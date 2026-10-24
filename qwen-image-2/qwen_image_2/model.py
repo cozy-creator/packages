@@ -205,6 +205,8 @@ def build_processor(assets: ModelAssets, config: Mapping[str, Any]) -> Any:
 class _StagedPipeline(QwenImage21Pipeline):
     reference_latents: torch.Tensor | None = None
     reference_pad_mask: torch.Tensor | None = None
+    #: The device the Runtime runs the model on (`Model.device`).
+    device_placed: torch.device = torch.device("cpu")
 
     def progress_bar[T](
         self, iterable: Iterable[T] | None = None, total: int | None = None
@@ -213,10 +215,9 @@ class _StagedPipeline(QwenImage21Pipeline):
 
     @property
     def _execution_device(self) -> torch.device:
-        # Diffusers chooses the first registered module (VAE), which can correctly
-        # remain parked on CPU while Runtime admits the denoiser. Follow the active
-        # denoising component instead. Encoding supplies its own leased device.
-        return next(self.transformer.parameters()).device
+        # Diffusers reads the first registered module's (the VAE's) parameters, which may sit
+        # paged on the CPU while the Runtime runs the model: the Runtime's device instead.
+        return self.device_placed
 
     def encode_prompt(self, *args: Any, **kwargs: Any) -> Any:
         # The denoiser must reuse the vision token positions from the separately
@@ -261,19 +262,21 @@ class QwenImage21Model(Model[QwenImage21Graph], encoded_leaves="accept"):
         return self.graph.sample_sigmas
 
     def _pipeline(self) -> _StagedPipeline:
-        return _StagedPipeline(
+        pipeline = _StagedPipeline(
             **self.graph.components,
             processor=self.processor,
             scheduler=FlowMatchEulerDiscreteScheduler.from_config(self.graph.scheduler_config),
             sample_sigmas=self.graph.sample_sigmas,
         )
+        pipeline.device_placed = torch.device(str(self.device))
+        return pipeline
 
     @uses_components("text_encoder", memoize=True, memo_dependencies=_ENCODER_CODE)
     def encode(self, prompt: str) -> tuple[Any, Any]:
         encoder = self.graph.components["text_encoder"]
         with torch.inference_mode():
             embeds, mask, _ = self._pipeline().encode_prompt(
-                prompt, device=next(encoder.parameters()).device
+                prompt, device=torch.device(str(self.device))
             )
         return embeds, mask
 
@@ -281,7 +284,7 @@ class QwenImage21Model(Model[QwenImage21Graph], encoded_leaves="accept"):
     def encode_reference_images(self, images: list[Any]) -> tuple[list[Any], torch.Tensor]:
         """Encode each reference once, using Diffusers' 1 MP conditioning size."""
         vae = self.graph.components["vae"]
-        device = next(vae.parameters()).device
+        device = torch.device(str(self.device))
         pipeline = self._pipeline()
         resized, packed = [], []
         with torch.inference_mode():
@@ -309,7 +312,7 @@ class QwenImage21Model(Model[QwenImage21Graph], encoded_leaves="accept"):
         encoder = self.graph.components["text_encoder"]
         with torch.inference_mode():
             encoded: tuple[Any, Any, Any] = self._pipeline().encode_prompt(
-                prompt, image=images, device=next(encoder.parameters()).device
+                prompt, image=images, device=torch.device(str(self.device))
             )
         return encoded
 
@@ -330,7 +333,7 @@ class QwenImage21Model(Model[QwenImage21Graph], encoded_leaves="accept"):
         image_pad_mask: torch.Tensor | None = None,
     ) -> Any:
         transformer = self.graph.components["transformer"]
-        device = next(transformer.parameters()).device
+        device = torch.device(str(self.device))
         pipeline = self._pipeline()
         pipeline.reference_latents = reference_latents
         if image_pad_mask is not None:
@@ -358,7 +361,7 @@ class QwenImage21Model(Model[QwenImage21Graph], encoded_leaves="accept"):
     @uses_components("vae")
     def decode(self, latents: Any, *, width: int, height: int) -> Any:
         vae = self.graph.components["vae"]
-        device = next(vae.parameters()).device
+        device = torch.device(str(self.device))
         with torch.inference_mode():
             latents = QwenImage21Pipeline._unpack_latents(latents, height, width, 16)
             latents = latents.to(device=device, dtype=vae.dtype)

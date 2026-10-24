@@ -220,6 +220,7 @@ _ENCODER_CODE = (build_processor, reference_sizes, QwenImagePipeline, QwenImageE
 
 def sample(
     transformer: nn.Module,
+    device: torch.device,
     scheduler_config: Mapping[str, Any],
     embeds: torch.Tensor,
     mask: torch.Tensor | None,
@@ -237,7 +238,6 @@ def sample(
     """Upstream's sampling loop: seeded noise drawn on the CPU in the DiT's dtype, Euler steps on
     `linspace(1, 1/steps)` shifted by `scheduler_config`, the references' tokens beside the target,
     and true CFG with the conditional norm restored when `negative` is given."""
-    device = next(transformer.parameters()).device
     # Upstream's latents take the prompt's dtype, the DiT's (bf16).
     dtype = transformer.dtype
     rows, columns = height // PATCH, width // PATCH
@@ -304,6 +304,7 @@ class QwenImageTransformer(Model[TransformerGraph], encoded_leaves="accept"):
         """`sample` on this DiT, at `scheduler_config` or its checkpoint's."""
         return sample(
             self.graph.components["transformer"],
+            torch.device(str(self.device)),
             scheduler_config or self.graph.scheduler_config,
             *args,
             **kwargs,
@@ -338,7 +339,7 @@ class QwenImage(Model[QwenImageGraph], encoded_leaves="accept"):
         """The prompt as upstream reads it, its embeddings and mask (None when every token is
         valid): with references, the edit template with each at its 384² area; without, the
         text-to-image template, at most 512 tokens."""
-        device = next(self.graph.components["text_encoder"].parameters()).device
+        device = torch.device(str(self.device))
         pipeline = self._pipeline(edit=bool(images))
         with torch.inference_mode():
             if images:
@@ -355,7 +356,7 @@ class QwenImage(Model[QwenImageGraph], encoded_leaves="accept"):
     def encode_references(self, images: list[Image.Image]) -> References:
         """Each reference at its 1024² area through the VAE (argmax), normalized and packed."""
         vae = self.graph.components["vae"]
-        device = next(vae.parameters()).device
+        device = torch.device(str(self.device))
         pipeline = self._pipeline(edit=True)
         packed, grids = [], []
         with torch.inference_mode():
@@ -375,6 +376,7 @@ class QwenImage(Model[QwenImageGraph], encoded_leaves="accept"):
         """`sample` on this checkpoint's DiT, at `scheduler_config` or the checkpoint's."""
         return sample(
             self.graph.components["transformer"],
+            torch.device(str(self.device)),
             scheduler_config or self.graph.scheduler_config,
             *args,
             **kwargs,
@@ -385,7 +387,7 @@ class QwenImage(Model[QwenImageGraph], encoded_leaves="accept"):
         """Upstream's decode of the one frame. The decoder runs without Diffusers' feature cache,
         which only keeps each convolution's input for a next frame an image never has."""
         vae = self.graph.components["vae"]
-        device = next(vae.parameters()).device
+        device = torch.device(str(self.device))
         with torch.inference_mode():
             latents = QwenImagePipeline._unpack_latents(latents, height, width, PATCH // 2)
             latents = latents.to(device=device, dtype=vae.dtype)

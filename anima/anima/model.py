@@ -131,7 +131,7 @@ class AnimaModel(Model[AnimaPipeline], encoded_leaves="accept"):
         phases: _Phases,
         batched: bool,
     ) -> Any:
-        device = next(self.pipe.components["transformer"].parameters()).device
+        device = torch.device(str(self.device))
         generator = rng.generator(seed)
         pipeline: Any = _text2image_pipeline(device, phases, batched, self.fused)
         pipeline.register_components(

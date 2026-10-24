@@ -160,8 +160,8 @@ class RetableResult(msgspec.Struct, frozen=True):
     tables: ModelArtifact
 
 
-def _require_cuda() -> None:
-    if not torch.cuda.is_available():
+def _require_cuda(ctx: Context) -> None:
+    if ctx.device.type != "cuda":
         raise UnsupportedInput(
             "H3 AdaLN timestep tables need a CUDA worker; run on a GPU rental",
             code="h3_tables_need_cuda",
@@ -322,7 +322,7 @@ def _produce_lane(
         else dual_full_config(sections)
     )
     if computed:
-        _require_cuda()
+        _require_cuda(ctx)
     replaced = {(s.component, key) for s in selections for key in s.replaced}
     request = ArtifactQuantizationRequest(max_relative_frobenius=max_relative_frobenius)
     reused = written = read = 0
@@ -606,7 +606,7 @@ async def retable(
             if retabled.done is None:
                 retabled.component(component).asset(TIMESTEP_PLAN, plans[task].canonical_bytes)
         if not all(retabled.has(*row) and bank.has(*row) for row in bank_order):
-            _require_cuda()
+            _require_cuda(ctx)
         read, written, _ = _tables(ctx, tel, full_source, (retabled, bank))
         result = RetableResult(
             list(plans["fl2va"].steps), ctx.adopt_model(retabled), ctx.adopt_model(bank)

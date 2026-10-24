@@ -477,7 +477,7 @@ class HiDreamO1(Model[O1Graph], encoded_leaves="accept"):
         against `negative` when it is given, over the first `GUIDED` of the steps if `interval`."""
         body = self.body
         image_token = self.processor.tokenizer.convert_tokens_to_ids("<|image_pad|>")
-        device = next(body.language_model.parameters()).device
+        device = torch.device(str(self.device))
         rows, columns = height // PATCH, width // PATCH
         n = rows * columns
         conditions = [condition_image(r, len(references)) for r in references]

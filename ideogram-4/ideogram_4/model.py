@@ -89,7 +89,7 @@ class Ideogram4(Model[IdeogramGraph], encoded_leaves="accept"):
         noise drawn on the CPU from `seed`."""
         tf = self.graph.components["transformer"]
         uncond = self.graph.components["unconditional_transformer"]
-        device = next(tf.parameters()).device
+        device = torch.device(str(self.device))
         steps = len(guidance)
         rows, columns = height // PATCH, width // PATCH
         tokens, texts = rows * columns, features.shape[0]
@@ -130,7 +130,7 @@ class Ideogram4(Model[IdeogramGraph], encoded_leaves="accept"):
         """The pipeline's decode: the VAE's BatchNorm statistics undone on the packed latents,
         2x2 patches unpacked, then the decoder."""
         vae = self.graph.components["vae"]
-        device = next(vae.parameters()).device
+        device = torch.device(str(self.device))
         rows, columns = height // PATCH, width // PATCH
         with torch.inference_mode():
             z = latents.to(device)

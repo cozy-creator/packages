@@ -263,15 +263,12 @@ class MossImage(Model[MossGraph], encoded_leaves="accept"):
         self.graph = loader.construct(MossGraph, factory=MossGraph)
         self.tokenizer = build_tokenizer(loader.assets)
 
-    def _device(self, component: str) -> torch.device:
-        return next(self.graph.components[component].parameters()).device
-
     @uses_components("text_encoder", memoize=True, memo_dependencies=_CODE)
     def encode(self, prompts: list[str]) -> list[torch.Tensor]:
         """Each prompt's last hidden state [S, 4096] (bf16, on the CPU): the user turn of the chat
         template with thinking open, at most 4096 tokens, one unpadded forward each."""
         encoder = self.graph.components["text_encoder"]
-        device = self._device("text_encoder")
+        device = torch.device(str(self.device))
         rows = []
         with torch.inference_mode():
             for prompt in prompts:
@@ -304,7 +301,7 @@ class MossImage(Model[MossGraph], encoded_leaves="accept"):
         """Upstream's sampler: f32 noise from `seed` on the CPU, CFG against `negative` with block 22
         skipped in its branch, Euler in f32. Returns the latents [1, 128, H/16, W/16] on the CPU."""
         transformer = self.graph.components["transformer"]
-        device = self._device("transformer")
+        device = torch.device(str(self.device))
         scheduler = MossScheduler.from_config(self.graph.scheduler_config)
         latents = rng.noise((1, transformer.latent_channels, height // 16, width // 16), seed, device=device)
         context = positive[None].to(device)
@@ -326,7 +323,7 @@ class MossImage(Model[MossGraph], encoded_leaves="accept"):
         """The latents' BatchNorm statistics restored, 2x2 patches unfolded, then the small decoder."""
         vae = self.graph.components["vae"]
         with torch.inference_mode():
-            z = latents.to(self._device("vae"), vae.dtype)
+            z = latents.to(str(self.device), vae.dtype)
             bn, eps = vae.bn, vae.config.batch_norm_eps
             z = z * (bn.running_var + eps).sqrt().to(z).view(1, -1, 1, 1) + bn.running_mean.to(z).view(1, -1, 1, 1)
             b, c, h, w = z.shape

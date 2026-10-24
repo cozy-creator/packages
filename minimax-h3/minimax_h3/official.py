@@ -65,6 +65,7 @@ from cozy_runtime.author import (
     DecodedAudioChunk,
     DecodedVideoFrame,
     DerivedCache,
+    Device,
     Image,
     InvalidRequest,
     ModelAssets,
@@ -1088,7 +1089,7 @@ class OfficialH3Pipeline:
             dict(state.values), {k: list(v) for k, v in state.kwargs_mapping.items()}
         )
         shell = SimpleNamespace(device=torch.device("meta"))
-        counted = PresentationLength(self.components["text_encoder"])
+        counted = PresentationLength(self.components["text_encoder"], torch.device("meta"))
         blocks["text_encoder"](
             _ScopedPipeline(pipe, shell, overrides={"text_encoder": counted}), scratch
         )
@@ -1175,8 +1176,8 @@ class OfficialH3Pipeline:
         for output in block.intermediate_outputs:
             state.set(output.name, text.get(output.name), output.kwargs_type)
 
-    def condition_text(self, task: Task, state: Any) -> None:
-        conditioner = FinalHiddenState(self.components["text_encoder"])
+    def condition_text(self, task: Task, state: Any, device: Device) -> None:
+        conditioner = FinalHiddenState(self.components["text_encoder"], torch.device(str(device)))
         view = _ScopedPipeline(
             self._pipes[self._workflow(task, state)],
             conditioner,

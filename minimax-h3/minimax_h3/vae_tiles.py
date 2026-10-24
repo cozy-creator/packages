@@ -31,6 +31,7 @@ from diffusers.models.autoencoders.vae import DiagonalGaussianDistribution
 from diffusers.models.modeling_utils import get_parameter_dtype
 
 from cozy_runtime.author import Cut, split, spread
+from cozy_runtime.author import device as placed_device
 
 
 class TileBatchedVideoVAE(AutoencoderKLMiniMaxH3):  # type: ignore[misc]
@@ -241,11 +242,11 @@ def encode_condition(
     seed: int,
 ) -> torch.Tensor:
     """Diffusers' `encode_vae_condition` for one reference, up to its `.cpu()`: the sampled
-    latents rounded to float16, on the VAE's device, so a group rank can hand them back over
+    latents rounded to float16, on this process's device, so a group rank can hand them back over
     the collective. `pixels` are the reference's uint8 pixels as the official step reads
     them, `(H, W, 3)` for an image or `(T, H, W, 3)` for a video, laid out on the device
     exactly as that step lays them out."""
-    device = next(vae.parameters()).device
+    device = torch.device(str(placed_device()))
     pixels = pixels.to(device)
     if pixels.ndim == 4 and isinstance(vae, TileBatchedVideoVAE):
         posterior = vae.encode_frames(pixels.permute(3, 0, 1, 2)[None], pixel_mean, pixel_std)

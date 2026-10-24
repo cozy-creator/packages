@@ -41,13 +41,6 @@ def get_world_size() -> int:
     return 1
 
 
-def get_device() -> torch.device:
-    """
-    Get current rank device.
-    """
-    return torch.device("cuda", torch.cuda.current_device())
-
-
 def barrier_if_distributed(*args, **kwargs):
     """
     Synchronizes all processes if under distributed context.
