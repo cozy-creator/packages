@@ -44,7 +44,7 @@ tasks:
         }
         trap 'git checkout -q -- .; rm -rf "$work"; [ -z "$shipped" ] || echo "candidates (yanked): $shipped
         gate: gh workflow run release-gate.yml -R cozy-creator/cozy-creator -f suites=packages -f pins=$shipped -f only=$(echo "$shipped" | sed "s/@[^,]*//g")
-        then: task promote GATE=<passing release-gate run id> -- ${shipped//,/ }  (a hand gate: GATE=<its dirs> RECORD=<URL of its recorded result>)"' EXIT
+        then: task promote GATE=<passing release-gate run id>  (a hand gate: GATE=<its dirs> RECORD=<URL of its recorded result>)"' EXIT
         release() {
           if ! git diff --quiet HEAD; then
             git commit -q -m "$1 $(ver "$1"): lock$(for q in $up; do printf ' %s %s' "$q" "$(ver "$q")"; done)" -- "$1"
@@ -70,19 +70,14 @@ tasks:
           release "$p"
         done
 
-  # The release gate passed these candidates: they become the unversioned default on every hub, the same releases.
+  # The release gate passed these candidates: cozy-creator's release-gate/promote.sh, the one promotion, makes the
+  # gated set users' (its pins the unversioned default on every hub that holds them).
   promote:
-    desc: "Un-yank gated candidates on every hub: task promote GATE=<passing release-gate run id> -- sdxl@2.13.0 ... (hand gate: GATE=<dirs> RECORD=<URL>)"
+    desc: "Promote a passed gate's set: task promote GATE=<passing release-gate run id> [-- --dry-run] (hand gate: GATE=<dirs> RECORD=<URL>)"
     requires:
       vars: [GATE]
     cmds:
       - |
         set -euo pipefail; creator=${CREATOR:-../cozy-creator}
-        case "{{.GATE}}" in
-          *[!0-9]*) [[ "{{.RECORD}}" == https://* ]] || { echo "a hand gate's dirs need RECORD=<URL where its passing result is recorded>" >&2; exit 1; } ;;
-        esac
-        set_=$("$creator/release-gate/verify.sh" {{.GATE}})
-        for p in {{.CLI_ARGS}}; do
-          jq -e --arg p "$p" '.pins | index($p)' <<< "$set_" >/dev/null || { echo "the gate did not pass $p" >&2; exit 1; }
-        done
-        for p in {{.CLI_ARGS}}; do for h in {{.HUBS}}; do cozy package yank --undo "$p" --tensorhub "$h" -y; done; done
+        record=(); [ -z "{{.RECORD}}" ] || record=(--record "{{.RECORD}}")
+        "$creator/release-gate/promote.sh" {{.CLI_ARGS}} "${record[@]}" {{.GATE}}
