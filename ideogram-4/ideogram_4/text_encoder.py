@@ -107,6 +107,8 @@ class QwenUpsampler(Model[UpsamplerGraph], encoded_leaves="accept", min_bits=4, 
     def load(self, loader: Loader) -> None:
         self.graph = loader.construct(UpsamplerGraph, factory=UpsamplerGraph)
         self.tokenizer = tokenizer(loader.assets)
+        # The caption schema's grammar, compiled once; `generate_captions` resets it for each caption.
+        self.constrained = build_caption_logits_processor(self.graph.components[COMPONENT], self.tokenizer)
 
     @uses_components(COMPONENT, memoize=True, memo_dependencies=(tokenizer, language_model))
     def caption(self, prompt: str, *, width: int, height: int, seed: int) -> str:
@@ -115,8 +117,6 @@ class QwenUpsampler(Model[UpsamplerGraph], encoded_leaves="accept", min_bits=4, 
         schema; returned as compact JSON."""
         model = self.graph.components[COMPONENT]
         device = next(model.parameters()).device
-        if self.constrained is None:
-            self.constrained = build_caption_logits_processor(model, self.tokenizer)
         generator = torch.Generator(device=device).manual_seed(seed)
         with torch.inference_mode():
             (text,) = generate_captions(

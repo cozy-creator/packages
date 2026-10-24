@@ -36,7 +36,7 @@ Inputs are the shared image request: `prompt`, `aspect_ratio` (any `W:H`), `mega
 `guidance`, `seed` (random when omitted, returned) and `prompt_upsampling` (default on). Text to image
 defaults to 1:1 at 1 MP (1024×1024, the reference CLI's); sizes are held to 256–2048 px sides, at most
 6:1 and 4 MP, on the 16 px grid, and anything outside is a `clamp` adjustment. Ideogram 4 takes no
-references, so `reference_images` must be empty; `negative_prompt` and `reference_boxes` are ignored
+references, so `reference_images` and `reference_boxes` must be empty; `negative_prompt` is ignored
 with a warning (the unconditional DiT reads no text). Outputs: `image` (PNG), `width`, `height`, `seed`
 and `prompt`, the caption the image was made from.
 
@@ -66,23 +66,21 @@ upsampler's text equals the pipeline's `upsample_prompt`.
 
 ## Prepare the models
 
-Ideogram publishes only weight-only fp8 (per-row scales on every linear, its own key layout);
-TensorFS ingests it as the release's `fp8` lane with Diffusers' keys (tfs-134). The repository is gated:
-accept Ideogram's licence on Hugging Face with the account whose token cozy uses.
+Ideogram publishes only weight-only fp8 (per-row scales on every linear, its own key layout), and nf4; no
+16-bit release exists, so the package serves the official fp8 as Ideogram 4's only lane, with no bf16 or int8
+written from it (owner, 2026-10-24). TensorFS ingests it with Diffusers' keys (tfs-134). fp8 needs an fp8
+GPU (sm_89 and newer: RTX 4090, L40S, H100, Blackwell); 3090-class cards have no Ideogram lane yet. The
+repository is gated: accept Ideogram's licence on Hugging Face with the account whose token cozy uses.
 
 ```sh
 cozy model upload hf://ideogram-ai/ideogram-4-fp8@ee79a7237b519f1402ceacf952f30c8a31ec5073 <account>/ideogram-4 --on <machine>
 cozy model upload hf://Qwen/Qwen3-VL-8B-Instruct@0c351dd01ed87e9c1b53cbc748cba10e6187ff3b <account>/qwen3-vl-8b-instruct --on <machine>
-cozy package install ./ideogram-4 --on <machine>
-cozy model quantize <account>/ideogram-4 --recipe bf16 --on <machine>
-cozy model quantize <account>/ideogram-4 --format int8 --on <machine>
-cozy model quantize <account>/qwen3-vl-8b-instruct --format int8 --on <machine>
+cozy model quantize <account>/qwen3-vl-8b-instruct --format int8 --package ./ideogram-4 --on <machine>
 ```
 
-The `bf16` lane is the fp8 weights decoded exactly (f32 code × scale, rounded once). `int8` puts the
-attention and SwiGLU linears of both DiTs' 34 blocks in `int8.convrot` and decodes the rest to bf16;
-the text encoder's `int8` takes its 36 language layers' linears. The int8 lanes are the defaults; the
-two DiTs are 37 GB at bf16 and 19 GB at int8, the text encoder 16 GB and 8 GB.
+The two DiTs are 19 GB at fp8. The text encoder's `int8` (from Qwen's bf16, 16 GB to 8 GB) takes its 36
+language layers' linears; Ideogram's own fp8 text encoder is exactly the per-row fp8 of stock Qwen3-VL-8B-Instruct
+(checked byte for byte, 368 fp8 and 381 plain tensors), so stock Qwen serves as the encoder.
 
 ## Licence
 
