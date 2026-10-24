@@ -88,18 +88,18 @@ two-reference composes.
 
 The `int8` recipe writes the default lane: every linear of the 60 DiT blocks, their modulation heads
 included, as `int8.convrot` (W8A8). The text encoder stays bf16, as in v1's 8-bit lane: with it int8
-too, a two-reference compose lost the first reference's identity. `nvfp4` (`--lane 4`, Blackwell) uses
+too, a two-reference compose lost the first reference's identity. `nvfp4` (`--lane nvfp4`, Blackwell) uses
 NVFP4 for the blocks' attention and MLP linears and int8 for the modulation heads. Both are made from
-the bf16 upload of either checkpoint, written onto one tag so one commit holds all three lanes.
+the bf16 upload of either checkpoint, and one release names all three lanes.
 
 ```sh
 cozy model upload hf://Qwen/Qwen-Image-2512@25468b98e3276ca6700de15c6628e51b7de54a26 \
-  <account>/qwen-image-2512 --on <machine>
+  qwen-image-2512 --lane bf16 --on <machine>
 cozy model upload hf://lightx2v/Qwen-Image-2512-Lightning@4609161e308ce82018a42c2a0c9b107e865bb751/Qwen-Image-2512-Lightning-8steps-V1.0-fp32.safetensors \
-  <account>/qwen-image-2512-lightning-lora --on <machine>
-cozy model upload <account>/qwen-image-2512#<bf16 checkpoint> <account>/qwen-image-2512@<tag> --on <machine>
-cozy model quantize <account>/qwen-image-2512#<bf16 checkpoint> <account>/qwen-image-2512@<tag> --format int8 --package qwen-image --on <machine>
-cozy model quantize <account>/qwen-image-2512#<bf16 checkpoint> <account>/qwen-image-2512@<tag> --format nvfp4 --package qwen-image --on <machine>
+  qwen-image-2512-lightning-lora --lane f32 --on <machine>
+cozy model quantize qwen-image-2512@sha256:<bf16 commit> --lane int8 --package qwen-image --on <machine>
+cozy model quantize qwen-image-2512@sha256:<bf16 commit> --lane nvfp4 --package qwen-image --on <machine>
+cozy model publish qwen-image-2512 <version> sha256:<bf16 commit> sha256:<int8 commit> sha256:<nvfp4 commit>
 ```
 
 The edit checkpoint is `hf://Qwen/Qwen-Image-Edit-2511@6f3ccc0b56e431dc6a0c2b2039706d7d26f22cb9`, its

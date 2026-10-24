@@ -91,15 +91,15 @@ With several references, each is cropped to the grid at up to 1 MP. The modules 
 
 Upload each repository as it is. The served checkpoint is the upload: TensorFS takes a Diffusers repo's
 index components (not BFL's `variants/`) and a Transformers repo's config, tokenizer, processor and chat
-template. Publish each as lane `bf16`.
+template. Each upload is lane `bf16`.
 
 ```sh
 cozy model upload hf://black-forest-labs/flux-3-image-klein@8454017f9ebaada30c998fccd9f67a80c7580f68 \
-  <account>/flux-3-klein --on <machine>
+  flux-3-klein --lane bf16 --on <machine>
 cozy model upload hf://black-forest-labs/flux-3-image-klein-base@1469d27cfb9bb1bd81d3a93f5a023b39dbf136e4 \
-  <account>/flux-3-klein-base --on <machine>
+  flux-3-klein-base --lane bf16 --on <machine>
 cozy model upload hf://black-forest-labs/flux-3-image-klein-pup@8b069751eb5dcab23829d9c5eccb470eb8b8a4ed \
-  <account>/flux-3-klein-upsampler --on <machine>
+  flux-3-klein-upsampler --lane bf16 --on <machine>
 ```
 
 Klein never builds Qwen3-VL's vision tower, its last four layers or its head, so it never loads those
@@ -112,15 +112,15 @@ embedder, the output norm and the text encoder's 32 language layers as `int8.con
 W8A8 on the int8 tensor cores. On real Klein activations each linear is 0.5–1.3% from bf16 (fp8
 row-scaled: 1.5–2.8%), and the images match bf16's. The VAE stays f32. As in BFL's int8 release,
 the image and joint blocks declare 8-bit attention (`attention_bits`; Runtime's `kitchen-int8` on
-RTX 30/40); the text and reference early blocks, and `--lane 16`, keep exact attention.
+RTX 30/40); the text and reference early blocks, and `--lane bf16`, keep exact attention.
 
 ```sh
-cozy model quantize <account>/flux-3-klein@0.1.0/bf16 --format int8 --package flux-3-klein --on <machine>
-cozy model publish <account>/flux-3-klein --release 0.1.0 --lane int8=sha256:<checkpoint>
+cozy model quantize flux-3-klein@sha256:<bf16 commit> --lane int8 --package flux-3-klein --on <machine>
+cozy model publish flux-3-klein 0.1.0 sha256:<bf16 commit> sha256:<int8 commit>
 ```
 
 Do the same for `flux-3-klein-base` and `flux-3-klein-upsampler`: each lane is one recipe that reads
-which checkpoint it was given (`--format nvfp4` writes the 4-bit lane the same way). Warm 1 MP seconds per step (16-step distilled; 50-step base
+which checkpoint it was given (`--lane nvfp4` writes the 4-bit lane the same way). Warm 1 MP seconds per step (16-step distilled; 50-step base
 with CFG), and the weights the lane holds:
 
 | card | distilled bf16 → int8 | base bf16 → int8 | weights |

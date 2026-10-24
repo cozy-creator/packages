@@ -72,7 +72,7 @@ inside this package repository.
   worker path. Record request numbers and results in the normal client history.
   Direct Runtime tests supplement this evidence; they do not replace it.
 
-Use `cozy package install <owner/package>` and `cozy run <owner/package/function>`
+Use `cozy package install <package>` and `cozy run <package>/<function>`
 for the public package path; use `cozy run ./script.py --on <name>` for a private
 script. Preserve user inputs, existing packages and active rentals during testing.
 

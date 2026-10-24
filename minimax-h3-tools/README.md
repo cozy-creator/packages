@@ -7,8 +7,8 @@ destination repository, run on the rental that holds the source:
 cozy run minimax-h3-tools/<function> <input model ref> <org/model> --on NAME
 ```
 
-Each declared output becomes a checkpoint named by its slot; publish lanes with
-`cozy model publish <org/model> --release R --lane <slot>=<checkpoint>`. On the rental that
+Each declared output becomes a commit in the lane named by its slot; publish lanes with
+`cozy model publish <org/model> <version> <commit>…`. On the rental that
 ingested or already fetched the input, its objects are in the pod Store and nothing moves.
 
 | Function | Input (first positional) | Output | Notes |
@@ -24,18 +24,18 @@ Its quantized lanes are recipes (`FP8`, `INT8`, `NVFP4`, `W4A8` in `h3_tables.jo
 DiTs and the text conditioner's 350 decoder linears, encoding what is still plain; CPU:
 
 ```sh
-cozy model quantize minimax-h3@<release>/<pruned lane> --format fp8 --package minimax-h3-tools --on NAME
+cozy model quantize minimax-h3@sha256:<pruned commit> --lane fp8 --package minimax-h3-tools --on NAME
 ```
 
 The conditioner keeps `embed_tokens` and its vision tower at bf16 (`lanes.TEXT_ENCODER_KEEP`); a
 component already carrying the requested encoding is inherited and one carrying the other
-encoding refuses, so `fp8 --format fp8` encodes only the conditioner. The lane functions run on the
+encoding refuses, so `--lane fp8` on an `fp8` commit encodes only the conditioner. The lane functions run on the
 ingest rental:
 
 ```sh
-cozy run minimax-h3-tools/fp8-pruned minimax-h3@1.0.0/bf16-full minimax-h3 --on NAME
-cozy run minimax-h3-tools/turbo-lora minimax-h3-acc-loras@1.0.0/bf16 minimax-h3-turbo-lora \
-  model.base=minimax-h3@1.0.0/bf16-full --on NAME
+cozy run minimax-h3-tools/fp8-pruned minimax-h3@1.0.0 minimax-h3 --lane bf16-full --on NAME
+cozy run minimax-h3-tools/turbo-lora minimax-h3-acc-loras@1.0.0 minimax-h3-turbo-lora --lane bf16 \
+  model.base=minimax-h3@sha256:<bf16-full commit> --on NAME
 ```
 
 The lane functions, `turbo-lora` and `retable` write weights, so they are never memoized; a

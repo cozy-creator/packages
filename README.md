@@ -50,15 +50,15 @@ dependencies or qualifying a worker image.
 
 A package publishes model slots (`<callable>.models.<param>`) and, beside the callable, each
 slot's default release: `defaults={"model": "sdxl@1.0.0"}`. A default names a release, never a
-lane; an org-less one names a model of the publishing account. To change a default, publish the
-package again. A request overrides one slot with `model.<param>=<org/model@release>`. A variant is
-its path in the release; only `cozy model download --variant <path>` pins one.
+lane; an org-less one names a first-party model. To change a default, publish the package
+again. A request overrides one slot with `model.<param>=<org/model@release>`. A lane is one
+commit in the release; `<org/model>@sha256:<commit>` pins one.
 
 The machine picks the lane: 8 bits on the GPU's most accurate native format (`int8`; `fp8` where
-int8 has no tensor cores, as on B300), else whatever variant works. `--lane 4` or `--lane 16` asks
-for only that lane (`nvfp4`, `bf16`) of the function's main model, and a release without it is
-refused; its LoRAs, other models and calls into other packages keep the machine's choice. The
-package declares only its tolerances, as `Model` class keywords:
+int8 has no tensor cores, as on B300), else whatever lane works. `--lane nvfp4` or `--lane bf16`
+asks for only that lane of the function's main model, and a release without it is refused; its
+LoRAs, other models and calls into other packages keep the machine's choice. The package declares
+only its tolerances, as `Model` class keywords:
 
 - `min_bits=` (16, 8 or 4; default 8): the fewest bits the machine may pick by itself. A slot at
   4 takes `nvfp4` when it decodes; memory never lowers a lane.
@@ -71,7 +71,7 @@ Code never reads the GPU's compute capability or name, or a kernel name, to choo
 
 ## SDXL sources
 
-A Civitai SDXL single file uploads servable: `cozy model upload civitai://<version> <org/model>`.
+A Civitai SDXL single file uploads servable: `cozy model upload civitai://<version> <org/model> --lane fp16`.
 TensorFS's `sdxl.single_file` table writes Diffusers' keys (`text_encoder.text_model.…` included)
 in constructor order (f16), with the index, configs and tokenizers of its pinned SDXL base
 reference. `cozy model quantize` (below) writes its quantized lanes.
@@ -89,13 +89,13 @@ INT8 = Recipe(lane="int8", model=SdxlModel, plan=QuantizationPlan(
 ```
 
 The static describe records every recipe a package's modules bind (`recipes` in its interface).
-`cozy model quantize <model> --format int8 --package <org>/<package>[@release]` runs the package's
-recipe for that lane and model on the machine holding the checkpoint (`--recipe <name>` names
-one); the package is always named, since packages that serve the same model can each declare
-one. The written lane's header records its provenance: package, release, recipe, fingerprint
-(the digest of its plan), the source checkpoint and the plan. A lane that needs code is a
-`DerivationHook` (H3's, `h3_tables.job`). SDXL's fp8 encodes the UNet's block-aligned rank-2
-weights, Anima's its transformer's; every other component inherits unchanged.
+`cozy model quantize <model>@<release> --lane int8 --package <package>[@release]` runs the package's
+recipe for that lane and model on the machine holding the checkpoint; the package is always
+named, since packages that serve the same model can each declare one. The written lane's header
+records its provenance: package, release, recipe, fingerprint (the digest of its plan), the
+source checkpoint and the plan. A lane that needs code is a `DerivationHook` (H3's,
+`h3_tables.job`). SDXL's fp8 encodes the UNet's block-aligned rank-2 weights, Anima's its
+transformer's; every other component inherits unchanged.
 
 ## MiniMax H3
 
@@ -135,7 +135,7 @@ cozy package install ./minimax-h3
 ```
 
 This needs no package publication. A published release can instead be installed
-with `cozy package install paul/minimax-h3@1.14.3`
+with `cozy package install minimax-h3`
 once available. With both checkpoint references available, a turbo invocation
 selects their exact releases independently, and `--lane` the base model's lane:
 
@@ -147,7 +147,7 @@ cozy run local/minimax-h3/fl2va_turbo \
   --on <existing-machine-name>
 ```
 
-For the published installation, use `paul/minimax-h3/fl2va_turbo` instead.
+For the published installation, use `minimax-h3/fl2va_turbo` instead.
 Repeat with explicitly selected two-H100 and four-H100 rentals for the GPU proof.
 The rental's device group selects the parallel degree; there is no request field
 for it. Record the installed package release, both checkpoint digests, worker
@@ -164,7 +164,7 @@ For a reference call, the package reads the supplied assets through Runtime's me
 File delivery works the same locally and on a rental:
 
 ```sh
-cozy run paul/minimax-h3/ref2va \
+cozy run minimax-h3/ref2va \
   'prompt=<your H3 prompt>' \
   --asset="$HOME/Pictures/character-1.png" \
   --asset="$HOME/Pictures/character-2.png" \
@@ -195,7 +195,7 @@ canvas-dependent preprocessing.
 Reference-image fidelity is an optional per-occurrence hint:
 
 ```sh
-cozy run paul/minimax-h3/ref2va \
+cozy run minimax-h3/ref2va \
   'prompt=<your H3 prompt>' duration_s=5 \
   --asset="woman=~/Pictures/woman.png" --asset-fidelity=woman=high \
   --asset="background=~/Pictures/background.png" --asset-fidelity=background=low \
@@ -399,7 +399,7 @@ Turn it on per request when throughput matters more than faces.
 
 ### Card conventions, for whoever is writing the prompt
 
-`paul/anima@1.0.0` is CircleStone Labs **Anima Base v1.0** (`circlestone-labs/Anima-Base-v1.0-Diffusers`).
+`anima@1.0.0` is CircleStone Labs **Anima Base v1.0** (`circlestone-labs/Anima-Base-v1.0-Diffusers`).
 
 - **Two independent quality-tag systems**, and any combination of them works: the
   aesthetic-classifier buckets `score_1`…`score_9` (`score_9` is the maximum; the card

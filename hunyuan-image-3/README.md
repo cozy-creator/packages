@@ -80,9 +80,9 @@ Upload each checkpoint as it is (168.5 GB each; neither repository is gated):
 
 ```sh
 cozy model upload hf://tencent/HunyuanImage-3.0-Instruct-Distil@c8ffd07206f1b843697606968196e8f59f8ff38c \
-  <account>/hunyuan-image-3-instruct-distil --on <machine>
+  hunyuan-image-3-instruct-distil --lane bf16 --on <machine>
 cozy model upload hf://tencent/HunyuanImage-3.0-Instruct@2ec2c78bee7d4b94157341fba86c4c2c7b1858b2 \
-  <account>/hunyuan-image-3-instruct --on <machine>
+  hunyuan-image-3-instruct --lane bf16 --on <machine>
 ```
 
 ## Lanes
@@ -93,8 +93,8 @@ shared and the 64 routed experts: 99% of the parameters) and the LM head as `int
 tower, VAE and image layers keep their source bytes.
 
 ```sh
-cozy run ./hunyuan-image-3/int8 <account>/hunyuan-image-3-instruct-distil#<checkpoint> <account>/hunyuan-image-3-instruct-distil --on <machine>
-cozy run ./hunyuan-image-3/nvfp4 <account>/hunyuan-image-3-instruct-distil#<checkpoint> <account>/hunyuan-image-3-instruct-distil --on <machine>
+cozy model quantize hunyuan-image-3-instruct-distil@sha256:<bf16 commit> --lane int8 --package ./hunyuan-image-3 --on <machine>
+cozy model quantize hunyuan-image-3-instruct-distil@sha256:<bf16 commit> --lane nvfp4 --package ./hunyuan-image-3 --on <machine>
 ```
 
 ## Licence

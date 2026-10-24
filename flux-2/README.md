@@ -64,15 +64,15 @@ Its first use fetches [dev]'s text encoder.
 
 ## Prepare the models
 
-Upload each repository as it is, and publish it as lane `bf16`:
+Upload each repository as it is, as lane `bf16`:
 
 ```sh
-cozy model upload hf://black-forest-labs/FLUX.2-dev@26afe3a78bb242c0a8bb181dcc8937bb16e5c66c flux-2-dev --on <machine>
-cozy model upload hf://fal/FLUX.2-dev-Turbo@9ee51cd87578162cf8d02355a870bc5f4570045c flux-2-dev-turbo --on <machine>
-cozy model upload hf://black-forest-labs/FLUX.2-klein-9B@92196c8e11f7b6cf2b7493e037d8c5345c559216 flux-2-klein-9b --on <machine>
-cozy model upload hf://black-forest-labs/FLUX.2-klein-base-9B@32773329fbe7e81a90ef971740e8ba4b0364ecf3 flux-2-klein-9b-base --on <machine>
-cozy model upload hf://black-forest-labs/FLUX.2-klein-4B@e7b7dc27f91deacad38e78976d1f2b499d76a294 flux-2-klein-4b --on <machine>
-cozy model upload hf://black-forest-labs/FLUX.2-klein-base-4B@a3b4f4849157f664bdbc776fd7453c2783562f4d flux-2-klein-4b-base --on <machine>
+cozy model upload hf://black-forest-labs/FLUX.2-dev@26afe3a78bb242c0a8bb181dcc8937bb16e5c66c flux-2-dev --lane bf16 --on <machine>
+cozy model upload hf://fal/FLUX.2-dev-Turbo@9ee51cd87578162cf8d02355a870bc5f4570045c flux-2-dev-turbo --lane bf16 --on <machine>
+cozy model upload hf://black-forest-labs/FLUX.2-klein-9B@92196c8e11f7b6cf2b7493e037d8c5345c559216 flux-2-klein-9b --lane bf16 --on <machine>
+cozy model upload hf://black-forest-labs/FLUX.2-klein-base-9B@32773329fbe7e81a90ef971740e8ba4b0364ecf3 flux-2-klein-9b-base --lane bf16 --on <machine>
+cozy model upload hf://black-forest-labs/FLUX.2-klein-4B@e7b7dc27f91deacad38e78976d1f2b499d76a294 flux-2-klein-4b --lane bf16 --on <machine>
+cozy model upload hf://black-forest-labs/FLUX.2-klein-base-4B@a3b4f4849157f664bdbc776fd7453c2783562f4d flux-2-klein-4b-base --lane bf16 --on <machine>
 ```
 
 The Turbo LoRA stays one separate 16-bit model: Runtime bakes it into [dev]'s resident weights at load.
@@ -80,14 +80,16 @@ The Turbo LoRA stays one separate 16-bit model: Runtime bakes it into [dev]'s re
 ## Lanes
 
 `int8` (the default lane) writes the linears of the DiT's blocks and the text encoder's layer projections
-([dev]'s LM head too) as `int8.convrot`, W8A8 on int8 tensor cores. `nvfp4` (`--lane 4`, Blackwell) puts the
+([dev]'s LM head too) as `int8.convrot`, W8A8 on int8 tensor cores. `nvfp4` (`--lane nvfp4`, Blackwell) puts the
 DiT blocks in NVFP4, except the double blocks' text attention, beside the same int8 rest. As in BFL's own
 8-bit and NVFP4 FLUX.2 files, the modulation heads, the embedders and the final layer keep their bf16, and so
-do the VAE and Mistral's vision tower. Each lane is written from the 16-bit upload:
+do the VAE and Mistral's vision tower. Each lane is written from the 16-bit upload, and one release names
+them all:
 
 ```sh
-cozy model quantize flux-2-dev@0.1.0 --format int8 --package flux-2 --on <machine>
-cozy model quantize flux-2-dev@0.1.0 --format nvfp4 --package flux-2 --on <machine>
+cozy model quantize flux-2-dev@sha256:<bf16 commit> --lane int8 --package flux-2 --on <machine>
+cozy model quantize flux-2-dev@sha256:<bf16 commit> --lane nvfp4 --package flux-2 --on <machine>
+cozy model publish flux-2-dev 0.1.0 sha256:<bf16 commit> sha256:<int8 commit> sha256:<nvfp4 commit>
 ```
 
 Measured on an A40 (int8), seconds per step at 1 MP: [dev] 1.93, [klein] 4B 0.62 (bf16 0.82), [klein] 9B

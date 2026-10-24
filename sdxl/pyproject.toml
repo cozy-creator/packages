@@ -5,7 +5,7 @@
 
 [project]
 name = "sdxl"
-version = "2.13.2"
+version = "0.1.0"
 description = "Stable Diffusion XL text-to-image"
 requires-python = ">=3.12"
 dependencies = [

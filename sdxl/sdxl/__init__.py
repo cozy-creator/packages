@@ -528,7 +528,7 @@ def generate(
 # ------------------------------------------------------------------ quantized lanes
 
 # The SDXL recipes: which weights each lane encodes; every other tensor inherits unchanged.
-# `cozy model quantize <model> --format int8|fp8|w4a8 --package <this>` runs the one for that lane.
+# `cozy model quantize <model> --lane int8|fp8|w4a8 --package <this>` runs the one for that lane.
 # `cozy_runtime.derive` owns the encodings and the round-trip tripwire.
 
 #: The fp8 lane: the UNet's block-aligned rank-2 weights, row-wise.

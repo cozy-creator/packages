@@ -73,9 +73,9 @@ GPU (sm_89 and newer: RTX 4090, L40S, H100, Blackwell); 3090-class cards have no
 repository is gated: accept Ideogram's licence on Hugging Face with the account whose token cozy uses.
 
 ```sh
-cozy model upload hf://ideogram-ai/ideogram-4-fp8@ee79a7237b519f1402ceacf952f30c8a31ec5073 <account>/ideogram-4 --on <machine>
-cozy model upload hf://Qwen/Qwen3-VL-8B-Instruct@0c351dd01ed87e9c1b53cbc748cba10e6187ff3b <account>/qwen3-vl-8b-instruct --on <machine>
-cozy model quantize <account>/qwen3-vl-8b-instruct --format int8 --package ./ideogram-4 --on <machine>
+cozy model upload hf://ideogram-ai/ideogram-4-fp8@ee79a7237b519f1402ceacf952f30c8a31ec5073 ideogram-4 --lane fp8 --on <machine>
+cozy model upload hf://Qwen/Qwen3-VL-8B-Instruct@0c351dd01ed87e9c1b53cbc748cba10e6187ff3b qwen3-vl-8b-instruct --lane bf16 --on <machine>
+cozy model quantize qwen3-vl-8b-instruct@sha256:<bf16 commit> --lane int8 --package ./ideogram-4 --on <machine>
 ```
 
 The two DiTs are 19 GB at fp8. The text encoder's `int8` (from Qwen's bf16, 16 GB to 8 GB) takes its 36

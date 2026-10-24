@@ -513,7 +513,7 @@ def quantize_lane(ctx: Context, tel: Telemetry, source: Weights[Any], output: st
     return _quantize_lane(ctx, tel, source, output, QUANTIZER_ENCODINGS[output], None)
 
 
-#: `cozy model quantize <H3 checkpoint> --format fp8|int8|nvfp4|w4a8 --package <this>`: code, not a
+#: `cozy model quantize <H3 checkpoint> --lane fp8|int8|nvfp4|w4a8 --package <this>`: code, not a
 #: plan, since what a lane encodes depends on what the source still holds plain.
 FP8 = Recipe(lane="fp8", model=Model, plan=DerivationHook(quantize_lane))
 INT8 = Recipe(lane="int8", model=Model, plan=DerivationHook(quantize_lane))
