@@ -15,6 +15,7 @@ from typing import Any
 
 import torch
 import torch.nn.functional as F
+from cozy_runtime import rng
 from cozy_runtime.author import Config, Loader, MemoDistribution, Model, ModelAssets, uses_components
 from diffusers import AutoencoderKLFlux2, FlowMatchEulerDiscreteScheduler
 from diffusers.configuration_utils import register_to_config
@@ -305,9 +306,7 @@ class MossImage(Model[MossGraph], encoded_leaves="accept"):
         transformer = self.graph.components["transformer"]
         device = self._device("transformer")
         scheduler = MossScheduler.from_config(self.graph.scheduler_config)
-        noise = torch.randn((1, transformer.latent_channels, height // 16, width // 16),
-                            generator=torch.Generator().manual_seed(seed), dtype=torch.float32, device="cpu")
-        latents = noise.to(device)
+        latents = rng.noise((1, transformer.latent_channels, height // 16, width // 16), seed, device=device)
         context = positive[None].to(device)
         uncond = None if negative is None else negative[None].to(device)
         scheduler.set_timesteps(steps, device=device)

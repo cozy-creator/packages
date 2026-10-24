@@ -8,16 +8,17 @@ from typing import Annotated
 
 import msgspec
 from cozy_runtime.author import (
-    MEGAPIXEL,
     Adjustments,
     App,
     Context,
     ImageRequest,
     ImageResult,
-    InvalidRequest,
     Memoize,
     Outputs,
+    Region,
+    Sizes,
     Telemetry,
+    corners,
     held,
 )
 
@@ -26,56 +27,21 @@ from .model import MossImage
 
 app = App()
 
-GRID = 16
 #: The user guide: best at 1-2 MP, extrapolates from 0.25 MP (512²) to 4 MP; the pipeline's default 1024².
-MEGAPIXELS, MIN_MEGAPIXELS, MAX_MEGAPIXELS = 1.0, 0.25, 4.0
-MIN_SIDE, MAX_SIDE = 256, 4096
+SIZES = Sizes((0.25, 4.0), (256, 4096), 16, "MOSS-Image's 0.25-4 MP")
 STEPS, MOST_STEPS = 50, 200
 GUIDANCE = 3.0
 
-_UNIT = Annotated[float, msgspec.Meta(ge=0.0, le=1.0)]
-#: `[x0, y0, x1, y1]`: corners, 0-1 of the output canvas, origin top-left, x0 < x1, y0 < y1.
-Box = Annotated[list[_UNIT], msgspec.Meta(min_length=4, max_length=4)]
-
-
-class Region(msgspec.Struct):
-    box: Box
-    #: What goes in the box.
-    prompt: Annotated[str, msgspec.Meta(min_length=1)]
-    #: The literal text to render in the box (`\n` breaks a line).
-    text: Annotated[str, msgspec.Meta(min_length=1)] | None = None
-
-
 class GenerateInput(ImageRequest):
-    #: Placement of `reference_images`: MOSS-Image takes no references, so both are warned and ignored.
-    reference_boxes: list[Box | None] | None = None
-    #: Elements and rendered text placed by box, described in words; the prompt describes the whole image.
+    #: Elements and rendered text placed by box, described in words (`\n` in `text` breaks a line); the
+    #: prompt describes the whole image.
     regions: Annotated[list[Region], msgspec.Meta(max_length=64)] | None = None
-
-
-def output_size(adj: Adjustments, payload: GenerateInput) -> tuple[int, int]:
-    """The ratio (else 1:1) at the pixel count (else 1 MP), held to 0.25-4 MP and 256-4096 px sides,
-    on the 16 px grid."""
-    target = payload.target(None, megapixels=MEGAPIXELS)
-    pixels = held(adj, "megapixels", target.pixels / MEGAPIXEL, MIN_MEGAPIXELS, MAX_MEGAPIXELS,
-                  "MOSS-Image's 0.25-4 MP") * MEGAPIXEL
-    w, h = target.ratio
-    widest = min(MAX_SIDE**2 / pixels, pixels / MIN_SIDE**2)
-    aspect = min(max(w / h, 1 / widest), widest)
-    width = min(max(round(math.sqrt(pixels * aspect) / GRID) * GRID, MIN_SIDE), MAX_SIDE)
-    height = min(max(round(math.sqrt(pixels / aspect) / GRID) * GRID, MIN_SIDE), MAX_SIDE)
-    if aspect != w / h:
-        adj.clamp("aspect_ratio", f"{w}:{h}", f"{width}:{height}", "MOSS-Image's 256-4096 px sides")
-    return width, height
 
 
 def pixel_box(box: list[float], width: int, height: int, field: str) -> list[int]:
     """A normalized `[x0, y0, x1, y1]` as MOSS's `yxyx` pixel box from the canvas centre: left and top
     floored, right and bottom ceiled, as upstream's layout compiler encloses a box."""
-    x0, y0, x1, y1 = box
-    if not (x0 < x1 and y0 < y1):
-        raise InvalidRequest(f"a box is [x0, y0, x1, y1] with x0 < x1 and y0 < y1, got {box}",
-                             code="invalid_box", fields=(field,))
+    x0, y0, x1, y1 = corners(box, field)
     return [math.floor(round(y0 * height, 9)) - height // 2, math.floor(round(x0 * width, 9)) - width // 2,
             math.ceil(round(y1 * height, 9)) - height // 2, math.ceil(round(x1 * width, 9)) - width // 2]
 
@@ -114,7 +80,7 @@ def generate(ctx: Context, payload: GenerateInput, model: MossImage, out: Output
     guidance = held(adj, "guidance", GUIDANCE if payload.guidance is None else payload.guidance, 1.0, 20.0,
                     "MOSS-Image's CFG 1-20")
     seed = payload.drawn_seed()
-    width, height = output_size(adj, payload)
+    width, height = payload.size(adj, None, SIZES, megapixels=1.0)
     prompt = layout_prompt(payload.prompt, payload.regions, width, height)
     prompts = [prompt] if guidance == 1.0 else [prompt, payload.negative_prompt or ""]
     ctx.raise_if_cancelled()

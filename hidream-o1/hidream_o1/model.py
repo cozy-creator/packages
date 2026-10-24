@@ -20,6 +20,7 @@ from typing import Any
 import numpy as np
 import torch
 import torch.nn.functional as F
+from cozy_runtime import rng
 from cozy_runtime.author import Config, Loader, Model, ModelAssets, uses_components
 from PIL import Image, ImageDraw
 from tokenizers import Tokenizer
@@ -200,7 +201,7 @@ COLOURS = ((255, 0, 0), (0, 180, 0), (0, 0, 255), (204, 180, 0), (255, 0, 255), 
            (0, 128, 0), (0, 0, 128), (128, 128, 0))
 
 
-def canvas_box(box: list[float], width: int, height: int) -> tuple[int, int, int, int] | None:
+def canvas_box(box: tuple[float, float, float, float], width: int, height: int) -> tuple[int, int, int, int] | None:
     """`[x0, y0, x1, y1]` (0-1) in pixels as upstream rounds and clamps them; None if it vanishes."""
     x0, x1 = (max(0, min(width - 1, round(v * width))) for v in (box[0], box[2]))
     y0, y1 = (max(0, min(height - 1, round(v * height))) for v in (box[1], box[3]))
@@ -493,13 +494,14 @@ class HiDreamO1(Model[O1Graph], encoded_leaves="accept"):
                 prefixes.append(_prefix(body, seq, vision, image_token, device))
             refs = (torch.cat([patches(r) for r in references]).to(device, torch.bfloat16)[None]
                     if references else None)
-            noise = recipe.noise * torch.randn((1, 3, height, width), generator=torch.Generator().manual_seed(seed + 1))
+            # One stream: the flash sampler's noise follows the initial noise's.
+            generator = rng.generator(seed + 1)
+            noise = recipe.noise * rng.noise((1, 3, height, width), generator)
             z = to_rows(noise[0].to(device, torch.bfloat16))
             sampler: Euler | UniPC
             if recipe.sampler == "unipc":
                 sampler = UniPC(steps, recipe.shift)
             elif recipe.sampler == "flash":
-                generator = torch.Generator(device).manual_seed(seed + 1)
                 sampler = Flash(generator, recipe.noise, recipe.clip)
             else:
                 sampler = Euler()

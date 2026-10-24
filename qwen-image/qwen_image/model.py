@@ -26,6 +26,7 @@ from typing import Any
 import numpy as np
 import torch
 import torch.nn.functional as F
+from cozy_runtime import rng
 from cozy_runtime.author import Config, Loader, Model, ModelAssets, uses_components
 from diffusers import (
     AutoencoderKLQwenImage,
@@ -242,11 +243,7 @@ def sample(
     rows, columns = height // PATCH, width // PATCH
     scheduler = FlowMatchEulerDiscreteScheduler.from_config(dict(scheduler_config))
     channels = transformer.config.in_channels // 4
-    noise = torch.randn(
-        (1, 1, channels, rows * 2, columns * 2),
-        generator=torch.Generator().manual_seed(seed),
-        dtype=dtype,
-    )
+    noise = rng.noise((1, 1, channels, rows * 2, columns * 2), seed, dtype=dtype)
     latents = QwenImagePipeline._pack_latents(noise.to(device), 1, channels, rows * 2, columns * 2)
     grids = [(1, rows, columns), *(references[1] if references else [])]
     conditioning = None if references is None else references[0].to(device=device, dtype=dtype)

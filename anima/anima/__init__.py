@@ -2,13 +2,11 @@
 
 from __future__ import annotations
 
-import math
 from typing import Annotated
 
 import msgspec
 import torch
 from cozy_runtime.author import (
-    MEGAPIXEL,
     Adjustments,
     App,
     Context,
@@ -20,6 +18,7 @@ from cozy_runtime.author import (
     QuantizationPlan,
     Recipe,
     ReferenceImages,
+    Sizes,
     Telemetry,
     UnsupportedInput,
     held,
@@ -32,30 +31,11 @@ app = App()
 
 #: Anima's native resolution classes (se-024): the ~1 MP training set (1024²) to the 1536 class
 #: (1536², 2.25 MiP) the model is meant to run at, this package's default. Denoise attention is full
-#: (no windowing), so time and VRAM scale roughly linearly with area.
-_MEGAPIXELS = (1.0, 2.25)
-#: The Cosmos rotary table holds 128 patches of 16 px on an axis.
-_MAX_SIDE = 128 * 16
+#: (no windowing), so time and VRAM scale roughly linearly with area. The Cosmos rotary table holds
+#: 128 patches of 16 px on an axis.
+SIZES = Sizes((1.0, 2.25), (32, 128 * 16), 32, "Anima's 1 MP training size to its 1536 class")
 #: Steps (default, range) and CFG scale (default, range): the model card's.
 _STEPS, _GUIDANCE = (30, 8, 50), (4.5, 1.0, 10.0)
-
-
-def _rounded(area: float, ratio: float) -> tuple[int, int]:
-    """Qwen-Image's `calculate_dimensions`: the area at that ratio, each side rounded to 32 px."""
-    width = math.sqrt(area * ratio)
-    return round(width / 32) * 32, round(width / ratio / 32) * 32
-
-
-def fitted_size(pixels: float, ratio: tuple[int, int]) -> tuple[int, int, bool]:
-    """`pixels` at `W:H`, held inside the rotary range, 32 px sides and 1/16 over `pixels`; True when
-    that moved it off the rounded size."""
-    w, h = ratio
-    widest = min(_MAX_SIDE**2 / pixels, pixels / 32**2)
-    width, height = _rounded(pixels, min(max(w / h, 1 / widest), widest))
-    width, height = min(max(width, 32), _MAX_SIDE), min(max(height, 32), _MAX_SIDE)
-    while width * height > pixels * 17 / 16:
-        width, height = (width - 32, height) if width >= height else (width, height - 32)
-    return width, height, (width, height) != _rounded(pixels, w / h)
 
 
 #: The official Anima model card's negative prompt, verbatim (se-026). Owner-labelled bank
@@ -118,13 +98,7 @@ def generate(
 ) -> ImageResult:
     """Generate one native-resolution Anima image."""
     payload.ignored(adj, "prompt_upsampling", reason="Anima has no prompt upsampler")
-    target = payload.target(None, megapixels=_MEGAPIXELS[1])
-    megapixels = held(adj, "megapixels", target.pixels / MEGAPIXEL, *_MEGAPIXELS,
-                      "Anima's 1 MP training size to its 1536 class")
-    width, height, moved = fitted_size(megapixels * MEGAPIXEL, target.ratio)
-    if moved:
-        ratio = f"{target.ratio[0]}:{target.ratio[1]}"
-        adj.clamp("aspect_ratio", ratio, f"{width}:{height}", "nearest size the model admits")
+    width, height = payload.size(adj, None, SIZES, megapixels=SIZES.megapixels[1])
     steps = held(adj, "steps", payload.steps or _STEPS[0], *_STEPS[1:])
     guidance = held(adj, "guidance", _GUIDANCE[0] if payload.guidance is None else payload.guidance,
                     *_GUIDANCE[1:])

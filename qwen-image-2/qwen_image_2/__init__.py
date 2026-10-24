@@ -7,7 +7,6 @@ from typing import Annotated, Any
 import msgspec
 import numpy as np
 from cozy_runtime.author import (
-    MEGAPIXEL,
     Adjustments,
     App,
     Context,
@@ -16,10 +15,10 @@ from cozy_runtime.author import (
     Memoize,
     Outputs,
     ReferenceImages,
+    Sizes,
     Telemetry,
     held,
 )
-from diffusers.pipelines.qwenimage21.pipeline_qwenimage21 import calculate_dimensions
 from PIL import Image
 
 from .model import QwenImage21Model
@@ -27,46 +26,17 @@ from . import quantize as quantize  # its recipes
 
 app = App()
 
-#: Upstream's rotary table centres at most 2048 tokens of 16 px on an axis.
-_MAX_SIDE = 2048 * 16
-#: The pixel counts Qwen serves, in megapixels: upstream's 1 MP default to its native 2K (4 MP), the
-#: default without references.
-_MEGAPIXELS = (1.0, 4.0)
-#: The largest output, 4 MP plus 1/16 for upstream's rounding to 32 px.
-_BOUND = 1088 * 4 * 1024
+#: The pixel counts Qwen serves: upstream's 1 MP default to its native 2K (4 MP), the default without
+#: references; upstream's rotary table centres at most 2048 tokens of 16 px on an axis.
+SIZES = Sizes((1.0, 4.0), (32, 2048 * 16), 32, "the 1-4 MP Qwen-Image serves")
 #: Steps without a checkpoint schedule (Turbo names its own 8), and the most admitted.
 _STEPS, _MAX_STEPS = 40, 100
-
-
-def fitted_size(pixels: float, ratio: tuple[int, int]) -> tuple[int, int, bool]:
-    """Upstream's `calculate_dimensions` at `pixels`, held inside the rotary range, 32 px sides and
-    4 MP; True when that moved it off upstream's size."""
-    w, h = ratio
-    widest = min(_MAX_SIDE**2 / pixels, pixels / 32**2)
-    width, height, _ = calculate_dimensions(pixels, min(max(w / h, 1 / widest), widest))
-    width, height = min(max(width, 32), _MAX_SIDE), min(max(height, 32), _MAX_SIDE)
-    while width * height > _BOUND:
-        width, height = (width - 32, height) if width >= height else (width, height - 32)
-    return width, height, (width, height) != calculate_dimensions(pixels, w / h)[:2]
 
 
 class GenerateInput(ImageRequest):
     reference_images: Annotated[ReferenceImages, msgspec.Meta(max_length=10)] = msgspec.field(
         default_factory=list
     )
-
-
-def output_size(adj: Adjustments, payload: ImageRequest, first: tuple[int, int] | None) -> tuple[int, int]:
-    """What is not given is the first reference's (its ratio and pixel count), else 1:1 at 4 MP;
-    the pixel count held to 1-4 MP. Upstream takes the LAST reference's; every Cozy image package
-    takes the first, the image being edited."""
-    target = payload.target(first, megapixels=_MEGAPIXELS[1])
-    megapixels = held(adj, "megapixels", target.pixels / MEGAPIXEL, *_MEGAPIXELS, "the 1-4 MP Qwen-Image serves")
-    width, height, moved = fitted_size(megapixels * MEGAPIXEL, target.ratio)
-    if moved:
-        ratio = f"{target.ratio[0]}:{target.ratio[1]}"
-        adj.clamp("aspect_ratio", ratio, f"{width}:{height}", "nearest size the model admits")
-    return width, height
 
 
 #: The decoder's alpha never quite reaches 0 or 255: a transparent background sits at 1–4 and an
@@ -117,7 +87,10 @@ def _generate(
             reference_images = [asset.read(mode="RGBA") for asset in payload.reference_images]
             conditioning_images, reference_latents = model.encode_reference_images(reference_images)
         ctx.raise_if_cancelled()
-    width, height = output_size(adj, payload, reference_images[0].size if reference_images else None)
+    # What is not given is the first reference's (upstream takes the LAST reference's; every Cozy
+    # image package takes the first, the image being edited).
+    first = reference_images[0].size if reference_images else None
+    width, height = payload.size(adj, first, SIZES, megapixels=SIZES.megapixels[1])
     with tel.stage("encoding prompt", overall_range=(0.08 if reference_images else 0.0, 0.1)):
         if reference_images is None:
             embeds, mask = model.encode(payload.prompt)

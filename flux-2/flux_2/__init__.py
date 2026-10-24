@@ -3,7 +3,6 @@ ordered references."""
 
 from __future__ import annotations
 
-import math
 from functools import partial
 from typing import Annotated
 
@@ -18,10 +17,10 @@ from cozy_runtime.author import (
     Memoize,
     Outputs,
     ReferenceImages,
+    Sizes,
     Telemetry,
     held,
 )
-from PIL import Image
 
 from .model import MAX_PIXELS, MAX_SIDE, MIN_SIDE, PATCH, TURBO_SIGMAS, Flux2, prepare_references, schedule
 from . import quantize as quantize  # its recipes
@@ -30,8 +29,9 @@ from .upsampler import Flux2Upsampler
 
 app = App()
 
-#: The largest output: 4 MiP plus 1/16 for the 16 px grid.
-_BOUND = 1088 * 4 * 1024
+#: 64-4096 px sides and 4 MiP, on the 16 px grid.
+SIZES = Sizes((MIN_SIDE**2 / MEGAPIXEL, MAX_PIXELS / MEGAPIXEL), (MIN_SIDE, MAX_SIDE), PATCH,
+              "the model's 4 MP maximum")
 
 
 class GenerateInput(ImageRequest):
@@ -40,39 +40,11 @@ class GenerateInput(ImageRequest):
     )
 
 
-def _snap(value: float) -> int:
-    return max(PATCH, round(value / PATCH) * PATCH)
-
-
-def output_size(ratio: float, area: float) -> tuple[int, int]:
-    """`area` pixels at W/H `ratio` on the 16 px grid, held to 64-4096 px sides and 4 MiP."""
-    area = min(area, MAX_PIXELS)
-    widest = min(MAX_SIDE**2 / area, area / MIN_SIDE**2)
-    ratio = min(max(ratio, 1 / widest), widest)
-    width = min(max(_snap(math.sqrt(area * ratio)), MIN_SIDE), MAX_SIDE)
-    height = min(max(_snap(math.sqrt(area / ratio)), MIN_SIDE), MAX_SIDE)
-    while width * height > _BOUND:
-        width, height = (width - PATCH, height) if width >= height else (width, height - PATCH)
-    return width, height
-
-
-def _layout(adj: Adjustments, payload: GenerateInput, first: Image.Image | None) -> tuple[int, int]:
-    """The output size: the ratio given (else the first reference's, else 1:1) at the size given (else
-    the first reference's pixel count, else 1 MP); out of range, the nearest the model admits."""
-    target = payload.target(first.size if first else None, megapixels=1.0)
-    (w, h), area = target.ratio, held(adj, "megapixels", target.pixels / MEGAPIXEL, MIN_SIDE**2 / MEGAPIXEL,
-                                      MAX_PIXELS / MEGAPIXEL, "the model's 4 MP maximum") * MEGAPIXEL
-    width, height = output_size(w / h, area)
-    if (width, height) != (_snap(math.sqrt(area * w / h)), _snap(math.sqrt(area * h / w))):
-        adj.clamp("aspect_ratio", f"{w}:{h}", f"{width}:{height}", "the nearest size the model admits")
-    return width, height
-
-
 def _generate(ctx: Context, payload: GenerateInput, model: Flux2, turbo: Flux2TurboLoRA | None,
               upsampler: Flux2Upsampler, out: Outputs, tel: Telemetry, adj: Adjustments) -> ImageResult:
     seed = payload.drawn_seed()
     images = [asset.read() for asset in payload.reference_images]
-    width, height = _layout(adj, payload, images[0] if images else None)
+    width, height = payload.size(adj, images[0].size if images else None, SIZES, megapixels=1.0)
     turbo = turbo if model.dev else None
     # The checkpoint's defaults: [dev] 50 steps at guidance 4, its Turbo fal's 8 sigmas at 2.5,
     # [klein] Base 50 steps of CFG 4, [klein] distilled 4 steps without guidance (BFL `util.py`).

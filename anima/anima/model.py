@@ -11,6 +11,7 @@ from types import TracebackType
 from typing import Any, NamedTuple
 
 import torch
+from cozy_runtime import rng
 from cozy_runtime.author import Loader, Model, Telemetry, uses_components
 from diffusers import (
     AnimaAutoBlocks,
@@ -131,7 +132,7 @@ class AnimaModel(Model[AnimaPipeline], encoded_leaves="accept"):
         batched: bool,
     ) -> Any:
         device = next(self.pipe.components["transformer"].parameters()).device
-        generator = torch.Generator(device=device).manual_seed(seed)
+        generator = rng.generator(seed)
         pipeline: Any = _text2image_pipeline(device, phases, batched, self.fused)
         pipeline.register_components(
             **self.pipe.components,

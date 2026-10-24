@@ -3,12 +3,10 @@
 from __future__ import annotations
 
 import json
-import math
 from typing import Annotated
 
 import msgspec
 from cozy_runtime.author import (
-    MEGAPIXEL,
     Adjustments,
     App,
     Context,
@@ -17,6 +15,7 @@ from cozy_runtime.author import (
     Memoize,
     Outputs,
     ReferenceImages,
+    Sizes,
     Telemetry,
     UnsupportedInput,
     held,
@@ -30,9 +29,9 @@ from .upsampler import Captioner
 app = App()
 
 #: Fibo 2.0 was trained at about 1 MP (model card: "multiples of 16 at about one megapixel").
-GRID = 16
-#: Diffusers' smallest side (4 latent patches), and the RoPE table's 512 positions an axis.
-MIN_SIDE, MAX_SIDE = 4 * GRID, 512 * GRID
+#: 0.25-1 MP on the 16 px grid; Diffusers' smallest side (4 latent patches) to the RoPE table's 512
+#: positions an axis.
+SIZES = Sizes((0.25, 1.0), (4 * 16, 512 * 16), 16, "Fibo 2.0's 0.25-1 MP")
 #: Each function's steps when none is given, and the most it admits; Dev's CFG scale (the card's 5.0).
 _STEPS = {"generate": (50, 200), "generate_turbo": (4, 50)}
 GUIDANCE = 5.0
@@ -54,21 +53,6 @@ class GenerateInput(ImageRequest):
     reference_images: Annotated[ReferenceImages, msgspec.Meta(max_length=4)] = msgspec.field(
         default_factory=list
     )
-
-
-def output_size(adj: Adjustments, payload: GenerateInput, first: tuple[int, int] | None) -> tuple[int, int]:
-    """The ratio (else the first reference's, else 1:1) at the pixel count (else the first
-    reference's, else 1 MP), held to 0.25-1 MP and 64-8192 px sides, on the 16 px grid."""
-    target = payload.target(first, megapixels=1.0)
-    pixels = held(adj, "megapixels", target.pixels / MEGAPIXEL, 0.25, 1.0, "Fibo 2.0's 0.25-1 MP") * MEGAPIXEL
-    w, h = target.ratio
-    widest = min(MAX_SIDE**2 / pixels, pixels / MIN_SIDE**2)
-    aspect = min(max(w / h, 1 / widest), widest)
-    width = min(max(round(math.sqrt(pixels * aspect) / GRID) * GRID, MIN_SIDE), MAX_SIDE)
-    height = min(max(round(math.sqrt(pixels / aspect) / GRID) * GRID, MIN_SIDE), MAX_SIDE)
-    if aspect != w / h:
-        adj.clamp("aspect_ratio", f"{w}:{h}", f"{width}:{height}", "Fibo 2.0's 64-8192 px sides")
-    return width, height
 
 
 def _json_object(prompt: str) -> dict[str, object] | None:
@@ -126,7 +110,7 @@ def _generate(
         guidance, negative = 1.0, None
         payload.ignored(adj, "guidance", "negative_prompt", reason="Edit Turbo is distilled to sample without guidance")
     seed = payload.drawn_seed()
-    width, height = output_size(adj, payload, images[0].size if images else None)
+    width, height = payload.size(adj, images[0].size if images else None, SIZES, megapixels=1.0)
     upsample = True if payload.prompt_upsampling is None else payload.prompt_upsampling
     with tel.stage("upsampling prompt", overall_range=(0.0, 0.15)):
         caption = _caption(payload.prompt, images, upsample, upsampler, edit_upsampler, adj)

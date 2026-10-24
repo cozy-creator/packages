@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import math
 from typing import Annotated, Any
 
 import msgspec
@@ -18,8 +17,10 @@ from cozy_runtime.author import (
     Outputs,
     ReferenceImages,
     Region,
+    Sizes,
     Telemetry,
     UnsupportedInput,
+    corners,
     held,
 )
 
@@ -29,10 +30,9 @@ from .text_encoder import QwenEncoder, QwenUpsampler
 
 app = App()
 
-#: Ideogram 4 serves 256-2048 px sides on its 16 px grid, at most 6:1 (README, `docs/inference.md`).
-MIN_SIDE, MAX_SIDE, MAX_RATIO = 256, 2048, 6.0
-#: The reference CLI's 1024² by default; up to 2048² (4 MP, Ideogram's highest quality).
-MEGAPIXELS, MIN_PIXELS, MAX_PIXELS = 1.0, MIN_SIDE * MIN_SIDE, MAX_SIDE * MAX_SIDE
+#: Ideogram 4 serves 256-2048 px sides on its 16 px grid, at most 6:1 (README, `docs/inference.md`); the
+#: reference CLI's 1024² by default, up to 2048² (4 MP, Ideogram's highest quality).
+SIZES = Sizes((256 * 256 / MEGAPIXEL, 4.0), (256, 2048), PATCH, "Ideogram 4 serves 0.06-4 MP", widest=6.0)
 #: Diffusers' default: V4_QUALITY_48, 48 steps at guidance 7 with a 3.0 polish tail.
 STEPS, GUIDANCE = 48, 7.0
 
@@ -43,30 +43,10 @@ class GenerateInput(ImageRequest):
     regions: list[Region] = msgspec.field(default_factory=list)
 
 
-def output_size(adj: Adjustments, payload: GenerateInput) -> tuple[int, int]:
-    """The ratio (else 1:1) at the pixel count (else 1 MP), held to 256-2048 px sides, 6:1 and
-    0.06-4 MP, on the 16 px grid."""
-    target = payload.target(None, megapixels=MEGAPIXELS)
-    megapixels = held(adj, "megapixels", target.pixels / MEGAPIXEL, MIN_PIXELS / MEGAPIXEL, MAX_PIXELS / MEGAPIXEL,
-                      "Ideogram 4 serves 0.06-4 MP")
-    pixels = megapixels * MEGAPIXEL
-    w, h = target.ratio
-    widest = min(MAX_RATIO, MAX_SIDE**2 / pixels, pixels / MIN_SIDE**2)
-    aspect = min(max(w / h, 1 / widest), widest)
-    width = min(max(round(math.sqrt(pixels * aspect) / PATCH) * PATCH, MIN_SIDE), MAX_SIDE)
-    height = min(max(round(math.sqrt(pixels / aspect) / PATCH) * PATCH, MIN_SIDE), MAX_SIDE)
-    if aspect != w / h:
-        adj.clamp("aspect_ratio", f"{w}:{h}", f"{width}:{height}", "Ideogram 4 serves 256-2048 px sides up to 6:1")
-    return width, height
-
-
 def element(region: Region, index: int) -> dict[str, Any]:
     """A region as Ideogram's caption element: `bbox` is `[y_min, x_min, y_max, x_max]` on its
     0-1000 grid, keys in the order it was trained on."""
-    x0, y0, x1, y1 = region.box
-    if not (x0 < x1 and y0 < y1):
-        raise UnsupportedInput(f"regions.{index}.box: corners [x0, y0, x1, y1] need x0 < x1 and y0 < y1",
-                               code="regions")
+    x0, y0, x1, y1 = corners(region.box, f"regions.{index}.box")
     bbox = [round(y0 * 1000), round(x0 * 1000), round(y1 * 1000), round(x1 * 1000)]
     if region.text is None:
         return {"type": "obj", "bbox": bbox, "desc": region.prompt}
@@ -125,7 +105,7 @@ def generate(ctx: Context, payload: GenerateInput, model: Ideogram4, text_encode
     steps = held(adj, "steps", payload.steps or STEPS, 1, 200)
     weight = held(adj, "guidance", GUIDANCE if payload.guidance is None else payload.guidance, 1.0, 20.0)
     seed = payload.drawn_seed()
-    width, height = output_size(adj, payload)
+    width, height = payload.size(adj, None, SIZES, megapixels=1.0)
     written = caption(payload, upsampler, width=width, height=height, seed=seed, tel=tel)
     if written != payload.prompt:
         tel.log("caption", caption=written[:4000])

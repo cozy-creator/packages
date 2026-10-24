@@ -14,6 +14,7 @@ from importlib.resources import files
 from typing import Any
 
 import torch
+from cozy_runtime import rng
 from cozy_runtime.author import Config, Loader, MemoDistribution, Model, ModelAssets, uses_components
 from diffusers import (
     AutoencoderKLFlux2,
@@ -256,7 +257,7 @@ class Fibo2(Model[FiboGraph], encoded_leaves="accept"):
             latents = pipe(
                 prompt=prompt, image=images or None, width=width, height=height, num_inference_steps=steps,
                 guidance_scale=guidance, negative_prompt=negative, fonts=list(FONTS),
-                generator=torch.Generator().manual_seed(seed), output_type="latent", callback_on_step_end=observed,
+                generator=rng.generator(seed), output_type="latent", callback_on_step_end=observed,
             ).images
         return latents.cpu()  # type: ignore[no-any-return]
 

@@ -3,7 +3,6 @@ Runtime-executed."""
 
 from __future__ import annotations
 
-import math
 from functools import partial
 from typing import Annotated
 
@@ -18,6 +17,7 @@ from cozy_runtime.author import (
     Memoize,
     Outputs,
     ReferenceImages,
+    Sizes,
     Telemetry,
     held,
 )
@@ -29,8 +29,7 @@ app = App()
 
 #: The sizes the model serves: 256² to 2 MiP (Qwen-Image trains from 256² up to 1328², 1.7 MiP),
 #: sides of 128-4096 px on its 16 px grid.
-MIN_SIDE, MAX_SIDE = 128, 4096
-MIN_PIXELS, MAX_PIXELS = 256 * 256, 2 << 20
+SIZES = Sizes((256 * 256 / MEGAPIXEL, 2.0), (128, 4096), PATCH, "the model serves 0.06-2 MiP")
 #: Text to image defaults to Qwen-Image-2512's 1328² at 1:1.
 TEXT_MEGAPIXELS = 1328 * 1328 / MEGAPIXEL
 #: `generate`'s recommended steps and negative prompt per DiT (each model card's), at true CFG 4.0.
@@ -40,30 +39,6 @@ TEXT_NEGATIVE = (
     "构图混乱。文字模糊，扭曲。"  # noqa: RUF001
 )
 EDIT_NEGATIVE, GUIDANCE = " ", 4.0
-
-
-
-def output_size(pixels: float, ratio: float) -> tuple[int, int, float]:
-    """(width, height) on the 16 px grid for `pixels` at `ratio`, with the ratio actually served:
-    what keeps both sides within 128-4096 px."""
-    widest = min(MAX_SIDE**2 / pixels, pixels / MIN_SIDE**2)
-    kept = min(max(ratio, 1 / widest), widest)
-    width = round(math.sqrt(pixels * kept) / PATCH) * PATCH
-    height = round(math.sqrt(pixels / kept) / PATCH) * PATCH
-    return min(max(width, MIN_SIDE), MAX_SIDE), min(max(height, MIN_SIDE), MAX_SIDE), kept
-
-
-def sized(adj: Adjustments, payload: ImageRequest, first: tuple[int, int] | None) -> tuple[int, int]:
-    """The output size: a ratio or size given, else the first reference's ratio and pixel count,
-    else 1328². Anything outside the model's range is a `clamp` adjustment."""
-    target = payload.target(first, megapixels=TEXT_MEGAPIXELS)
-    megapixels = held(adj, "megapixels", target.pixels / MEGAPIXEL, MIN_PIXELS / MEGAPIXEL,
-                      MAX_PIXELS / MEGAPIXEL, "the model serves 0.06-2 MiP")
-    (w, h) = target.ratio
-    width, height, kept = output_size(megapixels * MEGAPIXEL, w / h)
-    if kept != w / h:
-        adj.clamp("aspect_ratio", f"{w}:{h}", f"{width}:{height}", "nearest ratio the model serves")
-    return width, height
 
 
 class GenerateInput(ImageRequest):
@@ -93,7 +68,8 @@ def _render(
     payload.ignored(adj, "reference_boxes", reason="Qwen-Image has no layout control")
     # Upright, with any transparency over white, as upstream's RGB references.
     images = [asset.read() for asset in payload.reference_images]
-    width, height = sized(adj, payload, images[0].size if images else None)
+    first = images[0].size if images else None
+    width, height = payload.size(adj, first, SIZES, megapixels=TEXT_MEGAPIXELS)
     ctx.raise_if_cancelled()
     references = None
     if images:

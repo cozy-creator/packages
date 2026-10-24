@@ -16,6 +16,7 @@ from typing import Any
 
 import numpy as np
 import torch
+from cozy_runtime import rng
 from cozy_runtime.author import Config, Loader, Model, ModelAssets, UnsupportedInput, uses_components
 from diffusers import AutoencoderKLFlux2, Flux2KleinPipeline, Flux2Pipeline, Flux2Transformer2DModel
 from diffusers.pipelines.flux2.image_processor import Flux2ImageProcessor
@@ -280,7 +281,7 @@ class Flux2(Model[Flux2Graph], encoded_leaves="accept"):
         tf = self.graph.components["transformer"]
         device = next(tf.parameters()).device
         rows, columns = height // PATCH, width // PATCH
-        noise = torch.randn((1, tf.config.in_channels, rows, columns), generator=torch.Generator().manual_seed(seed))
+        noise = rng.noise((1, tf.config.in_channels, rows, columns), seed)
         x = noise.to(torch.bfloat16).flatten(2).transpose(1, 2).to(device)
         size = x.shape[1]
         ids = grid_ids(rows, columns)

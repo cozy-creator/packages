@@ -8,8 +8,7 @@ call, no placement, no offload, no pinning and no backend API — there is no su
 was entered is the runtime's question, decided before entry, and this file cannot observe
 the answer.
 
-What it adds over cr-008b's corpus fixture, which it is otherwise faithful to (its banked
-1024px pixel digest reproduces here, byte for byte):
+What it adds over cr-008b's corpus fixture, which it is otherwise faithful to:
 
   * THE SHARED IMAGE REQUEST (cr-219). Any W:H at any size, on SDXL's 64 px latent stride:
     1 MP is base SDXL (its training buckets), above it HiDiffusion, to 8 MP (16 MP at 1:1, the
@@ -32,21 +31,21 @@ checkpoint or revision — `package.toml` and the deploy binding do.
 
 from __future__ import annotations
 
+import dataclasses
 import functools
 import json
 import math
-import random
 from pathlib import Path
 from typing import Annotated, Any
 
 import msgspec
 import torch
+from cozy_runtime import rng
 from cozy_runtime.author import (
     MEGAPIXEL,
     AdapterCompatibility,
     Adjustments,
     App,
-    ConformanceError,
     Context,
     EncodingRule,
     ImageFrame,
@@ -60,6 +59,7 @@ from cozy_runtime.author import (
     QuantizationPlan,
     Recipe,
     ReferenceImages,
+    Sizes,
     Telemetry,
     held,
     uses_components,
@@ -80,32 +80,15 @@ from transformers import initialization as transformer_init
 app = App()
 
 
-#: SDXL's latent stride: 8 px per latent and 64-px buckets.
-_STRIDE = 64
-#: Pixel counts, in megapixels: SDXL's 1 MP training size up to HiDiffusion's 8 MP class, and its
-#: 4096² flagship at 1:1 only (its 4096-class recipe needs both latent sides at 512).
-_MEGAPIXELS, _SQUARE_MAX = (1.0, 8.0), 16.0
-#: The widest ratio SDXL's training buckets reach (512x2048), and the longest side.
-_WIDEST, _MAX_SIDE = 4.0, 4096
+#: Pixel counts: SDXL's 1 MP training size up to HiDiffusion's 8 MP class, and its 4096² flagship at
+#: 1:1 only (its 4096-class recipe needs both latent sides at 512); on its 64 px buckets, at most the
+#: 1:4-4:1 its training buckets reach (512x2048) and 4096 px sides.
+_SIZES = Sizes((1.0, 8.0), (64, 4096), 64,
+               "SDXL's 1 MP training size to HiDiffusion's 8 MP (16 MP at 1:1)", widest=4.0)
+_SQUARE = dataclasses.replace(_SIZES, megapixels=(1.0, 16.0))
 #: Above this, a request rides HiDiffusion unless it opts out: base SDXL duplicates subjects past
 #: its training size.
 _NATIVE = 1.5
-
-
-def output_size(pixels: float, ratio: tuple[int, int]) -> tuple[int, int, bool]:
-    """`pixels` at `W:H` on the 64 px stride, held to SDXL's 1:4-4:1 and 4096 px sides; True when
-    that moved it off the requested ratio's own size."""
-    w, h = ratio
-    widest = min(_WIDEST, _MAX_SIDE**2 / pixels)
-    kept = min(max(w / h, 1 / widest), widest)
-
-    def snapped(r: float) -> tuple[int, int]:
-        return (max(_STRIDE, round(math.sqrt(pixels * r) / _STRIDE) * _STRIDE),
-                max(_STRIDE, round(math.sqrt(pixels / r) / _STRIDE) * _STRIDE))
-
-    width, height = snapped(kept)
-    width, height = min(width, _MAX_SIDE), min(height, _MAX_SIDE)
-    return width, height, (width, height) != snapped(w / h)
 
 
 class GenerateInput(ImageRequest):
@@ -426,22 +409,6 @@ def _negative_prompt(requested: str, hidiffusion: bool) -> str:
     return f"{requested}, {_HIDIFFUSION_NEGATIVE}" if requested else _HIDIFFUSION_NEGATIVE
 
 
-def _request_generator(torch: Any, source: object, *, device: Any) -> Any:
-    """Adapt Runtime's public request generator to a device-placed torch generator.
-
-    `view.generator` is a `random.Random` while the runtime is weightless and a
-    `torch.Generator` once real fills exist; both spellings resolve here.
-    """
-    if isinstance(source, torch.Generator):
-        return source
-    if not isinstance(source, random.Random):
-        raise ConformanceError(
-            f"request generator has unsupported type {type(source).__name__}",
-            code="artifact_config",
-        )
-    return torch.Generator(device=device).manual_seed(source.getrandbits(63))
-
-
 @app.entrypoint(defaults={"model": "sdxl@1.0.0"}, memoize=Memoize(requires=["seed"]))
 def generate(
     ctx: Context,
@@ -455,15 +422,9 @@ def generate(
     ctx.plan({"text_encoder", "text_encoder_2"}, "unet", "vae")
     payload.ignored(adj, "prompt_upsampling", reason="SDXL has no prompt upsampler")
     seed = payload.drawn_seed()
-    view = model.for_request(ctx, seed=seed)
-    target = payload.target(None, megapixels=_MEGAPIXELS[0])
-    most = _SQUARE_MAX if target.ratio[0] == target.ratio[1] else _MEGAPIXELS[1]
-    megapixels = held(adj, "megapixels", target.pixels / MEGAPIXEL, _MEGAPIXELS[0], most,
-                      "SDXL's 1 MP training size to HiDiffusion's 8 MP (16 MP at 1:1)")
-    width, height, moved = output_size(megapixels * MEGAPIXEL, target.ratio)
-    if moved:
-        ratio = f"{target.ratio[0]}:{target.ratio[1]}"
-        adj.clamp("aspect_ratio", ratio, f"{width}:{height}", "nearest size SDXL admits")
+    target = payload.target(None, megapixels=1.0)
+    sizes = _SQUARE if target.ratio[0] == target.ratio[1] else _SIZES
+    width, height = sizes.fit(adj, target.ratio, sizes.pixels(adj, target))
     above_native = width * height > _NATIVE * MEGAPIXEL
     hidiffusion_applied = above_native if payload.hidiffusion is None else payload.hidiffusion
     default_steps, default_guidance = (30, 7.5) if hidiffusion_applied else (20, 7.0)
@@ -500,24 +461,14 @@ def generate(
     sampler = DDIMScheduler if hidiffusion_applied else EulerDiscreteScheduler
     scheduler = sampler.from_config(model.pipe.scheduler_config)  # type: ignore[no-untyped-call]
     scheduler.set_timesteps(steps, device=device)
-    generator = _request_generator(torch, view.generator, device=device)
+    generator = rng.generator(seed)
     step = (
         functools.partial(scheduler.step, eta=1.0, generator=generator)
         if hidiffusion_applied
         else scheduler.step
     )
-    latents = (
-        torch.randn(
-            1,
-            4,
-            height // 8,
-            width // 8,
-            generator=generator,
-            device=device,
-            dtype=torch.float16,
-        )
-        * scheduler.init_noise_sigma
-    )
+    shape = (1, 4, height // 8, width // 8)
+    latents = rng.noise(shape, generator, dtype=torch.float16, device=device) * scheduler.init_noise_sigma
     # SDXL's micro-conditioning: (original_h, original_w, crop_top, crop_left, target_h,
     # target_w). The bucket IS the original size — these fine-tunes were trained on it.
     time_ids = torch.tensor(
