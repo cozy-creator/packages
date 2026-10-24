@@ -34,10 +34,19 @@ cozy run hidream-o1/generate prompt='remove the earphones' --asset reference_ima
 Inputs are the shared image request, the same in every image package: `prompt`, `reference_images`, `aspect_ratio` (any W:H), `megapixels` (any size, 1024² pixels each), `steps`, `guidance`, `negative_prompt`, `seed` and `prompt_upsampling`. `reference_images` are up to 10, and `reference_boxes` places them (below). HiDream-O1 adds `guidance_interval` (below). Left out, each
 is the model's default: 50 steps (1–200) at guidance 5.0 (1–20) for `generate`, upstream's unconditional
 caption (a single space) as the negative prompt, and a random seed. `generate_turbo` runs its 28 distilled
-steps and ignores `guidance`, `negative_prompt` and `guidance_interval` with a warning; neither has a prompt
-upsampler. Unknown fields are dropped with a warning.
+steps and ignores `guidance`, `negative_prompt` and `guidance_interval` with a warning. Unknown fields are
+dropped with a warning.
 
 The result has the image, its `width` and `height`, the `seed`, and `prompt`: the caption used.
+
+## Prompt upsampling
+
+`prompt_upsampling=true` runs HiDream's Reasoning-Driven Prompt Agent on a text-to-image prompt (off unless
+asked). The agent is Gemma-4-31B-it with upstream's system prompt (`prompt_agent.py`): no thinking, sampling at
+temperature 1.0 (Gemma's top-k 64, top-p 0.95), seeded by `seed`. It rewrites the request as one dense English
+paragraph, the kind of prompt the model was trained on (report §3.2). A reply that does not parse falls back to
+the request plus upstream's quality suffix. The agent reads text only, so an edit's prompt goes as typed, with a
+warning. It is fetched and built on first use, at its `int8` lane by default.
 
 ## Placing references
 
@@ -105,6 +114,7 @@ Upstream ships f32 weights (35 GB per checkpoint). Upload each repository as it 
 ```sh
 cozy model upload hf://HiDream-ai/HiDream-O1-Image@0b0901d99f200389e138c61946af1185f5f49a13 <account>/hidream-o1 --on <machine>
 cozy model upload hf://HiDream-ai/HiDream-O1-Image-Dev@c0bada0e15c54a9f96a6d1ecc35575b32bc21544 <account>/hidream-o1-dev --on <machine>
+cozy model upload hf://google/gemma-4-31B-it@842da3794eaa0b77d5f08bae87a17459d91ff475 <account>/gemma-4-31b-it --on <machine>
 ```
 
 Each lane is written from the f32 upload. `bf16` rounds every f32 tensor to bf16. `int8` (the default
@@ -114,9 +124,12 @@ timestep MLP, pixel head, embeddings and vision tower. With every projection in 
 CFG 5 turns W8A8's per-pass error (33–37 dB teacher-forced) into visible grain (17–24 dB after CFG).
 Keeping v, o and down in bf16 was the best of nine measured keep-lists (23/28/36 dB at t 999/702/290).
 
+The agent's `int8` takes Gemma's 410 language projections (62 GB to about 31 GB); its embeddings stay bf16.
+
 ```sh
 cozy model quantize <account>/hidream-o1 --recipe bf16 --package hidream-o1 --on <machine>
-cozy model quantize <account>/hidream-o1 --format int8 --package hidream-o1 --on <machine>
+cozy model quantize <account>/hidream-o1 --int8 --package hidream-o1 --on <machine>
+cozy model quantize <account>/gemma-4-31b-it --recipe agent_int8 --package hidream-o1 --on <machine>
 ```
 
 ## Measured (one L40S, 4 MP)

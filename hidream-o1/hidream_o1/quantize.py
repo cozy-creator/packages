@@ -1,11 +1,13 @@
-"""HiDream-O1's lanes, for both checkpoints (full and Dev): which weights each encoding takes is this
-package's recipe; the encodings and their kernels are Runtime's. HiDream ships f32 weights: every lane
-is written from them, and every f32 tensor a lane does not encode is rounded to bf16."""
+"""HiDream-O1's lanes, for both checkpoints (full and Dev), and its prompt agent's (Gemma-4-31B-it): which
+weights each encoding takes is this package's recipe; the encodings and their kernels are Runtime's. HiDream
+ships f32 weights: every lane is written from them, and every f32 tensor a lane does not encode is rounded to
+bf16. Gemma's lanes are written from its bf16."""
 
 from __future__ import annotations
 
 from cozy_runtime.author import QuantizationPlan, Recipe
 
+from .agent import PromptAgent
 from .model import HiDreamO1
 
 _LAYERS = "model.model.language_model.layers.*"
@@ -30,5 +32,20 @@ INT8 = Recipe(
             f"{_LAYERS}.mlp.gate_proj.weight",
             f"{_LAYERS}.mlp.up_proj.weight",
         ),
+    ),
+)
+
+_AGENT = "model.model.language_model.layers.*"
+
+#: The agent's int8 lane (`int8.convrot`): Gemma 4's 410 language projections, the bytes each decoded token reads.
+#: Its embeddings (the tied head) stay bf16; the vision tower is never built.
+AGENT_INT8 = Recipe(
+    lane="int8",
+    model=PromptAgent,
+    plan=QuantizationPlan(
+        encoding="int8.convrot",
+        components=("model",),
+        include=(f"{_AGENT}.self_attn.*_proj.weight", f"{_AGENT}.mlp.*_proj.weight"),
+        output_precision="preserve",
     ),
 )

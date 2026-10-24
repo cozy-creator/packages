@@ -1,4 +1,4 @@
-"""HiDream-O1-Image text-to-image and reference editing, full and Dev."""
+"""HiDream-O1-Image text-to-image and reference editing, full and Dev, with HiDream's prompt agent."""
 
 from __future__ import annotations
 
@@ -23,6 +23,7 @@ from PIL import Image
 
 from .model import MAX_BOXES, HiDreamO1, Recipe, area_resize, canvas_box, grid_size, placed, reference_size
 from . import quantize as quantize  # its recipes
+from .agent import PromptAgent
 
 app = App()
 
@@ -117,36 +118,52 @@ def _boxes(payload: GenerateInput) -> list[list[float] | None]:
     return list(boxes)
 
 
+def _caption(prompt: str, upsample: bool, images: list[Image.Image], agent: PromptAgent, seed: int,
+             adj: Adjustments, tel: Telemetry) -> str:
+    """The prompt the image is made from: HiDream's agent's rewrite of a text-to-image prompt when asked."""
+    if not upsample:
+        return prompt
+    if images:
+        adj.warn("prompt_upsampling", "HiDream's prompt agent rewrites text-to-image prompts: an edit's goes as typed")
+        return prompt
+    with tel.stage("rewriting prompt", overall_range=(0.0, 0.15)):
+        caption = agent.rewrite(prompt, seed)
+    tel.log("rewritten prompt", caption=caption[:2000])
+    return caption
+
+
 def _generate(
-    ctx: Context, model: HiDreamO1, out: Outputs, tel: Telemetry, adj: Adjustments, *,
+    ctx: Context, model: HiDreamO1, agent: PromptAgent, out: Outputs, tel: Telemetry, adj: Adjustments, *,
     payload: GenerateInput, recipe: Recipe, steps: int, guidance: float, negative: str | None,
     interval: bool = False,
 ) -> ImageResult:
-    payload.ignored(adj, "prompt_upsampling", reason="HiDream-O1 has no prompt upsampler")
     seed = payload.drawn_seed()
     images = [asset.read() for asset in payload.reference_images]
     (width, height), references = layout(adj, payload, images)
+    caption = _caption(payload.prompt, payload.prompt_upsampling is True, images, agent, seed, adj, tel)
     ctx.raise_if_cancelled()
-    with tel.stage("generating image", overall_range=(0.0, 0.98)):
+    with tel.stage("generating image", overall_range=(0.15, 0.98)):
         image = model.generate(
-            payload.prompt, negative, references, width=width, height=height, recipe=recipe, steps=steps,
+            caption, negative, references, width=width, height=height, recipe=recipe, steps=steps,
             guidance=guidance, seed=seed, cancel=ctx.raise_if_cancelled, interval=interval,
-            on_step=tel.step_callback(steps, stage="generating image", overall_range=(0.0, 0.98)),
+            on_step=tel.step_callback(steps, stage="generating image", overall_range=(0.15, 0.98)),
         )
     with tel.stage("saving image", overall_range=(0.98, 1.0)):
         asset = out.save_image(image, format="png")
-    return ImageResult(asset, width, height, seed, payload.prompt)
+    return ImageResult(asset, width, height, seed, caption)
 
 
-_FULL = {"model": "hidream-o1@0.1.0"}
-_DEV = {"model": "hidream-o1-dev@0.1.0"}
-_COMPONENTS = {"model": ("model",)}
-_MEMO = ("hidream_o1", "hidream_o1.model", "hidream_o1.sampling")
+_FULL = {"model": "hidream-o1@0.1.0", "agent": "gemma-4-31b-it@0.1.0"}
+_DEV = {"model": "hidream-o1-dev@0.1.0", "agent": "gemma-4-31b-it@0.1.0"}
+_COMPONENTS = {"model": ("model",), "agent": ("model",)}
+#: Built and fetched on first use: without `prompt_upsampling` the agent is never pulled.
+_ON_DEMAND = ("agent",)
+_MEMO = ("hidream_o1", "hidream_o1.model", "hidream_o1.sampling", "hidream_o1.agent")
 
 
-@app.entrypoint(defaults=_FULL, components=_COMPONENTS, memoize=Memoize(requires=["seed"]),
+@app.entrypoint(defaults=_FULL, components=_COMPONENTS, on_demand=_ON_DEMAND, memoize=Memoize(requires=["seed"]),
                 memo_dependencies=_MEMO)
-def generate(ctx: Context, payload: GenerateInput, model: HiDreamO1, out: Outputs,
+def generate(ctx: Context, payload: GenerateInput, model: HiDreamO1, agent: PromptAgent, out: Outputs,
              tel: Telemetry, adj: Adjustments) -> ImageResult:
     """HiDream-O1-Image: 50 UniPC steps with CFG 5.0 over the first 40. The model HiDream recommends
     for editing."""
@@ -156,13 +173,13 @@ def generate(ctx: Context, payload: GenerateInput, model: HiDreamO1, out: Output
     cfg = guidance > 1.0
     negative = (payload.negative_prompt if payload.negative_prompt is not None else UNCONDITIONAL) if cfg else None
     steps = held(adj, "steps", payload.steps or FULL_STEPS, 1, 200)
-    return _generate(ctx, model, out, tel, adj, payload=payload, recipe=Recipe("unipc", shift),
+    return _generate(ctx, model, agent, out, tel, adj, payload=payload, recipe=Recipe("unipc", shift),
                      steps=steps, guidance=guidance, negative=negative, interval=payload.guidance_interval)
 
 
-@app.entrypoint(defaults=_DEV, components=_COMPONENTS, memoize=Memoize(requires=["seed"]),
+@app.entrypoint(defaults=_DEV, components=_COMPONENTS, on_demand=_ON_DEMAND, memoize=Memoize(requires=["seed"]),
                 memo_dependencies=_MEMO)
-def generate_turbo(ctx: Context, payload: GenerateInput, model: HiDreamO1, out: Outputs,
+def generate_turbo(ctx: Context, payload: GenerateInput, model: HiDreamO1, agent: PromptAgent, out: Outputs,
                    tel: Telemetry, adj: Adjustments) -> ImageResult:
     """HiDream-O1-Image-Dev: 28 distilled steps, no CFG. A one-reference edit samples flow-match Euler."""
     if payload.steps not in (None, DEV_STEPS):
@@ -171,5 +188,5 @@ def generate_turbo(ctx: Context, payload: GenerateInput, model: HiDreamO1, out: 
     if not payload.guidance_interval:
         adj.warn("guidance_interval", "ignored: HiDream-O1-Dev samples without CFG")
     recipe = Recipe("euler") if len(payload.reference_images) == 1 else DEV_FLASH
-    return _generate(ctx, model, out, tel, adj, payload=payload, recipe=recipe, steps=DEV_STEPS,
+    return _generate(ctx, model, agent, out, tel, adj, payload=payload, recipe=recipe, steps=DEV_STEPS,
                      guidance=0.0, negative=None)
