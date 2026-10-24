@@ -9,8 +9,9 @@ tasks:
   # First-party packages publish at the root namespace (`--root`, Hub admins). Locks pin first-party callees exactly, so each release of X is followed by one of every package
   # whose lock holds X: relocked to it, patch-bumped, pushed to master, then published.
   # Every release is a candidate: published and yanked at once (an exact pin installs it; the unversioned default skips
-  # it), gated by cozy-creator's release gate with the printed pins, then `task promote` un-yanks the gated releases
-  # (tracker design ci-v2, pre-release and promotion). A dependent relocks to a yanked callee only when it pins it with ==.
+  # it). The release agent tests it by hand (cozy-creator's release gate, the printed pins) and records the result; then
+  # `task promote` un-yanks the gated releases (tracker design ci-v2, pre-release and promotion). Nothing here starts a
+  # test. A dependent relocks to a yanked callee only when it pins it with ==.
   publish:
     desc: "Publish candidates from master to every hub (yanked), then cascade to their in-repo dependents: task publish -- qwen-image-2"
     cmds:
@@ -43,7 +44,7 @@ tasks:
         }
         trap 'git checkout -q -- .; rm -rf "$work"; [ -z "$shipped" ] || echo "candidates (yanked): $shipped
         gate: gh workflow run release-gate.yml -R cozy-creator/cozy-creator -f pins=$shipped -f only=$(echo "$shipped" | sed "s/@[^,]*//g")
-        then: task promote GATE=<passed run id | gate dir> -- ${shipped//,/ }"' EXIT
+        then: task promote GATE=<passing release-gate run id> -- ${shipped//,/ }  (a hand gate: GATE=<its dirs> RECORD=<URL of its recorded result>)"' EXIT
         release() {
           if ! git diff --quiet HEAD; then
             git commit -q -m "$1 $(ver "$1"): lock$(for q in $up; do printf ' %s %s' "$q" "$(ver "$q")"; done)" -- "$1"
@@ -71,12 +72,15 @@ tasks:
 
   # The release gate passed these candidates: they become the unversioned default on every hub, the same releases.
   promote:
-    desc: "Un-yank gated candidates on every hub: task promote GATE=<passed release-gate run id | gate dir>... -- sdxl@2.13.0 ..."
+    desc: "Un-yank gated candidates on every hub: task promote GATE=<passing release-gate run id> -- sdxl@2.13.0 ... (hand gate: GATE=<dirs> RECORD=<URL>)"
     requires:
       vars: [GATE]
     cmds:
       - |
         set -euo pipefail; creator=${CREATOR:-../cozy-creator}
+        case "{{.GATE}}" in
+          *[!0-9]*) [[ "{{.RECORD}}" == https://* ]] || { echo "a hand gate's dirs need RECORD=<URL where its passing result is recorded>" >&2; exit 1; } ;;
+        esac
         set_=$("$creator/release-gate/verify.sh" {{.GATE}})
         for p in {{.CLI_ARGS}}; do
           jq -e --arg p "$p" '.pins | index($p)' <<< "$set_" >/dev/null || { echo "the gate did not pass $p" >&2; exit 1; }
