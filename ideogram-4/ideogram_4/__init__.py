@@ -17,6 +17,7 @@ from cozy_runtime.author import (
     Memoize,
     Outputs,
     ReferenceImages,
+    Region,
     Telemetry,
     UnsupportedInput,
     held,
@@ -35,25 +36,9 @@ MEGAPIXELS, MIN_PIXELS, MAX_PIXELS = 1.0, MIN_SIDE * MIN_SIDE, MAX_SIDE * MAX_SI
 #: Diffusers' default: V4_QUALITY_48, 48 steps at guidance 7 with a 3.0 polish tail.
 STEPS, GUIDANCE = 48, 7.0
 
-Unit = Annotated[float, msgspec.Meta(ge=0, le=1)]
-#: A placement on the output canvas: corners [x0, y0, x1, y1], normalized 0-1, origin top-left.
-Box = tuple[Unit, Unit, Unit, Unit]
-
-
-class Region(msgspec.Struct, forbid_unknown_fields=True):
-    """One element placed in `box`: what it is (`prompt`), and with `text` the literal text
-    rendered there."""
-
-    box: Box
-    prompt: Annotated[str, msgspec.Meta(min_length=1)]
-    text: Annotated[str, msgspec.Meta(min_length=1)] | None = None
-
-
 class GenerateInput(ImageRequest):
     #: Ideogram 4 is text to image only.
     reference_images: Annotated[ReferenceImages, msgspec.Meta(max_length=0)] = msgspec.field(default_factory=list)
-    #: The shared layout input; Ideogram 4 takes no references, so there is nothing to place.
-    reference_boxes: list[Box | None] | None = None
     #: Elements placed by box, in order: an object (`prompt`), or rendered text (`text`, styled as `prompt` says).
     regions: list[Region] = msgspec.field(default_factory=list)
 
@@ -136,7 +121,7 @@ def generate(ctx: Context, payload: GenerateInput, model: Ideogram4, text_encode
     """Ideogram 4, 48 steps at guidance 7 (3 on the last steps): a JSON caption, or a prompt the
     upsampler expands into one, with `regions` placed by box."""
     payload.ignored(adj, "negative_prompt", reason="Ideogram 4's unconditional DiT reads no text")
-    payload.ignored(adj, "reference_boxes", reason="Ideogram 4 takes no references; place elements with regions")
+    payload.placements()  # no references: any reference_boxes entry is a length mismatch
     steps = held(adj, "steps", payload.steps or STEPS, 1, 200)
     weight = held(adj, "guidance", GUIDANCE if payload.guidance is None else payload.guidance, 1.0, 20.0)
     seed = payload.drawn_seed()

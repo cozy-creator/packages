@@ -36,7 +36,7 @@ Inputs are the shared image request: `prompt`, `aspect_ratio` (any `W:H`), `mega
 `guidance`, `seed` (random when omitted, returned) and `prompt_upsampling` (default on). Text to image
 defaults to 1:1 at 1 MP (1024×1024, the reference CLI's); sizes are held to 256–2048 px sides, at most
 6:1 and 4 MP, on the 16 px grid, and anything outside is a `clamp` adjustment. Ideogram 4 takes no
-references, so `reference_images` must be empty; `negative_prompt` and `reference_boxes` are ignored
+references, so `reference_images` and `reference_boxes` must be empty; `negative_prompt` is ignored
 with a warning (the unconditional DiT reads no text). Outputs: `image` (PNG), `width`, `height`, `seed`
 and `prompt`, the caption the image was made from.
 

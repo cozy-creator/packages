@@ -4,14 +4,14 @@ version = "0.1.0"
 description = "Cozy text-to-image with Ideogram 4: JSON captions, layout boxes and rendered text"
 requires-python = ">=3.12"
 dependencies = [
-    "cozy-runtime[media]>=0.31,<0.32",
+    "cozy-runtime[media]>=0.32",
     "diffusers>=0.41,<0.42",
     "msgspec>=0.19",
     "numpy>=1.26",
     # Diffusers' prompt enhancer constrains the upsampler's caption to Ideogram's schema with it.
     "outlines>=1.3,<1.4",
     "pillow>=12",
-    "tensorfs>=0.14,<0.15",
+    "tensorfs>=0.15",
     "tokenizers>=0.23.1",
     "torch>=2.13",
     "torchvision>=0.28",
