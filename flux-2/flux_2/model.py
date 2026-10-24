@@ -229,7 +229,7 @@ class Flux2(Model[Flux2Graph], encoded_leaves="accept"):
     @uses_components("text_encoder", memoize=True, memo_dependencies=(tokenizer, processor, text_encoder, _conditioning_only))
     def encode(self, prompt: str) -> torch.Tensor:
         encoder = self.graph.components["text_encoder"]
-        device = next(encoder.parameters()).device
+        device = torch.device(str(self.device))
         layers = TEXT_LAYERS[self.graph.family]
         with torch.inference_mode():
             if self.dev:
@@ -248,7 +248,7 @@ class Flux2(Model[Flux2Graph], encoded_leaves="accept"):
     def encode_references(self, references: list[Image.Image]) -> tuple[torch.Tensor, torch.Tensor]:
         """Normalized packed latents of the prepared references as one token sequence, with ids."""
         vae = self.graph.components["vae"]
-        device = next(vae.parameters()).device
+        device = torch.device(str(self.device))
         tokens, ids = [], []
         with torch.inference_mode():
             for index, reference in enumerate(references):
@@ -279,7 +279,7 @@ class Flux2(Model[Flux2Graph], encoded_leaves="accept"):
         """BFL's Euler sampler in bf16 (`denoise`, `denoise_cfg`): [dev] embeds `guidance`, [klein]
         Base takes CFG against `negative`, [klein] distilled takes neither."""
         tf = self.graph.components["transformer"]
-        device = next(tf.parameters()).device
+        device = torch.device(str(self.device))
         rows, columns = height // PATCH, width // PATCH
         noise = rng.noise((1, tf.config.in_channels, rows, columns), seed)
         x = noise.to(torch.bfloat16).flatten(2).transpose(1, 2).to(device)
@@ -315,7 +315,7 @@ class Flux2(Model[Flux2Graph], encoded_leaves="accept"):
     @uses_components("vae")
     def decode(self, tokens: torch.Tensor, *, width: int, height: int) -> Image.Image:
         vae = self.graph.components["vae"]
-        device = next(vae.parameters()).device
+        device = torch.device(str(self.device))
         rows, columns = height // PATCH, width // PATCH
         with torch.inference_mode():
             latents = tokens.to(device=device, dtype=vae.dtype).view(1, rows, columns, -1).permute(0, 3, 1, 2)

@@ -17,6 +17,7 @@ from types import MethodType
 from typing import Any
 
 import torch
+from cozy_runtime.author import device
 from cozy_runtime.author.kernels import int8_rows, native, quantize_once, rms_rope_split_half
 from diffusers.models.activations import GELU
 from diffusers.models.attention import FeedForward
@@ -157,8 +158,8 @@ def _capability() -> str:
         return f"torch {release} is outside the fused plan's releases {', '.join(TORCH_RELEASES)}"
     if torch.version.cuda != CUDA_RELEASE:
         return f"torch.version.cuda {torch.version.cuda!r} != the fused plan's {CUDA_RELEASE!r}"
-    if not torch.cuda.is_available():
-        return "torch reports no available CUDA device"
+    if (placed := device()).type != "cuda":
+        return f"this process runs on {placed}, not a CUDA GPU"
     return native()
 
 

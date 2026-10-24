@@ -192,7 +192,7 @@ class Fibo2(Model[FiboGraph], encoded_leaves="accept"):
             processor=self.processor,
             scheduler=FlowMatchEulerDiscreteScheduler.from_config(self.graph.scheduler_config),
         )
-        pipe.stage_device = next(self.graph.components[component].parameters()).device
+        pipe.stage_device = torch.device(str(self.device))
         pipe.encoded = {}
         return pipe
 

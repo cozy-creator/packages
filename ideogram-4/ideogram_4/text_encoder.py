@@ -78,7 +78,7 @@ class QwenEncoder(Model[EncoderGraph], encoded_leaves="accept"):
         """`Ideogram4Pipeline.encode_prompt` for one caption, unpadded: the hidden states of
         Ideogram's 13 layers concatenated per token, `[tokens, 53248]` in bf16."""
         model = self.graph.components[COMPONENT]
-        device = next(model.parameters()).device
+        device = torch.device(str(self.device))
         messages = [{"role": "user", "content": [{"type": "text", "text": caption}]}]
         text = self.tokenizer.apply_chat_template(messages, add_generation_prompt=True, tokenize=False)
         ids = self.tokenizer(text, return_tensors="pt", add_special_tokens=False)["input_ids"]
@@ -116,7 +116,7 @@ class QwenUpsampler(Model[UpsamplerGraph], encoded_leaves="accept", min_bits=4, 
         target aspect ratio, sampled at temperature 1 from `seed`, constrained to the caption's JSON
         schema; returned as compact JSON."""
         model = self.graph.components[COMPONENT]
-        device = next(model.parameters()).device
+        device = torch.device(str(self.device))
         generator = torch.Generator(device=device).manual_seed(seed)
         with torch.inference_mode():
             (text,) = generate_captions(

@@ -330,7 +330,7 @@ class Upsampler(Model[UpsamplerGraph], encoded_leaves="accept", min_bits=4, phas
         )
         inputs = processor(
             text=[chat], images=references or None, return_tensors="pt"
-        ).to(next(model.parameters()).device)
+        ).to(torch.device(str(self.device)))
         if "pixel_values" in inputs:
             inputs["pixel_values"] = inputs["pixel_values"].to(model.dtype)
         tokenizer = processor.tokenizer

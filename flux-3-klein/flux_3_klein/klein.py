@@ -326,7 +326,7 @@ class Klein(
                 encoder,
                 self.processor,
                 prompt,
-                device=next(encoder.parameters()).device,
+                device=torch.device(str(self.device)),
                 max_sequence_length=MAX_TOKENS,
                 pad_multiple=PAD_MULTIPLE,
                 hidden_states_layers=TEXT_LAYERS,
@@ -337,7 +337,7 @@ class Klein(
     def encode_references(self, references: list[Image.Image]) -> tuple[torch.Tensor, torch.Tensor]:
         """Normalized packed latents of the prepared references as one token sequence, with ids."""
         vae = self.graph.components["vae"]
-        device = next(vae.parameters()).device
+        device = torch.device(str(self.device))
         tokens, ids = [], []
         with torch.inference_mode():
             for index, reference in enumerate(references):
@@ -376,7 +376,7 @@ class Klein(
         request; a flow map adds each step's target time to every mode, so it runs them per step.
         """
         tf = self.graph.components["transformer"]
-        device = next(tf.parameters()).device
+        device = torch.device(str(self.device))
         rows, columns = height // PATCH, width // PATCH
         noise = rng.noise((rows * columns, tf.config.in_channels), seed)
         x = noise.to(torch.bfloat16).float().to(device)[None]  # bf16 values, an fp32 state across steps
@@ -428,7 +428,7 @@ class Klein(
     @uses_components("vae")
     def decode(self, tokens: torch.Tensor, *, width: int, height: int) -> Image.Image:
         vae = self.graph.components["vae"]
-        device = next(vae.parameters()).device
+        device = torch.device(str(self.device))
         rows, columns = height // PATCH, width // PATCH
         with torch.inference_mode():
             latents = tokens.to(device=device, dtype=vae.dtype).view(1, rows, columns, -1).permute(0, 3, 1, 2)
