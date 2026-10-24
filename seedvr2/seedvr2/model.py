@@ -111,13 +111,13 @@ class RestorationModel(Model[Graph], encoded_leaves="accept"):
         """A window's pixels, (c, t, h, w) bytes or [-1, 1] in host memory, to its scaled latent,
         (t, h, w, c) on the device. The VAE moves one slice of frames at a time."""
         latent = _vae(self.graph).encode(pixels[None]).latent[0]
-        return latent.movedim(0, -1).to(_device()) * SCALE
+        return latent.movedim(0, -1).to(str(self.device)) * SCALE
 
     @uses_components("dit", "conditioning")
     def denoise(self, latent: torch.Tensor, latent_noise: float) -> torch.Tensor:
         """The one-step restoration of a window's latent, conditioned on itself, in the fewest
         pieces along time that fit the device."""
-        runner = _runner(self.graph)
+        runner = _runner(self.graph, torch.device(str(self.device)))
         conditioning = cast(Conditioning, self.graph.components["conditioning"])
         noise = torch.randn_like(latent)
         if latent_noise:
@@ -150,7 +150,7 @@ class RestorationModel(Model[Graph], encoded_leaves="accept"):
             return _vae(self.graph).decode(z).sample[0]
 
 
-def _runner(graph: Graph) -> Any:
+def _runner(graph: Graph, device: torch.device) -> Any:
     """Upstream's inference driver over the constructed components (configuration only)."""
     cfg = OmegaConf.create(
         {
@@ -173,7 +173,7 @@ def _runner(graph: Graph) -> Any:
     )
     runner = cast(Any, VideoDiffusionInfer(cfg))
     runner.dit = graph.components["dit"]
-    runner.configure_diffusion()
+    runner.configure_diffusion(device)
     return runner
 
 
@@ -182,10 +182,6 @@ def _vae(graph: Graph) -> Any:
     # One latent frame a step of the causal scan, its finest; the Runtime cuts each op's rows.
     vae.set_causal_slicing(split_size=4, memory_device="same")
     return vae
-
-
-def _device() -> torch.device:
-    return torch.device("cuda", torch.cuda.current_device())
 
 
 def restore(
@@ -217,8 +213,9 @@ def restore(
         )
     )
     crop = (slice(top, top + height), slice(left, left + width))
-    device = _device()
-    with torch.inference_mode(), torch.random.fork_rng(devices=[device.index or 0]):
+    device = torch.device(str(model.device))
+    gpus = [device.index or 0] if device.type == "cuda" else []
+    with torch.inference_mode(), torch.random.fork_rng(devices=gpus):
         torch.manual_seed(seed)
         pixels = source.permute(3, 0, 1, 2).contiguous()
         if input_noise:

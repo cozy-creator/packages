@@ -118,7 +118,7 @@ class H3Model(
 
     @uses_components("text_encoder")
     def condition_text(self, task: Task, state: Any) -> None:
-        self.pipe.condition_text(task, state)
+        self.pipe.condition_text(task, state, self.device)
 
     @uses_components("audio_vae")
     def decode_audio(self, task: Task, state: Any) -> tuple[Any, int]:

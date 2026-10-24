@@ -42,23 +42,20 @@ class FinalHiddenState:
     alive and, for a conditioner hosted on another rank, sent them all back.
     """
 
-    def __init__(self, conditioner: Any) -> None:
+    def __init__(self, conditioner: Any, device: torch.device) -> None:
         self._conditioner = conditioner
+        self._device = device
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._conditioner, name)
 
     @property
     def device(self) -> Any:
-        """Where the call's inputs and result live: the conditioner's device, or this
-        process's current one when another group rank hosts it and the local copy is a
-        shell without bytes."""
+        """Where the call's inputs and result live: the conditioner's device, or the model's
+        (the Runtime's) when another GPU of the group hosts it and the local copy is a shell
+        without bytes."""
         device = self._conditioner.device
-        if device.type != "meta":
-            return device
-        if torch.cuda.is_available():
-            return torch.device("cuda", torch.cuda.current_device())
-        return torch.device("cpu")
+        return self._device if device.type == "meta" else device
 
     def model(self, **kwargs: Any) -> Any:
         outputs = self._conditioner.model(**{**kwargs, "output_hidden_states": False})

@@ -18,7 +18,6 @@ Distributed package.
 
 from .basic import (
     barrier_if_distributed,
-    get_device,
     get_global_rank,
     get_local_rank,
     get_world_size,
@@ -26,7 +25,6 @@ from .basic import (
 
 __all__ = [
     "barrier_if_distributed",
-    "get_device",
     "get_global_rank",
     "get_local_rank",
     "get_world_size",

@@ -18,7 +18,6 @@ import torch.distributed as dist
 import torch.nn.functional as F
 from torch import Tensor
 
-from seedvr2.upstream.common.distributed import get_device
 from seedvr2.upstream.common.distributed.advanced import (
     get_next_sequence_parallel_rank,
     get_prev_sequence_parallel_rank,
@@ -69,8 +68,8 @@ def causal_conv_gather_outputs(x):
         return x
 
     # Communicate shapes.
-    unpad_lens = torch.empty((sp_size,), device=get_device(), dtype=torch.long)
-    local_unpad_len = torch.tensor([x.size(2)], device=get_device(), dtype=torch.long)
+    unpad_lens = torch.empty((sp_size,), device=x.device, dtype=torch.long)
+    local_unpad_len = torch.tensor([x.size(2)], device=x.device, dtype=torch.long)
     torch.distributed.all_gather_into_tensor(unpad_lens, local_unpad_len, group=sp_group)
 
     # Padding to max_len for gather.

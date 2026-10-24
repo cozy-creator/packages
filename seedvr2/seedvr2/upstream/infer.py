@@ -25,7 +25,6 @@ from seedvr2.upstream.common.diffusion import (
     create_schedule_from_config,
 )
 from seedvr2.upstream.common.distributed import (
-    get_device,
     get_global_rank,
 )
 
@@ -68,15 +67,15 @@ class VideoDiffusionInfer():
 
     # ------------------------------ Diffusion ------------------------------ #
 
-    def configure_diffusion(self):
+    def configure_diffusion(self, device: torch.device):
         self.schedule = create_schedule_from_config(
             config=self.config.diffusion.schedule,
-            device=get_device(),
+            device=device,
         )
         self.sampling_timesteps = create_sampling_timesteps_from_config(
             config=self.config.diffusion.timesteps.sampling,
             schedule=self.schedule,
-            device=get_device(),
+            device=device,
         )
         self.sampler = create_sampler_from_config(
             config=self.config.diffusion.sampler,
@@ -91,7 +90,7 @@ class VideoDiffusionInfer():
         use_sample = self.config.vae.get("use_sample", True)
         latents = []
         if len(samples) > 0:
-            device = get_device()
+            device = next(self.vae.parameters()).device
             dtype = getattr(torch, self.config.vae.dtype)
             scale = self.config.vae.scaling_factor
             shift = self.config.vae.get("shifting_factor", 0.0)
@@ -134,7 +133,7 @@ class VideoDiffusionInfer():
     def vae_decode(self, latents: List[Tensor]) -> List[Tensor]:
         samples = []
         if len(latents) > 0:
-            device = get_device()
+            device = next(self.vae.parameters()).device
             dtype = getattr(torch, self.config.vae.dtype)
             scale = self.config.vae.scaling_factor
             shift = self.config.vae.get("shifting_factor", 0.0)

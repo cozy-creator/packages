@@ -29,7 +29,6 @@ from seedvr2.upstream.common.distributed.advanced import (
     get_sequence_parallel_world_size,
 )
 
-from .basic import get_device
 
 _SEQ_DATA_BUF = defaultdict(lambda: [None, None, None])
 _SEQ_DATA_META_SHAPES = defaultdict()
@@ -425,7 +424,7 @@ class SPDistForward:
         if not group:
             yield inputs
         else:
-            device = self.device if self.device is not None else get_device()
+            device = self.device if self.device is not None else torch.cuda.current_device()
             sp_world = get_sequence_parallel_world_size()
             sp_rank = get_sequence_parallel_rank()
             for local_step in range(sp_world):
