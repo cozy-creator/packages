@@ -1,6 +1,6 @@
 # /// script
 # requires-python = ">=3.12"
-# dependencies = ["torch==2.14.0"]
+# dependencies = ["cozy-runtime>=0.32", "msgspec>=0.19", "torch==2.14.0"]
 # ///
 """cozy_runtime.moe's grouped expert GEMV on a GPU, against each expert's own Linears (se-085).
 
@@ -18,16 +18,27 @@ from __future__ import annotations
 import json
 import time
 
+import msgspec
 import torch
 from torch import nn
 
 from cozy_runtime import moe
-from cozy_runtime.author import ScriptContext
+from cozy_runtime.author import App, Telemetry
 from cozy_runtime.author.kernels import INT8_CONVROT
 from cozy_runtime.internal import int8_linear
 from cozy_runtime.internal.encoding.formats import hadamard256
 
 H, INNER, K = 2048, 512, 8
+
+app = App()
+
+
+class Nothing(msgspec.Struct):
+    pass
+
+
+class Passed(msgspec.Struct):
+    results: str
 
 
 def launch(kernel, grid, *args):  # type: ignore[no-untyped-def]
@@ -122,13 +133,14 @@ def timed(call, repeats: int = 50) -> float:  # type: ignore[no-untyped-def]
     return round((time.perf_counter() - started) / repeats * 1e6, 1)
 
 
-def main(ctx: ScriptContext) -> str:
+@app.entrypoint
+def main(payload: Nothing, tel: Telemetry) -> Passed:
     torch.manual_seed(0)
     results: dict[str, object] = {"gpu": torch.cuda.get_device_name()}
 
     def passed(name: str, value: object) -> None:  # logged as it passes: the run log keeps it
         results[name] = value
-        ctx.log(f"PASS {name}: {json.dumps(value)}")
+        tel.log(f"PASS {name}: {json.dumps(value)}")
 
     for gate_first in (True, False):
         experts = layer(16, gate_first)
@@ -144,5 +156,5 @@ def main(ctx: ScriptContext) -> str:
         "decode layer us (bf16): grouped, sorted",
         (grouped, timed(lambda: decode._sorted(hidden, index))),
     )
-    ctx.log(f"ALL PASSED on {results['gpu']}")
-    return json.dumps(results)
+    tel.log(f"ALL PASSED on {results['gpu']}")
+    return Passed(json.dumps(results))

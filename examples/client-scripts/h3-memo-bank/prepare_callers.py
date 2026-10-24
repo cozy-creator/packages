@@ -12,7 +12,7 @@ args = parser.parse_args()
 reply = json.loads(args.adoption.read_text())
 if reply.get("status") != "completed":
     raise SystemExit("adoption must be an actual completed ordinary CLI run")
-artifact = reply["result"]["value"]
+artifact = reply["result"]
 if set(artifact) != {"producer_request_id", "output_slot", "checkpoint", "transaction"}:
     raise SystemExit("adoption did not return one exact ModelArtifact")
 if not artifact["producer_request_id"] or artifact["output_slot"] != "original":
@@ -23,17 +23,20 @@ for digest in (artifact["checkpoint"], artifact["transaction"]):
 body = json.dumps(artifact, sort_keys=True, separators=(",", ":"))
 code = '''# /// script
 # requires-python = ">=3.12,<3.13"
-# dependencies = ["cozy-runtime>=0.30.0,<1", "minimax-h3-tools"]
-# [tool.cozy]
-# accelerator = false
+# dependencies = ["cozy-runtime>=0.30.0,<1", "minimax-h3-tools", "msgspec>=0.19"]
 # ///
 import msgspec
-from cozy_runtime.author import ModelArtifact
+from cozy_runtime.author import App, ModelArtifact
 from h3_tables.operations import precompute_adaln
 
+app = App()
 SOURCE = msgspec.json.decode(BODY, type=ModelArtifact)
 
-async def main() -> ModelArtifact:
+class Nothing(msgspec.Struct):
+    pass
+
+@app.entrypoint(accelerator=False)
+async def main(payload: Nothing) -> ModelArtifact:
     return await precompute_adaln(model=SOURCE, timesteps=30)
 '''.replace("BODY", repr(body))
 if args.tools_source is not None:
