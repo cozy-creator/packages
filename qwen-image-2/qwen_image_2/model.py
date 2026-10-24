@@ -12,6 +12,7 @@ from collections.abc import Callable, Iterable, Iterator, Mapping
 from typing import Any
 
 import torch
+import torch.nn.functional as F
 from diffusers import (
     AutoencoderKLQwenImage21,
     FlowMatchEulerDiscreteScheduler,
@@ -364,8 +365,75 @@ class QwenImage21Model(Model[QwenImage21Graph], encoded_leaves="accept"):
             latents = latents.to(device=device, dtype=vae.dtype)
             mean = latents.new_tensor(vae.config.latents_mean).view(1, vae.config.z_dim, 1, 1, 1)
             std = latents.new_tensor(vae.config.latents_std).view(1, vae.config.z_dim, 1, 1, 1)
-            # The pipeline's final decode, with no cast of F32 source weights, as one frame:
-            # Diffusers' `decode` keeps every convolution's input for a next frame an image
-            # never has (its feature cache, half the decode's memory); the same bits without.
-            x = vae.post_quant_conv(latents * std + mean)
-            return vae.decoder(x, first_chunk=True).clamp(-1.0, 1.0)[:, :, 0]
+            # The pipeline's final decode, with no cast of F32 source weights, as one frame
+            # (Diffusers' `decode` keeps a feature cache for a next frame an image never has).
+            return _decoded(vae, latents * std + mean)
+
+
+# Diffusers' decoder forwards for one frame, each activation dropped once read. Theirs hold a
+# block's input and a copy of it, every conv's input beside its padded copy, and the shortcut's
+# repeated and permuted copies: at 2048² in F32, 26.6 GB live at once against these 12.1 GB.
+# Same ops on the same values; `own` lists hold an activation's only reference.
+
+
+def _decoded(vae: Any, latents: torch.Tensor) -> torch.Tensor:
+    """`vae.decoder(vae.post_quant_conv(latents), first_chunk=True)`, clamped, as one frame."""
+    d = vae.decoder
+    x = d.mid_block(_conv(d.conv_in, [_conv(vae.post_quant_conv, [latents])]))
+    own = [x]
+    del x
+    for up in d.up_blocks:
+        own = [_up_block(up, own)]
+    F.silu(_normed(d.norm_out, own[0]), inplace=True)
+    return _conv(d.conv_out, own).clamp(-1.0, 1.0)[:, :, 0]
+
+
+def _conv(conv: Any, own: list[torch.Tensor]) -> torch.Tensor:
+    """`QwenImage21CausalConv3d.forward`: the input goes once padded; a zero pad copies nothing."""
+    x = own.pop().squeeze(2)
+    if any(conv._padding):
+        x = F.pad(x, conv._padding)
+    return torch.nn.Conv2d.forward(conv, x).unsqueeze(2)
+
+
+def _normed(norm: Any, x: torch.Tensor) -> torch.Tensor:
+    """`norm(x)` written over `x` in row bands: the channel RMS norm reads each pixel alone."""
+    rows = max(1, x.shape[-2] // 16)
+    for at in range(0, x.shape[-2], rows):
+        band = x[..., at : at + rows, :]
+        band.copy_(norm(band))
+    return x
+
+
+def _resnet(block: Any, own: list[torch.Tensor], keep: bool) -> torch.Tensor:
+    """`QwenImage21ResidualBlock.forward`; `keep`: the caller reads the input again."""
+    x = own.pop()
+    h = x if isinstance(block.conv_shortcut, torch.nn.Identity) else _conv(block.conv_shortcut, [x])
+    y = [block.norm1(x) if keep or h is x else _normed(block.norm1, x)]
+    del x
+    F.silu(y[0], inplace=True)
+    y = [_conv(block.conv1, y)]
+    F.silu(_normed(block.norm2, y[0]), inplace=True)
+    return _conv(block.conv2, y).add_(h)
+
+
+def _up_block(up: Any, own: list[torch.Tensor]) -> torch.Tensor:
+    """`QwenImage21ResidualUpBlock.forward` with no copy of its input, which only the shortcut
+    reads again; the upsampler's permute and reshape are views of one frame."""
+    shortcut = own[0] if up.avg_shortcut is not None else None
+    for n, resnet in enumerate(up.resnets):
+        own = [_resnet(resnet, own, keep=n == 0 and shortcut is not None)]
+    x = own.pop()
+    if up.upsampler is not None:
+        x = up.upsampler.resample[0](x.squeeze(2))
+        x = up.upsampler.resample[1](x).unsqueeze(2)
+    if shortcut is not None:
+        dup = up.avg_shortcut
+        # `QwenImage21DupUp3D` for the last frame: output channel c at (i, j) of each upsampled
+        # cell is input channel (c·factor + (t-1)·s² + i·s + j) // repeats.
+        t, s, channels = dup.factor_t, dup.factor_s, torch.arange(dup.out_channels)
+        for i in range(s):
+            for j in range(s):
+                index = (channels * dup.factor + (t - 1) * s * s + i * s + j) // dup.repeats
+                x[:, :, 0, i::s, j::s].add_(shortcut[:, index.to(shortcut.device), 0])
+    return x
