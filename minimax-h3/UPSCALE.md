@@ -34,7 +34,7 @@ single-GPU SeedVR2 and multi-GPU H3 can each use their supported count. An expli
 applies to every GPU child and is never silently reduced.
 
 ```sh
-cozy run paul/minimax-h3/ref2va_turbo --asset character.png \
+cozy run minimax-h3/ref2va_turbo --asset character.png \
   prompt='<Picture 1> waves in a bright studio.' duration_s=15 seed=581203 \
   resolution=1440p
 ```
@@ -63,7 +63,7 @@ upstream names; it applies only above 768p. Restoration can invent skin texture 
 `latent_noise_scale` softens it:
 
 ```sh
-cozy run paul/minimax-h3/fl2va_turbo prompt='...' duration_s=15 resolution=1080p \
+cozy run minimax-h3/fl2va_turbo prompt='...' duration_s=15 resolution=1080p \
   'upscale:={"latent_noise_scale": 0.1}'
 ```
 

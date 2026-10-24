@@ -1,6 +1,6 @@
 [project]
 name = "hidream-o1"
-version = "0.2.3"
+version = "0.1.0"
 description = "Cozy text-to-image and reference editing with HiDream-O1-Image, full and Dev"
 requires-python = ">=3.12"
 dependencies = [

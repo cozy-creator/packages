@@ -5,7 +5,7 @@ its DiTs' attention may run at 4 bits, and the VAEs and text encoder keep exact 
 package names no GPU and no kernel. Runtime serves each site with the first kernel of the GPU
 family's cell at that level ([precision tiers §2.4](https://github.com/cozy-creator/tracker/blob/master/design/precision-tiers.md)):
 FP4 Sage3 dense rows on RTX 50-class cards, the 8-bit cell elsewhere (Sage2 on Hopper, FA4 FP8
-with rotated Q/K on datacenter Blackwell), and Sol on sparse steps. `--lane 16` serves every site
+with rotated Q/K on datacenter Blackwell), and Sol on sparse steps. `--lane bf16` serves every site
 exactly.
 
 `AttentionLayout` (`minimax_h3/official.py`) supplies the rest:

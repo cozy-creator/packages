@@ -12,4 +12,4 @@ without rewriting tables needs a metadata-only TensorFS commit: `tensorfs.Writer
 every carried tensor chunk before it commits, so that is a TensorFS change, not a script here.
 
 Read a published checkpoint's header and plan references without reading tensor values:
-`cozy run ./examples/client-scripts/h3-plan-assets/inspect_headers.py model.source=org/model@release/lane --on MACHINE`.
+`cozy run ./examples/client-scripts/h3-plan-assets/inspect_headers.py model.source=org/model@sha256:<commit> --on MACHINE`.

@@ -91,20 +91,18 @@ processor configs) as assets; the package builds its processor from them:
 ```sh
 cozy model upload \
   hf://Qwen/Qwen-Image-2.1@790c92633540aa0cb11d9abf19eb46d861714758 \
-  qwen-image-2.1 --on YOUR_MACHINE
-cozy model publish qwen-image-2.1 --release 0.1.0 \
-  --lane bf16=sha256:CHECKPOINT_DIGEST
+  qwen-image-2.1 --lane bf16 --on YOUR_MACHINE
 cozy model upload \
   hf://Qwen/Qwen-Image-2.1-Turbo@fc13ba1986fcb905854dc8de2f52eee395f49b5b \
-  qwen-image-2.1-turbo --on YOUR_MACHINE
-cozy model publish qwen-image-2.1-turbo --release 0.1.0 \
-  --lane bf16=sha256:CHECKPOINT_DIGEST
+  qwen-image-2.1-turbo --lane bf16 --on YOUR_MACHINE
+cozy model publish qwen-image-2.1-turbo 0.1.0 sha256:COMMIT
 ```
 
-Replace `YOUR_MACHINE` and `CHECKPOINT_DIGEST` with the selected machine name and
-returned checkpoint digest. Upload creates the checkpoint; the separate publish
-command creates the package's default release. Preparation and descriptor checks
-alone do not qualify GPU inference or the generated image.
+Replace `YOUR_MACHINE` and `COMMIT` with the selected machine name and
+returned commit id. Upload creates the commit; the separate publish
+command creates the package's default release (qwen-image-2.1's with its int8 lane,
+below). Preparation and descriptor checks alone do not qualify GPU inference or the
+generated image.
 
 ## The int8 lane
 
@@ -114,8 +112,8 @@ Hadamard, int8 per output row), served as W8A8 on the int8 tensor cores. Embeddi
 tower, the input/output projections, the modulation and the VAE keep their source bytes.
 
 ```sh
-cozy model quantize qwen-image-2.1@0.1.0/bf16 --format int8 --package qwen-image-2 --on YOUR_MACHINE
-cozy model publish qwen-image-2.1 --release 0.1.0 --lane int8=sha256:CHECKPOINT_DIGEST
+cozy model quantize qwen-image-2.1@sha256:BF16_COMMIT --lane int8 --package qwen-image-2 --on YOUR_MACHINE
+cozy model publish qwen-image-2.1 0.1.0 sha256:BF16_COMMIT sha256:INT8_COMMIT
 ```
 
 ## Python dependency
@@ -126,7 +124,7 @@ account names that index in its `pyproject.toml` and never spells its URL:
 
 ```toml
 [project]
-dependencies = ["qwen-image-2>=0.9.0"]
+dependencies = ["qwen-image-2>=0.1.0"]
 
 [tool.uv.sources]
 qwen-image-2 = { index = "tensorhub" }

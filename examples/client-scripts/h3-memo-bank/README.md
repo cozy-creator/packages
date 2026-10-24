@@ -15,11 +15,11 @@ All invocations use the global `cozy` CLI and normal `~/.cozy` history/outputs.
 
 Use the actual full generator source, not an already-pruned model:
 
-`paul/minimax-h3#sha256:f1e86cb6b4935fbf9e79d90ee87366b6d13e2280b1846b4e9bfa0a00242793eb`
+`minimax-h3@sha256:f1e86cb6b4935fbf9e79d90ee87366b6d13e2280b1846b4e9bfa0a00242793eb`
 
-Current local-Hub metadata identifies it as `1.0.0-rc.2/bf16-full`, with
+Current local-Hub metadata identifies it as release `1.0.0-rc.2`, lane `bf16-full`, with
 190,176,693,539 logical bytes. The film's FP8-pruned source
-`paul/minimax-h3#sha256:302eec1e11fd773f6b3cc29a7746f6e5e41ac26f1015ea47225b9392de525433`
+`minimax-h3@sha256:302eec1e11fd773f6b3cc29a7746f6e5e41ac26f1015ea47225b9392de525433`
 lacks the generating weights and cannot replace it. Source projections inherit
 native parts without copying payloads, but ordinary model acquisition still binds
 the full 190 GB checkpoint. Do not price the download as only 52 GB.
@@ -66,7 +66,7 @@ run it only on the chosen existing worker when the root authorizes the paid phas
 ```sh
 cozy run /ABSOLUTE/PATH/adopt_full.py --describe
 cozy run /ABSOLUTE/PATH/adopt_full.py \
-  'model.source=paul/minimax-h3#sha256:f1e86cb6b4935fbf9e79d90ee87366b6d13e2280b1846b4e9bfa0a00242793eb' \
+  'model.source=minimax-h3@sha256:f1e86cb6b4935fbf9e79d90ee87366b6d13e2280b1846b4e9bfa0a00242793eb' \
   --on ROOT_OWNED_WORKER --json
 # Retain stdout as adoption.json, then:
 python3 prepare_callers.py adoption.json
@@ -83,7 +83,7 @@ outputs. A private tools checkout may be supplied for same-version code/plan tes
 that generated private path is never published.
 
 Already passed: the actual adoption-script dry-run and the published
-`paul/minimax-h3-tools/select-adaln-weights` dry-run against the exact full source.
+`minimax-h3-tools/select-adaln-weights` dry-run against the exact full source.
 The complete composition dry-run awaits that genuine adoption result; no receipt
 was fabricated merely to make a dry-run appear complete.
 
