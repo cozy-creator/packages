@@ -11,7 +11,6 @@ everything, every step. Runtime constructs and fills the modules and owns their 
 
 from __future__ import annotations
 
-import json
 import math
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -20,16 +19,11 @@ from typing import Any
 import numpy as np
 import torch
 import torch.nn.functional as F
-from cozy_runtime import rng
-from cozy_runtime.author import Config, Loader, Model, ModelAssets, uses_components
+from cozy_runtime import rng, vlm
+from cozy_runtime.author import Config, Loader, Model, uses_components
 from PIL import Image, ImageDraw
-from tokenizers import Tokenizer
 from transformers import (
-    PreTrainedTokenizerFast,
-    Qwen2VLImageProcessor,
     Qwen3VLConfig,
-    Qwen3VLProcessor,
-    Qwen3VLVideoProcessor,
 )
 from transformers.initialization import no_init_weights
 from transformers.models.qwen3_vl.modeling_qwen3_vl import Qwen3VLTextModel, Qwen3VLVisionModel
@@ -117,28 +111,6 @@ class O1Graph:
         for module in (root.model.t_embedder1, root.model.x_embedder, root.model.final_layer2):
             module.to(torch.bfloat16)
         self.components: dict[str, torch.nn.Module] = {COMPONENT: root.eval()}
-
-
-def build_processor(assets: ModelAssets) -> Qwen3VLProcessor:
-    """Qwen3-VL's processor from the checkpoint's own files, parsed in memory."""
-    tokenizer_config = json.loads(assets.read("tokenizer_config.json"))
-    for key in ("tokenizer_file", "name_or_path", "added_tokens_decoder", "tokenizer_class",
-                "processor_class", "chat_template"):
-        tokenizer_config.pop(key, None)
-    tokenizer = PreTrainedTokenizerFast(
-        tokenizer_object=Tokenizer.from_str(assets.read("tokenizer.json").decode()), **tokenizer_config
-    )
-    image = json.loads(assets.read("preprocessor_config.json"))
-    video = json.loads(assets.read("video_preprocessor_config.json"))
-    for config in (image, video):
-        for key in ("processor_class", "image_processor_type", "video_processor_type"):
-            config.pop(key, None)
-    return Qwen3VLProcessor(
-        tokenizer=tokenizer,
-        image_processor=Qwen2VLImageProcessor(**image),
-        video_processor=Qwen3VLVideoProcessor(**video),
-        chat_template=json.loads(assets.read("chat_template.json"))["chat_template"],
-    )
 
 
 # ---------------------------------------------------------------- references and sizes
@@ -449,7 +421,7 @@ class HiDreamO1(Model[O1Graph], encoded_leaves="accept"):
 
     def load(self, loader: Loader) -> None:
         self.graph = loader.construct(O1Graph, factory=O1Graph)
-        self.processor = build_processor(loader.assets)
+        self.processor = vlm.processor(loader.assets)
 
     @property
     def body(self) -> Body:

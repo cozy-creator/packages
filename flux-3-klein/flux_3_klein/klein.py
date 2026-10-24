@@ -10,7 +10,6 @@ their residency.
 
 from __future__ import annotations
 
-import json
 import math
 from collections.abc import Callable, Mapping
 from typing import Any, NamedTuple
@@ -18,12 +17,11 @@ from typing import Any, NamedTuple
 import numpy as np
 import torch
 import torch.nn.functional as F
-from cozy_runtime import fusion, rng
+from cozy_runtime import fusion, rng, vlm
 from cozy_runtime.author import (
     Config,
     Loader,
     Model,
-    ModelAssets,
     uses_components,
 )
 from cozy_runtime.author.kernels import Plan
@@ -34,14 +32,10 @@ from diffusers.models.transformers.transformer_flux3 import (
 )
 from diffusers.modular_pipelines.flux3.encoders import Flux3TextEncoderStep
 from PIL import Image, ImageOps
-from tokenizers import Tokenizer
 from transformers import (
     AutoModelForImageTextToText,
-    PreTrainedTokenizerFast,
-    Qwen2VLImageProcessor,
     Qwen3VLConfig,
     Qwen3VLProcessor,
-    Qwen3VLVideoProcessor,
 )
 from transformers import initialization as transformer_init
 
@@ -139,32 +133,6 @@ class KleinGraph:
             "text_encoder": text_encoder,
             "vae": vae.to(dtype=torch.float32),
         }
-
-
-def build_processor(assets: ModelAssets) -> Qwen3VLProcessor:
-    """Qwen3-VL's processor from the checkpoint's `text_encoder/` files, parsed in memory."""
-
-    def read(name: str) -> bytes:
-        return assets.read(f"text_encoder/{name}")
-
-    tokenizer_config = json.loads(read("tokenizer_config.json"))
-    for key in ("tokenizer_file", "name_or_path", "added_tokens_decoder", "tokenizer_class",
-                "processor_class", "chat_template"):
-        tokenizer_config.pop(key, None)
-    tokenizer = PreTrainedTokenizerFast(
-        tokenizer_object=Tokenizer.from_str(read("tokenizer.json").decode()), **tokenizer_config
-    )
-    image = json.loads(read("preprocessor_config.json"))
-    video = json.loads(read("video_preprocessor_config.json"))
-    for config in (image, video):
-        for key in ("processor_class", "image_processor_type", "video_processor_type"):
-            config.pop(key, None)
-    return Qwen3VLProcessor(
-        tokenizer=tokenizer,
-        image_processor=Qwen2VLImageProcessor(**image),
-        video_processor=Qwen3VLVideoProcessor(**video),
-        chat_template=json.loads(read("chat_template.json"))["chat_template"],
-    )
 
 
 def _ceil16(value: int) -> int:
@@ -312,13 +280,13 @@ class Klein(
 
     def load(self, loader: Loader) -> None:
         self.graph = loader.construct(KleinGraph, factory=KleinGraph)
-        self.processor = build_processor(loader.assets)
+        self.processor = vlm.processor(loader.assets, "text_encoder/")
 
     @property
     def flow_map(self) -> bool:
         return bool(self.graph.components["transformer"].config.flow_map)
 
-    @uses_components("text_encoder", memoize=True, memo_dependencies=(build_processor, _conditioning_only))
+    @uses_components("text_encoder", memoize=True, memo_dependencies=(vlm.processor, _conditioning_only))
     def encode(self, prompt: str) -> torch.Tensor:
         encoder = self.graph.components["text_encoder"]
         with torch.inference_mode():
