@@ -43,7 +43,7 @@ tasks:
           shipped="$shipped${shipped:+,}$1@$(ver "$1")"
         }
         trap 'git checkout -q -- .; rm -rf "$work"; [ -z "$shipped" ] || echo "candidates (yanked): $shipped
-        gate: gh workflow run release-gate.yml -R cozy-creator/cozy-creator -f pins=$shipped -f only=$(echo "$shipped" | sed "s/@[^,]*//g")
+        gate: gh workflow run release-gate.yml -R cozy-creator/cozy-creator -f suites=packages -f pins=$shipped -f only=$(echo "$shipped" | sed "s/@[^,]*//g")
         then: task promote GATE=<passing release-gate run id> -- ${shipped//,/ }  (a hand gate: GATE=<its dirs> RECORD=<URL of its recorded result>)"' EXIT
         release() {
           if ! git diff --quiet HEAD; then
