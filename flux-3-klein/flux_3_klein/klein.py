@@ -18,7 +18,7 @@ from typing import Any, NamedTuple
 import numpy as np
 import torch
 import torch.nn.functional as F
-from cozy_runtime import fusion
+from cozy_runtime import fusion, rng
 from cozy_runtime.author import (
     Config,
     Loader,
@@ -378,7 +378,7 @@ class Klein(
         tf = self.graph.components["transformer"]
         device = next(tf.parameters()).device
         rows, columns = height // PATCH, width // PATCH
-        noise = torch.randn((rows * columns, tf.config.in_channels), generator=torch.Generator().manual_seed(seed))
+        noise = rng.noise((rows * columns, tf.config.in_channels), seed)
         x = noise.to(torch.bfloat16).float().to(device)[None]  # bf16 values, an fp32 state across steps
         texts = [embeds] if negative is None else [negative, embeds]
         texts = [t.to(device=device, dtype=torch.bfloat16) for t in texts]

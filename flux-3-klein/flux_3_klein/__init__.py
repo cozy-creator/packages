@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import math
 from typing import Annotated
 
 import msgspec
@@ -14,11 +13,13 @@ from cozy_runtime.author import (
     Context,
     ImageRequest,
     ImageResult,
-    InvalidRequest,
     Memoize,
     Outputs,
     ReferenceImages,
+    Region,
+    Sizes,
     Telemetry,
+    corners,
     held,
 )
 from PIL import Image
@@ -37,50 +38,20 @@ from .upsampler import Drafter, Row, Upsampler, canvas_box, is_finished, with_ta
 
 app = App()
 
-#: The largest output: 4 MiP plus 1/16 for rounding to 32 px.
-_BOUND = 1088 * 4 * 1024
 #: Each function's steps when none is given, and the most it admits; Base's CFG scale (BFL's 4.0).
 _STEPS = {"generate": (50, 200), "generate_turbo": (16, 100)}
 _GUIDANCE, _MAX_GUIDANCE = 4.0, 20.0
 
 
-def _rounded(area: float, ratio: float) -> tuple[int, int]:
-    """Qwen-Image's `calculate_dimensions`: the area at that ratio, each side rounded to 32 px."""
-    width = math.sqrt(area * ratio)
-    return round(width / 32) * 32, round(width / ratio / 32) * 32
-
-
-def fitted_size(pixels: float, ratio: tuple[int, int]) -> tuple[int, int, bool]:
-    """`pixels` at `W:H`, held inside BFL's 64-4096 px sides and 4 MiP; True when that moved it off
-    the rounded size."""
-    w, h = ratio
-    widest = min(MAX_SIDE**2 / pixels, pixels / MIN_SIDE**2)
-    width, height = _rounded(pixels, min(max(w / h, 1 / widest), widest))
-    width, height = min(max(width, MIN_SIDE), MAX_SIDE), min(max(height, MIN_SIDE), MAX_SIDE)
-    while width * height > _BOUND:
-        width, height = (width - 32, height) if width >= height else (width, height - 32)
-    return width, height, (width, height) != _rounded(pixels, w / h)
-
-
-_UNIT = Annotated[float, msgspec.Meta(ge=0.0, le=1.0)]
-#: `[x0, y0, x1, y1]`: corners, 0-1 of the output canvas, origin top-left, x0 < x1, y0 < y1.
-Box = Annotated[list[_UNIT], msgspec.Meta(min_length=4, max_length=4)]
-
-
-class Region(msgspec.Struct):
-    box: Box
-    #: What goes in the box.
-    prompt: Annotated[str, msgspec.Meta(min_length=1)]
-    #: The literal text to render there.
-    text: Annotated[str, msgspec.Meta(min_length=1)] | None = None
+#: BFL's 64-4096 px sides and 4 MiP.
+SIZES = Sizes((MIN_SIDE**2 / MEGAPIXEL, MATCH_MAX_PIXELS / MEGAPIXEL), (MIN_SIDE, MAX_SIDE), 32,
+              "the sizes Klein admits")
 
 
 class GenerateInput(ImageRequest):
     reference_images: Annotated[ReferenceImages, msgspec.Meta(max_length=10)] = msgspec.field(
         default_factory=list
     )
-    #: One per reference, in order: where it goes in the output, or null for none.
-    reference_boxes: list[Box | None] | None = None
     #: Elements and rendered text placed by box, described in words.
     regions: list[Region] | None = None
     #: Upsample with Qwen3.5-9B's MTP head drafting tokens (1.1-1.2× faster a caption on a 4090);
@@ -144,12 +115,6 @@ def _render(
     return ImageResult(asset, image.width, image.height, seed, caption)
 
 
-def _pixels(adj: Adjustments, pixels: float, reason: str) -> float:
-    """`pixels` inside the sizes Klein admits: 64×64 to 4 MiP."""
-    low, high = MIN_SIDE**2 / MEGAPIXEL, MATCH_MAX_PIXELS / MEGAPIXEL
-    return held(adj, "megapixels", pixels / MEGAPIXEL, low, high, reason) * MEGAPIXEL
-
-
 def _layout(
     adj: Adjustments, payload: GenerateInput, images: list[Image.Image], placed: bool
 ) -> tuple[list[Image.Image], tuple[int, int], tuple[int, int, int, int] | None, str | None]:
@@ -171,40 +136,24 @@ def _layout(
         left, top = (canvas[0] - fit[0]) // 2, (canvas[1] - fit[1]) // 2
         return prepared, canvas, None if fit == canvas else (left, top, left + fit[0], top + fit[1]), None
     target = payload.target(first, megapixels=1.0)
-    ratio = f"{target.ratio[0]}:{target.ratio[1]}"
-    width, height, moved = fitted_size(_pixels(adj, target.pixels, "the sizes Klein admits"), target.ratio)
-    if moved:
-        adj.clamp("aspect_ratio", ratio, f"{width}:{height}", "nearest size the model admits")
-    return prepared, (width, height), None, None if images else ratio
-
-
-def _checked(field: str, box: list[float]) -> list[int]:
-    x0, y0, x1, y1 = box
-    if not (x0 < x1 and y0 < y1):
-        raise InvalidRequest(f"a box is [x0, y0, x1, y1] with x0 < x1 and y0 < y1, got {box}",
-                             code="invalid_box", fields=(field,))
-    return canvas_box(box)
+    size = SIZES.fit(adj, target.ratio, SIZES.pixels(adj, target))
+    return prepared, size, None, None if images else f"{target.ratio[0]}:{target.ratio[1]}"
 
 
 def layout_rows(payload: GenerateInput) -> list[Row]:
     """Klein's table rows for the request's boxes: a placed reference is `ref_image_<i>` at its box (the
     upsampler describes it from the image); a region is a new element, its text quoted in the desc."""
-    boxes, references = payload.reference_boxes, len(payload.reference_images)
-    if boxes is not None and len(boxes) != references:
-        raise InvalidRequest(f"reference_boxes has {len(boxes)} entries for {references} reference_images",
-                             code="reference_boxes_length", fields=("reference_boxes",))
     rows: list[Row] = []
-    for i, box in enumerate(boxes or ()):
+    for i, box in enumerate(payload.placements()):
         if box is not None:
-            target = _checked(f"reference_boxes.{i}", box)
             rows.append({"id": f"obj_{len(rows) + 1}", "from": f"ref_image_{i}", "src_bbox": None,
-                         "tgt_bbox": target, "desc": ""})
+                         "tgt_bbox": canvas_box(box), "desc": ""})
     for i, region in enumerate(payload.regions or ()):
-        grid = _checked(f"regions.{i}.box", region.box)
+        grid = canvas_box(corners(region.box, f"regions.{i}.box"))
         desc = f'{region.prompt.strip()} "{region.text}"' if region.text else region.prompt.strip()
         row_id = f"obj_{len(rows) + 1}"
         rows.append({"id": row_id, "from": "target", "src_bbox": None, "tgt_bbox": grid, "desc": desc}
-                    if references else {"id": row_id, "bbox": grid, "desc": desc})
+                    if payload.reference_images else {"id": row_id, "bbox": grid, "desc": desc})
     return rows
 
 

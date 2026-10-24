@@ -12,6 +12,7 @@ from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
 import torch
+from cozy_runtime import rng
 from cozy_runtime.author import Config, Loader, Model, uses_components
 from diffusers import AutoencoderKLFlux2, FlowMatchEulerDiscreteScheduler, Ideogram4Transformer2DModel
 from diffusers.image_processor import VaeImageProcessor
@@ -101,8 +102,7 @@ class Ideogram4(Model[IdeogramGraph], encoded_leaves="accept"):
         sigmas = _logit_normal_sigmas(steps, _resolution_aware_mu(height, width, mu), std=std, device=device)
         scheduler.set_timesteps(sigmas=sigmas.tolist(), device=device)
         channels = tf.config.in_channels
-        noise = torch.randn((1, tokens, channels), generator=torch.Generator().manual_seed(seed), dtype=torch.float32)
-        latents = noise.to(device)
+        latents = rng.noise((1, tokens, channels), seed, device=device)
         padding = torch.zeros(1, texts, channels, dtype=torch.float32, device=device)
         train_steps = scheduler.config.num_train_timesteps
         with torch.inference_mode():

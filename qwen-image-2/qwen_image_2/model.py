@@ -31,7 +31,7 @@ from transformers import (
 )
 from transformers import initialization as transformer_init
 
-from cozy_runtime import fusion
+from cozy_runtime import fusion, rng
 from cozy_runtime.author import (
     Config,
     ConformanceError,
@@ -350,7 +350,7 @@ class QwenImage21Model(Model[QwenImage21Graph], encoded_leaves="accept"):
                 width=width,
                 height=height,
                 num_inference_steps=steps,
-                generator=torch.Generator(device=device).manual_seed(seed),
+                generator=rng.generator(seed),
                 output_type="latent",
                 callback_on_step_end=observed,
             ).images

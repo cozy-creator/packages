@@ -31,9 +31,6 @@ SIZES = ResolutionGroup(base_size=1024, align=16, extra_resolutions=[
 ])
 _WIDEST = max(r.w / r.h for r in SIZES.data)
 _TALLEST = min(r.w / r.h for r in SIZES.data)
-_UNIT = Annotated[float, msgspec.Meta(ge=0, le=1)]
-#: `[x0, y0, x1, y1]`, 0-1 against the output canvas (se-081).
-Box = Annotated[list[_UNIT], msgspec.Meta(min_length=4, max_length=4)]
 
 
 class HunyuanRequest(ImageRequest, forbid_unknown_fields=True):
@@ -41,8 +38,6 @@ class HunyuanRequest(ImageRequest, forbid_unknown_fields=True):
     `image_size="auto"`; it makes about 1 MP whatever `megapixels` asks."""
 
     reference_images: Annotated[ReferenceImages, msgspec.Meta(max_length=3)] = msgspec.field(default_factory=list)
-    #: Placement per reference (se-081): HunyuanImage 3.0 has no layout control, so it warns and is ignored.
-    reference_boxes: list[Box | None] | None = None
 
 
 def requested_size(adj: Adjustments, ratio: str) -> tuple[int, int]:

@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import numpy as np
 import torch
+from cozy_runtime import rng
 
 #: The Dev model's 28 timesteps (`DEFAULT_TIMESTEPS`).
 DEV_TIMESTEPS = (
@@ -44,7 +45,7 @@ class Flash(Euler):
     def step(self, i: int, flow: torch.Tensor, sample: torch.Tensor) -> torch.Tensor:
         sigmas = self.sigmas.to(sample.device)
         denoised = sample - flow * sigmas[i]
-        noise = torch.randn(flow.shape, generator=self.generator, device=flow.device, dtype=denoised.dtype)
+        noise = rng.noise(flow.shape, self.generator, dtype=denoised.dtype, device=flow.device)
         if self.clip > 0:
             bound = self.clip * noise.std().item()
             noise = noise.clamp(min=-bound, max=bound)
