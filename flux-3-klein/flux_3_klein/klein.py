@@ -103,7 +103,7 @@ BLOCK = fusion.DiTBlock(
     attention="attn",
     arguments=(),
     mlp=fusion.GatedMLP("ff", gate="linear_in", down="linear_out"),
-    rope=fusion.Rope("image_rotary_emb", interleaved=True, fp32=True),
+    rope=fusion.Rope("image_rotary_emb", interleaved=True, rounding="fp32"),
     shift=True,
 )
 
