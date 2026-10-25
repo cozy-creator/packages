@@ -9,7 +9,7 @@ transformer's run.
 from __future__ import annotations
 
 import json
-from collections.abc import Callable, Iterable, Iterator, Mapping
+from collections.abc import Callable, Iterable, Iterator
 from importlib.resources import files
 from typing import Any
 
@@ -112,32 +112,24 @@ class _Staged(BriaFibo2Pipeline):
         return [latents.to(device=device, dtype=dtype) for latents in self.image_latents]
 
 
-def _section(mapping: Mapping[str, Any], name: str) -> dict[str, Any]:
-    value = mapping.get(name, {})
-    if not isinstance(value, Mapping):
-        raise ValueError(f"Fibo 2.0 {name} configuration must be a mapping")
-    return {key: item for key, item in value.items() if not key.startswith("_")}
-
-
 class FiboGraph:
     def __init__(self, config: Config) -> None:
-        mapping = config.mapping()
         with transformer_init.no_init_weights():
             text_encoder = AutoModelForImageTextToText.from_config(
-                Qwen3VLConfig(**_section(mapping, "text_encoder")), dtype=torch.bfloat16
+                Qwen3VLConfig(**config.section("text_encoder").mapping()), dtype=torch.bfloat16
             )
             self.components: dict[str, Any] = {
-                "transformer": BriaFibo2Transformer2DModel.from_config(_section(mapping, "transformer")).to(
+                "transformer": BriaFibo2Transformer2DModel.from_config(config.section("transformer").mapping()).to(
                     dtype=torch.bfloat16
                 ),
                 "text_encoder": text_encoder,
-                "vae": AutoencoderKLFlux2.from_config(_section(mapping, "vae")).to(dtype=torch.float32),
+                "vae": AutoencoderKLFlux2.from_config(config.section("vae").mapping()).to(dtype=torch.float32),
             }
         # The pipeline reads hidden states only: the language-model head is never built.
         text_encoder.lm_head = torch.nn.Identity()
-        self.scheduler_config = _section(mapping, "scheduler")
+        self.scheduler_config = config.section("scheduler").mapping()
         # The processor folder's config file, which TensorFS keeps as its component's config.
-        self.processor_config = _section(mapping, "processor")
+        self.processor_config = config.section("processor").mapping() if "processor" in config.keys() else {}
 
 
 #: Code the stages read beyond their own bodies: their memo keys bind it.

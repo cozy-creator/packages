@@ -10,7 +10,7 @@ residency: the text encoder's and VAE's results are handed to the transformer's 
 from __future__ import annotations
 
 import json
-from collections.abc import Callable, Mapping
+from collections.abc import Callable
 from typing import Any
 
 import torch
@@ -217,23 +217,15 @@ class TextEncoder(torch.nn.Module):
         self.language_model = Qwen3_5TextModel._from_config(config.text_config, dtype=DTYPE)
 
 
-def _section(mapping: Mapping[str, Any], name: str) -> dict[str, Any]:
-    value = mapping.get(name, {})
-    if not isinstance(value, Mapping):
-        raise ValueError(f"MOSS-Image {name} configuration must be a mapping")
-    return {key: item for key, item in value.items() if not key.startswith("_")}
-
-
 class MossGraph:
     def __init__(self, config: Config) -> None:
-        mapping = config.mapping()
         with no_init_weights():
             self.components: dict[str, torch.nn.Module] = {
-                "transformer": MossTransformer(**_section(mapping, "transformer")).to(DTYPE).eval(),
-                "text_encoder": TextEncoder(Qwen3_5Config(**_section(mapping, "text_encoder"))).eval(),
-                "vae": AutoencoderKLFlux2.from_config(_section(mapping, "vae")).to(torch.float32).eval(),
+                "transformer": MossTransformer(**config.section("transformer").mapping()).to(DTYPE).eval(),
+                "text_encoder": TextEncoder(Qwen3_5Config(**config.section("text_encoder").mapping())).eval(),
+                "vae": AutoencoderKLFlux2.from_config(config.section("vae").mapping()).to(torch.float32).eval(),
             }
-        self.scheduler_config = _section(mapping, "scheduler")
+        self.scheduler_config = config.section("scheduler").mapping()
 
 
 def build_tokenizer(assets: ModelAssets) -> PreTrainedTokenizerFast:
