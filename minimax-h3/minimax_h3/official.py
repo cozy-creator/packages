@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import contextvars
 import hashlib
-import json
 import math
 import random
 import struct
@@ -49,14 +48,8 @@ from diffusers.modular_pipelines.minimax_h3.modular_pipeline import (
 )
 from diffusers.modular_pipelines.modular_pipeline import PipelineState
 from torch.nn.utils.weight_norm import WeightNorm
-from transformers import (
-    AddedToken,
-    Qwen2Tokenizer,
-    Qwen2VLImageProcessor,
-    Qwen3VLProcessor,
-    Qwen3VLVideoProcessor,
-)
 
+from cozy_runtime import vlm
 from cozy_runtime.author import (
     AttentionLayout,
     Config,
@@ -853,7 +846,8 @@ class OfficialH3Pipeline:
         audio_vae = AutoencoderKLMiniMaxH3Audio.from_config(_section(mapping, "audio_vae")).eval()
         for trunk in _TRUNKS:
             _validate_model_contract(pipes[trunk], dits[trunk], video_vae, audio_vae)
-        tokenizer, processor = _processor()
+        processor = vlm.processor(_ASSETS / "processor")
+        tokenizer = processor.tokenizer
 
         for workflow, task in _WORKFLOW_TASKS.items():
             pipes[workflow].register_components(
@@ -1900,65 +1894,6 @@ def _validate_model_contract(pipe: Any, transformer: Any, video_vae: Any, audio_
             code="dependency_drift",
             fields=["pipeline"],
         )
-
-
-def _processor() -> tuple[Any, Any]:
-    vocab = _json_mapping(_ASSETS / "tokenizer" / "vocab.json")
-    config = _json_mapping(_ASSETS / "tokenizer" / "tokenizer_config.json")
-    config.pop("tokenizer_class", None)
-    added_tokens = config.get("added_tokens_decoder")
-    if not isinstance(added_tokens, Mapping) or any(
-        not isinstance(value, Mapping) for value in added_tokens.values()
-    ):
-        raise ConformanceError(
-            "bundled tokenizer added-token table is missing or malformed",
-            code="artifact_config",
-        )
-    try:
-        config["added_tokens_decoder"] = {
-            int(index): AddedToken(**dict(value)) for index, value in added_tokens.items()
-        }
-    except (TypeError, ValueError) as exc:
-        raise ConformanceError(
-            "bundled tokenizer added-token table is malformed", code="artifact_config"
-        ) from exc
-    merge_lines = (_ASSETS / "tokenizer" / "merges.txt").read_text().splitlines()
-    merges = [tuple(line.split(" ")) for line in merge_lines]
-    if not merges or any(len(pair) != 2 for pair in merges):
-        raise ConformanceError(
-            "bundled tokenizer merges are empty or malformed", code="artifact_config"
-        )
-    tokenizer = Qwen2Tokenizer(vocab=vocab, merges=merges, **config)
-
-    image_config = _json_mapping(_ASSETS / "processor" / "preprocessor_config.json")
-    video_config = _json_mapping(_ASSETS / "processor" / "video_preprocessor_config.json")
-    image_config.pop("processor_class", None)
-    image_config.pop("image_processor_type", None)
-    video_config.pop("processor_class", None)
-    video_config.pop("video_processor_type", None)
-    processor = Qwen3VLProcessor(
-        image_processor=Qwen2VLImageProcessor(**image_config),
-        video_processor=Qwen3VLVideoProcessor(**video_config),
-        tokenizer=tokenizer,
-        chat_template=tokenizer.chat_template,
-    )
-    return tokenizer, processor
-
-
-def _json_mapping(path: Path) -> dict[str, Any]:
-    try:
-        value = json.loads(path.read_text())
-    except (OSError, ValueError) as exc:
-        raise ConformanceError(
-            f"bundled processor asset {path.name!r} is unreadable",
-            code="artifact_config",
-        ) from exc
-    if not isinstance(value, dict):
-        raise ConformanceError(
-            f"bundled processor asset {path.name!r} is not a JSON object",
-            code="artifact_config",
-        )
-    return value
 
 
 def _audio_tensor(audio: DecodedAudio) -> Any:
