@@ -9,7 +9,7 @@ version = "0.1.0"
 description = "Stable Diffusion XL text-to-image"
 requires-python = ">=3.12"
 dependencies = [
-    "cozy-runtime[adapters,media]>=0.31",
+    "cozy-runtime[adapters,media]>=0.32.2,<0.33",
     "diffusers>=0.40.0",
     "hf-xet>=1.6.0",
     "hidiffusion>=0.1.10",
