@@ -9,6 +9,7 @@ import shutil
 import subprocess
 import tempfile
 from collections.abc import Awaitable, Callable
+from pathlib import Path
 from typing import Annotated, cast
 
 import msgspec
@@ -147,25 +148,45 @@ async def clip(video: VideoAsset, tel: Telemetry) -> str:
 @invocable(memoize=True)
 async def find_cuts(ctx: Context, *, payload: CutsInput, tel: Telemetry) -> CutsOutput:
     """The clip's cut times from ffmpeg's scene score, memoized by the clip: a repeat costs nothing.
-    None, with a warning, when ffmpeg cannot read it."""
+    ffmpeg's own progress (`-progress`) is the `find_cuts` stage, and the scan ends at its exit.
+    None, with a warning, when ffmpeg cannot read the clip or exits before its end."""
 
-    def scan() -> subprocess.CompletedProcess[str]:
-        with tempfile.NamedTemporaryFile() as file:
-            file.write(payload.video.read_bytes())
-            file.flush()
-            return subprocess.run(
-                ["ffmpeg", "-v", "error", "-nostdin", "-t", f"{payload.seconds:.3f}", "-i", file.name, "-an", "-vf",
-                 f"setpts=PTS-STARTPTS,scale=-2:270,select='gte(scene,{CUT_SCENE})',metadata=print:file=-",
+    def scan() -> tuple[str, str]:
+        """The scene marks, and why ffmpeg failed ("" when it read the clip to its end)."""
+        with tempfile.TemporaryDirectory() as scratch:
+            Path(scratch, "clip").write_bytes(payload.video.read_bytes())
+            with open(Path(scratch, "errors"), "w+") as errors, subprocess.Popen(
+                ["ffmpeg", "-v", "error", "-nostdin", "-nostats", "-progress", "pipe:1", "-t", f"{payload.seconds:.3f}",
+                 "-i", "clip", "-an", "-vf",
+                 f"setpts=PTS-STARTPTS,scale=-2:270,select='gte(scene,{CUT_SCENE})',metadata=print:file=marks",
                  "-f", "null", "-"],
-                capture_output=True, text=True, check=False,
-            )
+                cwd=scratch, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=errors, text=True,
+            ) as ffmpeg:
+                assert ffmpeg.stdout is not None
+                ended = False
+                try:
+                    for line in ffmpeg.stdout:
+                        name, _, value = line.strip().partition("=")
+                        if name == "out_time_us" and value.isdigit():
+                            tel.progress(min(int(value) / 1e6 / payload.seconds, 1.0), stage="find_cuts")
+                        ended = ended or line.strip() == "progress=end"
+                except BaseException:
+                    ffmpeg.kill()
+                    raise
+                code = ffmpeg.wait()
+                errors.seek(0)
+                said = errors.read()[-400:]
+            if code or not ended:
+                return "", f"ffmpeg {f'exited {code}' if code else 'stopped before the end'}: {said}"
+            marks = Path(scratch, "marks")
+            return marks.read_text() if marks.exists() else "", ""
 
-    found = await asyncio.to_thread(scan)
-    if found.returncode:
-        tel.log("ffmpeg cannot read the clip: the model judges cuts itself", level="warning", error=found.stderr[-400:])
+    marks, failed = await asyncio.to_thread(scan)
+    if failed:
+        tel.log("ffmpeg cannot read the clip: the model judges cuts itself", level="warning", error=failed)
         return CutsOutput(None)
     cuts: list[float] = []
-    for t in map(float, re.findall(r"pts_time:([\d.]+)", found.stdout)):
+    for t in map(float, re.findall(r"pts_time:([\d.]+)", marks)):
         if 0 < t < payload.seconds and (not cuts or t - cuts[-1] >= CUT_GAP):
             cuts.append(t)
     return CutsOutput(cuts)

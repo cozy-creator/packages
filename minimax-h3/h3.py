@@ -648,7 +648,7 @@ def _finish(
             stream.abandon()
             raise
     try:
-        saved = stream.finish()
+        saved = stream.finish(lambda share: tel.progress(share, stage="encode_video"))
     except BaseException:
         stream.abandon()
         raise
@@ -735,7 +735,8 @@ class _VideoStream:
     The decode thread refuses non-finite values, quantizes each chunk on its device and
     lands it in its slice of ONE host RGB8 buffer; a worker thread feeds the slices in order
     to the runtime's streaming MP4 sink while the next chunk decodes. The soundtrack, decoded
-    first, is interleaved behind the frames it covers.
+    first, is interleaved behind the frames it covers. Each frame the sink takes is told
+    (`finish`), and the sink's end, its error included, ends the wait for it.
     """
 
     def __init__(
@@ -757,6 +758,8 @@ class _VideoStream:
         self._cancel = cancel
         self._progress = progress
         self._slices: queue.SimpleQueue[tuple[int, int] | None] = queue.SimpleQueue()
+        #: each frame the sink took, then None at its end
+        self._taken: queue.SimpleQueue[int | None] = queue.SimpleQueue()
         self._pool = ThreadPoolExecutor(max_workers=1)
         self._encode: Future[SavedVideo] | None = None
         self._abandoned = False
@@ -802,18 +805,30 @@ class _VideoStream:
             self.landed += len(landed)
         self._progress(self.landed - 1)
 
-    def finish(self) -> SavedVideo:
-        """Close the stream once every requested frame has landed; the sink's probed asset."""
+    def finish(self, progress: Callable[[float], None]) -> SavedVideo:
+        """Close the stream once every requested frame has landed; the sink's probed asset,
+        `progress` told the share of frames it took meanwhile. A sink that wrote fewer frames
+        fails the run."""
         if self.landed != self._frames or self._encode is None:
             raise OutputError(
                 f"official H3 decode returned {self.landed} frames, expected {self._frames}",
                 code="output_integrity",
             )
         self._slices.put(None)
+        self._encode.add_done_callback(lambda _: self._taken.put(None))
         try:
-            return self._encode.result()
+            while (index := self._taken.get()) is not None:
+                if self._taken.empty():  # the newest only
+                    progress((index + 1) / self._frames)
+            saved = self._encode.result()
         finally:
             self._pool.shutdown(wait=False)
+        if saved.frame_count != self._frames:
+            raise OutputError(
+                f"the video encoder wrote {saved.frame_count} of {self._frames} frames",
+                code="output_integrity",
+            )
+        return saved
 
     def abandon(self) -> None:
         """A failed decode ends the stream so the sink aborts and unlinks its partial file."""
@@ -860,6 +875,7 @@ class _VideoStream:
                     pixel_aspect_ratio=Fraction(1),
                     **_VIDEO_COLOR,
                 )
+                self._taken.put(index)
             covered = min(samples, stop * self._sample_rate // FPS)
             yield from self._audio(submitted, covered)
             submitted = covered
