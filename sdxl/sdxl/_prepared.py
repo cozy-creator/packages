@@ -121,7 +121,7 @@ def repeat_euler(
         (result,) = execution.wait()
         if progress.canceled or progress.completed_steps != total - 1:
             raise OutputError("prepared denoising stopped early", code="incomplete_denoise")
-        tel.metric("denoise_native_steps", float(progress.completed_steps))
+        tel.metric("request_path.denoise_native_steps", float(progress.completed_steps))
         return result
     finally:
         # No request-path graph retains UNet pages while the VAE starts. Close also joins
