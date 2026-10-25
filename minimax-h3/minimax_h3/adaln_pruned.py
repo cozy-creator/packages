@@ -14,6 +14,7 @@ factors through the same modules; every other forward reads the base tables it a
 from __future__ import annotations
 
 import inspect
+from functools import partial
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -30,6 +31,7 @@ from diffusers.utils import apply_lora_scale
 from torch import nn
 from torch.nn import functional as F
 
+from cozy_runtime import lora
 from cozy_runtime.author import ConformanceError
 
 from .turbo import (
@@ -39,7 +41,7 @@ from .turbo import (
     TURBO_BANK,
     TurboArming,
     TurboOverlay,
-    _LoRAHook,
+    armed,
 )
 
 
@@ -336,7 +338,7 @@ class AdaLNPrunedMiniMaxH3Transformer(MiniMaxH3Transformer3DModel):  # type: ign
             if path.startswith(
                 ("token_refiner.refiner_blocks.", "transformer_blocks.")
             ) and path.endswith(LORA_FAMILIES):
-                site.register_forward_hook(_LoRAHook(self, path))
+                site.register_forward_hook(lora.Hook(partial(armed, self, path)))
         self._lora_hooks_installed = True
 
     def _arm(
