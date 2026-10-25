@@ -2,11 +2,10 @@
 
 The second launch family, and the ENGINELESS-PATH REFERENCE (`cozy-runtime-sdxl.md`): one
 `Model` class with author-written `load`, three public methods each declaring the
-heavyweight components it may touch, one entrypoint. There is no engine class, no device
-call, no placement, no offload, no pinning and no backend API — there is no such surface on
-`cozy_runtime.author` for this file to reach. Whether the UNet was resident when `denoise`
-was entered is the runtime's question, decided before entry, and this file cannot observe
-the answer.
+heavyweight components it may touch, one entrypoint. Runtime owns placement, offload and
+pinning. After the first eager Euler step, this package can describe the remaining fixed
+tensor computation with the UNet as its owner. Runtime admits that native interval only
+when the whole UNet is already resident; a streamed model keeps the ordinary eager loop.
 
 What it adds over cr-008b's corpus fixture, which it is otherwise faithful to:
 
@@ -76,6 +75,8 @@ from transformers import (
     CLIPTokenizer,
 )
 from transformers import initialization as transformer_init
+
+from ._prepared import repeat_euler
 
 app = App()
 
@@ -507,6 +508,21 @@ def generate(
                 tel.metric("noise_absmax_step0", _finite(torch, noise))
             latents = step(noise, timestep, latents).prev_sample
             on_step(index)
+            if index == 0 and not hidiffusion_applied:
+                prepared = repeat_euler(
+                    unet=model.pipe.components["unet"],
+                    scheduler=scheduler,
+                    latents=latents,
+                    prompt=batch_prompt,
+                    pooled=batch_pooled,
+                    time_ids=batch_ids,
+                    guidance=guidance,
+                    ctx=ctx,
+                    tel=tel,
+                )
+                if prepared is not None:
+                    latents = prepared
+                    break
     tel.metric("latent_absmax", _finite(torch, latents))
 
     with tel.stage("decode", overall_range=(0.90, 0.98)):

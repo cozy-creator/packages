@@ -35,3 +35,10 @@ one.
 
 Its recipes write the model's `fp8`, `int8` and `w4a8` lanes, for model authors
 (`cozy model quantize <model> --lane int8 --package sdxl`).
+
+On Runtime 0.32.2, deterministic Euler with epsilon prediction can submit all steps after
+step zero as one prepared native interval. Runtime accepts it only when the UNet is already
+resident and its hooks and weight identity are safe for capture. HiDiffusion, other
+schedulers, streamed models and capacity refusals keep eager execution. The prepared
+interval closes before VAE decode; it is currently prepared per request. Native progress
+reports completed steps without treating observation intervals as per-step GPU timings.
