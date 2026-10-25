@@ -4,13 +4,13 @@ version = "0.1.0"
 description = "BiRefNet background removal for supplied character references"
 requires-python = ">=3.12"
 dependencies = [
-    "cozy-runtime[media]>=0.30",
+    "cozy-runtime[media]>=0.33",
     "einops>=0.8",
     "kornia>=0.8",
     "msgspec>=0.19",
     "pillow>=12",
     "timm>=1.0",
-    "tensorfs>=0.13",
+    "tensorfs>=0.16",
     "torch>=2.14",
     "torchvision>=0.29",
     "transformers>=5.17",

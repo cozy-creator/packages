@@ -4,12 +4,12 @@ version = "0.1.0"
 description = "Cozy text-to-image and reference editing with Tencent's HunyuanImage 3.0 Instruct and Instruct-Distil"
 requires-python = ">=3.12"
 dependencies = [
-    "cozy-runtime[media]>=0.31,<0.32",
+    "cozy-runtime[media]>=0.33",
     "einops>=0.8",
     "msgspec>=0.19",
     "numpy>=1.26",
     "pillow>=12",
-    "tensorfs>=0.13,<0.15",
+    "tensorfs>=0.16",
     # Tencent's code targets Transformers 4.57 (its requirements pin 4.57.1): the tokenizer and the
     # SigLIP2 image processor are Transformers'.
     "tokenizers>=0.22,<0.23",
