@@ -1,7 +1,9 @@
 # Qwen-Image-2.1 candidate preparation
 
-This is preparation for actual image inference, not a GPU result. No machine, SDK, model download,
-rental or publication was changed here. Use the parent's explicitly handed-off GPU lane.
+Preparation below is preserved with its original scope. The subsequent coordinated 24 GiB run
+completed four real calls (17335–17338); see [RESULTS.md](RESULTS.md) for exact outputs, metrics
+and the repeated warm-weight-read finding. No SDK update, rental lifecycle change or publication
+was performed by this lane. Further GPU work still requires the parent's explicit handoff.
 
 ## Exact identities
 

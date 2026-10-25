@@ -1,0 +1,1060 @@
+{
+  "passed": true,
+  "source": {
+    "target": "/home/fidika/cozy/.worktrees/packages/varena-qwen-qualification/qwen-image-2/generate",
+    "kind": "source",
+    "commit": "8d8d7243142c382188ee9c8fef5b1b7ffa623f6d",
+    "package_tree": "b679157fa34328a150d1b45bfc91945a9b57871b"
+  },
+  "target": "/home/fidika/cozy/.worktrees/packages/varena-qwen-qualification/qwen-image-2/generate",
+  "request": {
+    "prompt": "A photorealistic small bookstore on a rainy evening. A warm illuminated sign above the door reads PAPER & LIGHT. A person in a mustard coat holds a blue umbrella. Wet cobblestones reflect the window lights. Eye-level composition, detailed wood and fabric textures, natural proportions.",
+    "aspect_ratio": "1:1",
+    "megapixels": 1.0,
+    "steps": 30
+  },
+  "machine": {
+    "name": "cheval",
+    "gpus": [
+      {
+        "name": "NVIDIA GeForce RTX 3090",
+        "memory_bytes": 25769803776,
+        "driver": "580.95.05",
+        "family": "sm86"
+      }
+    ]
+  },
+  "installed_update_run": 17333,
+  "runtime_source": "75bce8937",
+  "tensord_source": "76656368e6e7674c4dc8cda5461e3457fee39a82",
+  "runs": [
+    {
+      "label": "cold",
+      "run_number": 17335,
+      "seed": 2026102511,
+      "steps": 30,
+      "cli_wall_ms": 187000.053663,
+      "request_created_to_settled_ms": 74552,
+      "execution_ms_as_reported": 56868,
+      "device_first_step_ms": 5980.472,
+      "device_steady_step_ms": {
+        "count": 29,
+        "mean": 563.9944137931035,
+        "median": 563.749,
+        "min": 555.107,
+        "max": 572.044
+      },
+      "executor_pids": [
+        488
+      ],
+      "executor_reused": null,
+      "models": [
+        {
+          "lane": "int8",
+          "manifest": "sha256:78705de45f7421fde51a0196913b11f1f7e3c95d468881d762d18af50da6fec3",
+          "precision": "int8",
+          "release": "0.1.0",
+          "repository": "_/qwen-image-2.1",
+          "slot": "model"
+        }
+      ],
+      "software": {
+        "attempt_ordinal": 1,
+        "runtime": "0.32.1",
+        "tensord": "0.11.17+dev.g76656368",
+        "tensord_commit": "76656368e6e7674c4dc8cda5461e3457fee39a82",
+        "tensorfs": "0.15.2+dev.g76656368"
+      },
+      "routes": [
+        {
+          "at_unix_ms": 1792893732471,
+          "attempt_key": "2",
+          "fields": {
+            "component": "model/text_encoder",
+            "format": "int8",
+            "leaf": "cozy.int8-convrot256.native-leaf/1",
+            "sites": 252
+          },
+          "kind": "confession",
+          "name": "gemm.selected",
+          "seq": 5,
+          "value": "cozy-int8"
+        },
+        {
+          "at_unix_ms": 1792893732471,
+          "attempt_key": "2",
+          "fields": {
+            "component": "model/transformer",
+            "format": "int8",
+            "leaf": "cozy.int8-convrot256.native-leaf/1",
+            "sites": 224
+          },
+          "kind": "confession",
+          "name": "gemm.selected",
+          "seq": 6,
+          "value": "cozy-int8"
+        },
+        {
+          "at_unix_ms": 1792893732472,
+          "attempt_key": "2",
+          "fields": {
+            "component": "model/transformer",
+            "dense_reference": "",
+            "pin": "",
+            "sites": 32
+          },
+          "kind": "confession",
+          "name": "attention.selected",
+          "seq": 12,
+          "value": "sdpa"
+        },
+        {
+          "at_unix_ms": 1792893732472,
+          "attempt_key": "2",
+          "fields": {
+            "component": "model/transformer",
+            "dense_reference": "",
+            "pin": "",
+            "sites": 32
+          },
+          "kind": "confession",
+          "name": "attention.restored",
+          "seq": 13,
+          "value": "sdpa"
+        }
+      ],
+      "images": [
+        {
+          "path": "/home/fidika/cozy_v2/outputs/varena-remote-20261024/cohort-4-qwen24/qwen-30/cold/assets/17335-image.png",
+          "bytes": 1871883,
+          "sha256": "sha256:79e71e5c2b5a82e478964338fcc410cc7793824090f9e25035173fcbd2ed7fd5",
+          "format": "PNG",
+          "size": [
+            1024,
+            1024
+          ],
+          "rgb_sha256": "74fccdc63a3f13fb014dcca1b0646526aeb8c7999c081e7e59c10c88e21c676a",
+          "rgb_extrema": [
+            [
+              0,
+              255
+            ],
+            [
+              0,
+              254
+            ],
+            [
+              0,
+              245
+            ]
+          ]
+        }
+      ],
+      "metric_gaps": [],
+      "host_first_step_ms": 5980.56,
+      "host_step_mean_ms": 734.099,
+      "host_steady_step_mean_ms": 553.1866206896552,
+      "peak_allocated_bytes": 17944774656,
+      "peak_reserved_bytes": 21961375744,
+      "store_moved": {
+        "bytes": 17134146768,
+        "ns": 1702800100
+      },
+      "fills_by_component": {
+        "text_encoder": {
+          "fills": 37,
+          "bytes": 8526490368,
+          "speculative_fills": 35
+        },
+        "transformer": {
+          "fills": 33,
+          "bytes": 7256694784,
+          "speculative_fills": 31
+        },
+        "vae": {
+          "fills": 1,
+          "bytes": 1350961616,
+          "speculative_fills": 0
+        }
+      },
+      "weight_residency_as_reported": {
+        "evictions": 40,
+        "fills": 71,
+        "hits": 994,
+        "pinned_bytes": 0,
+        "poisoned": false,
+        "preferred_bytes": 7230980096,
+        "ready_bytes": 8583643136,
+        "reclaimable_bytes": 8583643136,
+        "reclaimed_bytes": 8684306432,
+        "regions": 71,
+        "reserved_bytes": 17267949568,
+        "resident_bytes": 8583643136
+      },
+      "final_bindings_as_reported": {
+        "fallback_blocks": 0,
+        "fills": 0,
+        "final_resident_bytes": 0,
+        "hits": 0,
+        "native_prefetch": true,
+        "raw_resident_bytes": 8583643136,
+        "resident_scope": "process"
+      },
+      "prefetch_as_reported": {
+        "canceled": 0,
+        "completed": 66,
+        "failed": 0,
+        "scope": "one next exact raw block; no native transform callbacks",
+        "skipped_capacity": 0,
+        "started": 66,
+        "wait_ns": 15364789497
+      },
+      "graphs": {
+        "text_encoder": {
+          "captures": 0,
+          "replays": 0,
+          "eager_gap": "",
+          "active_graphs": 0
+        },
+        "transformer": {
+          "captures": 0,
+          "replays": 0,
+          "eager_gap": "with opaque arguments",
+          "active_graphs": 0
+        },
+        "vae": {
+          "captures": 0,
+          "replays": 0,
+          "eager_gap": "",
+          "active_graphs": 0
+        }
+      },
+      "stages": {
+        "decoding image": {
+          "count": 1,
+          "ended_unix_ms": 1792893731586,
+          "first_ms": 2060.512,
+          "last_ms": 2060.512,
+          "max_ms": 2060.512,
+          "mean_ms": 2060.512,
+          "min_ms": 2060.512,
+          "started_unix_ms": 1792893729525,
+          "total_ms": 2060.512
+        },
+        "encoding prompt": {
+          "count": 1,
+          "ended_unix_ms": 1792893707494,
+          "first_ms": 11244.681,
+          "last_ms": 11244.681,
+          "max_ms": 11244.681,
+          "mean_ms": 11244.681,
+          "min_ms": 11244.681,
+          "started_unix_ms": 1792893696250,
+          "total_ms": 11244.681
+        },
+        "generating image": {
+          "count": 1,
+          "ended_unix_ms": 1792893729525,
+          "first_ms": 22030.392,
+          "last_ms": 22030.392,
+          "max_ms": 22030.392,
+          "mean_ms": 22030.392,
+          "min_ms": 22030.392,
+          "started_unix_ms": 1792893707495,
+          "total_ms": 22030.392
+        },
+        "host \u00b7 cozy_runtime.internal.residency.Memory._settle_prefetch": {
+          "count": 1,
+          "ended_unix_ms": 1792893713475,
+          "first_ms": 4900.0,
+          "last_ms": 4900.0,
+          "max_ms": 4900.0,
+          "mean_ms": 4900.0,
+          "min_ms": 4900.0,
+          "started_unix_ms": 1792893708575,
+          "total_ms": 4900.0
+        },
+        "saving image": {
+          "count": 1,
+          "ended_unix_ms": 1792893731594,
+          "first_ms": 7.58,
+          "last_ms": 7.58,
+          "max_ms": 7.58,
+          "mean_ms": 7.58,
+          "min_ms": 7.58,
+          "started_unix_ms": 1792893731586,
+          "total_ms": 7.58
+        }
+      },
+      "raw_run_receipt_sha256": "0720aa40898d463548aaedd3f8ed5c2d9ea5c6dd454dc3d1f790500b0d28790c"
+    },
+    {
+      "label": "warm-1",
+      "run_number": 17336,
+      "seed": 2026102512,
+      "steps": 30,
+      "cli_wall_ms": 113681.979974,
+      "request_created_to_settled_ms": 68717,
+      "execution_ms_as_reported": 49025,
+      "device_first_step_ms": 1526.102,
+      "device_steady_step_ms": {
+        "count": 29,
+        "mean": 1588.817103448276,
+        "median": 1553.197,
+        "min": 1371.379,
+        "max": 1942.643
+      },
+      "executor_pids": [
+        488
+      ],
+      "executor_reused": true,
+      "models": [
+        {
+          "lane": "int8",
+          "manifest": "sha256:78705de45f7421fde51a0196913b11f1f7e3c95d468881d762d18af50da6fec3",
+          "precision": "int8",
+          "release": "0.1.0",
+          "repository": "_/qwen-image-2.1",
+          "slot": "model"
+        }
+      ],
+      "software": {
+        "attempt_ordinal": 1,
+        "runtime": "0.32.1",
+        "tensord": "0.11.17+dev.g76656368",
+        "tensord_commit": "76656368e6e7674c4dc8cda5461e3457fee39a82",
+        "tensorfs": "0.15.2+dev.g76656368"
+      },
+      "routes": [
+        {
+          "at_unix_ms": 1792893871791,
+          "attempt_key": "3",
+          "fields": {
+            "component": "model/text_encoder",
+            "format": "int8",
+            "leaf": "cozy.int8-convrot256.native-leaf/1",
+            "sites": 252
+          },
+          "kind": "confession",
+          "name": "gemm.selected",
+          "seq": 5,
+          "value": "cozy-int8"
+        },
+        {
+          "at_unix_ms": 1792893871791,
+          "attempt_key": "3",
+          "fields": {
+            "component": "model/transformer",
+            "format": "int8",
+            "leaf": "cozy.int8-convrot256.native-leaf/1",
+            "sites": 224
+          },
+          "kind": "confession",
+          "name": "gemm.selected",
+          "seq": 6,
+          "value": "cozy-int8"
+        },
+        {
+          "at_unix_ms": 1792893871791,
+          "attempt_key": "3",
+          "fields": {
+            "component": "model/transformer",
+            "dense_reference": "",
+            "pin": "",
+            "sites": 32
+          },
+          "kind": "confession",
+          "name": "attention.selected",
+          "seq": 9,
+          "value": "sdpa"
+        },
+        {
+          "at_unix_ms": 1792893871791,
+          "attempt_key": "3",
+          "fields": {
+            "component": "model/transformer",
+            "dense_reference": "",
+            "pin": "",
+            "sites": 32
+          },
+          "kind": "confession",
+          "name": "attention.restored",
+          "seq": 10,
+          "value": "sdpa"
+        }
+      ],
+      "images": [
+        {
+          "path": "/home/fidika/cozy_v2/outputs/varena-remote-20261024/cohort-4-qwen24/qwen-30/warm-1/assets/17336-image.png",
+          "bytes": 1812886,
+          "sha256": "sha256:9d9aa8279a1d5a3807f4f25f3d3b2db2a2be98e4e0ffbf894a72492abe76526f",
+          "format": "PNG",
+          "size": [
+            1024,
+            1024
+          ],
+          "rgb_sha256": "f36d06930359189c50583a6fc4152422ae3d438e04161baf6d6f4439a5afb8c8",
+          "rgb_extrema": [
+            [
+              0,
+              255
+            ],
+            [
+              0,
+              252
+            ],
+            [
+              0,
+              251
+            ]
+          ]
+        }
+      ],
+      "metric_gaps": [],
+      "host_first_step_ms": 1515.836,
+      "host_step_mean_ms": 1586.419,
+      "host_steady_step_mean_ms": 1588.8530344827586,
+      "peak_allocated_bytes": 17152884736,
+      "peak_reserved_bytes": 19425918976,
+      "store_moved": {
+        "bytes": 211175713232,
+        "ns": 17669003978
+      },
+      "fills_by_component": {
+        "transformer": {
+          "fills": 961,
+          "bytes": 209824751616,
+          "speculative_fills": 483
+        },
+        "vae": {
+          "fills": 1,
+          "bytes": 1350961616,
+          "speculative_fills": 0
+        }
+      },
+      "weight_residency_as_reported": {
+        "evictions": 1015,
+        "fills": 1033,
+        "hits": 1477,
+        "pinned_bytes": 0,
+        "poisoned": false,
+        "preferred_bytes": 4695523328,
+        "ready_bytes": 6048186368,
+        "reclaimable_bytes": 6048186368,
+        "reclaimed_bytes": 224237977600,
+        "regions": 71,
+        "reserved_bytes": 17267949568,
+        "resident_bytes": 6048186368
+      },
+      "final_bindings_as_reported": {
+        "fallback_blocks": 0,
+        "fills": 0,
+        "final_resident_bytes": 0,
+        "hits": 0,
+        "native_prefetch": true,
+        "raw_resident_bytes": 6048186368,
+        "resident_scope": "process"
+      },
+      "prefetch_as_reported": {
+        "canceled": 0,
+        "completed": 483,
+        "failed": 0,
+        "scope": "one next exact raw block; no native transform callbacks",
+        "skipped_capacity": 447,
+        "started": 483,
+        "wait_ns": 17004514236
+      },
+      "graphs": {
+        "text_encoder": {
+          "captures": 0,
+          "replays": 0,
+          "eager_gap": "",
+          "active_graphs": 0
+        },
+        "transformer": {
+          "captures": 0,
+          "replays": 0,
+          "eager_gap": "with opaque arguments",
+          "active_graphs": 0
+        },
+        "vae": {
+          "captures": 0,
+          "replays": 0,
+          "eager_gap": "",
+          "active_graphs": 0
+        }
+      },
+      "stages": {
+        "decoding image": {
+          "count": 1,
+          "ended_unix_ms": 1792893871786,
+          "first_ms": 1199.245,
+          "last_ms": 1199.245,
+          "max_ms": 1199.245,
+          "mean_ms": 1199.245,
+          "min_ms": 1199.245,
+          "started_unix_ms": 1792893870587,
+          "total_ms": 1199.245
+        },
+        "encoding prompt": {
+          "count": 1,
+          "ended_unix_ms": 1792893822990,
+          "first_ms": 0.356,
+          "last_ms": 0.356,
+          "max_ms": 0.356,
+          "mean_ms": 0.356,
+          "min_ms": 0.356,
+          "started_unix_ms": 1792893822989,
+          "total_ms": 0.356
+        },
+        "generating image": {
+          "count": 1,
+          "ended_unix_ms": 1792893870587,
+          "first_ms": 47596.844,
+          "last_ms": 47596.844,
+          "max_ms": 47596.844,
+          "mean_ms": 47596.844,
+          "min_ms": 47596.844,
+          "started_unix_ms": 1792893822990,
+          "total_ms": 47596.844
+        },
+        "saving image": {
+          "count": 1,
+          "ended_unix_ms": 1792893871788,
+          "first_ms": 1.519,
+          "last_ms": 1.519,
+          "max_ms": 1.519,
+          "mean_ms": 1.519,
+          "min_ms": 1.519,
+          "started_unix_ms": 1792893871787,
+          "total_ms": 1.519
+        }
+      },
+      "raw_run_receipt_sha256": "f66c451df1c90788fc0b645498a8ada5b182b30132ee5ae9fc40cebf051eb9b6"
+    },
+    {
+      "label": "warm-2",
+      "run_number": 17337,
+      "seed": 2026102513,
+      "steps": 30,
+      "cli_wall_ms": 117752.962254,
+      "request_created_to_settled_ms": 60025,
+      "execution_ms_as_reported": 48473,
+      "device_first_step_ms": 1546.574,
+      "device_steady_step_ms": {
+        "count": 29,
+        "mean": 1569.8837931034484,
+        "median": 1495.805,
+        "min": 1443.589,
+        "max": 1916.107
+      },
+      "executor_pids": [
+        488
+      ],
+      "executor_reused": true,
+      "models": [
+        {
+          "lane": "int8",
+          "manifest": "sha256:78705de45f7421fde51a0196913b11f1f7e3c95d468881d762d18af50da6fec3",
+          "precision": "int8",
+          "release": "0.1.0",
+          "repository": "_/qwen-image-2.1",
+          "slot": "model"
+        }
+      ],
+      "software": {
+        "attempt_ordinal": 1,
+        "runtime": "0.32.1",
+        "tensord": "0.11.17+dev.g76656368",
+        "tensord_commit": "76656368e6e7674c4dc8cda5461e3457fee39a82",
+        "tensorfs": "0.15.2+dev.g76656368"
+      },
+      "routes": [
+        {
+          "at_unix_ms": 1792893982717,
+          "attempt_key": "4",
+          "fields": {
+            "component": "model/text_encoder",
+            "format": "int8",
+            "leaf": "cozy.int8-convrot256.native-leaf/1",
+            "sites": 252
+          },
+          "kind": "confession",
+          "name": "gemm.selected",
+          "seq": 5,
+          "value": "cozy-int8"
+        },
+        {
+          "at_unix_ms": 1792893982717,
+          "attempt_key": "4",
+          "fields": {
+            "component": "model/transformer",
+            "format": "int8",
+            "leaf": "cozy.int8-convrot256.native-leaf/1",
+            "sites": 224
+          },
+          "kind": "confession",
+          "name": "gemm.selected",
+          "seq": 6,
+          "value": "cozy-int8"
+        },
+        {
+          "at_unix_ms": 1792893982717,
+          "attempt_key": "4",
+          "fields": {
+            "component": "model/transformer",
+            "dense_reference": "",
+            "pin": "",
+            "sites": 32
+          },
+          "kind": "confession",
+          "name": "attention.selected",
+          "seq": 9,
+          "value": "sdpa"
+        },
+        {
+          "at_unix_ms": 1792893982718,
+          "attempt_key": "4",
+          "fields": {
+            "component": "model/transformer",
+            "dense_reference": "",
+            "pin": "",
+            "sites": 32
+          },
+          "kind": "confession",
+          "name": "attention.restored",
+          "seq": 10,
+          "value": "sdpa"
+        }
+      ],
+      "images": [
+        {
+          "path": "/home/fidika/cozy_v2/outputs/varena-remote-20261024/cohort-4-qwen24/qwen-30/warm-2/assets/17337-image.png",
+          "bytes": 2199789,
+          "sha256": "sha256:df2565392263d1fe439a9af9ee4418023b5e0ba4415332be003861e910c0f3f7",
+          "format": "PNG",
+          "size": [
+            1024,
+            1024
+          ],
+          "rgb_sha256": "e764e6d9f7eace57282a0d237cadbc19dcc8907a31c9eb10af387948d8c47824",
+          "rgb_extrema": [
+            [
+              0,
+              255
+            ],
+            [
+              0,
+              255
+            ],
+            [
+              0,
+              255
+            ]
+          ]
+        }
+      ],
+      "metric_gaps": [],
+      "host_first_step_ms": 1535.15,
+      "host_step_mean_ms": 1568.851,
+      "host_steady_step_mean_ms": 1570.0128275862069,
+      "peak_allocated_bytes": 14617427968,
+      "peak_reserved_bytes": 19425918976,
+      "store_moved": {
+        "bytes": 211175713232,
+        "ns": 17235628859
+      },
+      "fills_by_component": {
+        "transformer": {
+          "fills": 961,
+          "bytes": 209824751616,
+          "speculative_fills": 483
+        },
+        "vae": {
+          "fills": 1,
+          "bytes": 1350961616,
+          "speculative_fills": 0
+        }
+      },
+      "weight_residency_as_reported": {
+        "evictions": 1977,
+        "fills": 1995,
+        "hits": 1960,
+        "pinned_bytes": 0,
+        "poisoned": false,
+        "preferred_bytes": 4695523328,
+        "ready_bytes": 6048186368,
+        "reclaimable_bytes": 6048186368,
+        "reclaimed_bytes": 437256192000,
+        "regions": 71,
+        "reserved_bytes": 17267949568,
+        "resident_bytes": 6048186368
+      },
+      "final_bindings_as_reported": {
+        "fallback_blocks": 0,
+        "fills": 0,
+        "final_resident_bytes": 0,
+        "hits": 0,
+        "native_prefetch": true,
+        "raw_resident_bytes": 6048186368,
+        "resident_scope": "process"
+      },
+      "prefetch_as_reported": {
+        "canceled": 0,
+        "completed": 483,
+        "failed": 0,
+        "scope": "one next exact raw block; no native transform callbacks",
+        "skipped_capacity": 447,
+        "started": 483,
+        "wait_ns": 17104493508
+      },
+      "graphs": {
+        "text_encoder": {
+          "captures": 0,
+          "replays": 0,
+          "eager_gap": "",
+          "active_graphs": 0
+        },
+        "transformer": {
+          "captures": 0,
+          "replays": 0,
+          "eager_gap": "with opaque arguments",
+          "active_graphs": 0
+        },
+        "vae": {
+          "captures": 0,
+          "replays": 0,
+          "eager_gap": "",
+          "active_graphs": 0
+        }
+      },
+      "stages": {
+        "decoding image": {
+          "count": 1,
+          "ended_unix_ms": 1792893982712,
+          "first_ms": 1189.199,
+          "last_ms": 1189.199,
+          "max_ms": 1189.199,
+          "mean_ms": 1189.199,
+          "min_ms": 1189.199,
+          "started_unix_ms": 1792893981523,
+          "total_ms": 1189.199
+        },
+        "encoding prompt": {
+          "count": 1,
+          "ended_unix_ms": 1792893934452,
+          "first_ms": 20.224,
+          "last_ms": 20.224,
+          "max_ms": 20.224,
+          "mean_ms": 20.224,
+          "min_ms": 20.224,
+          "started_unix_ms": 1792893934431,
+          "total_ms": 20.224
+        },
+        "generating image": {
+          "count": 1,
+          "ended_unix_ms": 1792893981523,
+          "first_ms": 47070.868,
+          "last_ms": 47070.868,
+          "max_ms": 47070.868,
+          "mean_ms": 47070.868,
+          "min_ms": 47070.868,
+          "started_unix_ms": 1792893934452,
+          "total_ms": 47070.868
+        },
+        "host \u00b7 cozy_runtime.internal.residency.Memory._settle_prefetch": {
+          "count": 1,
+          "ended_unix_ms": 1792893980031,
+          "first_ms": 1000.0,
+          "last_ms": 1000.0,
+          "max_ms": 1000.0,
+          "mean_ms": 1000.0,
+          "min_ms": 1000.0,
+          "started_unix_ms": 1792893979031,
+          "total_ms": 1000.0
+        },
+        "saving image": {
+          "count": 1,
+          "ended_unix_ms": 1792893982714,
+          "first_ms": 1.688,
+          "last_ms": 1.688,
+          "max_ms": 1.688,
+          "mean_ms": 1.688,
+          "min_ms": 1.688,
+          "started_unix_ms": 1792893982713,
+          "total_ms": 1.688
+        }
+      },
+      "raw_run_receipt_sha256": "4157d40ef13c97b2fa612fba57eb2c162e974fb4423d98e3b83fde74a3549ccb"
+    },
+    {
+      "label": "warm-3",
+      "run_number": 17338,
+      "seed": 2026102514,
+      "steps": 30,
+      "cli_wall_ms": 114289.283379,
+      "request_created_to_settled_ms": 62818,
+      "execution_ms_as_reported": 47583,
+      "device_first_step_ms": 1471.741,
+      "device_steady_step_ms": {
+        "count": 29,
+        "mean": 1541.8740344827586,
+        "median": 1503.191,
+        "min": 1372.669,
+        "max": 1925.116
+      },
+      "executor_pids": [
+        488
+      ],
+      "executor_reused": true,
+      "models": [
+        {
+          "lane": "int8",
+          "manifest": "sha256:78705de45f7421fde51a0196913b11f1f7e3c95d468881d762d18af50da6fec3",
+          "precision": "int8",
+          "release": "0.1.0",
+          "repository": "_/qwen-image-2.1",
+          "slot": "model"
+        }
+      ],
+      "software": {
+        "attempt_ordinal": 1,
+        "runtime": "0.32.1",
+        "tensord": "0.11.17+dev.g76656368",
+        "tensord_commit": "76656368e6e7674c4dc8cda5461e3457fee39a82",
+        "tensorfs": "0.15.2+dev.g76656368"
+      },
+      "routes": [
+        {
+          "at_unix_ms": 1792894098923,
+          "attempt_key": "5",
+          "fields": {
+            "component": "model/text_encoder",
+            "format": "int8",
+            "leaf": "cozy.int8-convrot256.native-leaf/1",
+            "sites": 252
+          },
+          "kind": "confession",
+          "name": "gemm.selected",
+          "seq": 5,
+          "value": "cozy-int8"
+        },
+        {
+          "at_unix_ms": 1792894098923,
+          "attempt_key": "5",
+          "fields": {
+            "component": "model/transformer",
+            "format": "int8",
+            "leaf": "cozy.int8-convrot256.native-leaf/1",
+            "sites": 224
+          },
+          "kind": "confession",
+          "name": "gemm.selected",
+          "seq": 6,
+          "value": "cozy-int8"
+        },
+        {
+          "at_unix_ms": 1792894098924,
+          "attempt_key": "5",
+          "fields": {
+            "component": "model/transformer",
+            "dense_reference": "",
+            "pin": "",
+            "sites": 32
+          },
+          "kind": "confession",
+          "name": "attention.selected",
+          "seq": 9,
+          "value": "sdpa"
+        },
+        {
+          "at_unix_ms": 1792894098924,
+          "attempt_key": "5",
+          "fields": {
+            "component": "model/transformer",
+            "dense_reference": "",
+            "pin": "",
+            "sites": 32
+          },
+          "kind": "confession",
+          "name": "attention.restored",
+          "seq": 10,
+          "value": "sdpa"
+        }
+      ],
+      "images": [
+        {
+          "path": "/home/fidika/cozy_v2/outputs/varena-remote-20261024/cohort-4-qwen24/qwen-30/warm-3/assets/17338-image.png",
+          "bytes": 2185243,
+          "sha256": "sha256:2778904003696ae02f0935df0cbc66a7eb88ebdffbba15659985ca111ffd8c11",
+          "format": "PNG",
+          "size": [
+            1024,
+            1024
+          ],
+          "rgb_sha256": "9dc60678ea0d57dd38b36a16e66e100ebcb252ef560e791102d78c3b1e2b7ef5",
+          "rgb_extrema": [
+            [
+              0,
+              255
+            ],
+            [
+              0,
+              255
+            ],
+            [
+              0,
+              248
+            ]
+          ]
+        }
+      ],
+      "metric_gaps": [],
+      "host_first_step_ms": 1461.556,
+      "host_step_mean_ms": 1539.295,
+      "host_steady_step_mean_ms": 1541.9756896551723,
+      "peak_allocated_bytes": 14617427968,
+      "peak_reserved_bytes": 19425918976,
+      "store_moved": {
+        "bytes": 211175713232,
+        "ns": 16924242404
+      },
+      "fills_by_component": {
+        "transformer": {
+          "fills": 961,
+          "bytes": 209824751616,
+          "speculative_fills": 483
+        },
+        "vae": {
+          "fills": 1,
+          "bytes": 1350961616,
+          "speculative_fills": 0
+        }
+      },
+      "weight_residency_as_reported": {
+        "evictions": 2939,
+        "fills": 2957,
+        "hits": 2443,
+        "pinned_bytes": 0,
+        "poisoned": false,
+        "preferred_bytes": 4695523328,
+        "ready_bytes": 6048186368,
+        "reclaimable_bytes": 6048186368,
+        "reclaimed_bytes": 650274406400,
+        "regions": 71,
+        "reserved_bytes": 17267949568,
+        "resident_bytes": 6048186368
+      },
+      "final_bindings_as_reported": {
+        "fallback_blocks": 0,
+        "fills": 0,
+        "final_resident_bytes": 0,
+        "hits": 0,
+        "native_prefetch": true,
+        "raw_resident_bytes": 6048186368,
+        "resident_scope": "process"
+      },
+      "prefetch_as_reported": {
+        "canceled": 0,
+        "completed": 483,
+        "failed": 0,
+        "scope": "one next exact raw block; no native transform callbacks",
+        "skipped_capacity": 447,
+        "started": 483,
+        "wait_ns": 16631486489
+      },
+      "graphs": {
+        "text_encoder": {
+          "captures": 0,
+          "replays": 0,
+          "eager_gap": "",
+          "active_graphs": 0
+        },
+        "transformer": {
+          "captures": 0,
+          "replays": 0,
+          "eager_gap": "with opaque arguments",
+          "active_graphs": 0
+        },
+        "vae": {
+          "captures": 0,
+          "replays": 0,
+          "eager_gap": "",
+          "active_graphs": 0
+        }
+      },
+      "stages": {
+        "decoding image": {
+          "count": 1,
+          "ended_unix_ms": 1792894098919,
+          "first_ms": 1203.643,
+          "last_ms": 1203.643,
+          "max_ms": 1203.643,
+          "mean_ms": 1203.643,
+          "min_ms": 1203.643,
+          "started_unix_ms": 1792894097716,
+          "total_ms": 1203.643
+        },
+        "encoding prompt": {
+          "count": 1,
+          "ended_unix_ms": 1792894051531,
+          "first_ms": 19.683,
+          "last_ms": 19.683,
+          "max_ms": 19.683,
+          "mean_ms": 19.683,
+          "min_ms": 19.683,
+          "started_unix_ms": 1792894051512,
+          "total_ms": 19.683
+        },
+        "generating image": {
+          "count": 1,
+          "ended_unix_ms": 1792894097715,
+          "first_ms": 46183.446,
+          "last_ms": 46183.446,
+          "max_ms": 46183.446,
+          "mean_ms": 46183.446,
+          "min_ms": 46183.446,
+          "started_unix_ms": 1792894051532,
+          "total_ms": 46183.446
+        },
+        "host \u00b7 cozy_runtime.internal.residency.Memory._ensure": {
+          "count": 1,
+          "ended_unix_ms": 1792894054509,
+          "first_ms": 1000.0,
+          "last_ms": 1000.0,
+          "max_ms": 1000.0,
+          "mean_ms": 1000.0,
+          "min_ms": 1000.0,
+          "started_unix_ms": 1792894053509,
+          "total_ms": 1000.0
+        },
+        "saving image": {
+          "count": 1,
+          "ended_unix_ms": 1792894098921,
+          "first_ms": 1.242,
+          "last_ms": 1.242,
+          "max_ms": 1.242,
+          "mean_ms": 1.242,
+          "min_ms": 1.242,
+          "started_unix_ms": 1792894098919,
+          "total_ms": 1.242
+        }
+      },
+      "raw_run_receipt_sha256": "996f8daa091c1a6030aea4474fc46535e1450bccbe43d1b493f39e50db0126c4"
+    }
+  ],
+  "raw_report": "/home/fidika/cozy_v2/outputs/varena-remote-20261024/cohort-4-qwen24/qwen-30/report.json",
+  "raw_report_sha256": "0ffbde4e914d633af520f789af270aa90ac0d1c5ce3a7dedfea112d4fa5bf127",
+  "scope_notes": [
+    "First observed call is not a forced empty-cache experiment.",
+    "Host and CUDA-event step intervals are not additive CPU/GPU totals.",
+    "Editable-source CLI wall includes preparation and result collection; it is not GPU execution time.",
+    "accepted_to_started_ms mixes observer/remote timestamps and was negative; excluded from latency conclusions.",
+    "Initialization/construction facts repeat historically on warm receipts; they were not counted as repeated warm work.",
+    "Store moved bytes are per-request read/movement, not network download bytes. Native residency counters are process-cumulative.",
+    "Tracked allocation/reservation peaks are not a hard driver-wide VRAM cap.",
+    "Transformer capture was unavailable with opaque arguments; zero graph replays.",
+    "No SDK/package changes occurred during these four calls.",
+    "Visual review of all four images found the requested bookstore sign, mustard coat, blue umbrella and wet reflections; this is a qualitative smoke review, not a fidelity benchmark."
+  ]
+}
