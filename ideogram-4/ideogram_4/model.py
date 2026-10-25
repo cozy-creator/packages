@@ -8,8 +8,7 @@ constructs and fills the modules and owns their residency.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping, Sequence
-from typing import Any
+from collections.abc import Callable, Sequence
 
 import torch
 from cozy_runtime import rng
@@ -28,22 +27,17 @@ PATCH = 16
 COMPONENTS = ("transformer", "unconditional_transformer", "vae")
 
 
-def section(mapping: Mapping[str, Any], name: str) -> dict[str, Any]:
-    value = mapping.get(name, {})
-    if not isinstance(value, Mapping):
-        raise ValueError(f"Ideogram 4 {name} configuration must be a mapping")
-    return {key: item for key, item in value.items() if not key.startswith("_")}
-
-
 class IdeogramGraph:
     def __init__(self, config: Config) -> None:
-        mapping = config.mapping()
+        # Ideogram's official fp8 release carries no transformer configs: Diffusers' defaults are its geometry.
         self.components: dict[str, torch.nn.Module] = {
-            name: Ideogram4Transformer2DModel.from_config(section(mapping, name)).to(dtype=torch.bfloat16)
+            name: Ideogram4Transformer2DModel.from_config(
+                config.section(name).mapping() if name in config.keys() else {}
+            ).to(dtype=torch.bfloat16)
             for name in ("transformer", "unconditional_transformer")
         }
-        self.components["vae"] = AutoencoderKLFlux2.from_config(section(mapping, "vae")).to(dtype=torch.bfloat16)
-        self.scheduler_config = section(mapping, "scheduler")
+        self.components["vae"] = AutoencoderKLFlux2.from_config(config.section("vae").mapping()).to(dtype=torch.bfloat16)
+        self.scheduler_config = config.section("scheduler").mapping()
 
 
 def guidance_schedule(steps: int, guidance: float) -> list[float]:
