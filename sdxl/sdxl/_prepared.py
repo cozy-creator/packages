@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import threading
 import time
 from collections.abc import Iterator
@@ -162,7 +163,12 @@ class ResidentPipeline:
         if ctx.device.type != "cuda":
             return False
         with self._using(ctx):
-            return self._select(**parameters, resident_only=False) is not None
+            selected = self._select(**parameters, resident_only=False)
+            if selected is None:
+                return False
+            program, reused = selected
+            program.observe(parameters["tel"], "prepared", reused)
+            return True
 
     def _select(
         self,
@@ -283,6 +289,7 @@ class ResidentPipeline:
                     "request_path.pipeline_host_launches",
                     float(int(execution.facts()["host_graph_launches"]) - launches),
                 )
+                program.observe(tel, "completed", reused)
                 # First-noise and per-stage timings are deliberately absent: collecting
                 # them must not add a reduction or a host rendezvous to every iteration.
                 for name, value in (
@@ -382,6 +389,18 @@ class _Pipeline:
             prefix=prefix,
             suffix=suffix,
             dtypes={vae: dtype},
+        )
+
+    def observe(self, tel: Telemetry, phase: str, reused: bool) -> None:
+        # Diagnostic identity is process-local, never a persisted cache or model key.
+        tel.log(
+            "resident pipeline definition",
+            phase=phase,
+            pid=os.getpid(),
+            plan=f"{id(self.plan):x}",
+            identity_scope="process-local",
+            host_graph_launches=int(self.plan.facts()["host_graph_launches"]),
+            reused=reused,
         )
 
     def update(
