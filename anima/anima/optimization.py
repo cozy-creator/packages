@@ -122,6 +122,11 @@ def apply(pipe: Any) -> str:
     return ""
 
 
+def installed(transformer: Any) -> bool:
+    """Whether `apply` installed the plan on this transformer."""
+    return isinstance(transformer.transformer_blocks[0].attn1.processor, _FusedSelfAttention)
+
+
 class FusedLatents(AnimaPrepareLatentsStep):
     """Diffusers' latent preparation with the padding mask at latent size: the transformer
     resizes it to latent size every step, and resizing zeros gives the same zeros."""
@@ -263,6 +268,10 @@ def _direct_rope_forward(rope: Any, hidden_states: Any, fps: int | None = None) 
 
 
 class _FusedSelfAttention:
+    #: A Runtime attention site: the Runtime sets the kernel per site (`dispatch_attention_fn`).
+    _attention_backend: Any = None
+    _parallel_config: Any = None
+
     def __init__(self, kernel: Callable[..., tuple[Any, Any]], rope: _RopeMatrix) -> None:
         self.kernel = kernel
         self.rope = rope
@@ -313,6 +322,8 @@ class _FusedSelfAttention:
             attn_mask=None,
             dropout_p=0.0,
             is_causal=False,
+            backend=self._attention_backend,
+            parallel_config=self._parallel_config,
         )
         output = output.flatten(2, 3).type_as(query)
         return attn.to_out[1](attn.to_out[0](output))
