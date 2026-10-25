@@ -30,6 +30,7 @@ from diffusers.models.transformers.transformer_minimax_h3 import (
 )
 from torch.nn.modules import module as torch_module
 
+from cozy_runtime import lora
 from cozy_runtime.author import (
     AttentionLayout,
     AttentionProducer,
@@ -40,7 +41,6 @@ from cozy_runtime.author import (
 from cozy_runtime.author.kernels import ROWWISE_FP8, PreQuantized
 
 from .glue import FusedMiniMaxH3AttnProcessor, H3AttnProcessor
-from .turbo import _LoRAHook
 
 FAST = "kitchen-sol-producer-fast-shared-qkv"
 FP4_LOWMEM = "kitchen-sol-producer-fp4-lowmem-shared-qkv"
@@ -97,7 +97,7 @@ def shared_qkv_refusal(attn: MiniMaxH3Attention) -> str:
             return "non-rowwise-leaf"
         if projection._forward_pre_hooks:
             return "projection-pre-hook"
-        if any(not isinstance(hook, _LoRAHook) for hook in projection._forward_hooks.values()):
+        if any(not isinstance(hook, lora.Hook) for hook in projection._forward_hooks.values()):
             return "unknown-projection-hook"
     return ""
 
@@ -361,7 +361,7 @@ def validate(module: object) -> None:
         # Weight-plane hooks are Runtime custody; author forward hooks must support replay and
         # chunks. The turbo overlay's LoRA hook adds a row-local update.
         for hook in projection._forward_hooks.values():
-            if not isinstance(hook, _LoRAHook):
+            if not isinstance(hook, lora.Hook):
                 raise ValueError("Kitchen producer cannot replay an unknown projection hook")
 
 

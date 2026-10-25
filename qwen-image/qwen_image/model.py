@@ -21,12 +21,12 @@ from __future__ import annotations
 import json
 import math
 from collections.abc import Callable, Mapping
+from functools import partial
 from typing import Any
 
 import numpy as np
 import torch
-import torch.nn.functional as F
-from cozy_runtime import rng
+from cozy_runtime import lora, rng
 from cozy_runtime.author import Config, Loader, Model, ModelAssets, uses_components
 from diffusers import (
     AutoencoderKLQwenImage,
@@ -88,42 +88,16 @@ class Arming:
         self.lora: nn.Module | None = None
 
 
-class LoRAHook:
-    """A permanent forward hook on one DiT linear (`weights.LoRASource`). Runtime bakes the armed
-    LoRA's factors into the linear's resident bytes and sets `_cozy_baked`; otherwise the hook
-    adds `scale * up(down(x))` to the output, as PEFT does."""
-
-    __slots__ = ("_cozy_baked", "arming", "path")
-
-    def __init__(self, arming: Arming, path: str) -> None:
-        self.arming = arming
-        self.path = path
-        self._cozy_baked = False
-
-    def __call__(self, module: nn.Module, args: tuple[Any, ...], out: torch.Tensor) -> None:
-        factors = self._factors()
-        if factors is None or self._cozy_baked:
-            return
-        down, up = factors.lora_A.weight, factors.lora_B.weight
-        delta = F.linear(F.linear(args[0].to(down.dtype), down), up) * factors.scale
-        out.add_(delta.to(out.dtype))
-
-    def _factors(self) -> LoRAFactors | None:
-        lora = self.arming.lora
-        return None if lora is None else lora.get_submodule(self.path)  # type: ignore[return-value]
-
-    def lora_factors(self) -> tuple[object, torch.Tensor, torch.Tensor, float] | None:
-        factors = self._factors()
-        if factors is None:
-            return None
-        return factors, factors.lora_A.weight, factors.lora_B.weight, factors.scale
-
-
 def install_lora_hooks(transformer: nn.Module, arming: Arming) -> None:
+    """A permanent hook on each LoRA site: the armed LoRA's factors there, else nothing."""
     for index, _ in enumerate(transformer.transformer_blocks):
         for site in LORA_SITES:
             path = f"transformer_blocks.{index}.{site}"
-            transformer.get_submodule(path).register_forward_hook(LoRAHook(arming, path))
+            transformer.get_submodule(path).register_forward_hook(lora.Hook(partial(_armed, arming, path)))
+
+
+def _armed(arming: Arming, path: str) -> LoRAFactors | None:
+    return None if arming.lora is None else arming.lora.get_submodule(path)  # type: ignore[return-value]
 
 
 class TransformerGraph:
@@ -438,6 +412,12 @@ class LoRAFactors(nn.Module):
         if self._scale is None:
             self._scale = float(self.alpha) / self.lora_A.weight.shape[0]
         return self._scale
+
+    def forward(self, x: torch.Tensor, out: torch.Tensor) -> None:
+        lora.accumulate(x, out, self.lora_A.weight, self.lora_B.weight, self.scale)
+
+    def factors(self) -> tuple[torch.Tensor, torch.Tensor, float]:
+        return self.lora_A.weight, self.lora_B.weight, self.scale
 
 
 class LoRAGraph:
