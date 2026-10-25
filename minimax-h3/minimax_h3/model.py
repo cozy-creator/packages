@@ -4,10 +4,14 @@ from __future__ import annotations
 
 import math
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from functools import partial
 from typing import Any, Literal
 
+import torch
+from diffusers.models.autoencoders.autoencoder_kl_minimax_h3 import MiniMaxH3VideoTransformerBlock
+
+from cozy_runtime import fusion
 from cozy_runtime.author import (
     AdapterCompatibility,
     DerivedCache,
@@ -21,7 +25,7 @@ from cozy_runtime.author import (
 )
 from cozy_runtime.author.kernels import Plan
 
-from . import glue, producer, vae_glue
+from . import glue, producer
 from .official import (
     OfficialH3Pipeline,
     OfficialH3TurboLoRA,
@@ -39,6 +43,33 @@ from .turbo import ATTENTION_KWARG, OVERLAY_KWARG, TURBO_BANK
 #: Reference latents one generation keeps (`ReferenceMemo`), least recently used first out; the
 #: Runtime sheds them sooner when memory is short.
 REFERENCE_MEMO_ENTRIES = 256
+
+
+def _layer_scales(block: Any, arguments: Mapping[str, Any]) -> fusion.Modulation:
+    """A video decoder block's layer scales: the gates of one row every token reads."""
+    row = block.scale1.new_zeros(1, dtype=torch.long)
+    return fusion.Modulation(row, gate_msa=block.scale1[None], gate_mlp=block.scale2[None])
+
+
+#: The video VAE's ViT decoder block as Runtime fuses it: fp16 autocast over an fp32 residual
+#: stream, torch RMSNorms, weightless q/k norms, split-half RoPE on 48 of 64 channels in fp16,
+#: Diffusers' value-first SwiGLU, `h + branch * scale` layer scales.
+VAE_BLOCK = fusion.DiTBlock(
+    MiniMaxH3VideoTransformerBlock,
+    width=2048,
+    head_dim=64,
+    modulation=_layer_scales,
+    norms=("norm1", "norm2"),
+    norm="rms",
+    attention="attn",
+    arguments=("rotary_emb",),
+    mlp=fusion.GatedMLP("ff", gate="net.0.proj", down="net.2", value_first=True),
+    rope=fusion.Rope("rotary_emb", interleaved=False, rotary=48, rounding="product"),
+    scale=False,
+    rows="fp16",
+    rms_rounding="once",
+    qk_affine=False,
+)
 
 
 def condition_references(model: H3Model, task: Task, state: Any, *, tel: Telemetry) -> None:
@@ -106,13 +137,13 @@ class H3Model(
         return None
 
     def execution_plan(self, plan: Plan) -> str:
-        """The fused glue on every filled H3 DiT and on the video VAE's decoder, and the CP
+        """The fused glue on every filled H3 DiT, the fused video VAE decoder blocks, and the CP
         producer's rotary hook."""
         for component in self.pipe.components.values():
             producer.retain_rotary(component)
         plans = (
             glue.install(self, self.pipe, plan),
-            vae_glue.install(self, self.pipe.components["vae"], plan),
+            fusion.install(plan, VAE_BLOCK, self.pipe.components["vae"]),
         )
         return "+".join(identity for identity in plans if identity)
 
