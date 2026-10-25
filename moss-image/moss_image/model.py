@@ -14,8 +14,8 @@ from collections.abc import Callable
 from typing import Any
 
 import torch
-import torch.nn.functional as F
 from cozy_runtime import rng
+from cozy_runtime.attention import Attention
 from cozy_runtime.author import Config, Loader, MemoDistribution, Model, ModelAssets, uses_components
 from diffusers import AutoencoderKLFlux2, FlowMatchEulerDiscreteScheduler
 from diffusers.configuration_utils import register_to_config
@@ -55,18 +55,17 @@ def rotate(x: torch.Tensor, rope: torch.Tensor) -> torch.Tensor:
     return x * cos + torch.cat((-b, a), -1) * sin
 
 
-def attention(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, rope: torch.Tensor, heads: int) -> torch.Tensor:
-    shape = (*q.shape[:2], heads, q.shape[-1] // heads)
-    q = rotate(q.reshape(shape), rope).transpose(1, 2)
-    k = rotate(k.reshape(shape), rope).transpose(1, 2)
-    v = v.reshape(shape).transpose(1, 2)
-    return F.scaled_dot_product_attention(q.to(v.dtype), k.to(v.dtype), v).transpose(1, 2).flatten(2)
+def attention(
+    site: Attention, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, rope: torch.Tensor
+) -> torch.Tensor:
+    shape = (*q.shape[:2], site.heads, site.head_dim)
+    return site(rotate(q.reshape(shape), rope), rotate(k.reshape(shape), rope), v.reshape(shape)).flatten(2)
 
 
 class TextBlock(torch.nn.Module):
     def __init__(self, dim: int, ffn_dim: int, heads: int) -> None:
         super().__init__()
-        self.heads = heads
+        self.heads, self.attn = heads, Attention(heads, dim // heads, DTYPE)
         self.norm1, self.norm2 = RMSNorm(dim), RMSNorm(dim)
         self.q_norm, self.k_norm = RMSNorm(dim // heads), RMSNorm(dim // heads)
         self.qkv = torch.nn.Linear(dim, 3 * dim)
@@ -78,7 +77,7 @@ class TextBlock(torch.nn.Module):
         q, k, v = self.qkv(self.norm1(x)).chunk(3, -1)
         q = self.q_norm(q.unflatten(-1, (self.heads, -1))).flatten(2)
         k = self.k_norm(k.unflatten(-1, (self.heads, -1))).flatten(2)
-        x = x + self.proj(attention(q, k, v, rope, self.heads))
+        x = x + self.proj(attention(self.attn, q, k, v, rope))
         y = self.norm2(x)
         return x + self.ffn_down(situ(self.ffn_up(y), self.ffn_gate(y)))
 
@@ -99,7 +98,7 @@ class TextProjection(torch.nn.Module):
 class Block(torch.nn.Module):
     def __init__(self, dim: int, ffn_dim: int, heads: int) -> None:
         super().__init__()
-        self.heads = heads
+        self.heads, self.attn = heads, Attention(heads, dim // heads, DTYPE)
         self.norm1, self.norm2 = RMSNorm(dim), RMSNorm(dim)
         self.q_norm, self.k_norm = RMSNorm(dim // heads), RMSNorm(dim // heads)
         self.proj = torch.nn.ModuleDict(
@@ -113,7 +112,7 @@ class Block(torch.nn.Module):
         y = (self.norm1(x) * (1 + scale_a[:, None]) + shift_a[:, None]).to(DTYPE)
         q = self.q_norm(self.proj["q"](y).unflatten(-1, (self.heads, -1))).flatten(2)
         k = self.k_norm(self.proj["k"](y).unflatten(-1, (self.heads, -1))).flatten(2)
-        x = x + self.proj["o"](attention(q, k, self.proj["v"](y), rope, self.heads)) * gate_a[:, None]
+        x = x + self.proj["o"](attention(self.attn, q, k, self.proj["v"](y), rope)) * gate_a[:, None]
         y = self.norm2(x) * (1 + scale_f[:, None]) + shift_f[:, None]
         hidden, gate = self.proj["ffn_up_gate"](y.to(DTYPE)).chunk(2, -1)
         return x + self.proj["ffn_down"](situ(hidden, gate)) * gate_f[:, None]
