@@ -23,6 +23,7 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 
+from cozy_runtime import lora
 from cozy_runtime.author import ConformanceError
 
 #: The forward-call selector: `attention_kwargs={ATTENTION_KWARG: TURBO_BANK}` names the bank
@@ -51,63 +52,12 @@ class LoRAFactors(nn.Module):  # type: ignore[misc]
         self.lora_up = nn.Parameter(torch.empty(out_features, rank, dtype=torch.bfloat16))
         self.scale = scale
 
-    def accumulate(self, x: torch.Tensor, out: torch.Tensor) -> None:
-        """`out += scale * (x @ down.T) @ up.T` in fixed row chunks: the up projection adds
-        into the base output in place (one rounding, no `[rows, out]` update), and only the
-        tail chunk, padded to the same row count, goes through a temporary."""
-        if not isinstance(x, torch.Tensor):
-            raise ValueError("a LoRA update requires the original tensor operand")
-        if not out.is_contiguous():
-            raise ValueError("a LoRA update accumulates into a contiguous base output only")
-        flat = out.view(-1, out.shape[-1])
-        inputs = x.reshape(-1, x.shape[-1])
-        down = self.lora_down.to(inputs.dtype)
-        up = self.lora_up.to(flat.dtype).t()
-        total = int(inputs.shape[0])
-        for start in range(0, total, _LORA_ROW_CHUNK):
-            count = min(_LORA_ROW_CHUNK, total - start)
-            # Row-major operands whatever the input's layout (a transposed view's rows are
-            # strided): the update's GEMMs, and so its bits, never depend on how x is laid out.
-            rows = inputs[start : start + count].contiguous()
-            if count == _LORA_ROW_CHUNK:
-                low = F.linear(rows, down).to(flat.dtype)
-                flat[start : start + count].addmm_(low, up, alpha=self.scale)
-                continue
-            pad = _LORA_ROW_CHUNK - count
-            low = F.linear(F.pad(rows, (0, 0, 0, pad)), down).to(flat.dtype)
-            tail = F.pad(flat[start:], (0, 0, 0, pad)).addmm_(low, up, alpha=self.scale)
-            flat[start:].copy_(tail[:count])
-
     def forward(self, x: torch.Tensor, out: torch.Tensor) -> None:
-        """`accumulate` as this piece's forward, so the factors are bound while it reads them."""
-        self.accumulate(x, out)
+        """Adds this site's update into `out` in fixed row chunks (`cozy_runtime.lora`)."""
+        lora.accumulate(x, out, self.lora_down, self.lora_up, self.scale, chunk=_LORA_ROW_CHUNK)
 
-
-class _LoRAHook:
-    """A permanent consumer hook, inactive for base forwards. The weight plane bakes the armed
-    overlay's factors into the site's resident bytes (`weights.LoRASource`) and the hook then
-    adds nothing; a base forward or another overlay finds those bytes refilled first."""
-
-    __slots__ = ("_cozy_baked", "owner", "path")
-
-    def __init__(self, owner: Any, path: str) -> None:
-        self.owner = owner
-        self.path = path
-        self._cozy_baked = False
-
-    def __call__(self, module: nn.Module, args: tuple[Any, ...], out: torch.Tensor) -> None:
-        del module
-        armed = self.owner._arming
-        if armed is not None and not self._cozy_baked:
-            armed.overlay.get_submodule(self.path)(args[0], out)
-
-    def lora_factors(self) -> tuple[object, torch.Tensor, torch.Tensor, float] | None:
-        """The armed overlay's factors for this site, or None in a base forward."""
-        armed = self.owner._arming
-        if armed is None:
-            return None
-        factors = armed.overlay.get_submodule(self.path)
-        return factors, factors.lora_down, factors.lora_up, float(factors.scale)
+    def factors(self) -> tuple[torch.Tensor, torch.Tensor, float]:
+        return self.lora_down, self.lora_up, float(self.scale)
 
 
 class _Site(nn.Module):  # type: ignore[misc]
@@ -331,3 +281,11 @@ class TurboArming:
     def __init__(self, overlay: TurboOverlay, step: int) -> None:
         self.overlay = overlay
         self.step = step
+
+
+def armed(owner: Any, path: str) -> LoRAFactors | None:
+    """The armed overlay's factors at `path`, or None in a base forward."""
+    arming = owner._arming
+    if arming is None:
+        return None
+    return arming.overlay.get_submodule(path)  # type: ignore[no-any-return]

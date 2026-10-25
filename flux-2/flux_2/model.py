@@ -10,13 +10,14 @@ fills the modules and owns their residency.
 from __future__ import annotations
 
 import json
+from functools import partial
 import math
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
 import numpy as np
 import torch
-from cozy_runtime import rng
+from cozy_runtime import lora, rng
 from cozy_runtime.author import Config, Loader, Model, ModelAssets, UnsupportedInput, uses_components
 from diffusers import AutoencoderKLFlux2, Flux2KleinPipeline, Flux2Pipeline, Flux2Transformer2DModel
 from diffusers.pipelines.flux2.image_processor import Flux2ImageProcessor
@@ -99,33 +100,10 @@ def _conditioning_only(encoder: Any, depth: int) -> None:
         inner.vision_tower = inner.multi_modal_projector = None
 
 
-class LoRAHook:
-    """A forward hook on one of [dev]'s linears. While a Turbo overlay is armed (`turbo.py`) it adds
-    the overlay's update, unless Runtime baked the factors into the linear's bytes: it is a
-    `LoRASource` (`lora_factors`, `_cozy_baked`), as H3's turbo hooks are."""
-
-    __slots__ = ("_cozy_baked", "owner", "path")
-
-    def __init__(self, owner: nn.Module, path: str) -> None:
-        self.owner, self.path, self._cozy_baked = owner, path, False
-
-    def _factors(self) -> Any:
-        armed = getattr(self.owner, "_cozy_turbo", None)
-        return None if armed is None else armed.get(self.path)
-
-    def __call__(self, module: nn.Module, args: tuple[Any, ...], out: torch.Tensor) -> torch.Tensor | None:
-        factors = self._factors()
-        if factors is None or self._cozy_baked:
-            return None
-        x = args[0]
-        update = factors.lora_B(factors.lora_A(x.to(factors.lora_A.weight.dtype)))
-        return out + (factors.scale * update).to(out.dtype)
-
-    def lora_factors(self) -> tuple[object, torch.Tensor, torch.Tensor, float] | None:
-        factors = self._factors()
-        if factors is None:
-            return None
-        return factors, factors.lora_A.weight, factors.lora_B.weight, factors.scale
+def _armed(transformer: nn.Module, path: str) -> nn.Module | None:
+    """The Turbo overlay's factors at `path` while `turbo.applied` arms it (`_cozy_turbo`)."""
+    armed = getattr(transformer, "_cozy_turbo", None)
+    return None if armed is None else armed.get(path)
 
 
 class Flux2Graph:
@@ -144,7 +122,7 @@ class Flux2Graph:
             transformer._cozy_turbo = None
             for path, module in transformer.named_modules():
                 if isinstance(module, nn.Linear):
-                    module.register_forward_hook(LoRAHook(transformer, path))
+                    module.register_forward_hook(lora.Hook(partial(_armed, transformer, path)))
         self.family = family
         index = mapping.get("model_index")
         self.distilled = isinstance(index, Mapping) and bool(index.get("is_distilled", False))
