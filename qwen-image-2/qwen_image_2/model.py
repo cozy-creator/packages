@@ -7,7 +7,6 @@ placement, or offload hook takes part in serving.
 
 from __future__ import annotations
 
-import json
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from typing import Any
 
@@ -20,25 +19,19 @@ from diffusers import (
 )
 from diffusers.models.transformers.transformer_qwenimage21 import QwenImage21TransformerBlock
 from diffusers.pipelines.qwenimage21.pipeline_qwenimage21 import calculate_dimensions
-from tokenizers import Tokenizer
 from transformers import (
     AutoModelForImageTextToText,
-    PreTrainedTokenizerFast,
-    Qwen2VLImageProcessor,
     Qwen3VLConfig,
-    Qwen3VLProcessor,
-    Qwen3VLVideoProcessor,
 )
 from transformers import initialization as transformer_init
 
-from cozy_runtime import fusion, rng
+from cozy_runtime import fusion, rng, vlm
 from cozy_runtime.author import (
     Config,
     ConformanceError,
     Loader,
     MemoDistribution,
     Model,
-    ModelAssets,
     uses_components,
 )
 from cozy_runtime.author.kernels import Plan
@@ -161,47 +154,6 @@ def build_qwen_image21(config: Config) -> QwenImage21Graph:
     return QwenImage21Graph(config)
 
 
-def build_processor(assets: ModelAssets, config: Mapping[str, Any]) -> Any:
-    """Qwen3-VL's processor from the checkpoint's upstream `processor/` files, parsed in memory.
-    TensorFS keeps the folder's config file (`preprocessor_config.json`, or Transformers 5's one
-    `processor_config.json`) as the processor component's `config`, not among its files."""
-    names = set(assets.names())
-
-    def read(name: str) -> bytes:
-        return assets.read(f"processor/{name}")
-
-    def held(name: str) -> dict[str, Any] | None:
-        return json.loads(read(name)) if f"processor/{name}" in names else None
-
-    tokenizer_config = json.loads(read("tokenizer_config.json"))
-    for key in (
-        "tokenizer_file",
-        "name_or_path",
-        "added_tokens_decoder",
-        "tokenizer_class",
-        "processor_class",
-        "backend",
-        "is_local",
-    ):
-        tokenizer_config.pop(key, None)
-    tokenizer = PreTrainedTokenizerFast(
-        tokenizer_object=Tokenizer.from_str(read("tokenizer.json").decode()), **tokenizer_config
-    )
-    # Transformers 5 saves one `processor_config.json` (Turbo); earlier releases, one file each.
-    nested = held("processor_config.json") or (dict(config) if "image_processor" in config else None)
-    if nested is not None:
-        image, video = nested["image_processor"], nested["video_processor"]
-    else:
-        image = held("preprocessor_config.json") or dict(config) or json.loads(read("preprocessor_config.json"))
-        video = json.loads(read("video_preprocessor_config.json"))
-    return Qwen3VLProcessor(
-        tokenizer=tokenizer,
-        image_processor=Qwen2VLImageProcessor(**image),
-        video_processor=Qwen3VLVideoProcessor(**video),
-        chat_template=read("chat_template.jinja").decode(),
-    )
-
-
 class _StagedPipeline(QwenImage21Pipeline):
     reference_latents: torch.Tensor | None = None
     reference_pad_mask: torch.Tensor | None = None
@@ -240,7 +192,7 @@ class _StagedPipeline(QwenImage21Pipeline):
 #: Code the encoders read beyond their own bodies: their memo key binds it.
 _ENCODER_CODE = (
     _StagedPipeline,
-    build_processor,
+    vlm.processor,
     MemoDistribution("diffusers"),
     MemoDistribution("transformers"),
 )
@@ -252,7 +204,7 @@ class QwenImage21Model(Model[QwenImage21Graph], encoded_leaves="accept"):
 
     def load(self, loader: Loader) -> None:
         self.graph = loader.construct(QwenImage21Graph, factory=build_qwen_image21)
-        self.processor = build_processor(loader.assets, self.graph.processor_config)
+        self.processor = vlm.processor(loader.assets, "processor/", self.graph.processor_config)
 
     def execution_plan(self, plan: Plan) -> str:
         return fusion.install(plan, BLOCK, self.graph.components["transformer"])

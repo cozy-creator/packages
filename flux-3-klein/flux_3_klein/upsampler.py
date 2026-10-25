@@ -17,17 +17,15 @@ import io
 import json
 import math
 import re
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Sequence
 from importlib.resources import files
 from typing import Any
 
 import torch
-import transformers
-from cozy_runtime import lm
-from cozy_runtime.author import Config, Loader, Model, ModelAssets, UnsupportedInput, uses_components
+from cozy_runtime import lm, vlm
+from cozy_runtime.author import Config, Loader, Model, UnsupportedInput, uses_components
 from PIL import Image, ImageOps
-from tokenizers import Tokenizer
-from transformers import AutoConfig, AutoModelForImageTextToText, PreTrainedTokenizerFast
+from transformers import AutoConfig
 from transformers.initialization import no_init_weights
 from transformers.models.qwen3_5 import modeling_qwen3_5
 
@@ -190,35 +188,6 @@ def reconcile(text: str, locked: list[Row]) -> str:
     return with_table(caption, out)
 
 
-def _construct(model_config: Mapping[str, Any]) -> torch.nn.Module:
-    with no_init_weights():
-        model = AutoModelForImageTextToText.from_config(
-            AutoConfig.for_model(**model_config), dtype=torch.bfloat16
-        )
-    model.tie_weights()
-    return model.eval()
-
-
-def _processor(assets: ModelAssets) -> Any:
-    """BFL's processor from the checkpoint's files, parsed in memory."""
-    processor = json.loads(assets.read("processor_config.json"))
-    image = processor["image_processor"]
-    video = processor["video_processor"]
-    tokenizer_config = json.loads(assets.read("tokenizer_config.json"))
-    for key in ("added_tokens_decoder", "tokenizer_file", "processor_class", "tokenizer_class",
-                "chat_template", "is_local", "local_files_only", "backend"):
-        tokenizer_config.pop(key, None)
-    tokenizer = PreTrainedTokenizerFast(
-        tokenizer_object=Tokenizer.from_str(assets.read("tokenizer.json").decode()), **tokenizer_config
-    )
-    return getattr(transformers, processor["processor_class"])(
-        image_processor=getattr(transformers, image.pop("image_processor_type"))(**image),
-        video_processor=getattr(transformers, video.pop("video_processor_type"))(**video),
-        tokenizer=tokenizer,
-        chat_template=assets.read("chat_template.jinja").decode(),
-    )
-
-
 class DrafterGraph:
     def __init__(self, config: Config) -> None:
         # The head-only lane keeps Qwen3.5-9B's config (`drafter_head`).
@@ -245,7 +214,8 @@ class Drafter(Model[DrafterGraph], encoded_leaves="accept"):
 
 class UpsamplerGraph:
     def __init__(self, config: Config) -> None:
-        self.components: dict[str, torch.nn.Module] = {COMPONENT: _construct(config.mapping())}
+        # Every parameter in its stored dtype: Qwen3.5 keeps A_log and its gated norms in f32.
+        self.components: dict[str, torch.nn.Module] = {COMPONENT: vlm.construct(config.mapping(), config)[0]}
 
 
 def _floor(value: float) -> int:
@@ -295,7 +265,7 @@ class Upsampler(Model[UpsamplerGraph], encoded_leaves="accept", min_bits=4, phas
 
     def load(self, loader: Loader) -> None:
         self.graph = loader.construct(UpsamplerGraph, factory=UpsamplerGraph)
-        self.processor = _processor(loader.assets)
+        self.processor = vlm.processor(loader.assets)
         self.system_prompts = json.loads(files(__package__).joinpath("system_prompts.json").read_bytes())
 
     @uses_components(

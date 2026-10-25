@@ -16,24 +16,22 @@ from typing import Any
 
 import torch
 import torch.nn.functional as F
-from cozy_runtime import lm
-from cozy_runtime.author import Config, Loader, Model, ModelAssets, UnsupportedInput, uses_components
+from cozy_runtime import lm, vlm
+from cozy_runtime.author import Config, Loader, Model, UnsupportedInput, uses_components
 from PIL import Image
-from tokenizers import Tokenizer
 from transformers import (
     AutoConfig,
     AutoModelForImageTextToText,
-    PreTrainedTokenizerFast,
-    Qwen2VLImageProcessor,
     Qwen3VLProcessor,
-    Qwen3VLVideoProcessor,
 )
 from transformers.initialization import no_init_weights
 
 COMPONENT = "model"
 MAX_NEW_TOKENS = 4096
 THUMBNAIL = 1024
-IMAGE_PIXELS = {"shortest_edge": 4 * 28 * 28, "longest_edge": 1280 * 28 * 28}
+#: Bria's image limits, in place of the checkpoint's.
+BRIA_IMAGE = {"size": {"shortest_edge": 4 * 28 * 28, "longest_edge": 1280 * 28 * 28}, "min_pixels": None,
+              "max_pixels": None}
 STOP_TOKENS = ("<|im_end|>", "<|endoftext|>")
 
 
@@ -61,30 +59,6 @@ class CaptionerGraph:
         self.components: dict[str, torch.nn.Module] = {COMPONENT: model.eval()}
 
 
-def build_processor(assets: ModelAssets) -> Qwen3VLProcessor:
-    """The checkpoint's tokenizer, chat template and processors, parsed in memory, with Bria's
-    image limits."""
-    tokenizer_config = json.loads(assets.read("tokenizer_config.json"))
-    for key in ("added_tokens_decoder", "tokenizer_file", "processor_class", "tokenizer_class",
-                "chat_template", "name_or_path"):
-        tokenizer_config.pop(key, None)
-    tokenizer = PreTrainedTokenizerFast(
-        tokenizer_object=Tokenizer.from_str(assets.read("tokenizer.json").decode()), **tokenizer_config
-    )
-    image = json.loads(assets.read("preprocessor_config.json"))
-    video = json.loads(assets.read("video_preprocessor_config.json"))
-    for section in (image, video):
-        for key in ("processor_class", "image_processor_type", "video_processor_type", "min_pixels", "max_pixels"):
-            section.pop(key, None)
-    image["size"] = dict(IMAGE_PIXELS)
-    return Qwen3VLProcessor(
-        tokenizer=tokenizer,
-        image_processor=Qwen2VLImageProcessor(**image),
-        video_processor=Qwen3VLVideoProcessor(**video),
-        chat_template=assets.read("chat_template.jinja").decode(),
-    )
-
-
 class Captioner(Model[CaptionerGraph], encoded_leaves="accept", min_bits=4, phase="decode"):
     """One of Bria's prompt-to-JSON VLMs."""
 
@@ -93,12 +67,12 @@ class Captioner(Model[CaptionerGraph], encoded_leaves="accept", min_bits=4, phas
 
     def load(self, loader: Loader) -> None:
         self.graph = loader.construct(CaptionerGraph, factory=CaptionerGraph)
-        self.processor = build_processor(loader.assets)
+        self.processor = vlm.processor(loader.assets, image=BRIA_IMAGE)
 
     def execution_plan(self, plan: Any) -> str:
         return lm.install(plan, self.graph.components[COMPONENT])
 
-    @uses_components(COMPONENT, memoize=True, memo_dependencies=(build_processor,))
+    @uses_components(COMPONENT, memoize=True, memo_dependencies=(vlm.processor,))
     def caption(self, prompt: str, image: Image.Image | None) -> str:
         """The structured caption for `prompt` (`<generate>`), or with `image` the edit's caption
         with its `edit_instruction` (`<edit>`), as compact JSON."""

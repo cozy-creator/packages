@@ -14,8 +14,8 @@ from importlib.resources import files
 from typing import Any
 
 import torch
-from cozy_runtime import rng
-from cozy_runtime.author import Config, Loader, MemoDistribution, Model, ModelAssets, uses_components
+from cozy_runtime import rng, vlm
+from cozy_runtime.author import Config, Loader, MemoDistribution, Model, uses_components
 from diffusers import (
     AutoencoderKLFlux2,
     BriaFibo2Pipeline,
@@ -23,14 +23,10 @@ from diffusers import (
     FlowMatchEulerDiscreteScheduler,
 )
 from PIL import Image
-from tokenizers import Tokenizer
 from transformers import (
     AutoModelForImageTextToText,
-    PreTrainedTokenizerFast,
-    Qwen2VLImageProcessor,
     Qwen3VLConfig,
     Qwen3VLProcessor,
-    Qwen3VLVideoProcessor,
 )
 from transformers import initialization as transformer_init
 
@@ -144,36 +140,8 @@ class FiboGraph:
         self.processor_config = _section(mapping, "processor")
 
 
-def build_processor(assets: ModelAssets, config: Mapping[str, Any]) -> Qwen3VLProcessor:
-    """Qwen3-VL's processor from the checkpoint's `processor/` files, parsed in memory; its image
-    size limits are Bria's (`processor_config.json`)."""
-    names = set(assets.names())
-
-    def read(name: str) -> bytes:
-        return assets.read(f"processor/{name}")
-
-    tokenizer_config = json.loads(read("tokenizer_config.json"))
-    for key in ("tokenizer_file", "name_or_path", "added_tokens_decoder", "tokenizer_class",
-                "processor_class", "backend", "is_local", "chat_template"):
-        tokenizer_config.pop(key, None)
-    tokenizer = PreTrainedTokenizerFast(
-        tokenizer_object=Tokenizer.from_str(read("tokenizer.json").decode()), **tokenizer_config
-    )
-    nested = json.loads(read("processor_config.json")) if "processor/processor_config.json" in names else dict(config)
-    image, video = dict(nested["image_processor"]), dict(nested["video_processor"])
-    for section in (image, video):
-        for key in ("image_processor_type", "video_processor_type", "processor_class"):
-            section.pop(key, None)
-    return Qwen3VLProcessor(
-        tokenizer=tokenizer,
-        image_processor=Qwen2VLImageProcessor(**image),
-        video_processor=Qwen3VLVideoProcessor(**video),
-        chat_template=read("chat_template.jinja").decode(),
-    )
-
-
 #: Code the stages read beyond their own bodies: their memo keys bind it.
-_CODE = (_Staged, build_processor, MemoDistribution("diffusers"), MemoDistribution("transformers"))
+_CODE = (_Staged, vlm.processor, MemoDistribution("diffusers"), MemoDistribution("transformers"))
 
 
 class Fibo2(Model[FiboGraph], encoded_leaves="accept"):
@@ -184,7 +152,7 @@ class Fibo2(Model[FiboGraph], encoded_leaves="accept"):
 
     def load(self, loader: Loader) -> None:
         self.graph = loader.construct(FiboGraph, factory=FiboGraph)
-        self.processor = build_processor(loader.assets, self.graph.processor_config)
+        self.processor = vlm.processor(loader.assets, "processor/", self.graph.processor_config)
 
     def _pipeline(self, component: str) -> _Staged:
         pipe = _Staged(
