@@ -3,9 +3,10 @@
 The second launch family, and the ENGINELESS-PATH REFERENCE (`cozy-runtime-sdxl.md`): one
 `Model` class with author-written `load`, three public methods each declaring the
 heavyweight components it may touch, one entrypoint. Runtime owns placement, offload and
-pinning. After the first eager Euler step, this package can describe the remaining fixed
-tensor computation with the UNet as its owner. Runtime admits that native interval only
-when the whole UNet is already resident; a streamed model keeps the ordinary eager loop.
+pinning. An explicitly prepared resident variant can run text encoding, all Euler steps
+and VAE decoding in one native submission. Its input buffers survive prompt/seed changes;
+Runtime retires the definition before reclaiming its weights. The existing native UNet
+interval and streamed eager path remain available when the full pipeline cannot be resident.
 
 What it adds over cr-008b's corpus fixture, which it is otherwise faithful to:
 
@@ -76,7 +77,7 @@ from transformers import (
 )
 from transformers import initialization as transformer_init
 
-from ._prepared import repeat_euler
+from ._prepared import ResidentPipeline, decode_latents, encode_tokens, repeat_euler
 
 app = App()
 
@@ -202,6 +203,7 @@ class SdxlPipeline:
         unet._cozy_hidiffusion_active = False
         self.scheduler_config: dict[str, Any] = dict(mapping["scheduler"])
         self.vae_scale: float = float(mapping["vae"]["scaling_factor"])
+        self.prepared = ResidentPipeline()
 
 
 def warmup() -> None:
@@ -266,10 +268,7 @@ class SdxlModel(Model[SdxlPipeline], encoded_leaves="accept"):
         with torch.inference_mode():
             ids = ids.to(first_encoder.get_input_embeddings().weight.device)
             ids_2 = ids_2.to(second_encoder.get_input_embeddings().weight.device)
-            first = first_encoder(ids, output_hidden_states=True)
-            second = second_encoder(ids_2, output_hidden_states=True)
-            prompt = torch.cat([first.hidden_states[-2], second.hidden_states[-2]], dim=-1)
-            return prompt, second.text_embeds
+            return encode_tokens(first_encoder, second_encoder, ids, ids_2)
 
     @uses_components("unet")
     def denoise(
@@ -312,7 +311,7 @@ class SdxlModel(Model[SdxlPipeline], encoded_leaves="accept"):
             latents = latents.to(dtype=wide)
         try:
             with torch.inference_mode():
-                return vae.decode(latents / self.pipe.vae_scale).sample
+                return decode_latents(vae, latents, self.pipe.vae_scale)
         finally:
             if upcast:
                 vae.to(dtype=original_dtype)
@@ -410,41 +409,26 @@ def _negative_prompt(requested: str, hidiffusion: bool) -> str:
     return f"{requested}, {_HIDIFFUSION_NEGATIVE}" if requested else _HIDIFFUSION_NEGATIVE
 
 
-@app.entrypoint(defaults={"model": "sdxl@1.0.0"}, memoize=Memoize(requires=["seed"]))
-def generate(
-    ctx: Context,
-    payload: GenerateInput,
+def _sample(
     model: SdxlModel,
-    out: Outputs,
+    tokens: tuple[Any, Any],
+    negative_tokens: tuple[Any, Any] | None,
+    *,
+    width: int,
+    height: int,
+    steps: int,
+    guidance: float,
+    hidiffusion_applied: bool,
+    seed: int,
+    ctx: Context,
     tel: Telemetry,
-    adj: Adjustments,
-) -> ImageResult:
-    """One text-to-image generation: tokenize, encode, denoise, decode, encode a WebP."""
-    ctx.plan({"text_encoder", "text_encoder_2"}, "unet", "vae")
-    payload.ignored(adj, "prompt_upsampling", reason="SDXL has no prompt upsampler")
-    seed = payload.drawn_seed()
-    target = payload.target(None, megapixels=1.0)
-    sizes = _SQUARE if target.ratio[0] == target.ratio[1] else _SIZES
-    width, height = sizes.fit(adj, target.ratio, sizes.pixels(adj, target))
-    above_native = width * height > _NATIVE * MEGAPIXEL
-    hidiffusion_applied = above_native if payload.hidiffusion is None else payload.hidiffusion
-    default_steps, default_guidance = (30, 7.5) if hidiffusion_applied else (20, 7.0)
-    steps = held(adj, "steps", payload.steps or default_steps, 1, 50)
-    guidance = held(adj, "guidance", default_guidance if payload.guidance is None else payload.guidance, 0.0, 20.0)
-    negative_prompt = _negative_prompt(payload.negative_prompt or "", hidiffusion_applied)
-    if above_native and not hidiffusion_applied:
-        adj.warn("hidiffusion", "HiDiffusion off above 1 MP: expect duplicated or tiled subjects")
-    if hidiffusion_applied and not above_native:
-        adj.warn("hidiffusion", "HiDiffusion at 1 MP composes at half resolution: expect simpler scenes")
-    # The value plane, and the only branch in this file that reads a request number: above
-    # 1.0 the negative branch is worth its second forward pass, at or below it is not.
+) -> Any:
+    """The existing streamed/eager path; preparation refusal reaches it before submission."""
+    ids, ids_2 = tokens
     classifier_free = guidance > 1.0
-
-    with tel.stage("tokenize", overall_range=(0.00, 0.02)):
-        ids, ids_2 = _tokenize(model.tokenizers, payload.prompt)
-        if classifier_free:
-            neg, neg_2 = _tokenize(model.tokenizers, negative_prompt)
-
+    if classifier_free:
+        assert negative_tokens is not None
+        neg, neg_2 = negative_tokens
     with tel.stage("encode", overall_range=(0.02, 0.10)):
         prompt, pooled = model.encode(ids, ids_2)
         if classifier_free:
@@ -527,6 +511,70 @@ def generate(
 
     with tel.stage("decode", overall_range=(0.90, 0.98)):
         image = model.decode(latents)
+    return image
+
+
+@app.entrypoint(defaults={"model": "sdxl@1.0.0"}, memoize=Memoize(requires=["seed"]))
+def generate(
+    ctx: Context,
+    payload: GenerateInput,
+    model: SdxlModel,
+    out: Outputs,
+    tel: Telemetry,
+    adj: Adjustments,
+) -> ImageResult:
+    """One text-to-image generation: tokenize, encode, denoise, decode, encode a WebP."""
+    ctx.plan({"text_encoder", "text_encoder_2"}, "unet", "vae")
+    payload.ignored(adj, "prompt_upsampling", reason="SDXL has no prompt upsampler")
+    seed = payload.drawn_seed()
+    target = payload.target(None, megapixels=1.0)
+    sizes = _SQUARE if target.ratio[0] == target.ratio[1] else _SIZES
+    width, height = sizes.fit(adj, target.ratio, sizes.pixels(adj, target))
+    above_native = width * height > _NATIVE * MEGAPIXEL
+    hidiffusion_applied = above_native if payload.hidiffusion is None else payload.hidiffusion
+    default_steps, default_guidance = (30, 7.5) if hidiffusion_applied else (20, 7.0)
+    steps = held(adj, "steps", payload.steps or default_steps, 1, 50)
+    guidance = held(adj, "guidance", default_guidance if payload.guidance is None else payload.guidance, 0.0, 20.0)
+    negative_prompt = _negative_prompt(payload.negative_prompt or "", hidiffusion_applied)
+    if above_native and not hidiffusion_applied:
+        adj.warn("hidiffusion", "HiDiffusion off above 1 MP: expect duplicated or tiled subjects")
+    if hidiffusion_applied and not above_native:
+        adj.warn("hidiffusion", "HiDiffusion at 1 MP composes at half resolution: expect simpler scenes")
+    # The value plane, and the only branch in this file that reads a request number: above
+    # 1.0 the negative branch is worth its second forward pass, at or below it is not.
+    classifier_free = guidance > 1.0
+
+    with tel.stage("tokenize", overall_range=(0.00, 0.02)):
+        ids, ids_2 = _tokenize(model.tokenizers, payload.prompt)
+        if classifier_free:
+            neg, neg_2 = _tokenize(model.tokenizers, negative_prompt)
+
+    tokens = (ids, ids_2)
+    negative_tokens = (neg, neg_2) if classifier_free else None
+    if hidiffusion_applied:
+        model.pipe.prepared.close()  # HiDiffusion mutates the UNet implementation.
+        image = None
+    else:
+        image = model.pipe.prepared.run(
+            components=model.pipe.components,
+            scheduler_config=model.pipe.scheduler_config,
+            vae_scale=model.pipe.vae_scale,
+            tokens=tokens,
+            negative_tokens=negative_tokens,
+            width=width,
+            height=height,
+            steps=steps,
+            guidance=guidance,
+            seed=seed,
+            ctx=ctx,
+            tel=tel,
+        )
+    if image is None:
+        image = _sample(
+            model, tokens, negative_tokens,
+            width=width, height=height, steps=steps, guidance=guidance,
+            hidiffusion_applied=hidiffusion_applied, seed=seed, ctx=ctx, tel=tel,
+        )
     tel.metric("image_absmax", _finite(torch, image))
     pixels = ((image / 2 + 0.5).clamp(0, 1)[0] * 255).to(torch.uint8).permute(1, 2, 0).contiguous()
     _integrity(torch, image, pixels, tel)

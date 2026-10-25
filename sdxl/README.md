@@ -42,3 +42,22 @@ resident and its hooks and weight identity are safe for capture. HiDiffusion, ot
 schedulers, streamed models and capacity refusals keep eager execution. The prepared
 interval closes before VAE decode; it is currently prepared per request. Native progress
 reports completed steps without treating observation intervals as per-step GPU timings.
+
+The coordinated native-pipeline candidate additionally supports a single resident program
+for both text encoders, every Euler step and VAE decode. A construction retains at most one
+variant; prompt and seed values update fixed input buffers, while shape, schedule, guidance,
+representation or Runtime invalidation replaces the definition. Runtime prepares the VAE's
+wide representation before capture and owns retirement under pressure.
+
+`ResidentPipeline.prepare` is the explicit preparation entry for an admitted warm turn.
+The ordinary request path only reuses it or captures already-resident representations; it
+does not load the whole model speculatively. Wiring the production warm/prepared-request
+boundary to that entry remains in progress. Full-pipeline GPU parity and request reuse also
+remain unqualified until their real release-gate runs pass. The existing component and
+native-interval receipts do not prove this new path.
+
+Whole-pipeline telemetry uses `native_pipeline` and `request_path.pipeline_native_steps`.
+It does not fabricate separate text/denoise/VAE device durations or a first-noise metric.
+CPU tokenization, input transfer, image verification and WebP/output delivery remain outside
+the submitted GPU program. Tensor-only CLIP conditioning avoids Transformers' lazy output
+collection hooks; its original 5.16.1 forward is the independent numerical oracle.
