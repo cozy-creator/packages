@@ -2,8 +2,8 @@ version: "3"
 silent: true
 
 vars:
-  LOCK_HUB: tensorhub # committed locks resolve against production
-  HUBS: tensorhub local
+  LOCK_HUB: https://tensorhub.com # committed locks resolve against production
+  HUBS: https://tensorhub.com http://127.0.0.1:8819
 
 tasks:
   # First-party packages publish at the root namespace (`--root`, Hub admins). Locks pin first-party callees exactly, so each release of X is followed by one of every package
@@ -32,13 +32,13 @@ tasks:
           [ -n "$f" ] && [ -n "$l" ] && [ "$(printf '%s\n' "$f" "$l" | sort -V | head -1)" != "$f" ] && echo "$d"; done; done | sort -u; }
         published() {
           i=$(grep -om1 'https\?://[^"]*/v1/index/[^/]*/simple/' "$1/uv.lock"); a=${i%/simple/}
-          cozy package info "${a##*/}/$1" --tensorhub "${i%%/v1/*}" --json | jq -e --arg v "$(ver "$1")" 'any(.releases[]; .release == $v)' >/dev/null
+          COZY_HUB_URL="${i%%/v1/*}" cozy package info "${a##*/}/$1" --json | jq -e --arg v "$(ver "$1")" 'any(.releases[]; .release == $v)' >/dev/null
         }
         shipped=
         ship() {
           for h in {{.HUBS}}; do
             rm -rf "${work:?}/$1"; git archive HEAD "$1" | tar -x -C "$work"
-            (cd "$work/$1" && cozy package publish --root --tensorhub "$h") && cozy package yank "$1@$(ver "$1")" --tensorhub "$h" -y
+            (cd "$work/$1" && COZY_HUB_URL="$h" cozy package publish --root) && COZY_HUB_URL="$h" cozy package yank "$1@$(ver "$1")" -y
           done
           shipped="$shipped${shipped:+,}$1@$(ver "$1")"
         }
@@ -65,7 +65,7 @@ tasks:
           published "$p" || { echo "$p $(ver "$p") on master is unpublished; release it first: task publish -- $p" >&2; exit 1; }
           if pinned "$p"; then ship "$p"; continue; fi
           uv version -q --bump patch --frozen --project "$p"
-          (cd "$p" && cozy package lock --root --tensorhub {{.LOCK_HUB}} $(printf ' --upgrade-package=%s' $up $(raised "$p")))
+          (cd "$p" && COZY_HUB_URL={{.LOCK_HUB}} cozy package lock --root $(printf ' --upgrade-package=%s' $up $(raised "$p")))
           pinned "$p" || { echo "$p: the relock did not take $up at their released versions" >&2; exit 1; }
           release "$p"
         done

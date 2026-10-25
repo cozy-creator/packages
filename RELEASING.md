@@ -8,7 +8,7 @@ task publish -- qwen-image-2
 
 It fast-forwards the checkout to `origin/master` and publishes a `git archive` of the package to each of `HUBS`.
 Then, in dependency order, each package whose `uv.lock` holds a republished package is
-relocked to it (`cozy package lock --tensorhub tensorhub --upgrade-package <it>`, plus
+relocked to it (`cozy package lock --upgrade-package <it>` against production, plus
 `cozy-runtime` or `tensorfs` when its floor is above the dependent's lock),
 patch-bumped, pushed to master and published the same way. A dependent whose
 master version is unpublished stops it too: its merged changes are not released yet.
@@ -28,7 +28,7 @@ org names a first-party model (`minimax-h3@1.0.0-rc.4`). First-party package dep
 Commit locks bound to production. After changing dependencies, as a tensorhub.com admin:
 
 ```sh
-cozy package lock --root --tensorhub https://tensorhub.com
+cozy package lock --root
 ```
 
 A published release runs exactly the dependency versions in its `uv.lock`, including
