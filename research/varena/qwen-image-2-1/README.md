@@ -58,7 +58,8 @@ receipts, including any private dependency installation; do not bypass resolutio
 Stored bytes are neither resident weight bytes nor peak VRAM. The source stages text encoding,
 transformer denoising and VAE decoding separately, accepts encoded leaves, and skips the unused
 stored language-model head. Activations, native decoder/library scratch, graph pools and CUDA
-context memory must still fit. No current-cohort Qwen GPU measurement is claimed.
+context memory must still fit. The original planning table follows; the subsequent 24 GiB int8
+result is recorded in RESULTS.md. Other capacities and lanes remain unqualified.
 
 | GPU capacity | Planned case and limitation |
 | --- | --- |
