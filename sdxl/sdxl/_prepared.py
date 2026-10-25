@@ -27,11 +27,18 @@ def _clip_text(model: Any, ids: torch.Tensor) -> tuple[torch.Tensor, torch.Tenso
     """
     ids = ids.view(-1, ids.shape[-1])
     hidden = model.embeddings(input_ids=ids)
-    mask = create_causal_mask(
-        config=model.config,
-        inputs_embeds=hidden,
-        attention_mask=None,
-        past_key_values=None,
+    # This helper always encodes a dense sequence, without a padding mask or KV cache.
+    # Keep SDPA's implicit causal path during capture too: Transformers materializes an
+    # equivalent mask while tracing, which selects different attention math/rounding.
+    mask = (
+        None
+        if model.config._attn_implementation == "sdpa"
+        else create_causal_mask(
+            config=model.config,
+            inputs_embeds=hidden,
+            attention_mask=None,
+            past_key_values=None,
+        )
     )
     if not model.encoder.layers:
         raise ValueError("SDXL conditioning requires a nonempty CLIP encoder")
