@@ -13,6 +13,7 @@ from typing import Any, NamedTuple
 import torch
 from cozy_runtime import rng
 from cozy_runtime.author import Loader, Model, Telemetry, uses_components
+from cozy_runtime.author.kernels import Plan
 from diffusers import (
     AnimaAutoBlocks,
     AnimaModularPipeline,
@@ -32,7 +33,7 @@ from diffusers.hooks.hooks import HookRegistry
 from diffusers.models.transformers.transformer_cosmos import CosmosTransformerBlock
 from diffusers.modular_pipelines import ModularPipelineBlocks
 from diffusers.modular_pipelines.anima.denoise import AnimaLoopDenoiser
-from transformers import PreTrainedTokenizerFast, Qwen3Config, Qwen3Model
+from transformers import AutoModel, PreTrainedTokenizerFast, Qwen3Config
 from transformers import initialization as transformer_init
 
 from . import optimization
@@ -78,8 +79,10 @@ class AnimaPipeline:
             transformer = CosmosTransformer3DModel.from_config(mapping["transformer"]).to(
                 torch.bfloat16
             )
-            text_encoder: Any = Qwen3Model(Qwen3Config(**mapping["text_encoder"]))
-            text_encoder.to(dtype=torch.bfloat16)
+            # Built in bf16, not cast to it: the rotary inv_freq stays f32, as upstream's.
+            text_encoder: Any = AutoModel.from_config(
+                Qwen3Config(**mapping["text_encoder"]), dtype=torch.bfloat16
+            )
             text_conditioner = AnimaTextConditioner.from_config(
                 mapping["text_conditioner"]
             ).to(torch.bfloat16)
@@ -108,13 +111,14 @@ class AnimaModel(Model[AnimaPipeline], encoded_leaves="accept"):
     transformer runs the fused CUDA plan wherever this process supports it."""
 
     pipe: AnimaPipeline
-    fused: bool = False
 
     def load(self, loader: Loader) -> None:
         self.pipe = loader.construct(AnimaPipeline, factory=build_pipeline)
+
+    def execution_plan(self, plan: Plan) -> str:
         eager = optimization.apply(self.pipe)
-        self.fused = not eager
         print("[anima] " + ("eager: " + eager if eager else "fused CUDA plan"), file=sys.stderr)
+        return "" if eager else "anima.fused"
 
     @uses_components("text_encoder", "text_conditioner", "transformer", "vae")
     def render(
@@ -133,7 +137,8 @@ class AnimaModel(Model[AnimaPipeline], encoded_leaves="accept"):
     ) -> Any:
         device = torch.device(str(self.device))
         generator = rng.generator(seed)
-        pipeline: Any = _text2image_pipeline(device, phases, batched, self.fused)
+        fused = optimization.installed(self.pipe.components["transformer"])
+        pipeline: Any = _text2image_pipeline(device, phases, batched, fused)
         pipeline.register_components(
             **self.pipe.components,
             scheduler=FlowMatchEulerDiscreteScheduler.from_config(self.pipe.scheduler_config),
