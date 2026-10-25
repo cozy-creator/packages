@@ -53,7 +53,8 @@ def _layer_scales(block: Any, arguments: Mapping[str, Any]) -> fusion.Modulation
 
 #: The video VAE's ViT decoder block as Runtime fuses it: fp16 autocast over an fp32 residual
 #: stream, torch RMSNorms, weightless q/k norms, split-half RoPE on 48 of 64 channels in fp16,
-#: Diffusers' value-first SwiGLU, `h + branch * scale` layer scales.
+#: Diffusers' value-first SwiGLU, `h + branch * scale` layer scales. The attention is composed
+#: (its processor upcasts q and k to fp32 around the norms; the kernel reads them as fp16).
 VAE_BLOCK = fusion.DiTBlock(
     MiniMaxH3VideoTransformerBlock,
     width=2048,
@@ -69,6 +70,7 @@ VAE_BLOCK = fusion.DiTBlock(
     rows="fp16",
     rms_rounding="once",
     qk_affine=False,
+    compose=True,
 )
 
 
