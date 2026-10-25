@@ -51,10 +51,20 @@ wide representation before capture and owns retirement under pressure.
 
 `ResidentPipeline.prepare` is the explicit preparation entry for an admitted warm turn.
 The ordinary request path only reuses it or captures already-resident representations; it
-does not load the whole model speculatively. Wiring the production warm/prepared-request
-boundary to that entry remains in progress. Full-pipeline GPU parity and request reuse also
-remain unqualified until their real release-gate runs pass. The existing component and
-native-interval receipts do not prove this new path.
+does not load the whole model speculatively. The coordinated Runtime candidate invokes
+SDXL's typed preparation factory from an explicit GPU warm request:
+
+```sh
+cozy run sdxl/generate --warm gpu prompt='warm variant' steps=30 guidance=7.0 aspect_ratio=1:1 hidiffusion=false
+```
+
+Warm and ordinary requests use the same resolved dimensions, defaults and adjustment rows.
+Preparation initializes fixed-shape token slots without drawing a seed, submitting an image
+or writing outputs. Later requests with matching geometry and sampling settings can replace
+prompt/seed values and reuse the program. HiDiffusion and capacity refusals leave the existing
+streamed path available. Full-pipeline numerical parity, the production warm caller and
+request reuse remain unqualified until their real release-gate runs pass. The existing
+component and native-interval receipts do not prove this new path.
 
 Whole-pipeline telemetry uses `native_pipeline` and `request_path.pipeline_native_steps`.
 It does not fabricate separate text/denoise/VAE device durations or a first-noise metric.

@@ -44,6 +44,8 @@ from cozy_runtime import rng
 from cozy_runtime.author import (
     MEGAPIXEL,
     AdapterCompatibility,
+    AdjustmentRow,
+    AdjustmentRows,
     Adjustments,
     App,
     Context,
@@ -56,6 +58,7 @@ from cozy_runtime.author import (
     Model,
     OutputError,
     Outputs,
+    Preflight,
     QuantizationPlan,
     Recipe,
     ReferenceImages,
@@ -514,19 +517,19 @@ def _sample(
     return image
 
 
-@app.entrypoint(defaults={"model": "sdxl@1.0.0"}, memoize=Memoize(requires=["seed"]))
-def generate(
-    ctx: Context,
-    payload: GenerateInput,
-    model: SdxlModel,
-    out: Outputs,
-    tel: Telemetry,
-    adj: Adjustments,
-) -> ImageResult:
-    """One text-to-image generation: tokenize, encode, denoise, decode, encode a WebP."""
-    ctx.plan({"text_encoder", "text_encoder_2"}, "unet", "vae")
-    payload.ignored(adj, "prompt_upsampling", reason="SDXL has no prompt upsampler")
-    seed = payload.drawn_seed()
+class GenerateFacts(msgspec.Struct, frozen=True):
+    width: int
+    height: int
+    steps: int
+    guidance: float
+    hidiffusion_applied: bool
+    negative_prompt: str
+    adjustments: tuple[AdjustmentRow, ...]
+
+
+def resolve_generate(payload: GenerateInput) -> GenerateFacts:
+    """Resolve one variant identically for admitted preparation and ordinary inference."""
+    adj = AdjustmentRows()
     target = payload.target(None, megapixels=1.0)
     sizes = _SQUARE if target.ratio[0] == target.ratio[1] else _SIZES
     width, height = sizes.fit(adj, target.ratio, sizes.pixels(adj, target))
@@ -540,6 +543,64 @@ def generate(
         adj.warn("hidiffusion", "HiDiffusion off above 1 MP: expect duplicated or tiled subjects")
     if hidiffusion_applied and not above_native:
         adj.warn("hidiffusion", "HiDiffusion at 1 MP composes at half resolution: expect simpler scenes")
+    return GenerateFacts(
+        width, height, steps, guidance, hidiffusion_applied, negative_prompt, tuple(adj.rows)
+    )
+
+
+def prepare_generate(
+    ctx: Context,
+    facts: Preflight[GenerateFacts],
+    model: SdxlModel,
+    tel: Telemetry,
+    adj: Adjustments,
+) -> bool:
+    """Prepare one known resident variant in Runtime's admitted GPU warm turn."""
+    adj.extend(facts.adjustments)
+    if facts.hidiffusion_applied:
+        return False
+    ctx.plan({"text_encoder", "text_encoder_2"}, "unet", "vae")
+    # Real tokenizer IDs initialize fixed-shape slots; request values replace them later.
+    # Preparation does not draw a seed or submit an image-generation request.
+    tokens = _tokenize(model.tokenizers, "")
+    return model.pipe.prepared.prepare(
+        components=model.pipe.components,
+        scheduler_config=model.pipe.scheduler_config,
+        vae_scale=model.pipe.vae_scale,
+        tokens=tokens,
+        negative_tokens=tokens if facts.guidance > 1.0 else None,
+        width=facts.width,
+        height=facts.height,
+        steps=facts.steps,
+        guidance=facts.guidance,
+        ctx=ctx,
+        tel=tel,
+    )
+
+
+@app.entrypoint(
+    defaults={"model": "sdxl@1.0.0"},
+    memoize=Memoize(requires=["seed"]),
+    preflight=resolve_generate,
+    prepare=prepare_generate,
+)
+def generate(
+    ctx: Context,
+    payload: GenerateInput,
+    facts: Preflight[GenerateFacts],
+    model: SdxlModel,
+    out: Outputs,
+    tel: Telemetry,
+    adj: Adjustments,
+) -> ImageResult:
+    """One text-to-image generation: tokenize, encode, denoise, decode, encode a WebP."""
+    ctx.plan({"text_encoder", "text_encoder_2"}, "unet", "vae")
+    payload.ignored(adj, "prompt_upsampling", reason="SDXL has no prompt upsampler")
+    adj.extend(facts.adjustments)
+    seed = payload.drawn_seed()
+    width, height = facts.width, facts.height
+    steps, guidance = facts.steps, facts.guidance
+    hidiffusion_applied, negative_prompt = facts.hidiffusion_applied, facts.negative_prompt
     # The value plane, and the only branch in this file that reads a request number: above
     # 1.0 the negative branch is worth its second forward pass, at or below it is not.
     classifier_free = guidance > 1.0
