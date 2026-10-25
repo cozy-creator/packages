@@ -520,7 +520,7 @@ def _sample(
 class GenerateFacts(msgspec.Struct, frozen=True):
     width: int
     height: int
-    steps: int
+    resolved_steps: int
     guidance: float
     hidiffusion_applied: bool
     negative_prompt: str
@@ -571,7 +571,7 @@ def prepare_generate(
         negative_tokens=tokens if facts.guidance > 1.0 else None,
         width=facts.width,
         height=facts.height,
-        steps=facts.steps,
+        steps=facts.resolved_steps,
         guidance=facts.guidance,
         ctx=ctx,
         tel=tel,
@@ -599,7 +599,7 @@ def generate(
     adj.extend(facts.adjustments)
     seed = payload.drawn_seed()
     width, height = facts.width, facts.height
-    steps, guidance = facts.steps, facts.guidance
+    steps, guidance = facts.resolved_steps, facts.guidance
     hidiffusion_applied, negative_prompt = facts.hidiffusion_applied, facts.negative_prompt
     # The value plane, and the only branch in this file that reads a request number: above
     # 1.0 the negative branch is worth its second forward pass, at or below it is not.
