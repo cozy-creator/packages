@@ -79,13 +79,6 @@ LORA_SITES = (
 _DTYPES = {"f32": torch.float32, "bf16": torch.bfloat16, "f16": torch.float16, "i64": torch.int64}
 
 
-def _section(mapping: Mapping[str, Any], name: str) -> dict[str, Any]:
-    value = mapping[name]
-    if not isinstance(value, Mapping):
-        raise ValueError(f"Qwen-Image {name} configuration must be a mapping")
-    return {key: item for key, item in value.items() if not key.startswith("_")}
-
-
 class Arming:
     """The LoRA a denoise has armed on this construction's DiT, else None (a base forward)."""
 
@@ -137,11 +130,10 @@ class TransformerGraph:
     """A DiT construction in bf16, with its LoRA hooks and its checkpoint's scheduler."""
 
     def __init__(self, config: Config) -> None:
-        mapping = config.mapping()
         with transformer_init.no_init_weights():
-            transformer = QwenImageTransformer2DModel.from_config(_section(mapping, "transformer"))
+            transformer = QwenImageTransformer2DModel.from_config(config.section("transformer").mapping())
         self.components: dict[str, Any] = {"transformer": transformer.to(dtype=torch.bfloat16)}
-        self.scheduler_config = _section(mapping, "scheduler")
+        self.scheduler_config = config.section("scheduler").mapping()
         self.arming = Arming()
         install_lora_hooks(transformer, self.arming)
 
@@ -151,15 +143,14 @@ class QwenImageGraph(TransformerGraph):
 
     def __init__(self, config: Config) -> None:
         super().__init__(config)
-        mapping = config.mapping()
-        self.text_encoder_config = _section(mapping, "text_encoder")
+        self.text_encoder_config = config.section("text_encoder").mapping()
         vae_dtype = _DTYPES[config.tensor_dtype("vae.encoder.conv_in.weight", default="bf16")]
         with transformer_init.no_init_weights():
             # Construction dtype leaves Qwen2.5-VL's RoPE buffers in F32, as upstream loads.
             self.components["text_encoder"] = AutoModelForImageTextToText.from_config(
                 Qwen2_5_VLConfig(**self.text_encoder_config), dtype=torch.bfloat16
             )
-            self.components["vae"] = AutoencoderKLQwenImage.from_config(_section(mapping, "vae")).to(
+            self.components["vae"] = AutoencoderKLQwenImage.from_config(config.section("vae").mapping()).to(
                 dtype=vae_dtype
             )
         # The pipelines read the last hidden state only: the 1.1 GB head is never built.

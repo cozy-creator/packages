@@ -53,13 +53,6 @@ MIN_SIDE, MAX_SIDE = 64, 4096
 COMPONENTS = ("transformer", "text_encoder", "vae")
 
 
-def _section(mapping: Mapping[str, Any], name: str) -> dict[str, Any]:
-    value = mapping[name]
-    if not isinstance(value, Mapping):
-        raise ValueError(f"Klein {name} configuration must be a mapping")
-    return {key: item for key, item in value.items() if not key.startswith("_")}
-
-
 def _conditioning_only(encoder: Any) -> None:
     """Klein reads hidden states 4..32 of Qwen3-VL's text stack: the vision tower, the last four
     layers, the final norm and the head are never run, so they are not built (their stored bytes
@@ -117,13 +110,12 @@ BLOCK = fusion.DiTBlock(
 
 class KleinGraph:
     def __init__(self, config: Config) -> None:
-        mapping = config.mapping()
         with transformer_init.no_init_weights():
-            transformer = Flux3Transformer2DModel.from_config(_section(mapping, "transformer"))
+            transformer = Flux3Transformer2DModel.from_config(config.section("transformer").mapping())
             text_encoder = AutoModelForImageTextToText.from_config(
-                Qwen3VLConfig(**_section(mapping, "text_encoder")), dtype=torch.bfloat16
+                Qwen3VLConfig(**config.section("text_encoder").mapping()), dtype=torch.bfloat16
             )
-            vae = AutoencoderKLFlux2.from_config(_section(mapping, "vae"))
+            vae = AutoencoderKLFlux2.from_config(config.section("vae").mapping())
         _conditioning_only(text_encoder)
         for block in transformer.modules():
             if type(block) in (Flux3ModeTransformerBlock, Flux3SingleTransformerBlock):

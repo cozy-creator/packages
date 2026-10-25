@@ -21,7 +21,7 @@ from diffusers.pipelines.flux2.system_messages import SYSTEM_MESSAGE_UPSAMPLING_
 from PIL import Image, ImageOps
 from transformers import initialization as transformer_init
 
-from .model import processor, section, text_encoder
+from .model import processor, text_encoder
 
 COMPONENT = "text_encoder"
 MAX_NEW_TOKENS = 512
@@ -30,7 +30,7 @@ MAX_NEW_TOKENS = 512
 class UpsamplerGraph:
     def __init__(self, config: Config) -> None:
         with transformer_init.no_init_weights():
-            model = text_encoder(section(config.mapping(), COMPONENT))
+            model = text_encoder(config.section(COMPONENT).mapping())
         self.components: dict[str, torch.nn.Module] = {COMPONENT: model.eval()}
 
 

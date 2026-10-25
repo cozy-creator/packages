@@ -15,7 +15,6 @@ from cozy_runtime.author import Config, Loader, Model, uses_components
 from diffusers import Flux2Transformer2DModel
 from torch import nn
 
-from .model import section
 
 T = TypeVar("T")
 #: The upload's one component: the LoRA file at the repository's root.
@@ -34,7 +33,7 @@ class Factors(nn.Module):
 
 class TurboGraph:
     def __init__(self, config: Config, geometry: Mapping[str, Any] | None = None) -> None:
-        adapter = section(config.mapping(), COMPONENT)
+        adapter = config.section(COMPONENT).mapping()
         rank = int(adapter["r"])
         scale = float(adapter.get("lora_alpha", rank)) / rank
         with torch.device("meta"):  # the base's sites; the class defaults are [dev]'s geometry

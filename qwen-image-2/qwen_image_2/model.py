@@ -96,12 +96,6 @@ class _Progress[T]:
         return None
 
 
-def _section(value: object, name: str) -> dict[str, Any]:
-    if not isinstance(value, Mapping):
-        raise ValueError(f"Qwen Image {name} configuration must be a mapping")
-    return dict(value)
-
-
 _DTYPES = {"f32": torch.float32, "bf16": torch.bfloat16, "f16": torch.float16}
 
 
@@ -123,30 +117,29 @@ class QwenImage21Graph:
     """One native construction census, with source checkpoint precision preserved."""
 
     def __init__(self, config: Config) -> None:
-        mapping = config.mapping()
         with transformer_init.no_init_weights():
             self.components: dict[str, Any] = {
                 "transformer": QwenImage21Transformer2DModel.from_config(
-                    _section(mapping["transformer"], "transformer")
+                    config.section("transformer").mapping()
                 ).to(dtype=torch.bfloat16),
                 # Construction dtype leaves derived RoPE buffers in Transformers' F32.
                 # Casting the completed module would round those frequencies to BF16.
                 "text_encoder": AutoModelForImageTextToText.from_config(
-                    Qwen3VLConfig(**_section(mapping["text_encoder"], "text_encoder")),
+                    Qwen3VLConfig(**config.section("text_encoder").mapping()),
                     dtype=torch.bfloat16,
                 ),
-                "vae": AutoencoderKLQwenImage21.from_config(_section(mapping["vae"], "vae")),
+                "vae": AutoencoderKLQwenImage21.from_config(config.section("vae").mapping()),
             }
         vae = self.components["vae"]
         vae.to(dtype=_stored(config, "vae", vae))
         # The pipeline reads hidden states only, so the 1.24 GB language-model head is not
         # built; Runtime skips its stored weight.
         self.components["text_encoder"].lm_head = torch.nn.Identity()
-        self.scheduler_config = _section(mapping["scheduler"], "scheduler")
+        self.scheduler_config = config.section("scheduler").mapping()
         # The processor folder's config file, which TensorFS keeps as its component's config.
-        self.processor_config = _section(mapping.get("processor", {}), "processor")
+        self.processor_config = config.section("processor").mapping() if "processor" in config.keys() else {}
         # A distilled checkpoint (Turbo) names its own schedule; its length is the step count.
-        sigmas = _section(mapping.get("model_index", {}), "model_index").get("sample_sigmas")
+        sigmas = (config.section("model_index").mapping() if "model_index" in config.keys() else {}).get("sample_sigmas")
         self.sample_sigmas = [float(sigma) for sigma in sigmas] if sigmas else None
 
 

@@ -52,13 +52,6 @@ TURBO_SIGMAS = (1.0, 0.6509, 0.4374, 0.2932, 0.1893, 0.1108, 0.0495, 0.00031)
 COMPONENTS = ("transformer", "text_encoder", "vae")
 
 
-def section(mapping: Mapping[str, Any], name: str) -> dict[str, Any]:
-    value = mapping.get(name, {})
-    if not isinstance(value, Mapping):
-        raise ValueError(f"FLUX.2 {name} configuration must be a mapping")
-    return {key: item for key, item in value.items() if not key.startswith("_")}
-
-
 def _read(assets: ModelAssets, name: str) -> bytes:
     return assets.read(f"tokenizer/{name}")
 
@@ -138,14 +131,14 @@ class LoRAHook:
 class Flux2Graph:
     def __init__(self, config: Config) -> None:
         mapping = config.mapping()
-        text = section(mapping, "text_encoder")
+        text = config.section("text_encoder").mapping()
         family = str(text["model_type"])
         if family not in TEXT_LAYERS:
             raise ValueError(f"FLUX.2 has no text encoder of type {family!r}")
         with transformer_init.no_init_weights():
-            transformer = Flux2Transformer2DModel.from_config(section(mapping, "transformer"))
+            transformer = Flux2Transformer2DModel.from_config(config.section("transformer").mapping())
             encoder = text_encoder(text)
-            vae = AutoencoderKLFlux2.from_config(section(mapping, "vae"))
+            vae = AutoencoderKLFlux2.from_config(config.section("vae").mapping())
         _conditioning_only(encoder, max(TEXT_LAYERS[family]))
         if transformer.config.guidance_embeds:  # [dev]: its Turbo LoRA's sites
             transformer._cozy_turbo = None
