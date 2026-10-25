@@ -825,8 +825,7 @@ class OfficialH3Pipeline:
     """Both official task workflows over one shared, dual-DiT construction."""
 
     def __init__(self, config: Config, plans: Mapping[Trunk, TimestepPlan]) -> None:
-        mapping = _artifact_sections(config.mapping())
-        dit_specs = _dit_specs(mapping)
+        dit_specs = _dit_specs(_artifact_sections(config))
         for trunk, (_upstream, _structure, layout) in dit_specs.items():
             _validate_plan(plans[trunk], trunk, layout)
         blocks = {
@@ -839,11 +838,12 @@ class OfficialH3Pipeline:
             for trunk, (upstream, structure, layout) in dit_specs.items()
         }
         _validate_dual_topology(dits, _DIT_COMPONENT)
-        text_encoder = build_text_conditioner(_section(mapping, "text_encoder"))
+        text_encoder = build_text_conditioner(config.section("text_encoder").mapping())
         video_vae = _apply_video_vae_dtype(
-            TileBatchedVideoVAE.from_config(_section(mapping, "vae")), config
+            TileBatchedVideoVAE.from_config(config.section("vae").mapping()), config
         )
-        audio_vae = AutoencoderKLMiniMaxH3Audio.from_config(_section(mapping, "audio_vae")).eval()
+        audio = config.section("audio_vae").mapping()
+        audio_vae = AutoencoderKLMiniMaxH3Audio.from_config(audio).eval()
         for trunk in _TRUNKS:
             _validate_model_contract(pipes[trunk], dits[trunk], video_vae, audio_vae)
         processor = vlm.processor(_ASSETS / "processor")
@@ -1495,14 +1495,13 @@ class OfficialH3TurboLoRA:
     """The standalone adapter's two roots, independent of the base checkpoint."""
 
     def __init__(self, config: Config, plans: Mapping[Trunk, TimestepPlan]) -> None:
-        mapping = config.mapping()
-        if set(mapping) != _OVERLAY_CONFIG_SECTIONS:
+        if set(config.keys()) != _OVERLAY_CONFIG_SECTIONS:
             raise ConformanceError(
                 "a turbo LoRA checkpoint contains exactly fl2va_turbo and ref2va_turbo",
                 code="artifact_config",
             )
         self.plans = {trunk: plans[trunk] for trunk in _TRUNKS}
-        self.specs = {trunk: _overlay_spec(mapping, trunk, self.plans[trunk]) for trunk in _TRUNKS}
+        self.specs = {trunk: _overlay_spec(config, trunk, self.plans[trunk]) for trunk in _TRUNKS}
         overlays = {
             trunk: _build_overlay(self.specs[trunk][0], self.plans[trunk], self.specs[trunk][1])
             for trunk in _TRUNKS
@@ -1522,7 +1521,7 @@ class OfficialH3TurboLoRA:
 
 def build_h3_turbo_base(config: Config, plans: Mapping[Trunk, TimestepPlan]) -> OfficialH3Pipeline:
     """The ordinary five-root artifact, with its turbo consumers installed before fill."""
-    specs = _dit_specs(_artifact_sections(config.mapping()))
+    specs = _dit_specs(_artifact_sections(config))
     if any(structure != "adaln-pruned" for _config, structure, _layout in specs.values()):
         raise ConformanceError("turbo requires an AdaLN-pruned base", code="artifact_config")
     pipe = OfficialH3Pipeline(config, plans)
@@ -1539,17 +1538,8 @@ def build_h3_pipeline(config: Config, plans: Mapping[Trunk, TimestepPlan]) -> Of
     return OfficialH3Pipeline(config, plans)
 
 
-def _section(mapping: Mapping[str, object], name: str) -> dict[str, Any]:
-    value = mapping.get(name)
-    if not isinstance(value, Mapping):
-        raise ConformanceError(
-            f"artifact config has no {name!r} mapping", code="artifact_config", fields=[name]
-        )
-    return dict(value)
-
-
-def _artifact_sections(mapping: Mapping[str, object]) -> Mapping[str, object]:
-    present = set(mapping)
+def _artifact_sections(config: Config) -> Config:
+    present = set(config.keys())
     expected = _WEIGHTED_CONFIG_SECTIONS
     if present != expected:
         missing = sorted(expected - present)
@@ -1560,14 +1550,12 @@ def _artifact_sections(mapping: Mapping[str, object]) -> Mapping[str, object]:
             code="artifact_config",
             fields=[*missing, *unexpected],
         )
-    return mapping
+    return config
 
 
-def _dit_spec(
-    mapping: Mapping[str, object], task: Trunk
-) -> tuple[dict[str, Any], str, TableLayout | None]:
+def _dit_spec(config: Config, task: Trunk) -> tuple[dict[str, Any], str, TableLayout | None]:
     component = _DIT_COMPONENT[task]
-    upstream = _section(mapping, component)
+    upstream = config.section(component).mapping()
     extension = upstream.pop("cozy_h3", None)
     if not isinstance(extension, Mapping):
         raise ConformanceError(
@@ -1626,10 +1614,8 @@ def _dit_spec(
     return upstream, str(structure), layout
 
 
-def _dit_specs(
-    mapping: Mapping[str, object],
-) -> dict[Trunk, tuple[dict[str, Any], str, TableLayout | None]]:
-    specs = {trunk: _dit_spec(mapping, trunk) for trunk in _TRUNKS}
+def _dit_specs(config: Config) -> dict[Trunk, tuple[dict[str, Any], str, TableLayout | None]]:
+    specs = {trunk: _dit_spec(config, trunk) for trunk in _TRUNKS}
     if len({spec[1] for spec in specs.values()}) != 1:
         raise ConformanceError(
             "FL2VA and Ref2VA DiTs use different modulation structures",
@@ -1662,11 +1648,11 @@ def _build_dit(config: Mapping[str, Any], structure: str, layout: TableLayout | 
 
 
 def _overlay_spec(
-    mapping: Mapping[str, object], trunk: Trunk, plan: TimestepPlan
+    config: Config, trunk: Trunk, plan: TimestepPlan
 ) -> tuple[dict[str, Any], TableLayout]:
     """Only the released rank-64 PDD-8 adapter is supported."""
     component = _OVERLAY_COMPONENT[trunk]
-    section = _section(mapping, component)
+    section = config.section(component).mapping()
     extension = section.pop("cozy_h3", None)
     if not isinstance(extension, dict):
         raise ConformanceError("missing PDD metadata", code="artifact_config")
