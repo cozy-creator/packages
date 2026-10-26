@@ -1,6 +1,6 @@
 # Qwen Image 2
 
-`generate` creates or edits one lossless WebP using Qwen-Image-2.1, and `generate_turbo` does
+`generate` creates or edits one lossless image using Qwen-Image-2.1, and `generate_turbo` does
 the same with Qwen-Image-2.1-Turbo. Both take the same inputs. The model checkpoint is selected
 independently from the package. TensorFS owns model downloads and bytes;
 Runtime owns construction, memory residency and component execution.
@@ -14,9 +14,11 @@ integer range); omitting one chooses a random seed in that range. Inputs are the
 runs no CFG and has no upsampler, so `guidance`, `negative_prompt` and `prompt_upsampling` are ignored
 with a warning, as are unknown fields. The result is `image`, `width`, `height`, `seed` and `prompt`.
 
-Lossless WebP preserves the same decoded pixels and alpha while reducing the bytes returned
-to the client. The image asset reports its actual `image/webp` media type; clients should use
-that media type rather than assume a PNG filename.
+Outputs use lossless WebP to preserve the same decoded pixels and alpha while reducing the
+bytes returned to the client. A canvas with either side at least 16384 pixels uses PNG,
+because that exceeds WebP's dimension limit. The requested canvas is preserved. The image
+asset reports its actual media type; clients should use it rather than assume a filename
+extension.
 
 The size is upstream's `calculate_dimensions` at `megapixels` (held to 1–4 MP), in multiples of 32 px;
 text-to-image defaults to `1:1` at 4 MP, the model's native 2048×2048. A ratio past the model's rotary

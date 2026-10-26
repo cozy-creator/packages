@@ -117,7 +117,9 @@ def _generate(
         decoded = model.decode(latents, width=width, height=height)
         image = decoded_image(decoded)
     with tel.stage("saving image", overall_range=(0.98, 1.0)):
-        asset = out.save_image(image, format="webp")
+        # WebP cannot represent a side of 16384 pixels; retain every supported canvas.
+        output_format = "webp" if max(width, height) < 16384 else "png"
+        asset = out.save_image(image, format=output_format)
     return ImageResult(asset, width, height, seed, payload.prompt)
 
 
