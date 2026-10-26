@@ -4,7 +4,9 @@ Step 0 runs eagerly in the transformer's ``extract`` mode, prefilling the per-la
 condition-image K/V cache over the full joint sequence. Steps ``1..N-1`` are the ``cached``
 pass over the target-image tokens only, and they are identical from one step to the next but
 for the timestep and the running latent. That repeated interval is captured once and replayed
-as a single native program, mirroring SDXL's ``repeat_euler``.
+as one native submission. A resident transformer uses one repeated graph; a capacity
+refusal prepares source-backed block stages that share graph scratch and repeat the whole
+cached step in native Runtime. The eager extract pass remains outside that submission.
 
 What makes the cached step capturable is that everything except the latent is a function of the
 request *layout* (prompt and reference length, canvas), not of the step: the rotary tables, the
@@ -98,7 +100,7 @@ class _Layout:
 
 
 class ResidentDenoise:
-    """One shape-stable repeat, owned and retired by Runtime's existing graph boundary.
+    """Prefer one resident repeat, then native block streaming when residency refuses.
 
     Only the transformer is retained. The eager prefix refreshes K/V for every prompt;
     those values, schedules, layout and initial latent are copied into stable inputs.
