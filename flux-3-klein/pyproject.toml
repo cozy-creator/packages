@@ -4,13 +4,13 @@ version = "0.1.0"
 description = "Cozy text-to-image and reference editing with FLUX.3 Image Klein, distilled and base"
 requires-python = ">=3.12"
 dependencies = [
-    "cozy-runtime[media]>=0.31",
+    "cozy-runtime[media]>=0.33",
     # Flux3 is in Diffusers main only (merged 2026-10-15, #15046).
     "diffusers @ git+https://github.com/huggingface/diffusers@7ecb1e1b4fe500be7fb7381a7bb79a24d7fa3941",
     "msgspec>=0.19",
     "numpy>=1.26",
     "pillow>=12",
-    "tensorfs>=0.13",
+    "tensorfs>=0.16",
     "tokenizers>=0.23.1",
     "torch>=2.13",
     "torchvision>=0.28",

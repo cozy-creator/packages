@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "SeedVR2 7B temporally consistent video restoration"
 requires-python = ">=3.12"
 dependencies = [
-    "cozy-runtime[media]>=0.31",
+    "cozy-runtime[media]>=0.33",
     "diffusers>=0.40",
     "einops>=0.8",
     "msgspec>=0.19",
@@ -12,7 +12,7 @@ dependencies = [
     "omegaconf>=2.3",
     "pillow>=12",
     "rotary-embedding-torch>=0.5.3",
-    "tensorfs>=0.13",
+    "tensorfs>=0.16",
     "torch>=2.14",
     "torchvision>=0.29",
 ]

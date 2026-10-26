@@ -4,13 +4,13 @@ version = "0.1.0"
 description = "Cozy text-to-image and image editing with Bria Fibo 2.0, Dev and Edit Turbo"
 requires-python = ">=3.12"
 dependencies = [
-    "cozy-runtime[media]>=0.31",
+    "cozy-runtime[media]>=0.33",
     # BriaFibo2Pipeline is in Diffusers main only (#14991, merged 2026-10-20).
     "diffusers @ git+https://github.com/huggingface/diffusers@48cdbaef5ee3d718aaee392b44f2099ae511c4a5",
     "msgspec>=0.19",
     "numpy>=1.26",
     "pillow>=12",
-    "tensorfs>=0.13.13",
+    "tensorfs>=0.16",
     "tokenizers>=0.23.1",
     "torch>=2.13",
     "torchvision>=0.28",

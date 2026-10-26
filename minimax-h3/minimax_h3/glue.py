@@ -763,6 +763,10 @@ class _Tokens:
     def dim(self) -> int:
         return len(self.shape)
 
+    def element_size(self) -> int:
+        """The bf16 activation's, as `split` sizes the window's output."""
+        return torch.bfloat16.itemsize
+
     def __getitem__(self, index: tuple[slice, ...]) -> PreQuantized:
         batch, tokens = self.shape[0], self.shape[1]
         payload, scale = (
