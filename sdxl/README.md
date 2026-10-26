@@ -28,52 +28,54 @@ negative prompt, a random seed. Sizes snap to the 64 px stride and stay within 1
 adjustment. SDXL takes no `reference_images`, and ignores `prompt_upsampling` with a warning. The
 result is `image` (a WebP in `~/.cozy/outputs`), `width`, `height`, `seed` and `prompt`.
 
-GPU: any NVIDIA card with 8 GB. The default 8-bit lane is 3.8 GiB (`sdxl@1.0.0`);
-`--lane bf16` loads the 6.5 GiB bf16 lane. A 1024² image at 20 steps takes about 2.6 s on an
-RTX 4090 and 17 s on an 8 GB RTX 4070 Laptop. Without an NVIDIA GPU, add `--on new` to rent
-one.
+Local inference uses Linux and NVIDIA CUDA. The default `int8` model lane is about
+3.8 GiB; the `bf16` catalog lane stores F16 weights and is about 6.5 GiB. Actual fit
+also depends on activations, graph scratch and the selected image dimensions. Rentals
+remain available through `--on new`.
 
 Its recipes write the model's `fp8`, `int8` and `w4a8` lanes, for model authors
 (`cozy model quantize <model> --lane int8 --package sdxl`).
 
-On Runtime 0.32.2, deterministic Euler with epsilon prediction can submit all steps after
-step zero as one prepared native interval. Runtime accepts it only when the UNet is already
-resident and its hooks and weight identity are safe for capture. HiDiffusion, other
-schedulers, streamed models and capacity refusals keep eager execution. The prepared
-interval closes before VAE decode; it is currently prepared per request. Native progress
-reports completed steps without treating observation intervals as per-step GPU timings.
+SDXL 0.1.1 requires Runtime 0.34 or newer and TensorFS 0.17 or newer. These floors
+cover the native sequence, source-stage and graph-pool APIs used by this package;
+older SDKs must not be selected merely because their version accepted an earlier
+package release.
 
-The coordinated native-pipeline candidate additionally supports a single resident program
-for both text encoders, every Euler step and VAE decode. A construction retains at most one
-variant; prompt and seed values update fixed input buffers, while shape, schedule, guidance,
-representation or Runtime invalidation replaces the definition. Runtime prepares the VAE's
-wide representation before capture and owns retirement under pressure.
+For plain epsilon Euler, the package can load missing UNet blocks and run the complete
+denoising interval through native stages at the model's existing virtual addresses.
+The standalone interval shares one owned graph scratch pool. Native code advances the
+stages and repeated steps; Python observes progress. HiDiffusion, unsupported layouts
+and safe preparation refusals retain their existing execution paths. A failure after
+native submission is propagated and never reruns the image automatically.
 
-`ResidentPipeline.prepare` is the explicit preparation entry for an admitted warm turn.
-The ordinary request path only reuses it or captures already-resident representations; it
-does not load the whole model speculatively. The coordinated Runtime candidate invokes
-SDXL's typed preparation factory from an explicit GPU warm request:
+An admitted preparation can also build a reusable sequence covering both text encoders,
+all Euler steps and VAE decode. A construction retains one variant. Prompt and seed
+values update fixed buffers; changed geometry, schedule, guidance, weight representation
+or Runtime invalidation closes the old definition. The wide typed VAE representation
+remains resident through this sequence. Its phase graphs currently use separate scratch
+pools; the later whole-phase pool refinement is not included in this release.
+
+`ResidentPipeline.prepare` is the preparation entry for an admitted warm turn. The
+ordinary request path reuses a valid program or captures only already-resident
+representations; it does not speculatively load the entire pipeline. The public warm
+command accepts model and lane choices, but no request payload or `--gpus`:
 
 ```sh
-cozy run sdxl/generate --warm gpu prompt='warm variant' steps=30 guidance=7.0 aspect_ratio=1:1 hidiffusion=false
+cozy run sdxl/generate --warm gpu --on <machine>
 ```
 
-Warm and ordinary requests use the same resolved dimensions, defaults and adjustment rows.
-Preparation initializes fixed-shape token slots without drawing a seed, submitting an image
-or writing outputs. Later requests with matching geometry and sampling settings can replace
-prompt/seed values and reuse the program. HiDiffusion and capacity refusals leave the existing
-streamed path available. Full-pipeline numerical parity, the production warm caller and
-request reuse remain unqualified until their real release-gate runs pass. The existing
-component and native-interval receipts do not prove this new path.
+This warms the function's default variant. Do not treat it as proof that a different
+30-step, shape or guidance variant has already been prepared. Matching requests reuse
+the prepared buffers; capacity refusal leaves the existing denoising path available.
+Idle pressure can retire a cached program and its boundary buffers after checked
+completion. A later request prepares a fresh definition as needed.
 
-This development candidate requires the coordinated Runtime build with typed preparation,
-`PreparedRepeat.valid()` and final-dtype preparation. Its `>=0.33,<0.34` dependency range
-allows the selected development artifact; it does not establish that every public 0.33
-release has these APIs. Before publication, set the minimum to the published release that
-contains the complete feature and qualify that artifact with this package.
+The merged implementation has real CUDA proof for full-size 1024-square, 30-step streamed
+denoising on an 8 GiB device; the complete phase sequence has reduced-model execution,
+changed-input reuse and pressure-retirement proof. These are distinct scopes. They do
+not establish a full-pipeline fit at every image size or a ComfyUI performance advantage.
 
-Whole-pipeline telemetry uses `native_pipeline` and `request_path.pipeline_native_steps`.
-It does not fabricate separate text/denoise/VAE device durations or a first-noise metric.
-CPU tokenization, input transfer, image verification and WebP/output delivery remain outside
-the submitted GPU program. Tensor-only CLIP conditioning avoids Transformers' lazy output
-collection hooks; its original 5.16.1 forward is the independent numerical oracle.
+Telemetry reports `native_pipeline` and `request_path.pipeline_native_steps` for a
+complete sequence, or native denoising metrics for an interval. It does not invent
+per-step GPU timings from polling. CPU tokenization, input transfer, image validation,
+WebP encoding and output delivery remain outside the native GPU program.
