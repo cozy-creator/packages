@@ -80,17 +80,20 @@ def _generate(
         steps = held(adj, "steps", payload.steps or _STEPS, 1, _MAX_STEPS)
     seed = payload.drawn_seed()
     ctx.raise_if_cancelled()
-    reference_images, reference_latents, image_pad_mask = None, None, None
-    if payload.reference_images:
-        with tel.stage("encoding reference images", overall_range=(0.0, 0.08)):
-            # Upstream feeds the VAE RGBA; its vision encoder sees alpha composited over white.
-            reference_images = [asset.read(mode="RGBA") for asset in payload.reference_images]
-            conditioning_images, reference_latents = model.encode_reference_images(reference_images)
-        ctx.raise_if_cancelled()
+    # Upstream feeds the VAE RGBA; its vision encoder sees alpha composited over white.
+    reference_images = (
+        [asset.read(mode="RGBA") for asset in payload.reference_images]
+        if payload.reference_images else None
+    )
     # What is not given is the first reference's (upstream takes the LAST reference's; every Cozy
     # image package takes the first, the image being edited).
     first = reference_images[0].size if reference_images else None
     width, height = payload.size(adj, first, SIZES, megapixels=SIZES.megapixels[1])
+    reference_latents, image_pad_mask = None, None
+    if reference_images:
+        with tel.stage("encoding reference images", overall_range=(0.0, 0.08)):
+            conditioning_images, reference_latents = model.encode_reference_images(reference_images)
+        ctx.raise_if_cancelled()
     with tel.stage("encoding prompt", overall_range=(0.08 if reference_images else 0.0, 0.1)):
         if reference_images is None:
             embeds, mask = model.encode(payload.prompt)
