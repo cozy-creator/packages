@@ -45,10 +45,12 @@ class StreamedEuler:
         time_ids: torch.Tensor,
         guidance: float,
         ordering: str = "events",
-        _shared_pool: bool = False,
+        _shared_pool: bool | None = None,
         _attach_sequence: bool = True,
         _latent_state: torch.Tensor | None = None,
     ) -> None:
+        if _shared_pool is None:
+            _shared_pool = _attach_sequence
         if _shared_pool and not _attach_sequence:
             _refuse("a shared scratch recording must own its complete sequence")
         if _shared_pool and not callable(getattr(PreparedSequence, "record", None)):
@@ -373,6 +375,7 @@ def stream_euler(*, ctx: Any, tel: Any, **parameters: Any) -> torch.Tensor | Non
             float(sum(row["read_bytes"] for row in facts["stage_inputs"])),
         )
         tel.metric("request_path.denoise_native_launches", float(facts["host_graph_launches"]))
+        tel.metric("request_path.denoise_shared_pool", float(program.shared_pool))
         tel.log("native streamed denoise", **program.facts())
         return result
     finally:
