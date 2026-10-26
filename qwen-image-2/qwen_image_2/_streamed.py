@@ -54,17 +54,21 @@ class _StreamedDenoise(_Denoise):
             def reset(_):
                 index.zero_()
 
-            recording.capture(
-                reset, state=(index,), steps=1, owners=(*slots, hidden, temb, modulation)
-            )
+            stages = [
+                recording.capture(
+                    reset, state=(index,), steps=1, owners=(*slots, hidden, temb, modulation)
+                )
+            ]
 
             def enter(_):
                 hidden.copy_(transformer.img_in(state))
                 temb.copy_(transformer.time_text_embed(euler.timestep(index), hidden))
                 modulation.copy_(transformer.modulation(temb))
 
-            recording.capture_stage(
-                enter, state=(hidden, temb, modulation), owner=transformer, paths=()
+            stages.append(
+                recording.capture_stage(
+                    enter, state=(hidden, temb, modulation), owner=transformer, paths=()
+                )
             )
             for number, (block, cache) in enumerate(zip(blocks, caches, strict=True)):
 
@@ -84,11 +88,13 @@ class _StreamedDenoise(_Denoise):
                         )
                     )
 
-                recording.capture_stage(
-                    body,
-                    state=(hidden,),
-                    owner=transformer,
-                    paths=(f"transformer_blocks.{number}",),
+                stages.append(
+                    recording.capture_stage(
+                        body,
+                        state=(hidden,),
+                        owner=transformer,
+                        paths=(f"transformer_blocks.{number}",),
+                    )
                 )
 
             def sample(_):
@@ -97,6 +103,13 @@ class _StreamedDenoise(_Denoise):
                 state.copy_((state.float() + euler.delta(index) * noise).to(state.dtype))
                 index.add_(1)
 
-            recording.capture_stage(sample, state=(state, index), owner=transformer, paths=())
+            stages.append(
+                recording.capture_stage(sample, state=(state, index), owner=transformer, paths=())
+            )
+            if any(not stage.valid() for stage in stages):
+                raise CapabilityError(
+                    "Qwen stage identity changed during preparation",
+                    code="prepared_graph_ineligible",
+                )
             self.plan = recording.finish(outputs=(state,), repeat=(1, len(blocks) + 3, total - 1))
         self._inputs = tuple(weakref.ref(value) for value in slots)
