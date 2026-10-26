@@ -473,43 +473,63 @@ def _sample(
     # HiDiffusion's window blocks seed torch's CPU RNG from the request (`_cozy_draw`): the
     # RNG state outside the loop is left as it was.
     with torch.random.fork_rng(devices=[]), tel.stage("denoise", overall_range=(0.10, 0.90)):
-        for index, timestep in enumerate(scheduler.timesteps):
-            ctx.raise_if_cancelled()
-            batch = torch.cat([latents] * 2) if classifier_free else latents
-            model_input = scheduler.scale_model_input(batch, timestep)
-            noise = model.denoise(
-                model_input,
-                timestep,
-                batch_prompt,
-                batch_pooled,
-                batch_ids,
-                index,
-                steps,
-                hidiffusion_applied,
-                seed,
+        loaded = None
+        if not hidiffusion_applied:
+            unet = model.pipe.components["unet"]
+            unet.begin_denoise_request(steps, False, seed)
+            unet.cozy_step = 0
+            loaded = repeat_euler(
+                unet=unet,
+                scheduler=scheduler,
+                latents=latents,
+                prompt=batch_prompt,
+                pooled=batch_pooled,
+                time_ids=batch_ids,
+                guidance=guidance,
+                ctx=ctx,
+                tel=tel,
+                load_from_storage=True,
             )
-            if classifier_free:
-                uncond, cond = noise.chunk(2)
-                noise = uncond + guidance * (cond - uncond)
-            if index == 0:
-                tel.metric("noise_absmax_step0", _finite(torch, noise))
-            latents = step(noise, timestep, latents).prev_sample
-            on_step(index)
-            if index == 0 and not hidiffusion_applied:
-                prepared = repeat_euler(
-                    unet=model.pipe.components["unet"],
-                    scheduler=scheduler,
-                    latents=latents,
-                    prompt=batch_prompt,
-                    pooled=batch_pooled,
-                    time_ids=batch_ids,
-                    guidance=guidance,
-                    ctx=ctx,
-                    tel=tel,
+        if loaded is not None:
+            latents = loaded
+        else:
+            for index, timestep in enumerate(scheduler.timesteps):
+                ctx.raise_if_cancelled()
+                batch = torch.cat([latents] * 2) if classifier_free else latents
+                model_input = scheduler.scale_model_input(batch, timestep)
+                noise = model.denoise(
+                    model_input,
+                    timestep,
+                    batch_prompt,
+                    batch_pooled,
+                    batch_ids,
+                    index,
+                    steps,
+                    hidiffusion_applied,
+                    seed,
                 )
-                if prepared is not None:
-                    latents = prepared
-                    break
+                if classifier_free:
+                    uncond, cond = noise.chunk(2)
+                    noise = uncond + guidance * (cond - uncond)
+                if index == 0:
+                    tel.metric("noise_absmax_step0", _finite(torch, noise))
+                latents = step(noise, timestep, latents).prev_sample
+                on_step(index)
+                if index == 0 and not hidiffusion_applied:
+                    prepared = repeat_euler(
+                        unet=model.pipe.components["unet"],
+                        scheduler=scheduler,
+                        latents=latents,
+                        prompt=batch_prompt,
+                        pooled=batch_pooled,
+                        time_ids=batch_ids,
+                        guidance=guidance,
+                        ctx=ctx,
+                        tel=tel,
+                    )
+                    if prepared is not None:
+                        latents = prepared
+                        break
     tel.metric("latent_absmax", _finite(torch, latents))
 
     with tel.stage("decode", overall_range=(0.90, 0.98)):
