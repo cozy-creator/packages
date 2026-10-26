@@ -229,9 +229,9 @@ class ResidentDenoise:
                     identity_scope="process-local",
                     reused=reused,
                 )
-                # The next request may update the reusable state while this request's
-                # VAE consumes its output; hand the caller independent storage.
-                return result.clone()
+                # Execution.wait returns its own completed readout, not the plan's
+                # mutable state. The next request cannot overwrite this VAE input.
+                return result
             except BaseException:
                 self.close()
                 raise
