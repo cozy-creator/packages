@@ -282,11 +282,16 @@ class _Denoise:
                 state.copy_((state.float() + euler.delta(index) * noise).to(state.dtype))
 
         self.plan = PreparedRepeat.capture(
-            body, state=(state,), steps=total - 1, owners=(transformer,), resident_only=True
+            body,
+            state=(state,),
+            steps=total - 1,
+            owners=(transformer, *slots[1:]),
+            resident_only=True,
         )
         # The native definition owns these inputs. Weak references let ordinary Runtime
         # graph retirement free K/V/layout buffers immediately under pressure; this cache
         # keeps no second strong owner or text-encoder weight binding.
+        # Explicit owners also cover inputs unused by a particular selected kernel.
         self._inputs = tuple(weakref.ref(value) for value in slots)
 
     def update(self, inputs: tuple[torch.Tensor, ...]) -> None:
