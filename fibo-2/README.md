@@ -34,7 +34,8 @@ cozy run fibo-2/generate_turbo prompt='Replace the jacket with a red leather one
   --asset reference_images.0=photo.jpg
 ```
 
-Both take the shared image request (`ImageRequest`). Unset knobs take Fibo's defaults: `steps` 50 (Dev) or 4
+Both take the shared image request (`ImageRequest`), which rejects output aspect ratios outside
+1:16 through 16:1, inclusive. Unset knobs take Fibo's defaults: `steps` 50 (Dev) or 4
 (Turbo), `guidance` 5.0 and `negative_prompt` Bria's (Dev only; Turbo warns and ignores them), and
 `prompt_upsampling` on. A `seed` is drawn when omitted and returned. Fibo 2.0 was trained at about 1 MP on a
 16 px grid (model card). Text-to-image defaults to 1:1 at 1024×1024. With references, the output takes the

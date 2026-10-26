@@ -34,7 +34,7 @@ cozy run qwen-image/generate_turbo \
 
 Inputs are the shared image request: `prompt`, `reference_images` (ordered, up to ten; Qwen
 recommends one to three, and the prompt calls them "Picture 1", "Picture 2", ...), `aspect_ratio`
-(any `W:H`), `megapixels` (1024² pixels each), `steps`, `seed` (random when omitted, returned).
+(`W:H` from 1:16 to 16:1, inclusive), `megapixels` (1024² pixels each), `steps`, `seed` (random when omitted, returned).
 `generate` also takes `guidance` and `negative_prompt`; by default each model card's: Qwen-Image-2512's
 Chinese quality negative, and Qwen-Image-Edit-2511's single space. `reference_boxes` and
 `prompt_upsampling` are accepted and ignored with a warning: the model has no layout control or
