@@ -435,17 +435,21 @@ def repeat_euler(
     guidance: float,
     ctx: Context,
     tel: Telemetry,
+    load_from_storage: bool = False,
 ) -> torch.Tensor | None:
-    """After eager step zero, finish a supported resident interval or leave it to the caller.
+    """Run an eligible resident Euler interval, optionally loading missing raw UNet blocks.
 
     A refusal before submission preserves the caller's latent. Once submitted, errors and
     cancellation propagate; they never rerun an interval that might have partially executed.
     HiDiffusion/DDIM and other Euler prediction rules keep their ordinary scheduler loop.
     """
+    if load_from_storage and not getattr(PreparedRepeat, "supports_component_load", False):
+        return None
+    start = 0 if load_from_storage else 1
     if (
         type(scheduler) is not EulerDiscreteScheduler
         or scheduler.config.prediction_type != "epsilon"
-        or scheduler.step_index != 1
+        or scheduler.step_index not in ((None, 0) if load_from_storage else (1,))
         or not latents.is_cuda
         or latents.dtype not in (torch.float16, torch.bfloat16, torch.float32)
         or scheduler.sigmas.device.type != "cpu"
@@ -459,17 +463,20 @@ def repeat_euler(
     try:
         with torch.inference_mode(False), torch.no_grad():
             state = latents.clone()
-            euler = _Euler(scheduler, state.device, 1)
+            euler = _Euler(scheduler, state.device, start)
 
         def body(index: torch.Tensor) -> None:
             with torch.no_grad():
                 euler.step(unet, index, state, prompt, pooled, time_ids, guidance)
 
+        options: dict[str, Any] = {"resident_only": not load_from_storage}
+        if load_from_storage:
+            options.update(load_component=unet, load_ordering="auto")
         plan = PreparedRepeat.capture(
-            body, state=(state,), steps=total - 1, owners=(unet,), resident_only=True
+            body, state=(state,), steps=total - start, owners=(unet,), **options
         )
     except CapabilityError as error:
-        if error.code != "prepared_graph_ineligible":
+        if error.code not in ("prepared_graph_ineligible", "prepared_load_unavailable"):
             raise
         tel.log("eager denoise", reason=str(error))
         return None
@@ -487,7 +494,7 @@ def repeat_euler(
             progress = execution.poll()
             if progress.completed_steps != observed:
                 observed = progress.completed_steps
-                fraction = (1 + observed) / total
+                fraction = (start + observed) / total
                 # Observation intervals are not GPU step timings. The GPU continues while
                 # this watcher sleeps; it does not need a Python callback per iteration.
                 tel.progress(fraction, stage="denoise", overall_fraction=0.10 + 0.80 * fraction)
@@ -495,9 +502,17 @@ def repeat_euler(
                 break
             time.sleep(0.05)
         (result,) = execution.wait()
-        if progress.canceled or progress.completed_steps != total - 1:
+        if progress.canceled or progress.completed_steps != total - start:
             raise OutputError("prepared denoising stopped early", code="incomplete_denoise")
         tel.metric("request_path.denoise_native_steps", float(progress.completed_steps))
+        if load := execution.facts().get("native_load"):
+            tel.metric("request_path.denoise_native_load_bytes", float(load["read_bytes"]))
+            tel.log(
+                "native denoise input",
+                ordering=load["ordering"],
+                regions=load["input_read_bytes"],
+                completion_proven=load["completion_proven"],
+            )
         return result
     finally:
         # No request-path graph retains UNet pages while the VAE starts. Close also joins
