@@ -179,11 +179,28 @@ class ResidentDenoise:
                 except CapabilityError as error:
                     if error.code != "prepared_graph_ineligible":
                         raise
-                    tel.log("eager denoise", reason=str(error))
-                    return None
+                    if "capture requires the component's weights to be resident" not in str(error):
+                        tel.log("eager denoise", reason=str(error))
+                        return None
                 except torch.OutOfMemoryError:
-                    tel.log("eager denoise", reason="resident graph preparation exceeded capacity")
-                    return None
+                    pass  # No accepted work: try native block streaming at the same boundary.
+                if program is None:
+                    from ._streamed import _StreamedDenoise
+
+                    try:
+                        program = _StreamedDenoise(
+                            key, transformer, inputs, euler, caches, layout, total
+                        )
+                    except CapabilityError as error:
+                        if error.code != "prepared_graph_ineligible":
+                            raise
+                        tel.log("eager denoise", reason=str(error))
+                        return None
+                    except torch.OutOfMemoryError:
+                        tel.log(
+                            "eager denoise", reason="native block preparation exceeded capacity"
+                        )
+                        return None
                 self._program = program
             tel.metric(
                 "request_path.denoise_capture_ms",
@@ -203,8 +220,13 @@ class ResidentDenoise:
                 while True:
                     ctx.raise_if_cancelled()
                     progress = execution.poll()
-                    if progress.completed_steps != observed:
-                        observed = progress.completed_steps
+                    completed = (
+                        int(execution.facts()["sequence"]["completed_passes"])
+                        if program.streaming
+                        else progress.completed_steps
+                    )
+                    if completed != observed:
+                        observed = completed
                         fraction = (1 + observed) / total
                         tel.progress(
                             fraction,
@@ -215,19 +237,21 @@ class ResidentDenoise:
                         break
                     time.sleep(0.05)
                 (result,) = execution.wait()
-                if progress.canceled or progress.completed_steps != total - 1:
+                if progress.canceled or observed != total - 1:
                     raise OutputError("prepared denoising stopped early", code="incomplete_denoise")
-                tel.metric("request_path.denoise_native_steps", float(progress.completed_steps))
+                tel.metric("request_path.denoise_native_steps", float(observed))
+                tel.metric("request_path.denoise_streamed", float(program.streaming))
                 tel.metric(
                     "request_path.denoise_host_launches",
                     float(int(execution.facts()["host_graph_launches"]) - launches),
                 )
                 tel.log(
-                    "resident denoise definition",
+                    "native denoise definition",
                     pid=os.getpid(),
                     plan=f"{id(program.plan):x}",
                     identity_scope="process-local",
                     reused=reused,
+                    streamed=program.streaming,
                 )
                 # Execution.wait returns its own completed readout, not the plan's
                 # mutable state. The next request cannot overwrite this VAE input.
@@ -238,6 +262,8 @@ class ResidentDenoise:
 
 
 class _Denoise:
+    streaming = False
+
     def __init__(
         self,
         key: tuple[Any, ...],
