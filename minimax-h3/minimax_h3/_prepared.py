@@ -192,6 +192,11 @@ def prepare(
                     resident_only=True,
                 )
             plans.append(plan)
+        if not all(plan.valid() for plan in plans):
+            raise CapabilityError(
+                "H3 weights or selected kernels changed during segment preparation",
+                code="prepared_graph_ineligible",
+            )
         sequence = sequence_type(plans, outputs=(video, audio))
         return sequence, pieces
     except BaseException:
