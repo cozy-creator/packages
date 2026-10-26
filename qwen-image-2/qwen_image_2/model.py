@@ -390,6 +390,9 @@ class QwenImage21Model(Model[QwenImage21Graph], encoded_leaves="accept"):
             img_shapes = [[(1, height // pipeline.vae_scale_factor, width // pipeline.vae_scale_factor)]]
             layout = _Layout(transformer, img_shapes, image_pad_mask, None, device)
 
+            # This attempt may be discarded if capture refuses after step 0. Keep its
+            # real timing separate from the full eager fallback's denoise callbacks.
+            observe_step0 = tel.step_callback(steps, stage="native preparation step 0")
             # Eager step 0 prefills the prefix K/V over the full joint sequence.
             kv_cache = QwenImage21KVCache(len(transformer.transformer_blocks))
             timestep = timesteps[0:1].to(transformer.dtype) / 1000
@@ -407,6 +410,7 @@ class QwenImage21Model(Model[QwenImage21Graph], encoded_leaves="accept"):
             )[0]
             noise = noise[:, -latents.shape[1] :]
             latents = scheduler.step(noise, timesteps[0], latents, return_dict=False)[0]
+            observe_step0(0)
 
         return repeat_cached(
             transformer=transformer,
