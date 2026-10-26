@@ -10,6 +10,7 @@ from __future__ import annotations
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from typing import Any
 
+import numpy as np
 import torch
 from diffusers import (
     AutoencoderKLQwenImage21,
@@ -17,8 +18,15 @@ from diffusers import (
     QwenImage21Pipeline,
     QwenImage21Transformer2DModel,
 )
-from diffusers.models.transformers.transformer_qwenimage21 import QwenImage21TransformerBlock
-from diffusers.pipelines.qwenimage21.pipeline_qwenimage21 import calculate_dimensions
+from diffusers.models.transformers.transformer_qwenimage21 import (
+    QwenImage21KVCache,
+    QwenImage21TransformerBlock,
+)
+from diffusers.pipelines.qwenimage21.pipeline_qwenimage21 import (
+    calculate_dimensions,
+    calculate_shift,
+    retrieve_timesteps,
+)
 from transformers import (
     AutoModelForImageTextToText,
     Qwen3VLConfig,
@@ -29,12 +37,16 @@ from cozy_runtime import fusion, rng, vlm
 from cozy_runtime.author import (
     Config,
     ConformanceError,
+    Context,
     Loader,
     MemoDistribution,
     Model,
+    Telemetry,
     uses_components,
 )
 from cozy_runtime.author.kernels import Plan
+
+from ._prepared import _Layout, repeat_cached
 
 
 def _modulation(block: Any, arguments: Mapping[str, Any]) -> fusion.Modulation:
@@ -273,6 +285,154 @@ class QwenImage21Model(Model[QwenImage21Graph], encoded_leaves="accept"):
         seed: int,
         on_step: Callable[[int], None],
         cancel: Callable[[], None],
+        ctx: Context,
+        tel: Telemetry,
+        reference_images: list[Any] | None = None,
+        reference_latents: torch.Tensor | None = None,
+        image_pad_mask: torch.Tensor | None = None,
+    ) -> Any:
+        """Eager step 0 then one captured native interval, or the eager Diffusers loop.
+
+        The native path removes Python from steps ``1..N-1``; a capability or capacity refusal
+        before submission falls through to the ordinary pipeline, which produces the same image
+        at the same seed. Q1 covers the text-to-image case (no reference images, unpadded single
+        prompt); other requests take the eager path.
+        """
+        cancel()
+        if (
+            ctx.device.type == "cuda"
+            and reference_latents is None
+            and reference_images is None
+            and mask is None
+        ):
+            latents = self._denoise_resident(
+                embeds, width=width, height=height, steps=steps, seed=seed, ctx=ctx, tel=tel
+            )
+            if latents is not None:
+                return latents
+        return self._denoise_eager(
+            embeds,
+            mask,
+            width=width,
+            height=height,
+            steps=steps,
+            seed=seed,
+            on_step=on_step,
+            cancel=cancel,
+            reference_images=reference_images,
+            reference_latents=reference_latents,
+            image_pad_mask=image_pad_mask,
+        )
+
+    def _denoise_resident(
+        self,
+        embeds: Any,
+        *,
+        width: int,
+        height: int,
+        steps: int,
+        seed: int,
+        ctx: Context,
+        tel: Telemetry,
+    ) -> Any:
+        """Run eager extract step 0 then the captured cached interval; ``None`` on refusal.
+
+        The preparation mirrors `QwenImage21Pipeline.__call__` for the text-to-image case,
+        reusing the pipeline's own `prepare_latents`/`calculate_shift`/`retrieve_timesteps` so
+        the schedule, noise and layout match the eager loop exactly.
+        """
+        transformer = self.graph.components["transformer"]
+        device = torch.device(str(self.device))
+        pipeline = self._pipeline()
+        scheduler = pipeline.scheduler
+        multiple_of = pipeline.vae_scale_factor * 2
+        width = width // multiple_of * multiple_of
+        height = height // multiple_of * multiple_of
+
+        with torch.inference_mode(False), torch.no_grad():
+            embeds = embeds.to(device=device, dtype=transformer.dtype)
+            latents, _ = pipeline.prepare_latents(
+                None,
+                1,
+                transformer.config.in_channels,
+                height,
+                width,
+                transformer.dtype,
+                device,
+                rng.generator(seed),
+                None,
+            )
+            # The checkpoint's own schedule when it names one (Turbo), else the uniform spacing
+            # the pipeline uses when no `sigmas` is passed. The dynamic shift follows the canvas.
+            sigmas = (
+                np.array(self.graph.sample_sigmas, dtype=np.float32)
+                if self.graph.sample_sigmas
+                else np.linspace(1.0, 1 / steps, steps)
+            )
+            mu = calculate_shift(
+                latents.shape[1],
+                scheduler.config.get("base_image_seq_len", 256),
+                scheduler.config.get("max_image_seq_len", 4096),
+                scheduler.config.get("base_shift", 0.5),
+                scheduler.config.get("max_shift", 1.15),
+            )
+            timesteps, steps = retrieve_timesteps(scheduler, steps, device, sigmas=sigmas, mu=mu)
+            if len(timesteps) < 2:
+                return None
+            scheduler.set_begin_index(0)
+
+            # The joint-sequence image mask: no condition images for text-to-image, then one
+            # vision-language slot per 2x2 group of target latents, as the pipeline appends.
+            image_pad_mask = embeds.new_zeros((1, embeds.shape[1]), dtype=torch.bool)
+            image_pad_mask = torch.cat(
+                [image_pad_mask, image_pad_mask.new_ones(1, latents.shape[1] // 4)], dim=1
+            )
+            img_shapes = [[(1, height // pipeline.vae_scale_factor, width // pipeline.vae_scale_factor)]]
+            layout = _Layout(transformer, img_shapes, image_pad_mask, None, device)
+
+            # This attempt may be discarded if capture refuses after step 0. Keep its
+            # real timing separate from the full eager fallback's denoise callbacks.
+            observe_step0 = tel.step_callback(steps, stage="native preparation step 0")
+            # Eager step 0 prefills the prefix K/V over the full joint sequence.
+            kv_cache = QwenImage21KVCache(len(transformer.transformer_blocks))
+            timestep = timesteps[0:1].to(transformer.dtype) / 1000
+            noise = transformer(
+                hidden_states=latents,
+                timestep=timestep,
+                encoder_hidden_states=embeds,
+                encoder_hidden_states_mask=None,
+                img_shapes=img_shapes,
+                img_mask=image_pad_mask,
+                attention_kwargs={},
+                kv_cache=kv_cache,
+                kv_cache_mode="extract",
+                return_dict=False,
+            )[0]
+            noise = noise[:, -latents.shape[1] :]
+            latents = scheduler.step(noise, timesteps[0], latents, return_dict=False)[0]
+            observe_step0(0)
+
+        return repeat_cached(
+            transformer=transformer,
+            scheduler=scheduler,
+            latents=latents,
+            kv_cache=kv_cache,
+            layout=layout,
+            ctx=ctx,
+            tel=tel,
+        )
+
+    def _denoise_eager(
+        self,
+        embeds: Any,
+        mask: Any,
+        *,
+        width: int,
+        height: int,
+        steps: int,
+        seed: int,
+        on_step: Callable[[int], None],
+        cancel: Callable[[], None],
         reference_images: list[Any] | None = None,
         reference_latents: torch.Tensor | None = None,
         image_pad_mask: torch.Tensor | None = None,
@@ -289,7 +449,6 @@ class QwenImage21Model(Model[QwenImage21Graph], encoded_leaves="accept"):
             on_step(step)
             return values
 
-        cancel()
         with torch.inference_mode():
             return pipeline(
                 image=reference_images,
