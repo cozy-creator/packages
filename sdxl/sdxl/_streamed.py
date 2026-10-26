@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import time
 from typing import Any
+from contextlib import nullcontext
 
 import torch
 from cozy_runtime.author import CapabilityError, OutputError
@@ -44,9 +45,14 @@ class StreamedEuler:
         time_ids: torch.Tensor,
         guidance: float,
         ordering: str = "events",
+        _shared_pool: bool = False,
         _attach_sequence: bool = True,
         _latent_state: torch.Tensor | None = None,
     ) -> None:
+        if _shared_pool and not _attach_sequence:
+            _refuse("a shared scratch recording must own its complete sequence")
+        if _shared_pool and not callable(getattr(PreparedSequence, "record", None)):
+            _refuse("Runtime lacks owned sequential graph pools")
         if not callable(getattr(PreparedRepeat, "capture_stage", None)):
             _refuse("Runtime lacks native model block stages")
         if (
@@ -116,6 +122,9 @@ class StreamedEuler:
             hidden = allocate((batch, unet.conv_in.out_channels, height, width))
             embedding = allocate((batch, unet.time_embedding.linear_2.out_features))
 
+        recording = PreparedSequence.record() if _shared_pool else None
+        self.shared_pool = _shared_pool
+
         def capture(name, operation, state, paths=None):
             self.calls[name] = 0
 
@@ -125,9 +134,11 @@ class StreamedEuler:
 
             began = time.perf_counter()
             if paths is None:
-                plan = PreparedRepeat.capture(body, state=state, steps=1)
+                plan = (PreparedRepeat if recording is None else recording).capture(
+                    body, state=state, steps=1
+                )
             else:
-                plan = PreparedRepeat.capture_stage(
+                plan = (PreparedRepeat if recording is None else recording).capture_stage(
                     body, state=state, owner=unet, paths=paths, load_ordering=ordering
                 )
             self.definitions.append(plan)
@@ -149,150 +160,159 @@ class StreamedEuler:
             return plan
 
         try:
-            capture("reset", lambda: self.index.zero_(), (self.index,))
+            with recording if recording is not None else nullcontext():
+                capture("reset", lambda: self.index.zero_(), (self.index,))
 
-            def project(input_hidden=hidden):
-                timestep = euler.timesteps.index_select(0, self.index)
-                inverse_scale = euler.inverse_scales.index_select(0, self.index).reshape(())
-                sample = torch.cat([self.latent] * 2) if guidance > 1 else self.latent
-                sample = (sample.float() * inverse_scale).to(sample.dtype)
-                if unet.config.center_input_sample:
-                    sample = 2 * sample - 1.0
-                t_emb = unet.get_time_embed(sample=sample, timestep=timestep)
-                emb = unet.time_embedding(t_emb, None)
-                augmented = unet.get_aug_embed(
-                    emb=emb,
-                    encoder_hidden_states=prompt,
-                    added_cond_kwargs={"text_embeds": pooled, "time_ids": time_ids},
-                )
-                emb = emb + augmented if augmented is not None else emb
-                if unet.time_embed_act is not None:
-                    emb = unet.time_embed_act(emb)
-                embedding.copy_(emb)
-                input_hidden.copy_(unet.conv_in(sample))
+                def project(input_hidden=hidden):
+                    timestep = euler.timesteps.index_select(0, self.index)
+                    inverse_scale = euler.inverse_scales.index_select(0, self.index).reshape(())
+                    sample = torch.cat([self.latent] * 2) if guidance > 1 else self.latent
+                    sample = (sample.float() * inverse_scale).to(sample.dtype)
+                    if unet.config.center_input_sample:
+                        sample = 2 * sample - 1.0
+                    t_emb = unet.get_time_embed(sample=sample, timestep=timestep)
+                    emb = unet.time_embedding(t_emb, None)
+                    augmented = unet.get_aug_embed(
+                        emb=emb,
+                        encoder_hidden_states=prompt,
+                        added_cond_kwargs={"text_embeds": pooled, "time_ids": time_ids},
+                    )
+                    emb = emb + augmented if augmented is not None else emb
+                    if unet.time_embed_act is not None:
+                        emb = unet.time_embed_act(emb)
+                    embedding.copy_(emb)
+                    input_hidden.copy_(unet.conv_in(sample))
 
-            input_hidden = hidden
-            capture("input", project, (input_hidden, embedding), ())
-            skips = [input_hidden]
-            for number, block in enumerate(unet.down_blocks):
+                input_hidden = hidden
+                capture("input", project, (input_hidden, embedding), ())
+                skips = [input_hidden]
+                for number, block in enumerate(unet.down_blocks):
+                    incoming = hidden
+                    channels = block.resnets[-1].out_channels
+                    with torch.inference_mode(False):
+                        outgoing = [
+                            allocate((batch, channels, height, width)) for _ in block.resnets
+                        ]
+                        if block.downsamplers:
+                            height, width = height // 2, width // 2
+                            outgoing.append(allocate((batch, channels, height, width)))
+                    outputs = tuple(outgoing)
+
+                    def down(block=block, incoming=incoming, outputs=outputs):
+                        if getattr(block, "has_cross_attention", False):
+                            result, residuals = block(
+                                hidden_states=incoming,
+                                temb=embedding,
+                                encoder_hidden_states=prompt,
+                                attention_mask=None,
+                                cross_attention_kwargs=None,
+                                encoder_attention_mask=None,
+                            )
+                        else:
+                            result, residuals = block(hidden_states=incoming, temb=embedding)
+                        if len(residuals) != len(outputs):
+                            _refuse("SDXL down block changed its skip layout")
+                        for slot, value in zip(outputs, residuals, strict=True):
+                            slot.copy_(value)
+                        # Diffusers' final residual is the same output used by the next block.
+                        if result.shape != outputs[-1].shape:
+                            _refuse("SDXL down output differs from its final skip layout")
+
+                    capture(f"down{number}", down, outputs, (f"down_blocks.{number}",))
+                    skips.extend(outputs)
+                    hidden = outputs[-1]
+
                 incoming = hidden
-                channels = block.resnets[-1].out_channels
                 with torch.inference_mode(False):
-                    outgoing = [allocate((batch, channels, height, width)) for _ in block.resnets]
-                    if block.downsamplers:
-                        height, width = height // 2, width // 2
-                        outgoing.append(allocate((batch, channels, height, width)))
-                outputs = tuple(outgoing)
+                    hidden = allocate(tuple(incoming.shape))
+                mid_output = hidden
 
-                def down(block=block, incoming=incoming, outputs=outputs):
+                def middle(incoming=incoming):
+                    block = unet.mid_block
                     if getattr(block, "has_cross_attention", False):
-                        result, residuals = block(
-                            hidden_states=incoming,
-                            temb=embedding,
+                        result = block(
+                            incoming,
+                            embedding,
                             encoder_hidden_states=prompt,
                             attention_mask=None,
                             cross_attention_kwargs=None,
                             encoder_attention_mask=None,
                         )
                     else:
-                        result, residuals = block(hidden_states=incoming, temb=embedding)
-                    if len(residuals) != len(outputs):
-                        _refuse("SDXL down block changed its skip layout")
-                    for slot, value in zip(outputs, residuals, strict=True):
-                        slot.copy_(value)
-                    # Diffusers' final residual is the same output used by the next block.
-                    if result.shape != outputs[-1].shape:
-                        _refuse("SDXL down output differs from its final skip layout")
+                        result = block(incoming, embedding)
+                    mid_output.copy_(result)
 
-                capture(f"down{number}", down, outputs, (f"down_blocks.{number}",))
-                skips.extend(outputs)
-                hidden = outputs[-1]
+                capture("mid", middle, (mid_output,), ("mid_block",))
+                for number, block in enumerate(unet.up_blocks):
+                    incoming = hidden
+                    count = len(block.resnets)
+                    residuals = tuple(skips[-count:])
+                    del skips[-count:]
+                    if len(residuals) != count:
+                        _refuse("SDXL up block has insufficient persistent skips")
+                    channels = block.resnets[-1].out_channels
+                    if block.upsamplers:
+                        height, width = height * 2, width * 2
+                    with torch.inference_mode(False):
+                        hidden = allocate((batch, channels, height, width))
+                    outgoing = hidden
 
-            incoming = hidden
-            with torch.inference_mode(False):
-                hidden = allocate(tuple(incoming.shape))
-            mid_output = hidden
+                    def up(
+                        block=block,
+                        incoming=incoming,
+                        residuals=residuals,
+                        outgoing=outgoing,
+                    ):
+                        arguments = {
+                            "hidden_states": incoming,
+                            "temb": embedding,
+                            "res_hidden_states_tuple": residuals,
+                            "upsample_size": None,
+                        }
+                        if getattr(block, "has_cross_attention", False):
+                            arguments.update(
+                                encoder_hidden_states=prompt,
+                                cross_attention_kwargs=None,
+                                attention_mask=None,
+                                encoder_attention_mask=None,
+                            )
+                        outgoing.copy_(block(**arguments))
 
-            def middle(incoming=incoming):
-                block = unet.mid_block
-                if getattr(block, "has_cross_attention", False):
-                    result = block(
-                        incoming,
-                        embedding,
-                        encoder_hidden_states=prompt,
-                        attention_mask=None,
-                        cross_attention_kwargs=None,
-                        encoder_attention_mask=None,
-                    )
-                else:
-                    result = block(incoming, embedding)
-                mid_output.copy_(result)
+                    capture(f"up{number}", up, (outgoing,), (f"up_blocks.{number}",))
+                if skips or (height, width) != tuple(latents.shape[-2:]):
+                    _refuse("SDXL skip topology did not close at the original latent geometry")
+                final_hidden = hidden
 
-            capture("mid", middle, (mid_output,), ("mid_block",))
-            for number, block in enumerate(unet.up_blocks):
-                incoming = hidden
-                count = len(block.resnets)
-                residuals = tuple(skips[-count:])
-                del skips[-count:]
-                if len(residuals) != count:
-                    _refuse("SDXL up block has insufficient persistent skips")
-                channels = block.resnets[-1].out_channels
-                if block.upsamplers:
-                    height, width = height * 2, width * 2
-                with torch.inference_mode(False):
-                    hidden = allocate((batch, channels, height, width))
-                outgoing = hidden
+                def sample():
+                    value = final_hidden
+                    if unet.conv_norm_out is not None:
+                        value = unet.conv_act(unet.conv_norm_out(value))
+                    noise = unet.conv_out(value)
+                    if guidance > 1:
+                        uncond, cond = noise.chunk(2)
+                        noise = uncond + guidance * (cond - uncond)
+                    sigma = euler.sigmas.index_select(0, self.index).reshape(())
+                    inverse_sigma = euler.inverse_sigmas.index_select(0, self.index).reshape(())
+                    delta = euler.deltas.index_select(0, self.index).reshape(())
+                    value = self.latent.float()
+                    original = value - (sigma * noise.float()).to(noise.dtype)
+                    derivative = (value - original) * inverse_sigma
+                    self.latent.copy_((value + derivative * delta).to(noise.dtype))
+                    self.index.add_(1)
 
-                def up(
-                    block=block,
-                    incoming=incoming,
-                    residuals=residuals,
-                    outgoing=outgoing,
-                ):
-                    arguments = {
-                        "hidden_states": incoming,
-                        "temb": embedding,
-                        "res_hidden_states_tuple": residuals,
-                        "upsample_size": None,
-                    }
-                    if getattr(block, "has_cross_attention", False):
-                        arguments.update(
-                            encoder_hidden_states=prompt,
-                            cross_attention_kwargs=None,
-                            attention_mask=None,
-                            encoder_attention_mask=None,
+                capture("sampler", sample, (self.latent, self.index), ())
+                if _attach_sequence:
+                    self.plan = (
+                        PreparedSequence(
+                            self.definitions,
+                            outputs=(self.latent,),
+                            repeat=(1, len(self.definitions), self.steps),
                         )
-                    outgoing.copy_(block(**arguments))
-
-                capture(f"up{number}", up, (outgoing,), (f"up_blocks.{number}",))
-            if skips or (height, width) != tuple(latents.shape[-2:]):
-                _refuse("SDXL skip topology did not close at the original latent geometry")
-            final_hidden = hidden
-
-            def sample():
-                value = final_hidden
-                if unet.conv_norm_out is not None:
-                    value = unet.conv_act(unet.conv_norm_out(value))
-                noise = unet.conv_out(value)
-                if guidance > 1:
-                    uncond, cond = noise.chunk(2)
-                    noise = uncond + guidance * (cond - uncond)
-                sigma = euler.sigmas.index_select(0, self.index).reshape(())
-                inverse_sigma = euler.inverse_sigmas.index_select(0, self.index).reshape(())
-                delta = euler.deltas.index_select(0, self.index).reshape(())
-                value = self.latent.float()
-                original = value - (sigma * noise.float()).to(noise.dtype)
-                derivative = (value - original) * inverse_sigma
-                self.latent.copy_((value + derivative * delta).to(noise.dtype))
-                self.index.add_(1)
-
-            capture("sampler", sample, (self.latent, self.index), ())
-            if _attach_sequence:
-                self.plan = PreparedSequence(
-                    self.definitions,
-                    outputs=(self.latent,),
-                    repeat=(1, len(self.definitions), self.steps),
-                )
+                        if recording is None
+                        else recording.finish(
+                            outputs=(self.latent,), repeat=(1, len(self.definitions), self.steps)
+                        )
+                    )
         except BaseException:
             self.close()
             raise
@@ -305,6 +325,7 @@ class StreamedEuler:
 
     def facts(self) -> dict[str, Any]:
         return {
+            "shared_pool": self.shared_pool,
             "steps": self.steps,
             "stages": len(self.definitions),
             "boundary_bytes": sum(
