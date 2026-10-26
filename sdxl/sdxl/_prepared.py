@@ -148,32 +148,25 @@ class ResidentPipeline:
             return None
         owner = placed[0]
         with self._lock:
-            if self._region is not None and self._region_owner is owner:
+            if self._region is not None:
+                if self._region_owner is not owner:
+                    raise CapabilityError(
+                        "native pipeline cache belongs to another model construction",
+                        code="prepared_graph_ineligible",
+                    )
                 return self._region
-        token = object()
+            token = object()
 
-        def release() -> None:
-            with self._lock:
-                if self._region_token is token:
-                    self._close_locked()
+            def release() -> None:
+                with self._lock:
+                    if self._region_token is token:
+                        self._close_locked()
 
-        made = owner.region("sdxl-native-plan", "latent", (), release=release)
-        old = None
-        with self._lock:
-            if self._region is not None and self._region_owner is owner:
-                selected = self._region
-            else:
-                old = self._region
-                self._close_locked()
-                self._region, self._region_owner, self._region_token = made, owner, token
-                selected = made
-        # Region operations never happen while holding the cache lock. Its callback takes
-        # that lock in the opposite direction only while the Region has no active pins.
-        if selected is not made:
-            made.close()
-        if old is not None:
-            old.close()
-        return selected
+            # Region registration creates only a release handle; it does not acquire its
+            # lock, allocate GPU memory, account bytes or invoke the callback here.
+            made = owner.region("sdxl-native-plan", "latent", (), release=release)
+            self._region, self._region_owner, self._region_token = made, owner, token
+            return made
 
     @contextmanager
     def _using(self, ctx: Context, components: dict[str, Any]) -> Iterator[None]:
@@ -183,6 +176,8 @@ class ResidentPipeline:
                 ctx.raise_if_cancelled()
             try:
                 ctx.raise_if_cancelled()
+                if region is not self._region:
+                    raise RuntimeError("native pipeline cache ownership changed during use")
                 yield
             finally:
                 self._lock.release()
