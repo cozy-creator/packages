@@ -14,6 +14,7 @@ from diffusers.models.autoencoders.autoencoder_kl_minimax_h3 import MiniMaxH3Vid
 from cozy_runtime import fusion
 from cozy_runtime.author import (
     AdapterCompatibility,
+    Context,
     DerivedCache,
     Loader,
     Model,
@@ -181,8 +182,11 @@ class H3Model(
         tel.log("h3 reference latents", reused=reused, encoded=encoded)
 
     @uses_components("transformer")
-    def sample_fl2va(self, state: Any, *, on_step: Any, cancel: Any) -> ScheduleFacts:
-        return self.pipe.denoise("fl2va", state, on_step=on_step, cancel=cancel)
+    def sample_fl2va(
+        self, state: Any, *, on_step: Any, cancel: Any,
+        ctx: Context | None = None, tel: Telemetry | None = None,
+    ) -> ScheduleFacts:
+        return self.pipe.denoise("fl2va", state, on_step=on_step, cancel=cancel, ctx=ctx, tel=tel)
 
     @uses_components("transformer_ref")
     def sample_ref2va(self, state: Any, *, on_step: Any, cancel: Any) -> ScheduleFacts:

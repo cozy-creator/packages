@@ -1246,7 +1246,7 @@ def _render_keyframes(
         with tel.stage("condition_media", overall_range=(0.08, 0.15)):
             model.condition_fl2va_media(task, state)
     if turbo_lora is None:
-        sample = model.sample_fl2va
+        sample = partial(model.sample_fl2va, ctx=ctx, tel=tel)
     else:
         assert isinstance(model, H3TurboBase)
         sample = partial(model.sample_fl2va_turbo, turbo_lora=turbo_lora)

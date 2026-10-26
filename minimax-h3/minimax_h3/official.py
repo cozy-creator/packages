@@ -53,6 +53,7 @@ from cozy_runtime import vlm
 from cozy_runtime.author import (
     AttentionLayout,
     Config,
+    Context,
     ConformanceError,
     DecodedAudio,
     DecodedAudioChunk,
@@ -62,6 +63,7 @@ from cozy_runtime.author import (
     Image,
     InvalidRequest,
     ModelAssets,
+    Telemetry,
     ThreadPoolExecutor,
     attention_scope,
     canonical_json,
@@ -1319,6 +1321,8 @@ class OfficialH3Pipeline:
         on_step: Callable[[int], None],
         cancel: Callable[[], None],
         sol_dense_steps: int = 10,
+        ctx: Context | None = None,
+        tel: Telemetry | None = None,
     ) -> ScheduleFacts:
         _validate_sol_dense_steps(sol_dense_steps)
         _settle_intake(state)
@@ -1360,8 +1364,18 @@ class OfficialH3Pipeline:
             references, latents = state.normalized_references, state.condition_latents
             clips = ClipRows(block_state, references, latents, scoped.patch_size)
             clips.thin(block_state)
+        native = False
+        if task == "fl2va" and clips is None and context is None and ctx is not None and tel is not None:
+            from ._prepared import run as run_prepared
+
+            cancel()
+            native = run_prepared(
+                scoped.transformer, block_state, scoped.scheduler, scoped.audio_scheduler,
+                lambda index: _attention_layout(block_state, index, sol_dense_steps=sol_dense_steps),
+                sol_dense_steps, ctx, tel,
+            )
         with step_invariants():
-            for index, timestep in enumerate(block_state.timesteps):
+            for index, timestep in enumerate(() if native else block_state.timesteps):
                 cancel()
                 if clips is not None and index == sol_dense_steps:
                     clips.release(block_state)

@@ -259,11 +259,41 @@ class AdaLNPrunedMiniMaxH3Transformer(MiniMaxH3Transformer3DModel):  # type: ign
             setattr(self, name, _SelectableHead(head.in_features, head.out_features))
         self._arming: TurboArming | None = None
         self._lora_hooks_installed = False
-        self.register_forward_pre_hook(self._arm, with_kwargs=True)
-        self.register_forward_hook(self._disarm, always_call=True)
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        audio_hidden_states: torch.Tensor,
+        encoder_hidden_states: torch.Tensor,
+        timestep: torch.Tensor,
+        timestep_indices: torch.Tensor,
+        token_tags: torch.Tensor,
+        position_ids: torch.Tensor,
+        video_indices: torch.Tensor,
+        audio_indices: torch.Tensor,
+        text_indices: torch.Tensor,
+        attention_kwargs: dict[str, Any] | None = None,
+        return_dict: bool = True,
+    ) -> MiniMaxH3TransformerOutput | tuple[torch.Tensor, torch.Tensor]:
+        # Preserve the former pre/post-hook order explicitly. Prepared tensor work has
+        # already validated these rows and never replays a Python hook or turbo mutation.
+        selected = self._arm(self, (), {
+            "timestep": timestep, "timestep_indices": timestep_indices,
+            "token_tags": token_tags, "attention_kwargs": attention_kwargs,
+        })
+        if selected is not None:
+            attention_kwargs = selected[1].get("attention_kwargs")
+        try:
+            return self._forward(
+                hidden_states, audio_hidden_states, encoder_hidden_states, timestep,
+                timestep_indices, token_tags, position_ids, video_indices, audio_indices,
+                text_indices, attention_kwargs=attention_kwargs, return_dict=return_dict,
+            )
+        finally:
+            self._release()
 
     @apply_lora_scale("attention_kwargs")  # type: ignore[untyped-decorator]
-    def forward(
+    def _forward(
         self,
         hidden_states: torch.Tensor,
         audio_hidden_states: torch.Tensor,
@@ -306,6 +336,34 @@ class AdaLNPrunedMiniMaxH3Transformer(MiniMaxH3Transformer3DModel):  # type: ign
             rotary_emb = memo.get("rope", (position_ids,), lambda: self.rope(position_ids))
             overlay = self._arming.overlay if self._arming is not None else None
             text = memo.get("text", (encoder_hidden_states, overlay), refined)
+        temb = self.time_proj(timestep)
+        temb = self.time_embedder(temb.to(get_parameter_dtype(self.time_embedder)))
+        return self.forward_prepared(
+            hidden_states, audio_hidden_states, text, rotary_emb, temb,
+            timestep_indices, token_tags, video_indices, audio_indices, text_indices,
+            return_dict,
+        )
+
+    def forward_prepared(
+        self,
+        hidden_states: torch.Tensor,
+        audio_hidden_states: torch.Tensor,
+        text: torch.Tensor,
+        rotary_emb: tuple[torch.Tensor, torch.Tensor],
+        temb: torch.Tensor,
+        timestep_indices: torch.Tensor,
+        token_tags: torch.Tensor,
+        video_indices: torch.Tensor,
+        audio_indices: torch.Tensor,
+        text_indices: torch.Tensor,
+        return_dict: bool = False,
+    ) -> MiniMaxH3TransformerOutput | tuple[torch.Tensor, torch.Tensor]:
+        """The unchanged tensor body over rows validated before native preparation.
+
+        `temb` is the exact checkpoint table-row lookup, not approximate timesteps.
+        The caller owns validation, frozen layout, rotary/refined text and no turbo arming.
+        """
+        sequence_length = token_tags.shape[0]
         rows = text.new_zeros((text.shape[0], sequence_length, text.shape[-1]))
         rows = rows.index_copy(1, text_indices, text)
         del text
@@ -315,8 +373,6 @@ class AdaLNPrunedMiniMaxH3Transformer(MiniMaxH3Transformer3DModel):  # type: ign
         audio = self.audio_proj_in(audio_hidden_states.to(get_parameter_dtype(self.audio_proj_in)))
         rows = rows.index_copy(1, audio_indices, audio.to(rows.dtype))
         del audio
-        temb = self.time_proj(timestep)
-        temb = self.time_embedder(temb.to(get_parameter_dtype(self.time_embedder)))
         adaln_indices = timestep_indices * MINIMAX_H3_MODALITY_NUM + token_tags
         for block in self.transformer_blocks:
             if torch.is_grad_enabled() and self.gradient_checkpointing:
@@ -447,10 +503,6 @@ class AdaLNPrunedMiniMaxH3Transformer(MiniMaxH3Transformer3DModel):  # type: ign
             head = _projection_base(getattr(self, name))
             if isinstance(head, _SelectableHead):
                 head._armed = None
-
-    def _disarm(self, module: nn.Module, args: tuple[Any, ...], output: Any) -> None:
-        del module, args, output
-        self._release()
 
     @classmethod
     def from_official_config(
