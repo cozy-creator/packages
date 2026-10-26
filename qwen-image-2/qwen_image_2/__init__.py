@@ -117,7 +117,7 @@ def _generate(
         decoded = model.decode(latents, width=width, height=height)
         image = decoded_image(decoded)
     with tel.stage("saving image", overall_range=(0.98, 1.0)):
-        asset = out.save_image(image, format="png")
+        asset = out.save_image(image, format="webp")
     return ImageResult(asset, width, height, seed, payload.prompt)
 
 
