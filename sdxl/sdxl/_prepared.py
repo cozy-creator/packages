@@ -13,7 +13,7 @@ from typing import Any
 import torch
 from cozy_runtime import rng
 from cozy_runtime.author import CapabilityError, Context, OutputError, Telemetry
-from cozy_runtime.compute import PreparedRepeat
+from cozy_runtime.compute import PreparedRepeat, PreparedSequence
 from diffusers import EulerDiscreteScheduler
 from transformers.masking_utils import create_causal_mask
 
@@ -214,29 +214,38 @@ class ResidentPipeline:
         if program is not None:
             return program, True
         began = time.perf_counter()
-        try:
-            program = _Pipeline(
-                key,
-                components,
-                scheduler_config,
-                vae_scale,
-                tokens,
-                negative_tokens,
-                width,
-                height,
-                steps,
-                guidance,
-                dtype,
-                ctx,
-                resident_only,
-            )
-        except CapabilityError as error:
-            if error.code != "prepared_graph_ineligible":
-                raise
-            tel.log("eager pipeline", reason=str(error))
-            return None
-        except torch.OutOfMemoryError:
-            tel.log("eager pipeline", reason="resident pipeline preparation exceeded capacity")
+        constructors = (
+            (_SequentialPipeline, _Pipeline)
+            if not resident_only and callable(getattr(PreparedRepeat, "capture_stage", None))
+            else (_Pipeline,)
+        )
+        reasons = []
+        for constructor in constructors:
+            try:
+                program = constructor(
+                    key,
+                    components,
+                    scheduler_config,
+                    vae_scale,
+                    tokens,
+                    negative_tokens,
+                    width,
+                    height,
+                    steps,
+                    guidance,
+                    dtype,
+                    ctx,
+                    resident_only,
+                )
+                break
+            except CapabilityError as error:
+                if error.code not in ("prepared_graph_ineligible", "prepared_load_unavailable"):
+                    raise
+                reasons.append(str(error))
+            except torch.OutOfMemoryError:
+                reasons.append(f"{constructor.__name__} preparation exceeded capacity")
+        else:
+            tel.log("eager pipeline", reason="; ".join(reasons))
             return None
         self._program = program
         tel.metric("request_path.pipeline_prepare_ms", (time.perf_counter() - began) * 1000)
@@ -262,6 +271,10 @@ class ResidentPipeline:
             try:
                 program.update(parameters["tokens"], parameters["negative_tokens"], seed)
                 tel.metric("request_path.pipeline_reused", float(reused))
+                tel.metric(
+                    "request_path.pipeline_sequential",
+                    float(isinstance(program, _SequentialPipeline)),
+                )
                 launches = int(program.plan.facts()["host_graph_launches"])
                 with tel.stage("native_pipeline", overall_range=(0.02, 0.98)):
                     execution = ctx.plan(program.plan)
@@ -269,8 +282,9 @@ class ResidentPipeline:
                     while True:
                         ctx.raise_if_cancelled()
                         progress = execution.poll()
-                        if progress.completed_steps != observed:
-                            observed = progress.completed_steps
+                        completed = program.completed(execution, progress)
+                        if completed != observed:
+                            observed = completed
                             tel.progress(
                                 observed / steps,
                                 stage="native_pipeline",
@@ -280,11 +294,12 @@ class ResidentPipeline:
                             break
                         time.sleep(0.05)
                     latent, prompt, pooled, image = execution.wait()
-                    if progress.canceled or progress.completed_steps != steps:
+                    completed = program.completed(execution, progress)
+                    if progress.canceled or completed != steps:
                         raise OutputError(
                             "prepared pipeline stopped early", code="incomplete_pipeline"
                         )
-                tel.metric("request_path.pipeline_native_steps", float(progress.completed_steps))
+                tel.metric("request_path.pipeline_native_steps", float(completed))
                 tel.metric(
                     "request_path.pipeline_host_launches",
                     float(int(execution.facts()["host_graph_launches"]) - launches),
@@ -391,6 +406,9 @@ class _Pipeline:
             dtypes={vae: dtype},
         )
 
+    def completed(self, execution: Any, progress: Any) -> int:
+        return int(progress.completed_steps)
+
     def observe(self, tel: Telemetry, phase: str, reused: bool) -> None:
         # Diagnostic identity is process-local, never a persisted cache or model key.
         tel.log(
@@ -422,6 +440,213 @@ class _Pipeline:
                 )
                 * self.initial_sigma
             )
+
+
+class _SequentialPipeline(_Pipeline):
+    """The existing pipeline cache with native phase boundaries and streamed UNet blocks.
+
+    The initial wide VAE remains resident through the whole submission. Its established
+    typed preparation is safe; raw source stages cannot yet reload derived BF16/F32 final
+    representations. Text/UNet stages keep source reservations without lifetime weight pins.
+    """
+
+    def __init__(
+        self,
+        key: tuple[Any, ...],
+        components: dict[str, Any],
+        scheduler_config: dict[str, Any],
+        vae_scale: float,
+        tokens: tuple[torch.Tensor, torch.Tensor],
+        negative_tokens: tuple[torch.Tensor, torch.Tensor] | None,
+        width: int,
+        height: int,
+        steps: int,
+        guidance: float,
+        dtype: Any,
+        ctx: Context,
+        resident_only: bool,
+    ) -> None:
+        from ._streamed import StreamedEuler
+
+        self.key = key
+        first, second, unet, vae = (
+            components[name] for name in ("text_encoder", "text_encoder_2", "unet", "vae")
+        )
+        unet.begin_denoise_request(steps, False, 0)
+        scheduler = EulerDiscreteScheduler.from_config(scheduler_config)
+        if scheduler.config.prediction_type != "epsilon":
+            raise CapabilityError(
+                "native pipeline requires epsilon Euler", code="prepared_graph_ineligible"
+            )
+        device = str(ctx.device)
+        scheduler.set_timesteps(steps, device=device)
+        self.initial_sigma = scheduler.init_noise_sigma
+        classifier_free = guidance > 1.0
+        if classifier_free != (negative_tokens is not None):
+            raise ValueError("negative tokens must match the classifier-free branch")
+        with torch.inference_mode(False), torch.no_grad():
+            self.tokens = tuple(value.to(device).clone() for value in tokens)
+            self.negative_tokens = (
+                None
+                if negative_tokens is None
+                else tuple(value.to(device).clone() for value in negative_tokens)
+            )
+            latent = torch.zeros(
+                (1, 4, height // 8, width // 8), dtype=torch.float16, device=device
+            )
+            batch = 2 if classifier_free else 1
+            first_hidden = torch.zeros(
+                (batch, tokens[0].shape[-1], first.config.hidden_size),
+                dtype=torch.float16,
+                device=device,
+            )
+            second_hidden = torch.zeros(
+                (batch, tokens[1].shape[-1], second.config.hidden_size),
+                dtype=torch.float16,
+                device=device,
+            )
+            prompt = torch.zeros(
+                (batch, tokens[0].shape[-1], first.config.hidden_size + second.config.hidden_size),
+                dtype=torch.float16,
+                device=device,
+            )
+            pooled = torch.zeros(
+                (batch, second.config.projection_dim), dtype=torch.float16, device=device
+            )
+            image = torch.zeros((1, 3, height, width), dtype=dtype, device=device)
+            time_ids = torch.tensor(
+                [[height, width, 0, 0, height, width]] * batch, dtype=torch.float16, device=device
+            )
+        self.plan = None
+        self._definitions: list[Any] = []
+        self._interval = None
+        self._capture_memory: list[dict[str, Any]] = []
+
+        def observed(name: str, plan: Any) -> Any:
+            self._definitions.append(plan)
+            self._capture_memory.append(
+                {
+                    "phase": name,
+                    "torch_allocated_bytes": int(torch.cuda.memory_allocated(device)),
+                    "torch_reserved_bytes": int(torch.cuda.memory_reserved(device)),
+                }
+            )
+            return plan
+
+        try:
+            self.latent = latent
+
+            def decode(_index: torch.Tensor) -> None:
+                image.copy_(decode_latents(vae, self.latent.to(dtype=dtype), vae_scale))
+
+            # This real typed binding owns the VAE's converted final weights until close;
+            # do not silently capture FP16 decode for a force_upcast model.
+            vae_plan = observed(
+                "wide_resident_vae",
+                PreparedRepeat.capture(
+                    decode,
+                    state=(image,),
+                    steps=1,
+                    owners=(vae,),
+                    dtypes={vae: dtype},
+                    resident_only=resident_only,
+                ),
+            )
+
+            # Wide VAE eligibility is checked before paying for every UNet graph.
+            interval = StreamedEuler(
+                unet=unet,
+                scheduler=scheduler,
+                latents=latent,
+                prompt=prompt,
+                pooled=pooled,
+                time_ids=time_ids,
+                guidance=guidance,
+                _attach_sequence=False,
+                _latent_state=latent,
+            )
+            self._interval = interval
+
+            def encode_first(_index: torch.Tensor) -> None:
+                positive, _ = _clip_text(first, self.tokens[0])
+                if self.negative_tokens is None:
+                    first_hidden.copy_(positive)
+                else:
+                    negative, _ = _clip_text(first, self.negative_tokens[0])
+                    first_hidden.copy_(torch.cat([negative, positive]))
+
+            first_plan = observed(
+                "text_encoder",
+                PreparedRepeat.capture_stage(
+                    encode_first, state=(first_hidden,), owner=first, load_ordering="events"
+                ),
+            )
+
+            def encode_second(_index: torch.Tensor) -> None:
+                positive, positive_pool = _clip_text(second.text_model, self.tokens[1])
+                positive_pool = second.text_projection(positive_pool)
+                if self.negative_tokens is None:
+                    second_hidden.copy_(positive)
+                    pooled.copy_(positive_pool)
+                else:
+                    negative, negative_pool = _clip_text(second.text_model, self.negative_tokens[1])
+                    negative_pool = second.text_projection(negative_pool)
+                    second_hidden.copy_(torch.cat([negative, positive]))
+                    pooled.copy_(torch.cat([negative_pool, positive_pool]))
+
+            second_plan = observed(
+                "text_encoder_2",
+                PreparedRepeat.capture_stage(
+                    encode_second,
+                    state=(second_hidden, pooled),
+                    owner=second,
+                    load_ordering="events",
+                ),
+            )
+
+            def condition(_index: torch.Tensor) -> None:
+                prompt.copy_(torch.cat([first_hidden, second_hidden], dim=-1))
+
+            condition_plan = observed(
+                "conditioning", PreparedRepeat.capture(condition, state=(prompt,), steps=1)
+            )
+            # The interval's reset is a one-time prefix; its input..sampler range repeats.
+            stages = (first_plan, second_plan, condition_plan, *interval.definitions, vae_plan)
+            begin = 3 + 1
+            end = 3 + len(interval.definitions)
+            self.plan = PreparedSequence(
+                stages, outputs=(self.latent, prompt, pooled, image), repeat=(begin, end, steps)
+            )
+        except BaseException:
+            for definition in self._definitions:
+                definition.close()
+            if self._interval is not None:
+                self._interval.close()
+            raise
+
+    def completed(self, execution: Any, progress: Any) -> int:
+        return int(execution.facts()["sequence"]["completed_passes"])
+
+    def observe(self, tel: Telemetry, phase: str, reused: bool) -> None:
+        assert self.plan is not None and self._interval is not None
+        tel.log(
+            "native sequential pipeline definition",
+            phase=phase,
+            pid=os.getpid(),
+            plan=f"{id(self.plan):x}",
+            identity_scope="process-local",
+            reused=reused,
+            host_graph_launches=int(self.plan.facts()["host_graph_launches"]),
+            vae_policy="wide resident typed binding held through whole submission",
+            weight_phase_policy="native demand capacity; no per-phase preference update",
+        )
+        tel.metric(
+            "request_path.pipeline_boundary_bytes", float(self._interval.facts()["boundary_bytes"])
+        )
+        tel.metric(
+            "request_path.pipeline_torch_reserved_bytes",
+            float(torch.cuda.memory_reserved(self.latent.device)),
+        )
 
 
 def repeat_euler(

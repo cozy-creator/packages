@@ -44,6 +44,8 @@ class StreamedEuler:
         time_ids: torch.Tensor,
         guidance: float,
         ordering: str = "events",
+        _attach_sequence: bool = True,
+        _latent_state: torch.Tensor | None = None,
     ) -> None:
         if not callable(getattr(PreparedRepeat, "capture_stage", None)):
             _refuse("Runtime lacks native model block stages")
@@ -87,11 +89,7 @@ class StreamedEuler:
             _refuse("streamed SDXL requires matching up/down sampling")
 
         batch = latents.shape[0] * (2 if guidance > 1 else 1)
-        if (
-            prompt.shape[0] != batch
-            or pooled.shape[0] != batch
-            or time_ids.shape[0] != batch
-        ):
+        if prompt.shape[0] != batch or pooled.shape[0] != batch or time_ids.shape[0] != batch:
             raise ValueError("conditioning batch does not match SDXL guidance")
         self.steps = len(scheduler.timesteps)
         self.calls: dict[str, int] = {}
@@ -100,7 +98,12 @@ class StreamedEuler:
         self.boundaries: list[torch.Tensor] = []
         self.plan = None
         with torch.inference_mode(False), torch.no_grad():
-            self.latent = latents.clone()
+            if _latent_state is not None and (
+                PreparedRepeat._layout(_latent_state)[:4] != PreparedRepeat._layout(latents)[:4]
+                or _latent_state.is_inference()
+            ):
+                raise ValueError("shared pipeline latent must have matching non-inference geometry")
+            self.latent = latents.clone() if _latent_state is None else _latent_state
             self.index = torch.zeros((1,), device=latents.device, dtype=torch.int64)
             euler = _Euler(scheduler, latents.device, 0)
 
@@ -133,12 +136,8 @@ class StreamedEuler:
                     "stage": name,
                     "paths": paths,
                     "capture_ms": (time.perf_counter() - began) * 1000,
-                    "torch_allocated_bytes": int(
-                        torch.cuda.memory_allocated(latents.device)
-                    ),
-                    "torch_reserved_bytes": int(
-                        torch.cuda.memory_reserved(latents.device)
-                    ),
+                    "torch_allocated_bytes": int(torch.cuda.memory_allocated(latents.device)),
+                    "torch_reserved_bytes": int(torch.cuda.memory_reserved(latents.device)),
                     "torch_peak_allocated_bytes": int(
                         torch.cuda.max_memory_allocated(latents.device)
                     ),
@@ -154,9 +153,7 @@ class StreamedEuler:
 
             def project(input_hidden=hidden):
                 timestep = euler.timesteps.index_select(0, self.index)
-                inverse_scale = euler.inverse_scales.index_select(
-                    0, self.index
-                ).reshape(())
+                inverse_scale = euler.inverse_scales.index_select(0, self.index).reshape(())
                 sample = torch.cat([self.latent] * 2) if guidance > 1 else self.latent
                 sample = (sample.float() * inverse_scale).to(sample.dtype)
                 if unet.config.center_input_sample:
@@ -181,10 +178,7 @@ class StreamedEuler:
                 incoming = hidden
                 channels = block.resnets[-1].out_channels
                 with torch.inference_mode(False):
-                    outgoing = [
-                        allocate((batch, channels, height, width))
-                        for _ in block.resnets
-                    ]
+                    outgoing = [allocate((batch, channels, height, width)) for _ in block.resnets]
                     if block.downsamplers:
                         height, width = height // 2, width // 2
                         outgoing.append(allocate((batch, channels, height, width)))
@@ -201,9 +195,7 @@ class StreamedEuler:
                             encoder_attention_mask=None,
                         )
                     else:
-                        result, residuals = block(
-                            hidden_states=incoming, temb=embedding
-                        )
+                        result, residuals = block(hidden_states=incoming, temb=embedding)
                     if len(residuals) != len(outputs):
                         _refuse("SDXL down block changed its skip layout")
                     for slot, value in zip(outputs, residuals, strict=True):
@@ -274,9 +266,7 @@ class StreamedEuler:
 
                 capture(f"up{number}", up, (outgoing,), (f"up_blocks.{number}",))
             if skips or (height, width) != tuple(latents.shape[-2:]):
-                _refuse(
-                    "SDXL skip topology did not close at the original latent geometry"
-                )
+                _refuse("SDXL skip topology did not close at the original latent geometry")
             final_hidden = hidden
 
             def sample():
@@ -288,9 +278,7 @@ class StreamedEuler:
                     uncond, cond = noise.chunk(2)
                     noise = uncond + guidance * (cond - uncond)
                 sigma = euler.sigmas.index_select(0, self.index).reshape(())
-                inverse_sigma = euler.inverse_sigmas.index_select(
-                    0, self.index
-                ).reshape(())
+                inverse_sigma = euler.inverse_sigmas.index_select(0, self.index).reshape(())
                 delta = euler.deltas.index_select(0, self.index).reshape(())
                 value = self.latent.float()
                 original = value - (sigma * noise.float()).to(noise.dtype)
@@ -299,11 +287,12 @@ class StreamedEuler:
                 self.index.add_(1)
 
             capture("sampler", sample, (self.latent, self.index), ())
-            self.plan = PreparedSequence(
-                self.definitions,
-                outputs=(self.latent,),
-                repeat=(1, len(self.definitions), self.steps),
-            )
+            if _attach_sequence:
+                self.plan = PreparedSequence(
+                    self.definitions,
+                    outputs=(self.latent,),
+                    repeat=(1, len(self.definitions), self.steps),
+                )
         except BaseException:
             self.close()
             raise
@@ -349,29 +338,20 @@ def stream_euler(*, ctx: Any, tel: Any, **parameters: Any) -> torch.Tensor | Non
             if completed != observed:
                 observed = completed
                 fraction = completed / program.steps
-                tel.progress(
-                    fraction, stage="denoise", overall_fraction=0.10 + 0.80 * fraction
-                )
+                tel.progress(fraction, stage="denoise", overall_fraction=0.10 + 0.80 * fraction)
             if progress.done:
                 break
             time.sleep(0.05)
         (result,) = execution.wait()
         facts = execution.facts()
-        if (
-            facts["sequence"]["canceled"]
-            or facts["sequence"]["completed_passes"] != program.steps
-        ):
-            raise OutputError(
-                "streamed denoising stopped early", code="incomplete_denoise"
-            )
+        if facts["sequence"]["canceled"] or facts["sequence"]["completed_passes"] != program.steps:
+            raise OutputError("streamed denoising stopped early", code="incomplete_denoise")
         tel.metric("request_path.denoise_native_steps", float(program.steps))
         tel.metric(
             "request_path.denoise_native_load_bytes",
             float(sum(row["read_bytes"] for row in facts["stage_inputs"])),
         )
-        tel.metric(
-            "request_path.denoise_native_launches", float(facts["host_graph_launches"])
-        )
+        tel.metric("request_path.denoise_native_launches", float(facts["host_graph_launches"]))
         tel.log("native streamed denoise", **program.facts())
         return result
     finally:
