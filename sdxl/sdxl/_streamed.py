@@ -3,7 +3,7 @@
 This adapter calls the package's existing Diffusers numerical modules. It covers the
 plain SDXL text-time UNet, with no ControlNet, adapters, HiDiffusion or compiled wrappers.
 Preparation is Python; a submitted interval advances/refills entirely in Runtime native
-code. This file is an unqualified outputs candidate until its ordinary CLI gates pass.
+code. A surrounding native phase program may lend its sequence-owned scratch recorder.
 """
 
 from __future__ import annotations
@@ -48,10 +48,15 @@ class StreamedEuler:
         _shared_pool: bool | None = None,
         _attach_sequence: bool = True,
         _latent_state: torch.Tensor | None = None,
+        _borrowed_recording: Any = None,
     ) -> None:
-        if _shared_pool is None:
+        if _borrowed_recording is not None:
+            if _attach_sequence or _shared_pool is False:
+                _refuse("a borrowed scratch recording belongs to its surrounding sequence")
+            _shared_pool = True
+        elif _shared_pool is None:
             _shared_pool = _attach_sequence
-        if _shared_pool and not _attach_sequence:
+        if _shared_pool and not _attach_sequence and _borrowed_recording is None:
             _refuse("a shared scratch recording must own its complete sequence")
         if _shared_pool and not callable(getattr(PreparedSequence, "record", None)):
             _refuse("Runtime lacks owned sequential graph pools")
@@ -124,7 +129,10 @@ class StreamedEuler:
             hidden = allocate((batch, unet.conv_in.out_channels, height, width))
             embedding = allocate((batch, unet.time_embedding.linear_2.out_features))
 
-        recording = PreparedSequence.record() if _shared_pool else None
+        owns_recording = _shared_pool and _borrowed_recording is None
+        recording = (
+            PreparedSequence.record() if owns_recording else _borrowed_recording
+        )
         self.shared_pool = _shared_pool
 
         def capture(name, operation, state, paths=None):
@@ -162,7 +170,7 @@ class StreamedEuler:
             return plan
 
         try:
-            with recording if recording is not None else nullcontext():
+            with recording if owns_recording else nullcontext():
                 capture("reset", lambda: self.index.zero_(), (self.index,))
 
                 def project(input_hidden=hidden):

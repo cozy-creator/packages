@@ -528,9 +528,11 @@ class _Pipeline:
 class _SequentialPipeline(_Pipeline):
     """The existing pipeline cache with native phase boundaries and streamed UNet blocks.
 
-    The initial wide VAE remains resident through the whole submission. Its established
-    typed preparation is safe; raw source stages cannot yet reload derived BF16/F32 final
-    representations. Text/UNet stages keep source reservations without lifetime weight pins.
+    All phase graphs share one sequence-owned scratch pool, captured in execution order.
+    The wide VAE's typed weights remain resident through the whole submission; raw source
+    stages cannot yet reload derived BF16/F32 final representations. Text/UNet stages keep
+    source reservations without lifetime weight pins. Persistent boundaries are outside
+    capture and cannot alias another stage's temporary storage.
     """
 
     def __init__(
@@ -616,90 +618,93 @@ class _SequentialPipeline(_Pipeline):
             )
             return plan
 
+        if not callable(getattr(PreparedSequence, "record", None)):
+            raise CapabilityError(
+                "Runtime lacks owned sequential graph pools", code="prepared_graph_ineligible"
+            )
         try:
             self.latent = latent
+            with PreparedSequence.record() as recording:
+                def encode_first(_index: torch.Tensor) -> None:
+                    positive, _ = _clip_text(first, self.tokens[0])
+                    if self.negative_tokens is None:
+                        first_hidden.copy_(positive)
+                    else:
+                        negative, _ = _clip_text(first, self.negative_tokens[0])
+                        first_hidden.copy_(torch.cat([negative, positive]))
 
-            def decode(_index: torch.Tensor) -> None:
-                image.copy_(decode_latents(vae, self.latent.to(dtype=dtype), vae_scale))
+                observed(
+                    "text_encoder",
+                    recording.capture_stage(
+                        encode_first, state=(first_hidden,), owner=first, load_ordering="events"
+                    ),
+                )
 
-            # This real typed binding owns the VAE's converted final weights until close;
-            # do not silently capture FP16 decode for a force_upcast model.
-            vae_plan = observed(
-                "wide_resident_vae",
-                PreparedRepeat.capture(
-                    decode,
-                    state=(image,),
-                    steps=1,
-                    owners=(vae,),
-                    dtypes={vae: dtype},
-                    resident_only=resident_only,
-                ),
-            )
+                def encode_second(_index: torch.Tensor) -> None:
+                    positive, positive_pool = _clip_text(second.text_model, self.tokens[1])
+                    positive_pool = second.text_projection(positive_pool)
+                    if self.negative_tokens is None:
+                        second_hidden.copy_(positive)
+                        pooled.copy_(positive_pool)
+                    else:
+                        negative, negative_pool = _clip_text(second.text_model, self.negative_tokens[1])
+                        negative_pool = second.text_projection(negative_pool)
+                        second_hidden.copy_(torch.cat([negative, positive]))
+                        pooled.copy_(torch.cat([negative_pool, positive_pool]))
 
-            # Wide VAE eligibility is checked before paying for every UNet graph.
-            interval = StreamedEuler(
-                unet=unet,
-                scheduler=scheduler,
-                latents=latent,
-                prompt=prompt,
-                pooled=pooled,
-                time_ids=time_ids,
-                guidance=guidance,
-                _attach_sequence=False,
-                _latent_state=latent,
-            )
-            self._interval = interval
+                observed(
+                    "text_encoder_2",
+                    recording.capture_stage(
+                        encode_second,
+                        state=(second_hidden, pooled),
+                        owner=second,
+                        load_ordering="events",
+                    ),
+                )
 
-            def encode_first(_index: torch.Tensor) -> None:
-                positive, _ = _clip_text(first, self.tokens[0])
-                if self.negative_tokens is None:
-                    first_hidden.copy_(positive)
-                else:
-                    negative, _ = _clip_text(first, self.negative_tokens[0])
-                    first_hidden.copy_(torch.cat([negative, positive]))
+                def condition(_index: torch.Tensor) -> None:
+                    prompt.copy_(torch.cat([first_hidden, second_hidden], dim=-1))
 
-            first_plan = observed(
-                "text_encoder",
-                PreparedRepeat.capture_stage(
-                    encode_first, state=(first_hidden,), owner=first, load_ordering="events"
-                ),
-            )
+                observed(
+                    "conditioning", recording.capture(condition, state=(prompt,), steps=1)
+                )
+                interval = StreamedEuler(
+                    unet=unet,
+                    scheduler=scheduler,
+                    latents=latent,
+                    prompt=prompt,
+                    pooled=pooled,
+                    time_ids=time_ids,
+                    guidance=guidance,
+                    _attach_sequence=False,
+                    _latent_state=latent,
+                    _borrowed_recording=recording,
+                )
+                self._interval = interval
 
-            def encode_second(_index: torch.Tensor) -> None:
-                positive, positive_pool = _clip_text(second.text_model, self.tokens[1])
-                positive_pool = second.text_projection(positive_pool)
-                if self.negative_tokens is None:
-                    second_hidden.copy_(positive)
-                    pooled.copy_(positive_pool)
-                else:
-                    negative, negative_pool = _clip_text(second.text_model, self.negative_tokens[1])
-                    negative_pool = second.text_projection(negative_pool)
-                    second_hidden.copy_(torch.cat([negative, positive]))
-                    pooled.copy_(torch.cat([negative_pool, positive_pool]))
+                def decode(_index: torch.Tensor) -> None:
+                    image.copy_(decode_latents(vae, self.latent.to(dtype=dtype), vae_scale))
 
-            second_plan = observed(
-                "text_encoder_2",
-                PreparedRepeat.capture_stage(
-                    encode_second,
-                    state=(second_hidden, pooled),
-                    owner=second,
-                    load_ordering="events",
-                ),
-            )
+                # This real typed binding owns the VAE's converted final weights until close;
+                # do not silently capture FP16 decode for a force_upcast model.
+                observed(
+                    "wide_resident_vae",
+                    recording.capture(
+                        decode,
+                        state=(image,),
+                        steps=1,
+                        owners=(vae,),
+                        dtypes={vae: dtype},
+                        resident_only=resident_only,
+                    ),
+                )
 
-            def condition(_index: torch.Tensor) -> None:
-                prompt.copy_(torch.cat([first_hidden, second_hidden], dim=-1))
-
-            condition_plan = observed(
-                "conditioning", PreparedRepeat.capture(condition, state=(prompt,), steps=1)
-            )
-            # The interval's reset is a one-time prefix; its input..sampler range repeats.
-            stages = (first_plan, second_plan, condition_plan, *interval.definitions, vae_plan)
-            begin = 3 + 1
-            end = 3 + len(interval.definitions)
-            self.plan = PreparedSequence(
-                stages, outputs=(self.latent, prompt, pooled, image), repeat=(begin, end, steps)
-            )
+                # The interval's reset is a one-time prefix; input..sampler repeats.
+                begin = 3 + 1
+                end = 3 + len(interval.definitions)
+                self.plan = recording.finish(
+                    outputs=(self.latent, prompt, pooled, image), repeat=(begin, end, steps)
+                )
         except BaseException:
             for definition in self._definitions:
                 definition.close()
@@ -721,8 +726,9 @@ class _SequentialPipeline(_Pipeline):
             reused=reused,
             host_graph_launches=int(self.plan.facts()["host_graph_launches"]),
             vae_policy="wide resident typed binding held through whole submission",
-            weight_phase_policy="native demand capacity; no per-phase preference update",
+            weight_phase_policy="delegated to the submitted Runtime native phase program",
         )
+        tel.metric("request_path.pipeline_shared_pool", 1.0)
         tel.metric(
             "request_path.pipeline_boundary_bytes", float(self._interval.facts()["boundary_bytes"])
         )
