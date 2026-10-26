@@ -16,6 +16,7 @@ from diffusers.models.modeling_utils import get_parameter_dtype
 
 from cozy_runtime import compute
 from cozy_runtime.author import CapabilityError, Context, OutputError, Telemetry, attention_scope
+from cozy_runtime.internal import kernel_ready
 
 from .adaln_pruned import AdaLNPrunedMiniMaxH3Transformer
 
@@ -145,6 +146,7 @@ def prepare(
     pieces = segments(row_plan, dense_steps)
     plans = []
     try:
+        _require_ready_kernels()
         for part in pieces:
             rows = torch.stack(table_rows[part.first : part.end])
             indices = torch.stack([row_plan[i][1] for i in range(part.first, part.end)])
@@ -192,12 +194,20 @@ def prepare(
                     resident_only=True,
                 )
             plans.append(plan)
+        _require_ready_kernels()
         sequence = sequence_type(plans, outputs=(video, audio))
         return sequence, pieces
     except BaseException:
         for plan in reversed(plans):
             plan.close()
         raise
+
+
+def _require_ready_kernels() -> None:
+    # A captured transient dense fallback would otherwise outlive the asynchronous
+    # sparse-kernel opener. Stable failures may use the same fallback as eager.
+    if any(state in ("opening", "landed") for state in kernel_ready.pending().values()):
+        raise CapabilityError("H3 kernels are still opening", code="prepared_graph_ineligible")
 
 
 def step_body(
