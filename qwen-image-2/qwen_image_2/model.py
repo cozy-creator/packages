@@ -46,7 +46,7 @@ from cozy_runtime.author import (
 )
 from cozy_runtime.author.kernels import Plan
 
-from ._prepared import _Layout, repeat_cached
+from ._prepared import ResidentDenoise, _Layout
 
 
 def _modulation(block: Any, arguments: Mapping[str, Any]) -> fusion.Modulation:
@@ -210,6 +210,7 @@ class QwenImage21Model(Model[QwenImage21Graph], encoded_leaves="accept"):
     def load(self, loader: Loader) -> None:
         self.graph = loader.construct(QwenImage21Graph, factory=build_qwen_image21)
         self.processor = vlm.processor(loader.assets, "processor/", self.graph.processor_config)
+        self._native_denoise = ResidentDenoise()
 
     def execution_plan(self, plan: Plan) -> str:
         return fusion.install(plan, BLOCK, self.graph.components["transformer"])
@@ -310,6 +311,7 @@ class QwenImage21Model(Model[QwenImage21Graph], encoded_leaves="accept"):
             )
             if latents is not None:
                 return latents
+        self._native_denoise.close()
         return self._denoise_eager(
             embeds,
             mask,
@@ -412,7 +414,7 @@ class QwenImage21Model(Model[QwenImage21Graph], encoded_leaves="accept"):
             latents = scheduler.step(noise, timesteps[0], latents, return_dict=False)[0]
             observe_step0(0)
 
-        return repeat_cached(
+        return self._native_denoise.run(
             transformer=transformer,
             scheduler=scheduler,
             latents=latents,
