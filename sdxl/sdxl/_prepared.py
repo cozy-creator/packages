@@ -7,7 +7,7 @@ import os
 import threading
 import time
 from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from typing import Any
 
 import torch
@@ -135,22 +135,69 @@ class ResidentPipeline:
     def __init__(self) -> None:
         self._lock = threading.RLock()
         self._program: _Pipeline | None = None
+        self._region: Any = None
+        self._region_owner: Any = None
+        self._region_token: Any = None
+
+    def _owned_region(self, components: dict[str, Any]) -> Any:
+        """Register only a release callback; Torch already accounts for these allocations."""
+        from cozy_runtime.author._model import PLACED
+
+        placed = PLACED.get(components["unet"])
+        if placed is None:
+            return None
+        owner = placed[0]
+        with self._lock:
+            if self._region is not None and self._region_owner is owner:
+                return self._region
+        token = object()
+
+        def release() -> None:
+            with self._lock:
+                if self._region_token is token:
+                    self._close_locked()
+
+        made = owner.region("sdxl-native-plan", "latent", (), release=release)
+        old = None
+        with self._lock:
+            if self._region is not None and self._region_owner is owner:
+                selected = self._region
+            else:
+                old = self._region
+                self._close_locked()
+                self._region, self._region_owner, self._region_token = made, owner, token
+                selected = made
+        # Region operations never happen while holding the cache lock. Its callback takes
+        # that lock in the opposite direction only while the Region has no active pins.
+        if selected is not made:
+            made.close()
+        if old is not None:
+            old.close()
+        return selected
 
     @contextmanager
-    def _using(self, ctx: Context) -> Iterator[None]:
-        while not self._lock.acquire(timeout=0.05):
-            ctx.raise_if_cancelled()
-        try:
-            ctx.raise_if_cancelled()
-            yield
-        finally:
-            self._lock.release()
+    def _using(self, ctx: Context, components: dict[str, Any]) -> Iterator[None]:
+        region = self._owned_region(components)
+        with region.pin() if region is not None else nullcontext(False):
+            while not self._lock.acquire(timeout=0.05):
+                ctx.raise_if_cancelled()
+            try:
+                ctx.raise_if_cancelled()
+                yield
+            finally:
+                self._lock.release()
+
+    def _close_locked(self) -> None:
+        old = self._program
+        if old is not None:
+            # Failed/unproven native close must retain the complete program and its actual
+            # graph/buffer owners. Only checked close authorizes releasing cached state.
+            old.plan.close()
+            self._program = None
 
     def close(self) -> None:
         with self._lock:
-            old, self._program = self._program, None
-            if old is not None:
-                old.plan.close()
+            self._close_locked()
 
     def prepare(self, **parameters: Any) -> bool:
         """Build one known variant during an admitted warm turn, before request submission.
@@ -162,7 +209,7 @@ class ResidentPipeline:
         ctx = parameters["ctx"]
         if ctx.device.type != "cuda":
             return False
-        with self._using(ctx):
+        with self._using(ctx, parameters["components"]):
             selected = self._select(**parameters, resident_only=False)
             if selected is None:
                 return False
@@ -261,7 +308,7 @@ class ResidentPipeline:
     ) -> torch.Tensor | None:
         if ctx.device.type != "cuda":
             return None
-        with self._using(ctx):
+        with self._using(ctx, parameters["components"]):
             selected = self._select(**parameters, ctx=ctx, tel=tel, resident_only=True)
             if selected is None:
                 return None
