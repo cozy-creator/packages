@@ -81,6 +81,7 @@ from transformers import (
 from transformers import initialization as transformer_init
 
 from ._prepared import ResidentPipeline, decode_latents, encode_tokens, repeat_euler
+from ._streamed import stream_euler
 
 app = App()
 
@@ -490,6 +491,12 @@ def _sample(
                 tel=tel,
                 load_from_storage=True,
             )
+            if loaded is None:
+                loaded = stream_euler(
+                    unet=unet, scheduler=scheduler, latents=latents,
+                    prompt=batch_prompt, pooled=batch_pooled, time_ids=batch_ids,
+                    guidance=guidance, ctx=ctx, tel=tel,
+                )
         if loaded is not None:
             latents = loaded
         else:
