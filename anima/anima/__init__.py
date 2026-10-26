@@ -97,6 +97,8 @@ def generate(
     adj: Adjustments,
 ) -> ImageResult:
     """Generate one native-resolution Anima image."""
+    # Both prompt branches are conditioned before the repeated transformer phase.
+    ctx.plan("text_encoder", "text_conditioner", "transformer", "vae")
     payload.ignored(adj, "prompt_upsampling", reason="Anima has no prompt upsampler")
     width, height = payload.size(adj, None, SIZES, megapixels=SIZES.megapixels[1])
     steps = held(adj, "steps", payload.steps or _STEPS[0], *_STEPS[1:])

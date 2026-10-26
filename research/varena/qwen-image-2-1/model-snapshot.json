@@ -1,0 +1,46 @@
+{
+  "observed": "2026-10-25T01:32Z",
+  "method": "default cozy --json model info <model>@0.1.0",
+  "published_lanes": [
+    {
+      "model": "_/qwen-image-2.1",
+      "release": "0.1.0",
+      "lane": "bf16",
+      "commit": "sha256:3feeda1b7c396addd8e2aeafd29d2dadd5bbe611ffb167ece0c18328c85b4b42",
+      "bytes": 33132028647,
+      "kinds": [
+        "BF16",
+        "F32"
+      ],
+      "provenance": null,
+      "gib": 30.857
+    },
+    {
+      "model": "_/qwen-image-2.1",
+      "release": "0.1.0",
+      "lane": "int8",
+      "commit": "sha256:ce2918d01f2132226405f2f5aa8c702507591b0778abfc00cc03b0c1f8da14f8",
+      "bytes": 19218339764,
+      "kinds": [
+        "BF16",
+        "F32",
+        "int8.convrot"
+      ],
+      "provenance": null,
+      "gib": 17.898
+    },
+    {
+      "model": "_/qwen-image-2.1-turbo",
+      "release": "0.1.0",
+      "lane": "bf16",
+      "commit": "sha256:7a5858cb36251790d8960c832d8d6bc1e75db5e8f3c841721b77af7b6f1a9c3e",
+      "bytes": 32452129570,
+      "kinds": [
+        "BF16"
+      ],
+      "provenance": null,
+      "gib": 30.223
+    }
+  ],
+  "identity_note": "Package release versions are independent from the Qwen-Image-2.1 model name; Hub provenance fields were null."
+}
