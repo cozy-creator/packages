@@ -44,7 +44,8 @@ from cozy_runtime.author import (
 )
 from cozy_runtime.author.kernels import ROWWISE_FP8, PreQuantized
 
-from .glue import FusedMiniMaxH3AttnProcessor, H3AttnProcessor, fits
+from .fit import fits
+from .glue import FusedMiniMaxH3AttnProcessor, H3AttnProcessor
 
 FAST = "kitchen-sol-producer-fast-shared-qkv"
 FP4_LOWMEM = "kitchen-sol-producer-fp4-lowmem-shared-qkv"
@@ -249,6 +250,12 @@ def produce(
     if attn.norm_q.eps != attn.norm_k.eps:
         raise ValueError("Kitchen producer requires matching Q/K RMSNorm epsilon")
     shared_counts: dict[str, int] = {}
+    tight = not fits(hidden_states, attn)
+    if tight:
+        # Kitchen allocates the call's K/V codes and [tokens, heads, 128] output whole; on a
+        # card the call does not fit, they need the cache's free blocks back as whole segments
+        # (step 5 of 15 s on an RTX 3070 asked 1.46 GiB with 1.8 GiB free in pieces).
+        torch.cuda.empty_cache()
     if parallel:
         output, reuse = _parallel_produce(call, hidden_states, name, key, shared_counts)
     else:
@@ -271,7 +278,7 @@ def produce(
         f"comfy_kitchen.sol_attn_chunked(int8, stats={statistics}, vmargin=1.1, "
         f"prefix=int8, qkv={shared})"
     )
-    if fits(hidden_states, attn):
+    if not tight:
         return attn.to_out[1](attn.to_out[0](output.flatten(2, 3)))
     # Where the whole call does not fit, as the site's own processor runs it.
     out = attn.to_out[1](split(attn.to_out[0], output.flatten(2, 3), Cut(1)))

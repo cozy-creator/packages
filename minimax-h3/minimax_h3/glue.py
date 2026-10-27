@@ -30,11 +30,9 @@ partner-channel RoPE and the integer-domain bf16 rounding are theirs.
 
 from __future__ import annotations
 
-import functools
 import hashlib
 import inspect
 import json
-import math
 import sys
 import time
 from collections.abc import Callable, Iterator, Mapping
@@ -69,6 +67,7 @@ from cozy_runtime.author.kernels import (
 from cozy_runtime.rows import Rows, rows
 
 from .adaln_pruned import AdaLNPrunedMiniMaxH3Transformer
+from .fit import fits
 
 CONTRACT = "h3-glue-call-and-topology/2"
 #: The widths compiled: a transformer with others is not installable.
@@ -735,30 +734,6 @@ class FusedMiniMaxH3AttnProcessor(H3AttnProcessor):
         query = rmsnorm_rope(self._glue, query, attn.norm_q.weight, cos, sin, attn.norm_q.eps)
         key = rmsnorm_rope(self._glue, key, attn.norm_k.weight, cos, sin, attn.norm_k.eps)
         return query, key
-
-
-#: What a card holds beside one attention call: the CUDA context and the weights' streaming
-#: window (two int8 DiT blocks, 0.8 GB). An approximation; the cut sizes itself on the device.
-_BESIDE = 3 << 29
-
-
-@functools.cache
-def _capacity(index: int) -> int:
-    return int(torch.cuda.mem_get_info(index)[1])
-
-
-def fits(hidden: Any, attn: Any) -> bool:
-    """Whether one attention call's whole working set fits the device beside what is allocated
-    now: Q, K and V, the RoPE copies of two and the output (bf16), and the input's int8 rows.
-    Off CUDA, always."""
-    quantized = isinstance(hidden, PreQuantized)
-    device = hidden.payload.device if quantized else hidden.device
-    if device.type != "cuda":
-        return True
-    tokens, width = math.prod(hidden.shape[:-1]), int(hidden.shape[-1])
-    need = 6 * tokens * attn.heads * attn.head_dim * 2 + tokens * width
-    index = device.index if device.index is not None else torch.cuda.current_device()
-    return need <= _capacity(index) - torch.cuda.memory_allocated(index) - _BESIDE
 
 
 class _Heads:
