@@ -60,6 +60,8 @@ from gates import MediaFacts, refuse_before_encode
 from long_form_state import (
     RenderProvenance, compatible, compatible_base, context_provenance, provenance,
 )
+from minimax_h3 import _kernel_study  # KERNEL-ERROR STUDY (proof-only)
+_kernel_study.install()
 from minimax_h3.continuation import (
     AVContext,
     Carry,
@@ -354,12 +356,14 @@ class H3VideoOutput(msgspec.Struct):
 
     video: Annotated[VideoAsset, AssetBound(max_bytes=1 << 30, media_types=("video/mp4",))]
     warnings: list[str]
+    study: Annotated[FileAsset, AssetBound(max_bytes=64 << 20, media_types=("application/json",))]
 
 
 class RenderOutput(msgspec.Struct):
     video: Annotated[VideoAsset, AssetBound(media_types=("video/mp4",), max_bytes=1 << 30)]
     originals: Annotated[list[VideoAsset], AssetBound(media_types=("video/mp4",), max_bytes=1 << 30)]
     warnings: list[str]
+    study: Annotated[FileAsset, AssetBound(max_bytes=64 << 20, media_types=("application/json",))]
 
 
 class ReferenceRenderOutput(RenderOutput):
@@ -695,7 +699,9 @@ def _finish(
         audio_decoded_samples=saved.audio.decoded_samples if saved.audio is not None else 0,
         video_bytes=saved.video.size_bytes,
     )
-    return H3VideoOutput(video=saved.video, warnings=[])
+    data, line = _kernel_study.drain()  # KERNEL-ERROR STUDY
+    study = out.save_bytes(data, media_type="application/json")
+    return H3VideoOutput(video=saved.video, warnings=[f"kernel-study {line}"], study=study)
 
 
 #: Frames per handoff slice: 8 frames of 1344x768 are 100 MB of fp32 source and 25 MB of
@@ -1060,7 +1066,7 @@ async def _render_workflow(
     if payload.resolution is Resolution.NATIVE:
         ctx.release_gpus()
         ignored = ["upscale settings apply only above 768p"] if payload.upscale else []
-        return RenderOutput(source.video, [], source.warnings + ignored)
+        return RenderOutput(source.video, [], source.warnings + ignored, source.study)
     out.publish("originals", source.video, label="Original 768p video")
     restore = cast(Callable[..., Awaitable[RestorationOutput]], restore_video)
     with tel.scope(f"SeedVR2 upscale to {payload.resolution.value}"):
@@ -1070,7 +1076,7 @@ async def _render_workflow(
             **{k: v for k, v in asdict(payload.upscale or Upscale()).items() if v is not None},
         )
     ctx.release_gpus()
-    return RenderOutput(result.video, [source.video], source.warnings)
+    return RenderOutput(result.video, [source.video], source.warnings, source.study)
 
 
 async def fl2va(ctx: Context, payload: StandardRenderInput, assets: KeyframeAssets,
@@ -1148,7 +1154,7 @@ async def ref2va(ctx: Context, payload: ReferenceStandardRenderInput, out: Outpu
     result = await _render_workflow(ctx, request, resolved, out, tel, task="ref2va", steps=payload.steps,
                                     video_audio=sound)
     return ReferenceRenderOutput(
-        result.video, result.originals, truncated + warnings + result.warnings, shown
+        result.video, result.originals, truncated + warnings + result.warnings, result.study, shown
     )
 
 
@@ -1159,7 +1165,7 @@ async def ref2va_turbo(ctx: Context, payload: ReferenceRenderInput, out: Outputs
     result = await _render_workflow(ctx, request, resolved, out, tel, task="ref2va_turbo", steps=None,
                                     video_audio=sound)
     return ReferenceRenderOutput(
-        result.video, result.originals, truncated + warnings + result.warnings, shown
+        result.video, result.originals, truncated + warnings + result.warnings, result.study, shown
     )
 
 
