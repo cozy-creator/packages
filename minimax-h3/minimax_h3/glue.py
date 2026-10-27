@@ -733,9 +733,16 @@ def feed_forward(ff: Any, normed: Any) -> Any:
     intermediate (6.4 GB at 15 s) is never whole on a small card. Each token's output reads
     only its own row, an fp8 operand's per-row scale with it. Windows start on multiples of
     256 tokens: every window but the last has the same tile-aligned row count, and the finest
-    is 256 tokens, never one."""
+    is 256 tokens, never one. The windows are sized from the FFN's own widths (`working`),
+    from the first call on: no measurement at small windows.
+
+    A token holds at most its [2F] projection twice (a bias added outside the GEMM, or the
+    unfused SwiGLU's two F temporaries beside it) and two D-wide output rows (this window's,
+    and the previous one's until it is copied out), in the activation dtype."""
     tokens = _Tokens(normed) if isinstance(normed, PreQuantized) else normed
-    return split(_FFN(ff), tokens, Cut(1, align=256))
+    projected, dout = int(ff.net[0].proj.out_features), int(ff.net[2].out_features)
+    working = tokens.element_size() * 2 * (projected + dout) / int(tokens.shape[-1])
+    return split(_FFN(ff), tokens, Cut(1, align=256), working=working)
 
 
 class _FFN:
