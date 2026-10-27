@@ -443,7 +443,8 @@ def _sample(
     ctx: Context,
     tel: Telemetry,
 ) -> Any:
-    """Encode, denoise, decode: Euler through `denoise_loop`, HiDiffusion's DDIM eagerly."""
+    """Encode, denoise, decode: epsilon Euler through `denoise_loop`, HiDiffusion's DDIM (or
+    another prediction rule) eagerly."""
     ids, ids_2 = tokens
     classifier_free = guidance > 1.0
     if classifier_free:
@@ -485,13 +486,17 @@ def _sample(
     # HiDiffusion's window blocks seed torch's CPU RNG from the request (`_cozy_draw`): the
     # RNG state outside the loop is left as it was.
     with torch.random.fork_rng(devices=[]), tel.stage("denoise", overall_range=(0.10, 0.90)):
-        if not hidiffusion_applied:
+        if not hidiffusion_applied and scheduler.config.prediction_type == "epsilon":
             latents = model.denoise_euler(
                 latents, batch_prompt, batch_pooled, batch_ids,
                 scheduler=scheduler, guidance=guidance, on_step=on_step,
             )
-        else:
-            ddim = functools.partial(scheduler.step, eta=1.0, generator=generator)
+        else:  # HiDiffusion's DDIM, or a checkpoint whose Euler predicts something else
+            update = (
+                functools.partial(scheduler.step, eta=1.0, generator=generator)
+                if hidiffusion_applied
+                else scheduler.step
+            )
             for index, timestep in enumerate(scheduler.timesteps):
                 ctx.raise_if_cancelled()
                 batch = torch.cat([latents] * 2) if classifier_free else latents
@@ -512,7 +517,7 @@ def _sample(
                     noise = uncond + guidance * (cond - uncond)
                 if index == 0:
                     tel.metric("noise_absmax_step0", _finite(torch, noise))
-                latents = ddim(noise, timestep, latents).prev_sample
+                latents = update(noise, timestep, latents).prev_sample
                 on_step(index)
     tel.metric("latent_absmax", _finite(torch, latents))
 
