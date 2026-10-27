@@ -15,7 +15,6 @@ from cozy_runtime import rng
 from cozy_runtime.author import CapabilityError, Context, OutputError, Telemetry
 from cozy_runtime.author._model import PLACED
 from cozy_runtime.compute import PreparedRepeat, PreparedSequence
-from cozy_runtime.internal.residency import StaleBinding
 from diffusers import EulerDiscreteScheduler
 from transformers.masking_utils import create_causal_mask
 
@@ -78,18 +77,31 @@ def decode_latents(vae: Any, latents: torch.Tensor, scale: float) -> torch.Tenso
     return vae.decode(latents / scale).sample
 
 
-def _represent(vae: Any, dtype: Any, tel: Telemetry) -> None:
-    """Hold the VAE in the wide representation every SDXL decode uses, eager and native: a cast
-    of its stored bytes, refilled on its next use, so nothing loads here. Without it only an
-    explicit warm made that representation and ordinary requests stayed eager. While the VAE
-    is in use the cast waits for a later request; the eager decode widens per call meanwhile."""
-    placed = PLACED.get(vae)
-    if placed is None or next(vae.parameters()).dtype == dtype:
+def decode_dtype(vae: Any) -> torch.dtype:
+    """The dtype every SDXL decode runs the VAE in. The SDXL VAE overflows fp16 (force_upcast):
+    bf16 where the GPU computes it natively (fp32's range; 48 dB PSNR to fp32 on the 1024px fox,
+    run 1642), else fp32."""
+    if not getattr(vae.config, "force_upcast", False):
+        return next(vae.parameters()).dtype
+    return (
+        torch.bfloat16 if torch.cuda.is_bf16_supported(including_emulation=False) else torch.float32
+    )
+
+
+def hold_decode_dtype(vae: Any, tel: Telemetry) -> None:
+    """Hold the VAE in `decode_dtype` for good, before any VAE scope opens: Runtime's cast of its
+    stored bytes, filled on its next use, so nothing loads here and no request converts weights.
+    Eager and native decode read the same weights, and a later ordinary request can capture
+    the resident pipeline without a warm."""
+    dtype = decode_dtype(vae)
+    if next(vae.parameters()).dtype == dtype:
         return
-    try:
+    placed = PLACED.get(vae)
+    if placed is None:
+        vae.to(dtype=dtype)  # not Runtime-placed: an ordinary module
+    else:
         placed[0].represent(placed[1], dtype)()
-    except StaleBinding as error:
-        tel.log("vae representation kept", reason=str(error))
+    tel.log("vae representation", dtype=str(dtype).removeprefix("torch."))
 
 
 class _Euler:
@@ -243,14 +255,7 @@ class ResidentPipeline:
         resident_only: bool,
     ) -> tuple[_Pipeline, bool] | None:
         vae = components["vae"]
-        dtype = next(vae.parameters()).dtype
-        if bool(getattr(vae.config, "force_upcast", False)):
-            dtype = (
-                torch.bfloat16
-                if torch.cuda.is_bf16_supported(including_emulation=False)
-                else torch.float32
-            )
-            _represent(vae, dtype, tel)
+        dtype = decode_dtype(vae)
         key = (
             json.dumps(scheduler_config, sort_keys=True, separators=(",", ":")),
             vae_scale,

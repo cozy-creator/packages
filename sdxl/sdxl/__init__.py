@@ -80,7 +80,13 @@ from transformers import (
 )
 from transformers import initialization as transformer_init
 
-from ._prepared import ResidentPipeline, decode_latents, encode_tokens, repeat_euler
+from ._prepared import (
+    ResidentPipeline,
+    decode_latents,
+    encode_tokens,
+    hold_decode_dtype,
+    repeat_euler,
+)
 from ._streamed import stream_euler
 
 app = App()
@@ -301,24 +307,11 @@ class SdxlModel(Model[SdxlPipeline], encoded_leaves="accept"):
 
     @uses_components("vae")
     def decode(self, latents: Any) -> Any:
+        """In the VAE's held decode dtype (`hold_decode_dtype`); its weights never convert here."""
         vae = self.pipe.components["vae"]
-        original_dtype = next(vae.parameters()).dtype
-        upcast = bool(getattr(vae.config, "force_upcast", False))
-        if upcast:
-            # The SDXL VAE overflows fp16. bf16 has fp32's range: 48 dB PSNR to fp32 on the
-            # 1024px fox (run 1642), ~0.5 s faster on an RTX 4070 Laptop.
-            native_bf16 = latents.is_cuda and torch.cuda.is_bf16_supported(
-                including_emulation=False
-            )
-            wide = torch.bfloat16 if native_bf16 else torch.float32
-            vae.to(dtype=wide)
-            latents = latents.to(dtype=wide)
-        try:
-            with torch.inference_mode():
-                return decode_latents(vae, latents, self.pipe.vae_scale)
-        finally:
-            if upcast:
-                vae.to(dtype=original_dtype)
+        latents = latents.to(dtype=next(vae.parameters()).dtype)
+        with torch.inference_mode():
+            return decode_latents(vae, latents, self.pipe.vae_scale)
 
 
 # ------------------------------------------------------------------ the handler
@@ -587,6 +580,7 @@ def prepare_generate(
     if facts.hidiffusion_applied:
         return False
     ctx.plan({"text_encoder", "text_encoder_2"}, "unet", "vae")
+    hold_decode_dtype(model.pipe.components["vae"], tel)
     # Real tokenizer IDs initialize fixed-shape slots; request values replace them later.
     # Preparation does not draw a seed or submit an image-generation request.
     tokens = _tokenize(model.tokenizers, "")
@@ -622,6 +616,7 @@ def generate(
 ) -> ImageResult:
     """One text-to-image generation: tokenize, encode, denoise, decode, encode a WebP."""
     ctx.plan({"text_encoder", "text_encoder_2"}, "unet", "vae")
+    hold_decode_dtype(model.pipe.components["vae"], tel)
     payload.ignored(adj, "prompt_upsampling", reason="SDXL has no prompt upsampler")
     adj.extend(facts.adjustments)
     seed = payload.drawn_seed()
