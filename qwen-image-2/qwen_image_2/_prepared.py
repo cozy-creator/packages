@@ -20,11 +20,8 @@ Diffusers/Runtime ones; the parity gate is this path against the eager Diffusers
 from __future__ import annotations
 
 import os
-import threading
 import time
 import weakref
-from contextlib import contextmanager
-from collections.abc import Iterator
 from typing import Any
 
 import torch
@@ -102,30 +99,9 @@ class _Layout:
 class ResidentDenoise:
     """Prefer one resident repeat, then native block streaming when residency refuses.
 
-    Only the transformer is retained. The eager prefix refreshes K/V for every prompt;
-    those values, schedules, layout and initial latent are copied into stable inputs.
-    Runtime's binding/fill and kernel identity checks decide whether reuse remains valid.
+    The program lives for one denoise: its captured graphs and their pool are released before
+    the call goes on to the VAE decode, which at 4 MP needs that memory back.
     """
-
-    def __init__(self) -> None:
-        self._lock = threading.RLock()
-        self._program: _Denoise | None = None
-
-    @contextmanager
-    def _using(self, ctx: Context) -> Iterator[None]:
-        while not self._lock.acquire(timeout=0.05):
-            ctx.raise_if_cancelled()
-        try:
-            ctx.raise_if_cancelled()
-            yield
-        finally:
-            self._lock.release()
-
-    def close(self) -> None:
-        with self._lock:
-            if self._program is not None:
-                self._program.plan.close()
-                self._program = None
 
     def run(
         self,
@@ -145,122 +121,91 @@ class ResidentDenoise:
             or total < 2
             or scheduler.sigmas.shape[0] != total + 1
         ):
-            self.close()
             return None
-        with self._using(ctx):
-            with torch.inference_mode(False), torch.no_grad():
-                euler = _FlowEuler(scheduler, latents.device, 1)
-            caches = [
-                kv_cache.get_layer(index) for index in range(len(transformer.transformer_blocks))
-            ]
-            inputs = (
-                latents,
-                euler.ts,
-                euler.dt,
-                layout.rotary_emb,
-                layout.modulation_mask,
-                *(tensor for cache in caches for tensor in cache.get()),
-                *((layout.attention_mask,) if layout.attention_mask is not None else ()),
-            )
-            key = (
-                id(transformer),
-                total,
-                len(caches),
-                layout.attention_mask is not None,
-                tuple((tuple(value.shape), value.dtype, value.device) for value in inputs),
-            )
-            program = self._program
-            if program is not None and (program.key != key or not program.plan.valid()):
-                self.close()
-                program = None
-            reused = program is not None
-            began = time.perf_counter()
-            if program is None:
-                try:
-                    program = _Denoise(key, transformer, inputs, euler, caches, layout, total)
-                except CapabilityError as error:
-                    if error.code != "prepared_graph_ineligible":
-                        raise
-                    if "capture requires the component's weights to be resident" not in str(error):
-                        tel.log("eager denoise", reason=str(error))
-                        return None
-                except torch.OutOfMemoryError:
-                    pass  # No accepted work: try native block streaming at the same boundary.
-                if program is None:
-                    try:
-                        program = _StreamedDenoise(
-                            key, transformer, inputs, euler, caches, layout, total
-                        )
-                    except CapabilityError as error:
-                        if error.code not in ("prepared_graph_ineligible", "prepared_load_unavailable"):
-                            raise
-                        # A not-local source is refused before submission. The ordinary
-                        # eager loader can fetch it; accepted native work is never retried.
-                        tel.log("eager denoise", reason=str(error))
-                        return None
-                    except torch.OutOfMemoryError:
-                        tel.log(
-                            "eager denoise", reason="native block preparation exceeded capacity"
-                        )
-                        return None
-                self._program = program
-            tel.metric(
-                "request_path.denoise_capture_ms",
-                0.0 if reused else (time.perf_counter() - began) * 1000,
-            )
-            # No fallback after submission: cancellation/device failures join before disposal.
-            try:
-                began = time.perf_counter()
-                program.update(inputs)
-                tel.metric(
-                    "request_path.denoise_input_enqueue_ms", (time.perf_counter() - began) * 1000
-                )
-                tel.metric("request_path.denoise_reused", float(reused))
-                launches = int(program.plan.facts()["host_graph_launches"])
-                execution = ctx.plan(program.plan)
-                observed = -1
-                while True:
-                    ctx.raise_if_cancelled()
-                    progress = execution.poll()
-                    completed = (
-                        int(execution.facts()["sequence"]["completed_passes"])
-                        if program.streaming
-                        else progress.completed_steps
-                    )
-                    if completed != observed:
-                        observed = completed
-                        fraction = (1 + observed) / total
-                        tel.progress(
-                            fraction,
-                            stage="generating image",
-                            overall_fraction=0.1 + 0.8 * fraction,
-                        )
-                    if progress.done:
-                        break
-                    time.sleep(0.05)
-                (result,) = execution.wait()
-                if progress.canceled or observed != total - 1:
-                    raise OutputError("prepared denoising stopped early", code="incomplete_denoise")
-                tel.metric("request_path.denoise_native_steps", float(observed))
-                tel.metric("request_path.denoise_streamed", float(program.streaming))
-                tel.metric(
-                    "request_path.denoise_host_launches",
-                    float(int(execution.facts()["host_graph_launches"]) - launches),
-                )
-                tel.log(
-                    "native denoise definition",
-                    pid=os.getpid(),
-                    plan=f"{id(program.plan):x}",
-                    identity_scope="process-local",
-                    reused=reused,
-                    streamed=program.streaming,
-                )
-                # Execution.wait returns its own completed readout, not the plan's
-                # mutable state. The next request cannot overwrite this VAE input.
-                return result
-            except BaseException:
-                self.close()
+        with torch.inference_mode(False), torch.no_grad():
+            euler = _FlowEuler(scheduler, latents.device, 1)
+        caches = [kv_cache.get_layer(index) for index in range(len(transformer.transformer_blocks))]
+        inputs = (
+            latents,
+            euler.ts,
+            euler.dt,
+            layout.rotary_emb,
+            layout.modulation_mask,
+            *(tensor for cache in caches for tensor in cache.get()),
+            *((layout.attention_mask,) if layout.attention_mask is not None else ()),
+        )
+        began = time.perf_counter()
+        program: _Denoise | None = None
+        try:
+            program = _Denoise(transformer, inputs, euler, caches, layout, total)
+        except CapabilityError as error:
+            if error.code != "prepared_graph_ineligible":
                 raise
+            if "capture requires the component's weights to be resident" not in str(error):
+                tel.log("eager denoise", reason=str(error))
+                return None
+        except torch.OutOfMemoryError:
+            pass  # No accepted work: try native block streaming at the same boundary.
+        if program is None:
+            try:
+                program = _StreamedDenoise(transformer, inputs, euler, caches, layout, total)
+            except CapabilityError as error:
+                if error.code not in ("prepared_graph_ineligible", "prepared_load_unavailable"):
+                    raise
+                # A not-local source is refused before submission. The ordinary
+                # eager loader can fetch it; accepted native work is never retried.
+                tel.log("eager denoise", reason=str(error))
+                return None
+            except torch.OutOfMemoryError:
+                tel.log("eager denoise", reason="native block preparation exceeded capacity")
+                return None
+        tel.metric("request_path.denoise_capture_ms", (time.perf_counter() - began) * 1000)
+        # No fallback after submission: cancellation/device failures join before disposal.
+        try:
+            began = time.perf_counter()
+            program.update(inputs)
+            tel.metric(
+                "request_path.denoise_input_enqueue_ms", (time.perf_counter() - began) * 1000
+            )
+            launches = int(program.plan.facts()["host_graph_launches"])
+            execution = ctx.plan(program.plan)
+            observed = -1
+            while True:
+                ctx.raise_if_cancelled()
+                progress = execution.poll()
+                completed = (
+                    int(execution.facts()["sequence"]["completed_passes"])
+                    if program.streaming
+                    else progress.completed_steps
+                )
+                if completed != observed:
+                    observed = completed
+                    fraction = (1 + observed) / total
+                    tel.progress(
+                        fraction, stage="generating image", overall_fraction=0.1 + 0.8 * fraction
+                    )
+                if progress.done:
+                    break
+                time.sleep(0.05)
+            (result,) = execution.wait()
+            if progress.canceled or observed != total - 1:
+                raise OutputError("prepared denoising stopped early", code="incomplete_denoise")
+            tel.metric("request_path.denoise_native_steps", float(observed))
+            tel.metric("request_path.denoise_streamed", float(program.streaming))
+            tel.metric(
+                "request_path.denoise_host_launches",
+                float(int(execution.facts()["host_graph_launches"]) - launches),
+            )
+            tel.log(
+                "native denoise definition",
+                pid=os.getpid(),
+                plan=f"{id(program.plan):x}",
+                streamed=program.streaming,
+            )
+            # Execution.wait returns its own completed readout, not the plan's state.
+            return result
+        finally:
+            program.plan.close()
 
 
 class _Denoise:
@@ -268,7 +213,6 @@ class _Denoise:
 
     def __init__(
         self,
-        key: tuple[Any, ...],
         transformer: Any,
         inputs: tuple[torch.Tensor, ...],
         euler: _FlowEuler,
@@ -276,7 +220,6 @@ class _Denoise:
         layout: _Layout,
         total: int,
     ) -> None:
-        self.key = key
         with torch.inference_mode(False), torch.no_grad():
             state = inputs[0].clone()
         slots = (state, *inputs[1:])
@@ -335,7 +278,7 @@ class _Denoise:
 class _StreamedDenoise(_Denoise):
     streaming = True
 
-    def __init__(self, key, transformer, inputs, euler, caches, layout, total):
+    def __init__(self, transformer, inputs, euler, caches, layout, total):
         if not callable(getattr(PreparedSequence, "record", None)):
             raise CapabilityError(
                 "native streamed sequence recording is unavailable",
@@ -345,7 +288,6 @@ class _StreamedDenoise(_Denoise):
             raise CapabilityError(
                 "streamed Qwen requires one causal cached sample", code="prepared_graph_ineligible"
             )
-        self.key = key
         blocks = transformer.transformer_blocks
         if not blocks or len(caches) != len(blocks):
             raise CapabilityError(
