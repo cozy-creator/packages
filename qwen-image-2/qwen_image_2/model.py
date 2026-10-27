@@ -17,6 +17,7 @@ from diffusers import (
     QwenImage21Pipeline,
     QwenImage21Transformer2DModel,
 )
+from diffusers.models.autoencoders.autoencoder_kl_qwenimage21 import QwenImage21ResidualUpBlock
 from diffusers.models.transformers.transformer_qwenimage21 import QwenImage21TransformerBlock
 from diffusers.pipelines.qwenimage21.pipeline_qwenimage21 import calculate_dimensions
 from transformers import (
@@ -316,4 +317,25 @@ class QwenImage21Model(Model[QwenImage21Graph], encoded_leaves="accept"):
             # Diffusers' `decode` keeps every convolution's input for a next frame an image
             # never has (its feature cache, half the decode's memory); the same bits without.
             x = vae.post_quant_conv(latents * std + mean)
-            return vae.decoder(x, first_chunk=True).clamp(-1.0, 1.0)[:, :, 0]
+            return _decoded(vae.decoder, x).clamp(-1.0, 1.0)[:, :, 0]
+
+
+def _decoded(decoder: Any, x: torch.Tensor) -> torch.Tensor:
+    """`decoder(x, first_chunk=True)` without its residual up-blocks' input copies: each block's
+    shortcut is its input itself (nothing writes it in place), and the last, with no shortcut,
+    keeps none. Diffusers clones it regardless, 4.8 GB at 2048² F32 in the last block alone,
+    which put a 4 MP decode past a 24 GB card (Runtime 0.34, run 6: 24.2 GB live)."""
+    x = decoder.mid_block(decoder.conv_in(x))
+    for block in decoder.up_blocks:
+        if not isinstance(block, QwenImage21ResidualUpBlock):
+            x = block(x, first_chunk=True)
+            continue
+        shortcut = x if block.avg_shortcut is not None else None
+        for resnet in block.resnets:
+            x = resnet(x)
+        if block.upsampler is not None:
+            x = block.upsampler(x)
+        if shortcut is not None:
+            x = x + block.avg_shortcut(shortcut, first_chunk=True)
+        del shortcut
+    return decoder.conv_out(decoder.nonlinearity(decoder.norm_out(x)))
