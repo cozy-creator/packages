@@ -154,11 +154,6 @@ class QwenImage21Graph:
             "QwenImage21AttentionBlock",
             "QwenImage21Resample",
         ]
-        # `decode` falls back to Diffusers' tiled decode when the whole canvas does not fit. Its
-        # 256 px tiles leave green and purple streaks along the seams in flat sky; 512 px tiles
-        # blended over 128 px err 7 dB less against the whole decode at 1 and 4 MP.
-        vae.tile_sample_min_height = vae.tile_sample_min_width = 512
-        vae.tile_sample_stride_height = vae.tile_sample_stride_width = 384
         # The pipeline reads hidden states only, so the 1.24 GB language-model head is not
         # built; Runtime skips its stored weight.
         self.components["text_encoder"].lm_head = torch.nn.Identity()
@@ -490,7 +485,8 @@ class QwenImage21Model(Model[QwenImage21Graph], encoded_leaves="accept"):
             z = latents * std + mean
             decoded = _decoded_whole(vae, z)
             if decoded is None:
-                # Diffusers' tiled decode, F32 like the whole one; it applies post_quant_conv itself.
+                # Diffusers' tiled decode (256 px tiles blended over 64 px), F32 like the whole
+                # one; it applies post_quant_conv itself.
                 decoded = vae.tiled_decode(z, return_dict=False)[0]
             return decoded.clamp(-1.0, 1.0)[:, :, 0]
 
