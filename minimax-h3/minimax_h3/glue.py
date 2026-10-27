@@ -62,7 +62,9 @@ from cozy_runtime.author.kernels import (
     PreQuantized,
     TritonEntry,
     TritonKernels,
+    quantize_once,
 )
+from cozy_runtime.rows import Rows, rows
 
 from .adaln_pruned import AdaLNPrunedMiniMaxH3Transformer
 
@@ -633,8 +635,13 @@ class FusedSwiGLU(SwiGLU):  # type: ignore[misc]
 
 
 class H3AttnProcessor(MiniMaxH3AttnProcessor):  # type: ignore[misc]
-    """Diffusers' H3 attention with its Q, K and V freed before the out projection: at 15 s
-    the three take 4.8 GB beside it (run 11340, 8 GB)."""
+    """Diffusers' H3 attention cut by query heads, then its out projection by tokens, each through
+    `split` (the memory picks the windows; whole while the device holds it). A window of heads
+    computes its own rows of the Q, K and V projections (`cozy_runtime.rows`), their per-head
+    norms and RoPE, and attends: at 15 s the three whole projections take 4.8 GB, more than an
+    8 GB card holds beside the residual stream. Every head reads only its own rows, so the
+    windows join to the whole call. A projection that does not cut by rows, a mask or a
+    sequence-parallel exchange runs the heads whole."""
 
     def __call__(
         self,
@@ -643,9 +650,29 @@ class H3AttnProcessor(MiniMaxH3AttnProcessor):  # type: ignore[misc]
         rotary_emb: tuple[Any, Any] | None = None,
         attention_mask: Any | None = None,
     ) -> Any:
+        heads = _Heads.of(self, attn, hidden_states, rotary_emb, attention_mask)
+        with quantize_once(hidden_states):
+            attended = (
+                split(heads, heads, Cut(2))
+                if heads is not None
+                else self.whole(attn, hidden_states, rotary_emb, attention_mask)
+            )
+        return attn.to_out[1](split(attn.to_out[0], attended.flatten(2, 3), Cut(1)))
+
+    def whole(
+        self,
+        attn: Any,
+        hidden_states: Any,
+        rotary_emb: tuple[Any, Any] | None,
+        attention_mask: Any | None,
+    ) -> Any:
         query, key, value = self.qkv(attn, hidden_states, rotary_emb)
+        return self.attend(query, key, value, attention_mask)
+
+    def attend(self, query: Any, key: Any, value: Any, attention_mask: Any | None = None) -> Any:
+        """The attention of `query`'s heads, in its dtype."""
         dtype = query.dtype
-        hidden_states = dispatch_attention_fn(
+        return dispatch_attention_fn(
             query,
             key,
             value,
@@ -654,9 +681,7 @@ class H3AttnProcessor(MiniMaxH3AttnProcessor):  # type: ignore[misc]
             is_causal=False,
             backend=self._attention_backend,
             parallel_config=self._parallel_config,
-        )
-        del query, key, value
-        return attn.to_out[1](attn.to_out[0](hidden_states.flatten(2, 3).to(dtype)))
+        ).to(dtype)
 
     def qkv(self, attn: Any, hidden_states: Any, rotary_emb: tuple[Any, Any] | None) -> Any:
         if attn.fused_projections:
@@ -665,10 +690,13 @@ class H3AttnProcessor(MiniMaxH3AttnProcessor):  # type: ignore[misc]
             query, key = attn.to_q(hidden_states), attn.to_k(hidden_states)
             value = attn.to_v(hidden_states)
         query, key, value = (t.unflatten(-1, (attn.heads, -1)) for t in (query, key, value))
+        return (*self.rope(attn, query, key, rotary_emb), value)
+
+    def rope(self, attn: Any, query: Any, key: Any, rotary_emb: tuple[Any, Any] | None) -> Any:
         query, key = attn.norm_q(query), attn.norm_k(key)
         if rotary_emb is not None:
             query, key = _apply_rotary_emb(query, *rotary_emb), _apply_rotary_emb(key, *rotary_emb)
-        return query, key, value
+        return query, key
 
 
 class FusedMiniMaxH3AttnProcessor(H3AttnProcessor):
@@ -678,12 +706,76 @@ class FusedMiniMaxH3AttnProcessor(H3AttnProcessor):
         query = attn.to_q(hidden_states).unflatten(-1, (attn.heads, -1))
         key = attn.to_k(hidden_states).unflatten(-1, (attn.heads, -1))
         value = attn.to_v(hidden_states).unflatten(-1, (attn.heads, -1))
+        return (*self.rope(attn, query, key, rotary_emb), value)
+
+    def rope(self, attn: Any, query: Any, key: Any, rotary_emb: tuple[Any, Any] | None) -> Any:
         if rotary_emb is None:
-            return attn.norm_q(query), attn.norm_k(key), value
+            return attn.norm_q(query), attn.norm_k(key)
         cos, sin = rotary_emb
         query = rmsnorm_rope(self._glue, query, attn.norm_q.weight, cos, sin, attn.norm_q.eps)
         key = rmsnorm_rope(self._glue, key, attn.norm_k.weight, cos, sin, attn.norm_k.eps)
-        return query, key, value
+        return query, key
+
+
+class _Heads:
+    """One attention call as `split` cuts it by query heads: its shape is the call's
+    [batch, tokens, heads, head_dim] output, a window of it a slice of heads, and calling it on a
+    window gives those heads' attention. Called on itself (`split` running whole), all heads."""
+
+    __slots__ = ("attn", "device", "dtype", "hidden", "processor", "projections", "rotary", "shape")
+
+    def __init__(
+        self,
+        processor: H3AttnProcessor,
+        attn: Any,
+        hidden: Any,
+        rotary: tuple[Any, Any] | None,
+        projections: tuple[Rows, Rows, Rows],
+    ) -> None:
+        self.processor, self.attn, self.hidden, self.rotary = processor, attn, hidden, rotary
+        self.projections = projections
+        self.shape = (*hidden.shape[:-1], attn.heads, attn.head_dim)
+        # A row-quantized input (the fused norm's fp8 epilogue) stands for its bf16 rows.
+        quantized = isinstance(hidden, PreQuantized)
+        self.dtype = torch.bfloat16 if quantized else hidden.dtype
+        self.device = hidden.payload.device if quantized else hidden.device
+
+    @classmethod
+    def of(
+        cls,
+        processor: H3AttnProcessor,
+        attn: Any,
+        hidden: Any,
+        rotary: tuple[Any, Any] | None,
+        mask: Any | None,
+    ) -> _Heads | None:
+        """The call cut by heads, or None where it runs them whole."""
+        if attn.fused_projections or mask is not None or processor._parallel_config is not None:
+            return None
+        found = tuple(rows(m) for m in (attn.to_q, attn.to_k, attn.to_v))
+        if any(r is None for r in found):
+            return None
+        return cls(processor, attn, hidden, rotary, found)  # type: ignore[arg-type]
+
+    def dim(self) -> int:
+        return len(self.shape)
+
+    def element_size(self) -> int:
+        return int(self.dtype.itemsize)
+
+    def __getitem__(self, index: tuple[slice, ...]) -> slice:
+        return index[2]
+
+    def __call__(self, heads: _Heads | slice) -> Any:
+        window = slice(0, self.attn.heads) if heads is self else heads
+        assert isinstance(window, slice)
+        d = self.attn.head_dim
+        start, stop = window.start * d, window.stop * d
+        query, key, value = (
+            project(self.hidden, start, stop).unflatten(-1, (-1, d)) for project in self.projections
+        )
+        query, key = self.processor.rope(self.attn, query, key, self.rotary)
+        return self.processor.attend(query, key, value)
 
 
 class FusedMiniMaxH3TransformerBlock(MiniMaxH3TransformerBlock):  # type: ignore[misc]
@@ -711,6 +803,7 @@ class FusedMiniMaxH3TransformerBlock(MiniMaxH3TransformerBlock):  # type: ignore
             fp8=self._fusion_attn_fp8,
         )
         attn_output = self.attn(normed, rotary_emb, attention_mask)
+        del normed  # its last use: 1.2 GB at 15 s, not held through the next norm
         hidden_states, normed = gate_add_rmsnorm_modulate(
             self._glue,
             hidden_states,
