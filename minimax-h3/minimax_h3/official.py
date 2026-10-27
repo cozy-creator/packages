@@ -1365,16 +1365,25 @@ class OfficialH3Pipeline:
             clips = ClipRows(block_state, references, latents, scoped.patch_size)
             clips.thin(block_state)
         native = False
-        if task == "fl2va" and clips is None and context is None and ctx is not None and tel is not None:
+        eligible = (
+            task == "fl2va" and clips is None and context is None
+            and ctx is not None and tel is not None
+        )
+
+        def prepared_suffix(first: int) -> bool:
             from ._prepared import run as run_prepared
 
+            assert ctx is not None and tel is not None
             cancel()
-            native = run_prepared(
+            return run_prepared(
                 scoped.transformer, block_state, scoped.scheduler, scoped.audio_scheduler,
                 lambda index: _attention_layout(block_state, index, sol_dense_steps=sol_dense_steps),
-                sol_dense_steps, ctx, tel,
+                sol_dense_steps, ctx, tel, start=first,
             )
+
         with step_invariants():
+            if eligible:
+                native = prepared_suffix(0)
             for index, timestep in enumerate(() if native else block_state.timesteps):
                 cancel()
                 if clips is not None and index == sol_dense_steps:
@@ -1384,6 +1393,11 @@ class OfficialH3Pipeline:
                 ):
                     _, block_state = loop.loop_step(scoped, block_state, i=index, t=timestep)
                 on_step(index)
+                # One ordinary prefix can make cold weights resident. Its update ran once;
+                # a refused suffix continues at the next original index, never reexecutes it.
+                if eligible and index == 0 and len(block_state.timesteps) > 1:
+                    if prepared_suffix(1):
+                        break
         loop.set_block_state(state, block_state)
         self._run_with(task, scoped, "denoise.after_denoise", state)
         return facts

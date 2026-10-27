@@ -28,11 +28,12 @@ class Segment:
     unique_rows: int
 
 
-def segments(row_plan: list[Any], dense_steps: int) -> tuple[Segment, ...]:
+def segments(row_plan: list[Any], dense_steps: int, *, start: int = 0) -> tuple[Segment, ...]:
     """Keep upstream's variable unique-timestep shapes; never pad or change row semantics."""
     result: list[Segment] = []
     previous = None
-    for index, (times, indices) in enumerate(row_plan):
+    for index in range(start, len(row_plan)):
+        times, indices = row_plan[index]
         shape = (index < dense_steps, times.numel(), tuple(indices.shape))
         if result and shape == previous:
             old = result[-1]
@@ -72,10 +73,12 @@ def prepare(
     audio_scheduler: Any,
     layout_at: Callable[[int], Any],
     dense_steps: int,
+    *,
+    start: int = 0,
 ) -> Any:
     """Prepare without mutating the caller's latents; Runtime owns every graph dependency."""
     sequence_type = getattr(compute, "PreparedSequence", None)
-    if sequence_type is None:
+    if sequence_type is None or not callable(getattr(sequence_type, "record", None)):
         raise CapabilityError(
             "native stage sequences unavailable", code="prepared_graph_ineligible"
         )
@@ -92,6 +95,22 @@ def prepare(
         )
     if not state.latents.is_cuda or not state.audio_latents.is_cuda:
         raise CapabilityError("native H3 requires CUDA latents", code="prepared_graph_ineligible")
+    # The package's Kitchen producers carry Python previous-step summary state. A
+    # repeated graph needs explicit GPU carry before those implementations are eligible.
+    from cozy_runtime.internal.producers import Processor
+
+    for module in transformer.modules():
+        processor = getattr(module, "processor", None)
+        if isinstance(processor, Processor):
+            from .producer import PRODUCERS
+
+            selected = processor._attention_backend
+            active = str(getattr(selected, "value", selected)) == processor.backend
+            if active and PRODUCERS.get(processor.producer.name) is processor.producer:
+                raise CapabilityError(
+                    "H3 Kitchen producer previous-step summaries need native GPU carry",
+                    code="prepared_graph_ineligible",
+                )
     if state.attention_kwargs:
         raise CapabilityError(
             "native H3 requires fixed base attention inputs", code="prepared_graph_ineligible"
@@ -100,12 +119,27 @@ def prepare(
     total = len(row_plan)
     if (
         not total
+        or type(start) is not int
+        or not 0 <= start < total
         or len(video_scheduler.sigmas) != total + 1
         or len(audio_scheduler.sigmas) != total + 1
     ):
         raise CapabilityError(
             "native H3 requires complete dual schedules", code="prepared_graph_ineligible"
         )
+    from cozy_runtime.author._model import PLACED
+
+    placed = PLACED.get(transformer)
+    if placed is not None:
+        binding = placed[0].retain(placed[1], ("",))
+        try:
+            if not binding.resident():
+                raise CapabilityError(
+                    "native H3 needs resident weights before segment preparation",
+                    code="prepared_graph_ineligible",
+                )
+        finally:
+            binding.close()
     fields = state.denoiser_input_fields
     names = ("token_tags", "position_ids", "video_indices", "audio_indices", "text_indices")
     if set(fields) != set(names):
@@ -136,20 +170,29 @@ def prepare(
             transformer._release()
     with torch.inference_mode(False), torch.no_grad():
         video, audio = state.latents.clone(), state.audio_latents.clone()
-        rotary = transformer.rope(position_ids)
-        text = transformer.token_refiner(
-            transformer.context_embedder(
-                state.prompt_embeds.to(get_parameter_dtype(transformer.context_embedder))
+        with attention_scope(layout_at(start)):
+            rotary = transformer.rope(position_ids)
+            text = transformer.token_refiner(
+                transformer.context_embedder(
+                    state.prompt_embeds.to(get_parameter_dtype(transformer.context_embedder))
+                )
             )
-        )
-    pieces = segments(row_plan, dense_steps)
-    plans = []
-    try:
+    pieces = segments(row_plan, dense_steps, start=start)
+    prepared = []
+    with torch.inference_mode(False), torch.no_grad():
         for part in pieces:
-            rows = torch.stack(table_rows[part.first : part.end])
-            indices = torch.stack([row_plan[i][1] for i in range(part.first, part.end)])
-            video_euler = Euler(video_scheduler, part.first, part.end, video.device)
-            audio_euler = Euler(audio_scheduler, part.first, part.end, audio.device)
+            prepared.append(
+                (
+                    part,
+                    torch.stack(table_rows[part.first : part.end]),
+                    torch.stack([row_plan[i][1] for i in range(part.first, part.end)]),
+                    Euler(video_scheduler, part.first, part.end, video.device),
+                    Euler(audio_scheduler, part.first, part.end, audio.device),
+                )
+            )
+    with sequence_type.record() as recording:
+        plans = []
+        for part, rows, indices, video_euler, audio_euler in prepared:
             body = step_body(
                 transformer,
                 video,
@@ -167,10 +210,10 @@ def prepare(
                 state.num_condition_video_rows,
                 state.num_condition_audio_rows,
             )
-            # Attention selection is fixed for this policy segment during capture. Runtime
-            # rejects a kernel identity change while recording or before sequence submission.
+            # Policy uses the original global step, even when an ordinary prefix ran.
+            # Runtime validates kernel/fill identities for every prepared definition.
             with attention_scope(layout_at(part.first)):
-                plan = compute.PreparedRepeat.capture(
+                plan = recording.capture(
                     body,
                     state=(video, audio),
                     steps=part.end - part.first,
@@ -197,12 +240,7 @@ def prepare(
                 "H3 weights or selected kernels changed during segment preparation",
                 code="prepared_graph_ineligible",
             )
-        sequence = sequence_type(plans, outputs=(video, audio))
-        return sequence, pieces
-    except BaseException:
-        for plan in reversed(plans):
-            plan.close()
-        raise
+        return recording.finish(outputs=(video, audio)), pieces
 
 
 def step_body(
@@ -250,11 +288,19 @@ def run(
     dense_steps: int,
     ctx: Context,
     tel: Telemetry,
+    *,
+    start: int = 0,
 ) -> bool:
     began = time.perf_counter()
     try:
         plan, pieces = prepare(
-            transformer, state, video_scheduler, audio_scheduler, layout_at, dense_steps
+            transformer,
+            state,
+            video_scheduler,
+            audio_scheduler,
+            layout_at,
+            dense_steps,
+            start=start,
         )
     except CapabilityError as error:
         if error.code != "prepared_graph_ineligible":
@@ -280,19 +326,20 @@ def run(
             if progress.completed_steps != observed:
                 observed = progress.completed_steps
                 tel.progress(
-                    observed / plan.steps,
+                    (start + observed) / len(state.row_timestep_plan),
                     stage="denoise",
-                    overall_fraction=0.15 + 0.7 * observed / plan.steps,
+                    overall_fraction=0.15 + 0.7 * (start + observed) / len(state.row_timestep_plan),
                 )
             if progress.done:
                 break
             time.sleep(0.05)
         video, audio = execution.wait()
-        if progress.canceled or progress.completed_steps != len(state.row_timestep_plan):
+        if progress.canceled or progress.completed_steps != len(state.row_timestep_plan) - start:
             raise OutputError(
                 "native H3 stopped before all scheduled steps", code="incomplete_denoise"
             )
         state.latents, state.audio_latents = video, audio
+        tel.metric("request_path.h3_eager_prefix_steps", float(start))
         tel.metric("request_path.h3_native_steps", float(progress.completed_steps))
         tel.metric("request_path.h3_native_submissions", 1.0)
         tel.metric(
