@@ -3,8 +3,10 @@
 On a sparse step the producer owns the H3 attention module's whole call: one rowwise fp8
 quantization of the hidden states shared by the Q, K and V projections, fed in 4096-row
 chunks to Kitchen's `sol_attn_chunked` (per-head RMSNorm and split-half RoPE fused), with the
-previous step's sparse statistics reused per site within one request. Dense steps and dense
-paths call the site's own processor, served by the producer's Runtime base backend.
+previous step's key means reused per site within one request and the value scales of the call's
+own values: a scale from the previous step saturates Kitchen's int8 values wherever they grew
+(every site of H3 Turbo's steps 5-7, up to 44% of a block's channels). Dense steps, dense paths
+and exact paths call the site's own processor, served by the producer's Runtime base backend.
 
 The approved SM120 recipe (`kitchen-sol-producer-fp4-fixed-means-shared-qkv`) serves dense
 calls with Sage3 fixed-means NVFP4 and also shards over Ulysses: its projection runs on the
@@ -46,6 +48,8 @@ FAST = "kitchen-sol-producer-fast-shared-qkv"
 FP4_LOWMEM = "kitchen-sol-producer-fp4-lowmem-shared-qkv"
 FIXED_MEANS = "kitchen-sol-producer-fp4-fixed-means-shared-qkv"
 CHUNK = 4096
+#: Kitchen's value-scale margin (`sol_attn_chunked`'s `vscale_next`): absmax / 127 x 1.1.
+VMARGIN = 1.1
 _ROTARY_HOOK = "cozy_cp_producer_rotary"
 
 Statistics = tuple[int, tuple[int, ...], torch.Tensor | None, torch.Tensor | None]
@@ -133,6 +137,34 @@ def qkv_chunks(
         ).squeeze(0)
 
 
+def value_absmax(
+    attn: MiniMaxH3Attention,
+    hidden: torch.Tensor | PreQuantized,
+    tokens: int,
+    quantize: Callable[[Any], PreQuantized],
+) -> torch.Tensor:
+    """This call's per-(head, channel) value absmax over the live document, F32 [H, 128]: the
+    V projection alone, in the chunks and with the shared operand `qkv_chunks` gives Kitchen."""
+    shared = not shared_qkv_refusal(attn)
+    found: torch.Tensor | None = None
+    for start in range(0, tokens, CHUNK):
+        chunk = rows(hidden, start, min(tokens, start + CHUNK))
+        if shared and not isinstance(chunk, PreQuantized):
+            value = attn.to_v(chunk, prequantized=quantize(chunk))
+        else:
+            value = attn.to_v(chunk)
+        peak = value.reshape(-1, value.shape[-1]).abs().amax(dim=0)
+        found = peak if found is None else torch.maximum(found, peak)
+    if found is None:
+        raise ValueError("H3 producer has no live rows to scale")
+    return found.float().reshape(attn.heads, 128)
+
+
+def value_scale(absmax: torch.Tensor) -> torch.Tensor:
+    """Kitchen's value scale for these values: no channel saturates its int8 range."""
+    return (absmax.float() / 127.0 * VMARGIN).clamp_min(1e-8).contiguous()
+
+
 def rope_presentation(
     rotary: tuple[torch.Tensor, torch.Tensor], tokens: int, state: RequestState
 ) -> torch.Tensor:
@@ -180,8 +212,10 @@ def previous_statistics(
 
 
 def sparse_step(layout: AttentionLayout, path: str) -> bool:
+    """A call this producer serves: a sparse step at a site on neither a dense path nor an exact
+    one. An exact path's dense rows (its protected prefix) are BF16 on the Runtime route only."""
     return layout.step >= layout.dense_until_step and not any(
-        path == p or path.startswith(p + ".") for p in layout.dense_paths
+        path == p or path.startswith(p + ".") for p in (*layout.dense_paths, *layout.exact_paths)
     )
 
 
@@ -227,8 +261,9 @@ def produce(
             lambda: qkv_chunks(
                 attn, hidden_states, tokens, call.quantize, shared=True, counts=shared_counts
             ),
+            lambda: value_absmax(attn, hidden_states, tokens, call.quantize),
         )
-    statistics = "previous-step" if reuse else "current-call"
+    statistics = "kmean=previous-step,vscale=current-call" if reuse else "current-call"
     shared = ",".join(f"{kind}:{count}" for kind, count in sorted(shared_counts.items()))
     call.served(
         f"comfy_kitchen.sol_attn_chunked(int8, stats={statistics}, vmargin=1.1, "
@@ -245,11 +280,14 @@ def _produce(
     geometry: tuple[int, ...],
     freqs: torch.Tensor,
     chunks: Callable[[], Iterator[torch.Tensor]],
+    absmax: Callable[[], torch.Tensor],
 ) -> tuple[torch.Tensor, bool]:
     attn, layout, state = call.module, call.layout, call.state
     prior_mean, prior_scale = previous_statistics(
         state, key, layout.step, geometry, replay_safe=PRODUCERS[name].context_parallel
     )
+    if prior_mean is not None:  # the key mean carries; the values are this call's own
+        prior_scale = value_scale(absmax())
     output, mean, scale = call.kernel.sol_attn_chunked(
         chunks,
         layout.live_tokens,
@@ -343,6 +381,7 @@ def _parallel_produce(
             (tokens, heads, layout.protected_prefix, degree, rank),
             freqs,
             chunks,
+            lambda: v[0].abs().amax(dim=0).float(),
         )
         return output
 
