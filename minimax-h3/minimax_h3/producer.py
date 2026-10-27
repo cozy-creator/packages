@@ -44,7 +44,7 @@ from cozy_runtime.author import (
 )
 from cozy_runtime.author.kernels import ROWWISE_FP8, PreQuantized
 
-from .glue import FusedMiniMaxH3AttnProcessor, H3AttnProcessor
+from .glue import FusedMiniMaxH3AttnProcessor, H3AttnProcessor, fits
 
 FAST = "kitchen-sol-producer-fast-shared-qkv"
 FP4_LOWMEM = "kitchen-sol-producer-fp4-lowmem-shared-qkv"
@@ -271,8 +271,13 @@ def produce(
         f"comfy_kitchen.sol_attn_chunked(int8, stats={statistics}, vmargin=1.1, "
         f"prefix=int8, qkv={shared})"
     )
-    # By tokens where the device needs it, as the site's own processor does.
-    return attn.to_out[1](split(attn.to_out[0], output.flatten(2, 3), Cut(1)))
+    if fits(hidden_states, attn):
+        return attn.to_out[1](attn.to_out[0](output.flatten(2, 3)))
+    # Where the whole call does not fit, as the site's own processor runs it.
+    out = attn.to_out[1](split(attn.to_out[0], output.flatten(2, 3), Cut(1)))
+    del output
+    torch.cuda.empty_cache()
+    return out
 
 
 def _produce(
