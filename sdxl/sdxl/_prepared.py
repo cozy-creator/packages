@@ -13,6 +13,7 @@ from typing import Any
 import torch
 from cozy_runtime import rng
 from cozy_runtime.author import CapabilityError, Context, OutputError, Telemetry
+from cozy_runtime.author._model import PLACED
 from cozy_runtime.compute import PreparedRepeat, PreparedSequence
 from diffusers import EulerDiscreteScheduler
 from transformers.masking_utils import create_causal_mask
@@ -74,6 +75,33 @@ def encode_tokens(
 def decode_latents(vae: Any, latents: torch.Tensor, scale: float) -> torch.Tensor:
     """Decode with the VAE's already selected representation; never change its weights."""
     return vae.decode(latents / scale).sample
+
+
+def decode_dtype(vae: Any) -> torch.dtype:
+    """The dtype every SDXL decode runs the VAE in. The SDXL VAE overflows fp16 (force_upcast):
+    bf16 where the GPU computes it natively (fp32's range; 48 dB PSNR to fp32 on the 1024px fox,
+    run 1642), else fp32."""
+    if not getattr(vae.config, "force_upcast", False):
+        return next(vae.parameters()).dtype
+    return (
+        torch.bfloat16 if torch.cuda.is_bf16_supported(including_emulation=False) else torch.float32
+    )
+
+
+def hold_decode_dtype(vae: Any, tel: Telemetry) -> None:
+    """Hold the VAE in `decode_dtype` for good, before any VAE scope opens: Runtime's cast of its
+    stored bytes, filled on its next use, so nothing loads here and no request converts weights.
+    Eager and native decode read the same weights, and a later ordinary request can capture
+    the resident pipeline without a warm."""
+    dtype = decode_dtype(vae)
+    if next(vae.parameters()).dtype == dtype:
+        return
+    placed = PLACED.get(vae)
+    if placed is None:
+        vae.to(dtype=dtype)  # not Runtime-placed: an ordinary module
+    else:
+        placed[0].represent(placed[1], dtype)()
+    tel.log("vae representation", dtype=str(dtype).removeprefix("torch."))
 
 
 class _Euler:
@@ -141,8 +169,6 @@ class ResidentPipeline:
 
     def _owned_region(self, components: dict[str, Any]) -> Any:
         """Register only a release callback; Torch already accounts for these allocations."""
-        from cozy_runtime.author._model import PLACED
-
         placed = PLACED.get(components["unet"])
         if placed is None:
             return None
@@ -229,13 +255,7 @@ class ResidentPipeline:
         resident_only: bool,
     ) -> tuple[_Pipeline, bool] | None:
         vae = components["vae"]
-        dtype = next(vae.parameters()).dtype
-        if bool(getattr(vae.config, "force_upcast", False)):
-            dtype = (
-                torch.bfloat16
-                if torch.cuda.is_bf16_supported(including_emulation=False)
-                else torch.float32
-            )
+        dtype = decode_dtype(vae)
         key = (
             json.dumps(scheduler_config, sort_keys=True, separators=(",", ":")),
             vae_scale,

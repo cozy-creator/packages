@@ -51,8 +51,12 @@ wide representation before capture and owns retirement under pressure.
 
 `ResidentPipeline.prepare` is the explicit preparation entry for an admitted warm turn.
 The ordinary request path only reuses it or captures already-resident representations; it
-does not load the whole model speculatively. The coordinated Runtime candidate invokes
-SDXL's typed preparation factory from an explicit GPU warm request:
+does not load the whole model speculatively. Every request first holds the VAE in its decode
+dtype for good (a cast of the stored bytes, filled on its next use; no request converts VAE
+weights), so once an eager request has left the weights resident the next ordinary request
+captures without a warm. The
+coordinated Runtime candidate invokes SDXL's typed preparation factory from an explicit GPU
+warm request:
 
 ```sh
 cozy run sdxl/generate --warm gpu prompt='warm variant' steps=30 guidance=7.0 aspect_ratio=1:1 hidiffusion=false
