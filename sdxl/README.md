@@ -70,11 +70,8 @@ streamed path available. Full-pipeline numerical parity, the production warm cal
 request reuse remain unqualified until their real release-gate runs pass. The existing
 component and native-interval receipts do not prove this new path.
 
-This development candidate requires the coordinated Runtime build with typed preparation,
-`PreparedRepeat.valid()` and final-dtype preparation. Its `>=0.33,<0.34` dependency range
-allows the selected development artifact; it does not establish that every public 0.33
-release has these APIs. Before publication, set the minimum to the published release that
-contains the complete feature and qualify that artifact with this package.
+SDXL 0.1.1 requires Runtime 0.34 and TensorFS 0.17, which supply the native sequence,
+source-stage and graph-pool APIs it uses.
 
 Whole-pipeline telemetry uses `native_pipeline` and `request_path.pipeline_native_steps`.
 It does not fabricate separate text/denoise/VAE device durations or a first-noise metric.
