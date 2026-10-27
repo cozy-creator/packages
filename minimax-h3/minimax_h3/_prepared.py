@@ -1,13 +1,16 @@
-"""Resident H3 intervals, split only at actual row geometry or attention-policy changes.
+"""Resident H3 intervals, split only at actual row geometry, attention-policy or producer
+summary (bootstrap/rolling) changes.
 
 Conditioning and initial RNG stay in the ordinary pipeline. One native sequence owns all
-segments and advances both video/audio latents without Python decisions between steps.
+segments and advances both video/audio latents, and a Kitchen producer's previous-step
+summaries (`producer.NativeCarry`), without Python decisions between steps.
 """
 
 from __future__ import annotations
 
 import time
 from collections.abc import Callable
+from contextlib import nullcontext
 from dataclasses import dataclass
 from typing import Any
 
@@ -16,8 +19,10 @@ from diffusers.models.modeling_utils import get_parameter_dtype
 
 from cozy_runtime import compute
 from cozy_runtime.author import CapabilityError, Context, OutputError, Telemetry, attention_scope
+from cozy_runtime.author._model import PLACED
 
 from .adaln_pruned import AdaLNPrunedMiniMaxH3Transformer
+from .producer import NativeCarry, native_carry
 
 
 @dataclass(frozen=True)
@@ -26,20 +31,26 @@ class Segment:
     end: int
     dense: bool
     unique_rows: int
+    bootstrap: bool = False
 
 
-def segments(row_plan: list[Any], dense_steps: int, *, start: int = 0) -> tuple[Segment, ...]:
-    """Keep upstream's variable unique-timestep shapes; never pad or change row semantics."""
+def segments(
+    row_plan: list[Any], dense_steps: int, *, start: int = 0, carry: NativeCarry | None = None
+) -> tuple[Segment, ...]:
+    """Keep upstream's variable unique-timestep shapes; never pad or change row semantics.
+    A producer's summary choice (dense, bootstrap, rolling) also splits a stage."""
     result: list[Segment] = []
     previous = None
     for index in range(start, len(row_plan)):
         times, indices = row_plan[index]
-        shape = (index < dense_steps, times.numel(), tuple(indices.shape))
+        summaries = None if carry is None else carry.plan[index]
+        shape = (index < dense_steps, times.numel(), tuple(indices.shape), summaries)
         if result and shape == previous:
             old = result[-1]
-            result[-1] = Segment(old.first, index + 1, old.dense, old.unique_rows)
+            result[-1] = Segment(old.first, index + 1, old.dense, old.unique_rows, old.bootstrap)
         else:
-            result.append(Segment(index, index + 1, shape[0], shape[1]))
+            bootstrap = carry is not None and carry.bootstraps(index)
+            result.append(Segment(index, index + 1, shape[0], shape[1], bootstrap))
         previous = shape
     return tuple(result)
 
@@ -75,7 +86,7 @@ def prepare(
     dense_steps: int,
     *,
     start: int = 0,
-) -> Any:
+) -> tuple[Any, tuple[Segment, ...], NativeCarry | None]:
     """Prepare without mutating the caller's latents; Runtime owns every graph dependency."""
     sequence_type = getattr(compute, "PreparedSequence", None)
     if sequence_type is None or not callable(getattr(sequence_type, "record", None)):
@@ -95,22 +106,6 @@ def prepare(
         )
     if not state.latents.is_cuda or not state.audio_latents.is_cuda:
         raise CapabilityError("native H3 requires CUDA latents", code="prepared_graph_ineligible")
-    # The package's Kitchen producers carry Python previous-step summary state. A
-    # repeated graph needs explicit GPU carry before those implementations are eligible.
-    from cozy_runtime.internal.producers import Processor
-
-    for module in transformer.modules():
-        processor = getattr(module, "processor", None)
-        if isinstance(processor, Processor):
-            from .producer import PRODUCERS
-
-            selected = processor._attention_backend
-            active = str(getattr(selected, "value", selected)) == processor.backend
-            if active and PRODUCERS.get(processor.producer.name) is processor.producer:
-                raise CapabilityError(
-                    "H3 Kitchen producer previous-step summaries need native GPU carry",
-                    code="prepared_graph_ineligible",
-                )
     if state.attention_kwargs:
         raise CapabilityError(
             "native H3 requires fixed base attention inputs", code="prepared_graph_ineligible"
@@ -127,8 +122,6 @@ def prepare(
         raise CapabilityError(
             "native H3 requires complete dual schedules", code="prepared_graph_ineligible"
         )
-    from cozy_runtime.author._model import PLACED
-
     placed = PLACED.get(transformer)
     if placed is not None:
         binding = placed[0].retain(placed[1], ("",))
@@ -170,77 +163,92 @@ def prepare(
             transformer._release()
     with torch.inference_mode(False), torch.no_grad():
         video, audio = state.latents.clone(), state.audio_latents.clone()
-        with attention_scope(layout_at(start)):
-            rotary = transformer.rope(position_ids)
-            text = transformer.token_refiner(
-                transformer.context_embedder(
-                    state.prompt_embeds.to(get_parameter_dtype(transformer.context_embedder))
+        # The selected producers' summaries as GPU state; request state is restored after.
+        carry = native_carry(transformer, layout_at, start, total, video.device)
+    with nullcontext() if carry is None else carry.preparing():
+        with torch.inference_mode(False), torch.no_grad():
+            with attention_scope(layout_at(start)):
+                rotary = transformer.rope(position_ids)
+                text = transformer.token_refiner(
+                    transformer.context_embedder(
+                        state.prompt_embeds.to(get_parameter_dtype(transformer.context_embedder))
+                    )
                 )
+            # Kitchen reads its packed rotary table by raw pointer: the sequence owns it.
+            presented = (
+                () if carry is None else carry.present(rotary, layout_at(start).live_tokens)
             )
-    pieces = segments(row_plan, dense_steps, start=start)
-    prepared = []
-    with torch.inference_mode(False), torch.no_grad():
-        for part in pieces:
-            prepared.append(
-                (
-                    part,
-                    torch.stack(table_rows[part.first : part.end]),
-                    torch.stack([row_plan[i][1] for i in range(part.first, part.end)]),
-                    Euler(video_scheduler, part.first, part.end, video.device),
-                    Euler(audio_scheduler, part.first, part.end, audio.device),
+        pieces = segments(row_plan, dense_steps, start=start, carry=carry)
+        prepared = []
+        with torch.inference_mode(False), torch.no_grad():
+            for part in pieces:
+                prepared.append(
+                    (
+                        part,
+                        torch.stack(table_rows[part.first : part.end]),
+                        torch.stack([row_plan[i][1] for i in range(part.first, part.end)]),
+                        Euler(video_scheduler, part.first, part.end, video.device),
+                        Euler(audio_scheduler, part.first, part.end, audio.device),
+                    )
                 )
-            )
-    with sequence_type.record() as recording:
-        plans = []
-        for part, rows, indices, video_euler, audio_euler in prepared:
-            body = step_body(
-                transformer,
-                video,
-                audio,
-                text,
-                rotary,
-                rows,
-                indices,
-                token_tags,
-                video_indices,
-                audio_indices,
-                text_indices,
-                video_euler,
-                audio_euler,
-                state.num_condition_video_rows,
-                state.num_condition_audio_rows,
-            )
-            # Policy uses the original global step, even when an ordinary prefix ran.
-            # Runtime validates kernel/fill identities for every prepared definition.
-            with attention_scope(layout_at(part.first)):
-                plan = recording.capture(
-                    body,
-                    state=(video, audio),
-                    steps=part.end - part.first,
-                    owners=(
-                        transformer,
-                        text,
-                        *rotary,
-                        rows,
-                        indices,
-                        token_tags,
-                        video_indices,
-                        audio_indices,
-                        text_indices,
-                        video_euler.timesteps,
-                        video_euler.sigmas,
-                        audio_euler.timesteps,
-                        audio_euler.sigmas,
-                    ),
-                    resident_only=True,
+        summaries = () if carry is None else carry.state
+        with sequence_type.record() as recording:
+            plans = []
+            for part, rows, indices, video_euler, audio_euler in prepared:
+                body = step_body(
+                    transformer,
+                    video,
+                    audio,
+                    text,
+                    rotary,
+                    rows,
+                    indices,
+                    token_tags,
+                    video_indices,
+                    audio_indices,
+                    text_indices,
+                    video_euler,
+                    audio_euler,
+                    state.num_condition_video_rows,
+                    state.num_condition_audio_rows,
                 )
-            plans.append(plan)
-        if not all(plan.valid() for plan in plans):
-            raise CapabilityError(
-                "H3 weights or selected kernels changed during segment preparation",
-                code="prepared_graph_ineligible",
-            )
-        return recording.finish(outputs=(video, audio)), pieces
+                # Policy uses the original global step, even when an ordinary prefix ran.
+                # Runtime validates kernel/fill identities for every prepared definition.
+                with (
+                    attention_scope(layout_at(part.first)),
+                    nullcontext() if carry is None else carry.stage(part.first),
+                ):
+                    plan = recording.capture(
+                        body,
+                        state=(video, audio, *summaries),
+                        steps=part.end - part.first,
+                        owners=(
+                            transformer,
+                            text,
+                            *rotary,
+                            *presented,
+                            rows,
+                            indices,
+                            token_tags,
+                            video_indices,
+                            audio_indices,
+                            text_indices,
+                            video_euler.timesteps,
+                            video_euler.sigmas,
+                            audio_euler.timesteps,
+                            audio_euler.sigmas,
+                        ),
+                        resident_only=True,
+                    )
+                plans.append(plan)
+            if not all(plan.valid() for plan in plans) or (
+                carry is not None and not carry.owned()
+            ):
+                raise CapabilityError(
+                    "H3 weights, kernels or rotary tables changed during segment preparation",
+                    code="prepared_graph_ineligible",
+                )
+            return recording.finish(outputs=(video, audio)), pieces, carry
 
 
 def step_body(
@@ -293,7 +301,7 @@ def run(
 ) -> bool:
     began = time.perf_counter()
     try:
-        plan, pieces = prepare(
+        plan, pieces, carry = prepare(
             transformer,
             state,
             video_scheduler,
@@ -314,7 +322,9 @@ def run(
     tel.log(
         "H3 native segments",
         segments=";".join(
-            f"{p.first}:{p.end}:{'dense' if p.dense else 'sparse'}:{p.unique_rows}" for p in pieces
+            f"{p.first}:{p.end}:{'dense' if p.dense else 'sparse'}"
+            f"{'+bootstrap' if p.bootstrap else ''}:{p.unique_rows}"
+            for p in pieces
         ),
     )
     try:
@@ -348,3 +358,5 @@ def run(
         return True
     finally:
         plan.close()
+        if carry is not None:
+            carry.close()  # reached only after a checked close

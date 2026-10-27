@@ -73,6 +73,7 @@ from cozy_runtime.author import (
 from h3_tables.table_layout import TableLayout
 
 from .adaln_pruned import AdaLNPrunedMiniMaxH3Transformer, step_invariants
+from ._prepared import run as run_prepared
 from .conditioner import FinalHiddenState, PresentationLength, build_text_conditioner
 from .continuation import (
     AVContext,
@@ -1371,8 +1372,6 @@ class OfficialH3Pipeline:
         )
 
         def prepared_suffix(first: int) -> bool:
-            from ._prepared import run as run_prepared
-
             assert ctx is not None and tel is not None
             cancel()
             return run_prepared(

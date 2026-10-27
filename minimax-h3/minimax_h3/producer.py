@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import sys
 from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from functools import partial
 from typing import Any
@@ -36,11 +37,13 @@ from cozy_runtime import lora
 from cozy_runtime.author import (
     AttentionLayout,
     AttentionProducer,
+    CapabilityError,
     ProducerCall,
     active_attention_layout,
     register_attention,
 )
 from cozy_runtime.author.kernels import ROWWISE_FP8, PreQuantized
+from cozy_runtime.internal.producers import Processor
 
 from .glue import FusedMiniMaxH3AttnProcessor, H3AttnProcessor
 
@@ -62,18 +65,28 @@ class RequestState:
     rope: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None
     parallel_rotary: dict[object, tuple[torch.Tensor, torch.Tensor]] = field(default_factory=dict)
     replay_inputs: dict[tuple[object, ...], Statistics] = field(default_factory=dict)
+    # Set only while a native sequence prepares: its sparse calls carry summaries on the GPU.
+    native: NativeCarry | None = None
 
     def close(self) -> None:
         self.statistics.clear()
         self.parallel_rotary.clear()
         self.replay_inputs.clear()
-        backend = sys.modules.get("comfy_kitchen.backends.cuda")
-        cached = getattr(backend, "_ROPE_FAB_CACHE", {})
         if self.rope is not None:
-            for key, (reference, _packed) in list(cached.items()):
-                if reference() is self.rope[2]:
-                    cached.pop(key, None)
+            forget_rope_table(self.rope[2])
         self.rope = None
+
+
+def _rope_tables() -> dict[Any, Any]:
+    return getattr(sys.modules.get("comfy_kitchen.backends.cuda"), "_ROPE_FAB_CACHE", {})
+
+
+def forget_rope_table(presentation: torch.Tensor) -> None:
+    """Drop Kitchen's packed rotary table cached for this presentation tensor."""
+    cached = _rope_tables()
+    for key, (reference, _packed) in list(cached.items()):
+        if reference() is presentation:
+            cached.pop(key, None)
 
 
 def rows(value: torch.Tensor | PreQuantized, start: int, stop: int) -> torch.Tensor | PreQuantized:
@@ -219,6 +232,231 @@ def sparse_step(layout: AttentionLayout, path: str) -> bool:
     )
 
 
+_BOOTSTRAP, _ROLLING = "bootstrap", "rolling"
+#: Per site of a step: None on a dense call, else (bootstrap|rolling, geometry).
+Plan = tuple[tuple[str, tuple[int, ...]] | None, ...]
+
+
+@dataclass(frozen=True)
+class _Site:
+    key: tuple[object, ...]
+    path: str
+    heads: int
+    replay_safe: bool
+    state: RequestState
+
+
+class NativeCarry:
+    """One native H3 sequence's previous-step summaries, carried as GPU state.
+
+    Eager reuse is a Python decision on `layout.step` (`previous_statistics`), which a replayed
+    graph would freeze at its capture step. The same decisions run here once per scheduled
+    step on CPU metadata, and stages split wherever one changes. Each sparse site owns one
+    F32 [2, H, 128] (mean, scale) slot of declared sequence state: a bootstrap stage gives
+    Kitchen no summaries, a rolling stage gives it the slot, and both overwrite the slot on
+    the same stream after the kernel consumed its inputs. A valid eager prior seeds the slot.
+    Preparation leaves the request's own state exactly as eager left it.
+    """
+
+    def __init__(
+        self,
+        sites: list[_Site],
+        layout_at: Callable[[int], AttentionLayout],
+        start: int,
+        total: int,
+        device: torch.device,
+    ) -> None:
+        self._order = {site.key: index for index, site in enumerate(sites)}
+        self.states = list({id(site.state): site.state for site in sites}.values())
+        shadows = {
+            id(state): RequestState(
+                statistics=dict(state.statistics), replay_inputs=dict(state.replay_inputs)
+            )
+            for state in self.states
+        }
+        self.slots: dict[tuple[object, ...], torch.Tensor] = {}
+        self.plan: dict[int, Plan] = {}
+        seeds = []
+        for step in range(start, total):
+            layout = layout_at(step)
+            row: list[tuple[str, tuple[int, ...]] | None] = []
+            for site in sites:
+                shadow = shadows[id(site.state)]
+                if not sparse_step(layout, site.path):
+                    shadow.statistics.pop(site.key, None)
+                    shadow.replay_inputs.pop(site.key, None)
+                    row.append(None)
+                    continue
+                slot = self.slots.get(site.key)
+                if slot is None:
+                    shape = (site.heads, 128)
+                    slot = torch.stack(
+                        (
+                            torch.zeros(shape, dtype=torch.float32, device=device),
+                            torch.ones(shape, dtype=torch.float32, device=device),
+                        )
+                    )
+                    self.slots[site.key] = slot
+                geometry = (layout.live_tokens, site.heads, layout.protected_prefix)
+                mean, scale = previous_statistics(
+                    shadow, site.key, step, geometry, replay_safe=site.replay_safe
+                )
+                if mean is None or scale is None:
+                    row.append((_BOOTSTRAP, geometry))
+                else:
+                    if step == start:
+                        seeds.append((slot, mean, scale))
+                    row.append((_ROLLING, geometry))
+                shadow.statistics[site.key] = (step, geometry, slot[0], slot[1])
+            self.plan[step] = tuple(row)
+        for slot, mean, scale in seeds:
+            slot[0].copy_(mean)
+            slot[1].copy_(scale)
+        self._stage: Plan | None = None
+        self.presentation: torch.Tensor | None = None
+        self.table: torch.Tensor | None = None
+        self.tokens = 0
+        self._saved = [
+            (
+                state,
+                dict(state.statistics),
+                dict(state.replay_inputs),
+                state.rope,
+                dict(state.parallel_rotary),
+            )
+            for state in self.states
+        ]
+        for state in self.states:
+            state.native = self
+
+    @property
+    def state(self) -> tuple[torch.Tensor, ...]:
+        return tuple(self.slots.values())
+
+    def bootstraps(self, step: int) -> bool:
+        return any(entry is not None and entry[0] == _BOOTSTRAP for entry in self.plan[step])
+
+    @contextmanager
+    def stage(self, step: int) -> Iterator[None]:
+        """Warm-up and capture of the stage whose first step is `step`."""
+        self._stage = self.plan[step]
+        try:
+            yield
+        finally:
+            self._stage = None
+
+    def inputs(
+        self, key: tuple[object, ...], geometry: tuple[int, ...]
+    ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
+        index = self._order.get(key)
+        planned = None if index is None or self._stage is None else self._stage[index]
+        if planned is None or planned[1] != geometry:
+            raise CapabilityError(
+                "an H3 sparse call differs from its planned native summaries",
+                code="prepared_graph_ineligible",
+            )
+        if planned[0] == _BOOTSTRAP:
+            return None, None
+        slot = self.slots[key]
+        return slot[0], slot[1]
+
+    def store(self, key: tuple[object, ...], mean: torch.Tensor, scale: torch.Tensor) -> None:
+        slot = self.slots[key]
+        slot[0].copy_(mean)
+        slot[1].copy_(scale)
+
+    def present(
+        self, rotary: tuple[torch.Tensor, torch.Tensor], tokens: int
+    ) -> tuple[torch.Tensor, ...]:
+        """Outside capture: the one rotary presentation every sparse call reads, and Kitchen's
+        packed table for it. Kitchen reads the table through a raw pointer that capture does
+        not see, so the sequence owns both."""
+        if not self.slots:
+            return ()
+        build = getattr(sys.modules.get("comfy_kitchen.backends.cuda"), "_packed_rope_fab", None)
+        if not callable(build):
+            raise CapabilityError(
+                "Kitchen's packed rotary table cannot be owned by a native sequence",
+                code="prepared_graph_ineligible",
+            )
+        presentation = rope_presentation(rotary, tokens, RequestState())
+        self.table = build(presentation, tokens, presentation.shape[-3] * 2)
+        self.presentation, self.tokens = presentation, tokens
+        for state in self.states:
+            state.rope = (rotary[0], rotary[1], presentation)
+        return presentation, self.table
+
+    def owned(self) -> bool:
+        """Kitchen still caches this sequence's table: no captured call read another one."""
+        if self.presentation is None:
+            return True
+        key = (id(self.presentation), self.tokens, self.presentation.shape[-3] * 2)
+        held = _rope_tables().get(key)
+        return held is not None and held[0]() is self.presentation and held[1] is self.table
+
+    @contextmanager
+    def preparing(self) -> Iterator[None]:
+        """Every outcome restores the request states; a refusal also forgets the table."""
+        try:
+            yield
+        except BaseException:
+            self.close()
+            raise
+        finally:
+            self.detach()
+
+    def detach(self) -> None:
+        for state, statistics, replay_inputs, rope, rotary in self._saved:
+            state.native = None
+            state.statistics.clear()
+            state.statistics.update(statistics)
+            state.replay_inputs.clear()
+            state.replay_inputs.update(replay_inputs)
+            state.parallel_rotary.clear()
+            state.parallel_rotary.update(rotary)
+            state.rope = rope
+
+    def close(self) -> None:
+        """After the checked native close (or a refusal): forget only this sequence's table."""
+        if self.presentation is not None:
+            forget_rope_table(self.presentation)
+        self.presentation = self.table = None
+
+
+def native_carry(
+    transformer: torch.nn.Module,
+    layout_at: Callable[[int], AttentionLayout],
+    start: int,
+    total: int,
+    device: torch.device,
+) -> NativeCarry | None:
+    """Plan the summaries of every producer selected on `transformer` for steps
+    [start, total), keyed exactly as `produce` keys them; None when none is selected."""
+    sites = []
+    for module in transformer.modules():
+        processor = getattr(module, "processor", None)
+        if not isinstance(processor, Processor):
+            continue
+        selected = processor._attention_backend
+        if getattr(selected, "value", str(selected)) != processor.backend:
+            continue  # the wrapper calls the site's own processor
+        producer = processor.producer
+        state = producer.request_state()
+        if PRODUCERS.get(producer.name) is not producer or not isinstance(state, RequestState):
+            raise CapabilityError(
+                "another attention producer's state cannot be replayed natively",
+                code="prepared_graph_ineligible",
+            )
+        sharded = producer.context_parallel
+        key = (
+            (processor.component, processor.path, id(module))
+            if sharded
+            else (processor.component, processor.path)
+        )
+        sites.append(_Site(key, processor.path, module.heads, sharded, state))
+    return NativeCarry(sites, layout_at, start, total, device) if sites else None
+
+
 def produce(
     name: str,
     call: ProducerCall,
@@ -283,9 +521,13 @@ def _produce(
     absmax: Callable[[], torch.Tensor],
 ) -> tuple[torch.Tensor, bool]:
     attn, layout, state = call.module, call.layout, call.state
-    prior_mean, prior_scale = previous_statistics(
-        state, key, layout.step, geometry, replay_safe=PRODUCERS[name].context_parallel
-    )
+    carry = state.native
+    if carry is None:
+        prior_mean, prior_scale = previous_statistics(
+            state, key, layout.step, geometry, replay_safe=PRODUCERS[name].context_parallel
+        )
+    else:
+        prior_mean, prior_scale = carry.inputs(key, geometry)
     if prior_mean is not None:  # the key mean carries; the values are this call's own
         prior_scale = value_scale(absmax())
     output, mean, scale = call.kernel.sol_attn_chunked(
@@ -303,7 +545,10 @@ def _produce(
         sink_q=[0, -(-layout.protected_prefix // 64)],
         token_aug=0,
     )
-    state.statistics[key] = (layout.step, geometry, mean, scale)
+    if carry is None:
+        state.statistics[key] = (layout.step, geometry, mean, scale)
+    else:
+        carry.store(key, mean, scale)
     return output, prior_mean is not None
 
 
