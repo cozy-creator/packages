@@ -36,45 +36,11 @@ one.
 Its recipes write the model's `fp8`, `int8` and `w4a8` lanes, for model authors
 (`cozy model quantize <model> --lane int8 --package sdxl`).
 
-On Runtime 0.32.2, deterministic Euler with epsilon prediction can submit all steps after
-step zero as one prepared native interval. Runtime accepts it only when the UNet is already
-resident and its hooks and weight identity are safe for capture. HiDiffusion, other
-schedulers, streamed models and capacity refusals keep eager execution. The prepared
-interval closes before VAE decode; it is currently prepared per request. Native progress
-reports completed steps without treating observation intervals as per-step GPU timings.
+Deterministic Euler runs as one `denoise_loop`: the Runtime runs the steps eagerly or as a native
+program (resident or streamed UNet blocks), by card and free memory, and records which in the run
+record's `loops`. Text encoding, VAE decode and HiDiffusion's DDIM run eagerly. Every request holds
+the VAE in its decode dtype for good (a cast of the stored bytes on its next fill; no request
+converts VAE weights). CLIP conditioning calls the encoders' layers directly, avoiding
+Transformers' lazy output-collection hooks; its original 5.16.1 forward is the numerical oracle.
 
-The coordinated native-pipeline candidate additionally supports a single resident program
-for both text encoders, every Euler step and VAE decode. A construction retains at most one
-variant; prompt and seed values update fixed input buffers, while shape, schedule, guidance,
-representation or Runtime invalidation replaces the definition. Runtime prepares the VAE's
-wide representation before capture and owns retirement under pressure.
-
-`ResidentPipeline.prepare` is the explicit preparation entry for an admitted warm turn.
-The ordinary request path only reuses it or captures already-resident representations; it
-does not load the whole model speculatively. Every request first holds the VAE in its decode
-dtype for good (a cast of the stored bytes, filled on its next use; no request converts VAE
-weights), so once an eager request has left the weights resident the next ordinary request
-captures without a warm. The
-coordinated Runtime candidate invokes SDXL's typed preparation factory from an explicit GPU
-warm request:
-
-```sh
-cozy run sdxl/generate --warm gpu prompt='warm variant' steps=30 guidance=7.0 aspect_ratio=1:1 hidiffusion=false
-```
-
-Warm and ordinary requests use the same resolved dimensions, defaults and adjustment rows.
-Preparation initializes fixed-shape token slots without drawing a seed, submitting an image
-or writing outputs. Later requests with matching geometry and sampling settings can replace
-prompt/seed values and reuse the program. HiDiffusion and capacity refusals leave the existing
-streamed path available. Full-pipeline numerical parity, the production warm caller and
-request reuse remain unqualified until their real release-gate runs pass. The existing
-component and native-interval receipts do not prove this new path.
-
-SDXL 0.1.1 requires Runtime 0.34 and TensorFS 0.17, which supply the native sequence,
-source-stage and graph-pool APIs it uses.
-
-Whole-pipeline telemetry uses `native_pipeline` and `request_path.pipeline_native_steps`.
-It does not fabricate separate text/denoise/VAE device durations or a first-noise metric.
-CPU tokenization, input transfer, image verification and WebP/output delivery remain outside
-the submitted GPU program. Tensor-only CLIP conditioning avoids Transformers' lazy output
-collection hooks; its original 5.16.1 forward is the independent numerical oracle.
+It requires a Runtime with `cozy_runtime.author.denoise_loop`.
