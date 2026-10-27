@@ -53,7 +53,7 @@ from diffusers.models.transformers.transformer_minimax_h3 import (
 )
 from triton.language.extra import libdevice
 
-from cozy_runtime.author import CapabilityError, Cut, split
+from cozy_runtime.author import CapabilityError, Cut, plain_forward, split
 from cozy_runtime.author.kernels import (
     ROWWISE_FP8,
     KernelsUnavailable,
@@ -1017,12 +1017,6 @@ def _tensor_census(module: Any) -> tuple[object, ...]:
     )
 
 
-def _plain(module: Any) -> bool:
-    """No forward of its own but the memory's wrapper, which calls the class's at each call."""
-    own = vars(module).get("forward")
-    return own is None or getattr(own, "_varena", False)
-
-
 def _shape(condition: bool, detail: str) -> None:
     if not condition:
         raise GlueRefusal("fusion_block_shape", detail)
@@ -1045,7 +1039,7 @@ def _widths(transformer: Any, root: str) -> None:
 def _validate_transformer(transformer: Any, root: str) -> None:
     forwards = (MiniMaxH3Transformer3DModel.forward, AdaLNPrunedMiniMaxH3Transformer.forward)
     _shape(
-        type(transformer).forward in forwards and _plain(transformer),
+        type(transformer).forward in forwards and plain_forward(transformer),
         f"{root}: {_type_name(transformer)} overrides the Diffusers MiniMax-H3 forward",
     )
     for index, block in enumerate(transformer.transformer_blocks):
@@ -1053,18 +1047,18 @@ def _validate_transformer(transformer: Any, root: str) -> None:
         attn, ff = block.attn, block.ff
         _shape(
             type(block) is MiniMaxH3TransformerBlock
-            and _plain(block)
+            and plain_forward(block)
             and type(attn.processor) in (MiniMaxH3AttnProcessor, H3AttnProcessor)
             and not attn.fused_projections
             and type(ff) is FeedForward
-            and _plain(ff)
+            and plain_forward(ff)
             and len(ff.net) == 3
             and type(ff.net[0]) is SwiGLU
-            and _plain(ff.net[0])
+            and plain_forward(ff.net[0])
             and type(ff.net[0].activation) is torch.nn.SiLU
-            and _plain(ff.net[0].activation)
+            and plain_forward(ff.net[0].activation)
             and type(ff.net[1]) is torch.nn.Dropout
-            and _plain(ff.net[1])
+            and plain_forward(ff.net[1])
             and ff.net[1].p == 0.0
             and not any(
                 m._forward_hooks or m._forward_pre_hooks
@@ -1082,7 +1076,7 @@ def _validate_transformer(transformer: Any, root: str) -> None:
                 )
             )
             and all(
-                type(m) is torch.nn.RMSNorm and _plain(m)
+                type(m) is torch.nn.RMSNorm and plain_forward(m)
                 for m in (block.norm1, block.norm2, attn.norm_q, attn.norm_k)
             )
             and block.norm1.weight is not None
