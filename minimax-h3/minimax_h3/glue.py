@@ -731,9 +731,11 @@ def feed_forward(ff: Any, normed: Any) -> Any:
     """H3's FFN, [SwiGLU, Dropout(0.0), Linear], through `split` by tokens: whole while the
     device holds it, else in the token windows the memory picks, so the [tokens, 2 x ffn]
     intermediate (6.4 GB at 15 s) is never whole on a small card. Each token's output reads
-    only its own row, an fp8 operand's per-row scale with it."""
+    only its own row, an fp8 operand's per-row scale with it. Windows start on multiples of
+    256 tokens: every window but the last has the same tile-aligned row count, and the finest
+    is 256 tokens, never one."""
     tokens = _Tokens(normed) if isinstance(normed, PreQuantized) else normed
-    return split(_FFN(ff), tokens, Cut(1))
+    return split(_FFN(ff), tokens, Cut(1, align=256))
 
 
 class _FFN:
