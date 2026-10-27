@@ -321,7 +321,6 @@ class QwenImage21Model(Model[QwenImage21Graph], encoded_leaves="accept"):
             )
             if latents is not None:
                 return latents
-        self._native_denoise.close()
         return self._denoise_eager(
             embeds,
             mask,
