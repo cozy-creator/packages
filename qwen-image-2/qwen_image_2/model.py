@@ -511,7 +511,12 @@ def _tiled(vae: Any, z: torch.Tensor, tile: int, tel: Telemetry) -> torch.Tensor
     their neighbours over a quarter of their side."""
     vae.tile_sample_min_height = vae.tile_sample_min_width = tile
     vae.tile_sample_stride_height = vae.tile_sample_stride_width = tile * 3 // 4
-    decoded = vae.tiled_decode(z, return_dict=False)[0]
+    try:
+        decoded = vae.tiled_decode(z, return_dict=False)[0]
+    finally:
+        # A decode that ran out of memory left its tile's feature cache on the VAE (0.94 GB of
+        # 512 px tiles), and every later request on a 3 GB card failed within a second.
+        vae.clear_cache()
     tel.log("tiled vae decode", tile_px=tile)
     return decoded
 
