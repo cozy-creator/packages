@@ -2,7 +2,8 @@
 attention call through Sol's policy boundary is measured after it served. Per head: cheap Q/K/V
 outlier statistics, two logit statistics, and the error of each production kernel (Sage3 FP4 fixed
 means, Kitchen INT8, Sage2, Kitchen's sparse INT8) against BF16 SDPA on the same Q/K/V, over
-sampled query rows (prefix rows and the rest kept apart). Head-chunked; the served output is
+sampled query rows (prefix rows and the rest kept apart), and each site's Q/K RMSNorm gammas
+(a weight-only outlier rule's input). Head-chunked; the served output is
 returned untouched."""
 
 from __future__ import annotations
@@ -35,6 +36,10 @@ _SERVE = _sol._execute
 _SAMPLES: dict[tuple[int, int, str], tuple[torch.Tensor, int, torch.Tensor]] = {}
 _SAGE2: dict[str, object] = {}
 _TINY = 1e-20
+#: path -> its attention module's per-head RMSNorm weights (norm_q, norm_k), read once in its forward.
+WEIGHTS: dict[str, dict[str, list[float | None] | None]] = {}
+_MODULES: dict[str, object] = {}
+_INSTALL = _sol.install_site
 
 
 def _round(rows: list[list[float]]) -> list[list[float | None]]:
@@ -144,6 +149,27 @@ def _measure(q, k, v, scale, tokens, prefix, kernels):  # type: ignore[no-untype
     return torch.cat(stats, 1).cpu().tolist(), torch.cat(errors, 1).cpu().tolist()
 
 
+def _install_site(module, component, path):  # type: ignore[no-untyped-def]
+    _MODULES[path] = module
+    return _INSTALL(module, component, path)
+
+
+def _weights(path: str) -> None:
+    """The site's Q/K RMSNorm gammas, read inside its forward (resident there)."""
+    if path in WEIGHTS:
+        return
+    try:
+        module = _MODULES.get(path)
+        found: dict[str, list[float | None] | None] = {}
+        for name in ("norm_q", "norm_k"):
+            weight = getattr(getattr(module, name, None), "weight", None)
+            found[name] = None if weight is None else _round([weight.detach().float().flatten().cpu().tolist()])[0]
+        WEIGHTS[path] = found
+    except Exception as exc:
+        WEIGHTS[path] = {"norm_q": None, "norm_k": None}
+        NOTES.setdefault("weights", f"{path}: {type(exc).__name__}: {exc}"[:300])
+
+
 def _on(path: str, paths: tuple[str, ...]) -> bool:
     return any(path == p or path.startswith(p + ".") for p in paths)
 
@@ -153,6 +179,7 @@ def _execute(query, key, value, scale, layout, site, **options):  # type: ignore
     if layout.step not in PROBE.get(layout.dense_until_step, ()) or torch.cuda.is_current_stream_capturing():
         return output
     started = time.perf_counter()
+    _weights(site.path)
     try:
         with torch.no_grad():
             short = query.shape[1] < layout.live_tokens
@@ -188,6 +215,7 @@ def _execute(query, key, value, scale, layout, site, **options):  # type: ignore
 
 def install() -> None:
     _sol._execute = _execute
+    _sol.install_site = _install_site
 
 
 def drain() -> tuple[bytes, str]:
@@ -198,7 +226,7 @@ def drain() -> tuple[bytes, str]:
         "errors_are": "squared error sums over sampled rows per head; rel L2 = sqrt(kernel / ref)",
     }
     summary = {"calls": len(CALLS), **TOTAL, "notes": dict(NOTES)}
-    data = json.dumps({"schema": schema, **summary, "calls": CALLS}, separators=(",", ":")).encode()
+    data = json.dumps({"schema": schema, **summary, "weights": WEIGHTS, "calls": CALLS}, separators=(",", ":")).encode()
     CALLS.clear()
     NOTES.pop("probe", None)
     TOTAL.update(seconds=0.0, failed=0)
