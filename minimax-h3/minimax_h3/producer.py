@@ -3,10 +3,11 @@
 On a sparse step the producer owns the H3 attention module's whole call: one rowwise fp8
 quantization of the hidden states shared by the Q, K and V projections, fed in 4096-row
 chunks to Kitchen's `sol_attn_chunked` (per-head RMSNorm and split-half RoPE fused), with the
-previous step's key means reused per site within one request and the value scales of the call's
-own values: a scale from the previous step saturates Kitchen's int8 values wherever they grew
-(every site of H3 Turbo's steps 5-7, up to 44% of a block's channels). Dense steps, dense paths
-and exact paths call the site's own processor, served by the producer's Runtime base backend.
+call's own statistics on every rolling call: its keys' mean and its values' scale. A scale from the
+previous step saturates Kitchen's int8 values wherever they grew (every site of H3 Turbo's steps
+5-7, up to 44% of a block's channels); a previous key mean costs 0.0073 rel L2 against current-call.
+Dense steps, dense paths and exact paths call the site's own processor, served by the producer's
+Runtime base backend.
 
 The approved SM120 recipe (`kitchen-sol-producer-fp4-fixed-means-shared-qkv`) serves dense
 calls with Sage3 fixed-means NVFP4 and also shards over Ulysses: its projection runs on the
@@ -29,6 +30,7 @@ from diffusers.models.transformers.transformer_minimax_h3 import (
     MiniMaxH3Attention,
     MiniMaxH3AttnProcessor,
     MiniMaxH3Transformer3DModel,
+    _apply_rotary_emb,
 )
 from torch.nn.modules import module as torch_module
 
@@ -137,27 +139,56 @@ def qkv_chunks(
         ).squeeze(0)
 
 
-def value_absmax(
+def call_statistics(
+    attn: MiniMaxH3Attention,
+    key: Callable[[int, int], torch.Tensor],
+    value: Callable[[int, int], torch.Tensor],
+    rotary: tuple[torch.Tensor, torch.Tensor],
+    tokens: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """This call's own statistics, F32 [H, 128]: the mean of its post-RMSNorm, post-RoPE keys (what
+    Kitchen centres K with) and its value absmax, over the live document in `CHUNK` rows. `key` and
+    `value` give rows [start, stop) of the raw projections."""
+    cos, sin = rotary
+    total: torch.Tensor | None = None
+    peak: torch.Tensor | None = None
+    for start in range(0, tokens, CHUNK):
+        stop = min(tokens, start + CHUNK)
+        k = key(start, stop).reshape(1, stop - start, -1, 128)
+        k = _apply_rotary_emb(attn.norm_k(k), cos[start:stop], sin[start:stop])
+        part = k.float().sum(dim=(0, 1))
+        total = part if total is None else total + part
+        top = value(start, stop).reshape(-1, k.shape[2] * 128).abs().amax(dim=0)
+        peak = top if peak is None else torch.maximum(peak, top)
+    if total is None or peak is None:
+        raise ValueError("H3 producer has no live rows to summarise")
+    return (total / tokens).contiguous(), peak.float().reshape(-1, 128)
+
+
+def projected(
     attn: MiniMaxH3Attention,
     hidden: torch.Tensor | PreQuantized,
-    tokens: int,
     quantize: Callable[[Any], PreQuantized],
-) -> torch.Tensor:
-    """This call's per-(head, channel) value absmax over the live document, F32 [H, 128]: the
-    V projection alone, in the chunks and with the shared operand `qkv_chunks` gives Kitchen."""
+) -> tuple[Callable[[int, int], torch.Tensor], Callable[[int, int], torch.Tensor]]:
+    """Rows of the K and V projections with the shared operand `qkv_chunks` gives Kitchen, one
+    quantization per chunk for both."""
     shared = not shared_qkv_refusal(attn)
-    found: torch.Tensor | None = None
-    for start in range(0, tokens, CHUNK):
-        chunk = rows(hidden, start, min(tokens, start + CHUNK))
-        if shared and not isinstance(chunk, PreQuantized):
-            value = attn.to_v(chunk, prequantized=quantize(chunk))
-        else:
-            value = attn.to_v(chunk)
-        peak = value.reshape(-1, value.shape[-1]).abs().amax(dim=0)
-        found = peak if found is None else torch.maximum(found, peak)
-    if found is None:
-        raise ValueError("H3 producer has no live rows to scale")
-    return found.float().reshape(attn.heads, 128)
+    held: dict[tuple[int, int], Any] = {}
+
+    def operand(start: int, stop: int) -> tuple[Any, Any]:
+        chunk = rows(hidden, start, stop)
+        if not shared or isinstance(chunk, PreQuantized):
+            return chunk, None
+        if (start, stop) not in held:
+            held.clear()
+            held[(start, stop)] = quantize(chunk)
+        return chunk, held[(start, stop)]
+
+    def project(module: Any, start: int, stop: int) -> torch.Tensor:
+        chunk, op = operand(start, stop)
+        return module(chunk) if op is None else module(chunk, prequantized=op)
+
+    return partial(project, attn.to_k), partial(project, attn.to_v)
 
 
 def value_scale(absmax: torch.Tensor) -> torch.Tensor:
@@ -261,9 +292,11 @@ def produce(
             lambda: qkv_chunks(
                 attn, hidden_states, tokens, call.quantize, shared=True, counts=shared_counts
             ),
-            lambda: value_absmax(attn, hidden_states, tokens, call.quantize),
+            lambda: call_statistics(
+                attn, *projected(attn, hidden_states, call.quantize), rotary_emb, tokens
+            ),
         )
-    statistics = "kmean=previous-step,vscale=current-call" if reuse else "current-call"
+    statistics = "kmean=current-call,vscale=current-call" if reuse else "current-call"
     shared = ",".join(f"{kind}:{count}" for kind, count in sorted(shared_counts.items()))
     call.served(
         f"comfy_kitchen.sol_attn_chunked(int8, stats={statistics}, vmargin=1.1, "
@@ -280,14 +313,15 @@ def _produce(
     geometry: tuple[int, ...],
     freqs: torch.Tensor,
     chunks: Callable[[], Iterator[torch.Tensor]],
-    absmax: Callable[[], torch.Tensor],
+    current: Callable[[], tuple[torch.Tensor, torch.Tensor]],
 ) -> tuple[torch.Tensor, bool]:
     attn, layout, state = call.module, call.layout, call.state
     prior_mean, prior_scale = previous_statistics(
         state, key, layout.step, geometry, replay_safe=PRODUCERS[name].context_parallel
     )
-    if prior_mean is not None:  # the key mean carries; the values are this call's own
-        prior_scale = value_scale(absmax())
+    if prior_mean is not None:  # a rolling call: Kitchen's one pass, on this call's own statistics
+        prior_mean, absmax = current()
+        prior_scale = value_scale(absmax)
     output, mean, scale = call.kernel.sol_attn_chunked(
         chunks,
         layout.live_tokens,
@@ -381,7 +415,13 @@ def _parallel_produce(
             (tokens, heads, layout.protected_prefix, degree, rank),
             freqs,
             chunks,
-            lambda: v[0].abs().amax(dim=0).float(),
+            lambda: call_statistics(
+                attn,
+                lambda a, b: k[:, a:b].flatten(2, 3),
+                lambda a, b: v[:, a:b].flatten(2, 3),
+                rotary,
+                tokens,
+            ),
         )
         return output
 
