@@ -150,16 +150,11 @@ _ASSETS = Path(__file__).resolve().parent
 # NVIDIA's H3 sparse policy protects conditioning and the initial sensitive work.
 # This supplies semantics only; Runtime chooses the kernels.
 _DENSE_ATTENTION_PATHS = ("token_refiner", "transformer_blocks.0", "transformer_blocks.1")
-#: Layers whose dense rows keep BF16 attention when the dense kernel quantizes: the text
-#: refiner, and the blocks whose key channel outliers a per-head FP8 scale cannot carry
-#: (FA4 FP8 on B200, real H3 Q/K/V: 0.10-0.12, 0.19-0.20 and 0.26-0.42 rel L2 at blocks 1, 45
-#: and 49, 0.02-0.06 everywhere else).
-_EXACT_ATTENTION_PATHS = (
-    "token_refiner",
-    "transformer_blocks.1",
-    "transformer_blocks.45",
-    "transformer_blocks.49",
-)
+#: Layers whose dense rows keep BF16 attention when the dense kernel quantizes, beside the ones
+#: Runtime finds by their key RMSNorm gain (blocks 45, 48 and 49): the text refiner, and block 1,
+#: whose key outliers are in its activations (FA4 FP8 on B200 0.10-0.12 rel L2; Sage3 FP4 on an
+#: RTX 5090 0.23 at step 0; 0.02-0.06 and 0.10 typical).
+_EXACT_ATTENTION_PATHS = ("token_refiner", "transformer_blocks.1")
 
 
 def _validate_sol_dense_steps(value: int) -> None:

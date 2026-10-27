@@ -14,8 +14,9 @@ exactly.
   ten dense (`sol_dense_steps`), then sparse.
 - `dense_paths`: the token refiners and the first two transformer blocks are dense in every step;
   the protected text/audio prefix of a sparse block is dense too.
-- `exact_paths`: the text refiner and blocks 1, 45 and 49 keep BF16 attention, because a per-head
-  FP8 scale cannot carry their key outliers (0.10–0.42 rel L2 on B200, 0.02–0.06 elsewhere).
+- Exact rows: the text refiner and block 1 (`exact_paths`), and blocks 45, 48 and 49, which Runtime
+  finds by their key RMSNorm gain, keep BF16 attention, because no quantized scale carries their key
+  outliers (FP4 0.17–0.56 rel L2 on an RTX 5090, 0.10 elsewhere; FP8 0.10–0.42 on B200).
 
 On the RTX 5090 the approved hybrid is Sage3 FP4 dense rows plus Kitchen INT8 Sol; all-dense FP4
 showed visible artifacts and stays an explicit experiment.
