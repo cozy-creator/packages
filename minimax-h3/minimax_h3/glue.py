@@ -67,6 +67,7 @@ from cozy_runtime.author.kernels import (
 from cozy_runtime.rows import Rows, rows
 
 from .adaln_pruned import AdaLNPrunedMiniMaxH3Transformer
+from .fit import fits
 
 CONTRACT = "h3-glue-call-and-topology/2"
 #: The widths compiled: a transformer with others is not installable.
@@ -646,13 +647,14 @@ class FusedSwiGLU(SwiGLU):  # type: ignore[misc]
 
 
 class H3AttnProcessor(MiniMaxH3AttnProcessor):  # type: ignore[misc]
-    """Diffusers' H3 attention cut by query heads, then its out projection by tokens, each through
-    `split` (the memory picks the windows; whole while the device holds it). A window of heads
-    computes its own rows of the Q, K and V projections (`cozy_runtime.rows`), their per-head
-    norms and RoPE, and attends: at 15 s the three whole projections take 4.8 GB, more than an
-    8 GB card holds beside the residual stream. Every head reads only its own rows, so the
-    windows join to the whole call. A projection that does not cut by rows, a mask or a
-    sequence-parallel exchange runs the heads whole."""
+    """Diffusers' H3 attention. Where the device holds the whole call (`fits`), it runs as it
+    always did: Q, K and V whole, freed before the out projection. Where it does not (15 s on an
+    8 GB card: the three take 4.8 GB beside 2.4 GB of residual and normed rows), the call goes
+    through `split` by query heads, each window computing its own rows of the projections
+    (`cozy_runtime.rows`), per-head norms and RoPE, then the out projection by tokens; Torch's
+    cache is returned after it, so its odd-sized blocks are not split for the next block's row
+    sets (fragmentation ran step 2 out of memory with 2.14 GiB cached). A projection that does
+    not cut by rows, a mask or a sequence-parallel exchange runs the heads whole."""
 
     def __call__(
         self,
@@ -661,14 +663,20 @@ class H3AttnProcessor(MiniMaxH3AttnProcessor):  # type: ignore[misc]
         rotary_emb: tuple[Any, Any] | None = None,
         attention_mask: Any | None = None,
     ) -> Any:
-        heads = _Heads.of(self, attn, hidden_states, rotary_emb, attention_mask)
+        heads = (
+            None
+            if fits(hidden_states, attn)
+            else _Heads.of(self, attn, hidden_states, rotary_emb, attention_mask)
+        )
+        if heads is None:
+            hidden_states = self.whole(attn, hidden_states, rotary_emb, attention_mask)
+            return attn.to_out[1](attn.to_out[0](hidden_states.flatten(2, 3)))
         with quantize_once(hidden_states):
-            attended = (
-                split(heads, heads, Cut(2))
-                if heads is not None
-                else self.whole(attn, hidden_states, rotary_emb, attention_mask)
-            )
-        return attn.to_out[1](split(attn.to_out[0], attended.flatten(2, 3), Cut(1)))
+            attended = split(heads, heads, Cut(2))
+        out = attn.to_out[1](split(attn.to_out[0], attended.flatten(2, 3), Cut(1)))
+        del attended
+        torch.cuda.empty_cache()
+        return out
 
     def whole(
         self,

@@ -44,6 +44,7 @@ from cozy_runtime.author import (
 )
 from cozy_runtime.author.kernels import ROWWISE_FP8, PreQuantized
 
+from .fit import fits
 from .glue import FusedMiniMaxH3AttnProcessor, H3AttnProcessor
 
 FAST = "kitchen-sol-producer-fast-shared-qkv"
@@ -237,7 +238,11 @@ def produce(
         raise ValueError("H3 producer serves unmasked noncausal attention only")
     # A recipe that shards over Ulysses keys its statistics and replays per module instance.
     key = (call.component, call.path, id(attn)) if sharded else (call.component, call.path)
-    if not sparse_step(layout, call.path):
+    # Kitchen's chunked call holds the whole document's K/V codes and allocates its whole
+    # [tokens, heads, 128] output beside them: on a card the call does not fit (15 s on an RTX
+    # 3070: step 5 asked 1.46 GiB with 1.8 GiB free in pieces), the site's own processor serves
+    # the sparse step instead, by head groups, through the producer's base backend.
+    if not sparse_step(layout, call.path) or (not parallel and not fits(hidden_states, attn)):
         state.statistics.pop(key, None)
         state.replay_inputs.pop(key, None)
         return call.original(hidden_states, rotary_emb, attention_mask)
@@ -249,6 +254,7 @@ def produce(
     if attn.norm_q.eps != attn.norm_k.eps:
         raise ValueError("Kitchen producer requires matching Q/K RMSNorm epsilon")
     shared_counts: dict[str, int] = {}
+    tight = not fits(hidden_states, attn)
     if parallel:
         output, reuse = _parallel_produce(call, hidden_states, name, key, shared_counts)
     else:
@@ -271,8 +277,13 @@ def produce(
         f"comfy_kitchen.sol_attn_chunked(int8, stats={statistics}, vmargin=1.1, "
         f"prefix=int8, qkv={shared})"
     )
-    # By tokens where the device needs it, as the site's own processor does.
-    return attn.to_out[1](split(attn.to_out[0], output.flatten(2, 3), Cut(1)))
+    if not tight:
+        return attn.to_out[1](attn.to_out[0](output.flatten(2, 3)))
+    # Where the whole call does not fit, as the site's own processor runs it.
+    out = attn.to_out[1](split(attn.to_out[0], output.flatten(2, 3), Cut(1)))
+    del output
+    torch.cuda.empty_cache()
+    return out
 
 
 def _produce(
