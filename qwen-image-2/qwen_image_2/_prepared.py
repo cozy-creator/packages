@@ -194,8 +194,10 @@ class ResidentDenoise:
                             key, transformer, inputs, euler, caches, layout, total
                         )
                     except CapabilityError as error:
-                        if error.code != "prepared_graph_ineligible":
+                        if error.code not in ("prepared_graph_ineligible", "prepared_load_unavailable"):
                             raise
+                        # A not-local source is refused before submission. The ordinary
+                        # eager loader can fetch it; accepted native work is never retried.
                         tel.log("eager denoise", reason=str(error))
                         return None
                     except torch.OutOfMemoryError:
