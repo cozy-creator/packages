@@ -13,7 +13,9 @@ from typing import Any
 import torch
 from cozy_runtime import rng
 from cozy_runtime.author import CapabilityError, Context, OutputError, Telemetry
+from cozy_runtime.author._model import PLACED
 from cozy_runtime.compute import PreparedRepeat, PreparedSequence
+from cozy_runtime.internal.residency import StaleBinding
 from diffusers import EulerDiscreteScheduler
 from transformers.masking_utils import create_causal_mask
 
@@ -74,6 +76,20 @@ def encode_tokens(
 def decode_latents(vae: Any, latents: torch.Tensor, scale: float) -> torch.Tensor:
     """Decode with the VAE's already selected representation; never change its weights."""
     return vae.decode(latents / scale).sample
+
+
+def _represent(vae: Any, dtype: Any, tel: Telemetry) -> None:
+    """Hold the VAE in the wide representation every SDXL decode uses, eager and native: a cast
+    of its stored bytes, refilled on its next use, so nothing loads here. Without it only an
+    explicit warm made that representation and ordinary requests stayed eager. While the VAE
+    is in use the cast waits for a later request; the eager decode widens per call meanwhile."""
+    placed = PLACED.get(vae)
+    if placed is None or next(vae.parameters()).dtype == dtype:
+        return
+    try:
+        placed[0].represent(placed[1], dtype)()
+    except StaleBinding as error:
+        tel.log("vae representation kept", reason=str(error))
 
 
 class _Euler:
@@ -141,8 +157,6 @@ class ResidentPipeline:
 
     def _owned_region(self, components: dict[str, Any]) -> Any:
         """Register only a release callback; Torch already accounts for these allocations."""
-        from cozy_runtime.author._model import PLACED
-
         placed = PLACED.get(components["unet"])
         if placed is None:
             return None
@@ -236,6 +250,7 @@ class ResidentPipeline:
                 if torch.cuda.is_bf16_supported(including_emulation=False)
                 else torch.float32
             )
+            _represent(vae, dtype, tel)
         key = (
             json.dumps(scheduler_config, sort_keys=True, separators=(",", ":")),
             vae_scale,
