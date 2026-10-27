@@ -81,7 +81,7 @@ def _generate(
     seed = payload.drawn_seed()
     ctx.raise_if_cancelled()
     # Phase order for residency: references encode on the VAE first, then the text encoder, the
-    # transformer denoise (where the native interval lives), and the VAE decode.
+    # transformer denoise (the `denoise_loop`), and the VAE decode.
     if payload.reference_images:
         ctx.plan("vae", "text_encoder", "transformer", "vae")
     else:
@@ -114,8 +114,6 @@ def _generate(
             seed=seed,
             on_step=tel.step_callback(steps, stage="generating image", overall_range=(0.1, 0.9)),
             cancel=ctx.raise_if_cancelled,
-            ctx=ctx,
-            tel=tel,
             reference_images=reference_images,
             reference_latents=reference_latents,
             image_pad_mask=image_pad_mask,
