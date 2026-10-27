@@ -213,7 +213,7 @@ class ResidentPipeline:
         if old is not None:
             # Failed/unproven native close must retain the complete program and its actual
             # graph/buffer owners. Only checked close authorizes releasing cached state.
-            old.plan.close()
+            old.close()
             self._program = None
 
     def close(self) -> None:
@@ -384,6 +384,8 @@ class ResidentPipeline:
 
 
 class _Pipeline:
+    decoder: Any = None  # the VAE decoder's binding the program owns (None: not Runtime-placed)
+
     def __init__(
         self,
         key: tuple[Any, ...],
@@ -457,16 +459,35 @@ class _Pipeline:
         def suffix() -> None:
             image.copy_(decode_latents(vae, self.latent.to(dtype=dtype), vae_scale))
 
-        self.plan = PreparedRepeat.capture(
-            body,
-            state=(self.latent, prompt, pooled, image),
-            steps=steps,
-            owners=(first, second, unet, vae),
-            resident_only=resident_only,
-            prefix=prefix,
-            suffix=suffix,
-            dtypes={vae: dtype},
+        if next(vae.parameters()).dtype != dtype:
+            raise CapabilityError(
+                "the VAE is not held in its decode dtype", code="prepared_graph_ineligible"
+            )
+        # Text-to-image only decodes: the program owns the VAE's decoder, never its encoder,
+        # whose blocks no request fills (an encoder block kept every capture non-resident).
+        placed = PLACED.get(vae)
+        self.decoder = (
+            None if placed is None else placed[0].retain(placed[1], ("decoder", "post_quant_conv"))
         )
+        try:
+            self.plan = PreparedRepeat.capture(
+                body,
+                state=(self.latent, prompt, pooled, image),
+                steps=steps,
+                owners=(first, second, unet, vae if self.decoder is None else self.decoder),
+                resident_only=resident_only,
+                prefix=prefix,
+                suffix=suffix,
+            )
+        except BaseException:
+            if self.decoder is not None:
+                self.decoder.close()
+            raise
+
+    def close(self) -> None:
+        self.plan.close()  # an unproven close raises and keeps every owner
+        if self.decoder is not None:
+            self.decoder.close()
 
     def completed(self, execution: Any, progress: Any) -> int:
         return int(progress.completed_steps)
