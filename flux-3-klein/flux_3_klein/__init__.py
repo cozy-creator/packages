@@ -123,11 +123,12 @@ def _layout(
     size (1 MP). Otherwise what is not given is the first reference's: given neither, its own size,
     fitted to the 4 MiP Klein admits and generated on the 16 px grid, then cropped back; given one,
     its ratio or its pixel count."""
+    first = images[0].size if images and not placed else None
+    target = payload.target(first, megapixels=1.0)
     if len(images) == 1:
         prepared = [prepare_reference(images[0])[0]]
     else:
         prepared = [prepare_multi_reference(image) for image in images]
-    first = images[0].size if images and not placed else None
     if first is not None and payload.aspect_ratio is None and payload.megapixels is None:
         fit, canvas = reference_canvas(*first)
         if fit != first:
@@ -135,7 +136,6 @@ def _layout(
                       "the first reference's size, fitted to the 4 MiP and 4096 px sides Klein admits")
         left, top = (canvas[0] - fit[0]) // 2, (canvas[1] - fit[1]) // 2
         return prepared, canvas, None if fit == canvas else (left, top, left + fit[0], top + fit[1]), None
-    target = payload.target(first, megapixels=1.0)
     size = SIZES.fit(adj, target.ratio, SIZES.pixels(adj, target))
     return prepared, size, None, None if images else f"{target.ratio[0]}:{target.ratio[1]}"
 

@@ -35,7 +35,7 @@ cozy run flux-2/generate prompt='...'          # [dev]
 cozy run flux-2/generate_turbo prompt='...'    # [dev] Turbo
 ```
 
-Inputs are the shared image request, the same in every image package: `prompt`, `reference_images`, `aspect_ratio` (any W:H), `megapixels` (any size, 1024² pixels each), `steps`, `guidance`, `negative_prompt`, `seed` and `prompt_upsampling`. Left out, each is the checkpoint's default: steps as above (Turbo always runs its 8),
+Inputs are the shared image request, the same in every image package: `prompt`, `reference_images`, `aspect_ratio` (W:H from 1:16 to 16:1, inclusive), `megapixels` (any size, 1024² pixels each), `steps`, `guidance`, `negative_prompt`, `seed` and `prompt_upsampling`. Left out, each is the checkpoint's default: steps as above (Turbo always runs its 8),
 guidance 4 ([dev]'s embedded guidance, 2.5 with Turbo; [klein] Base's CFG scale), no negative prompt
 ([klein] Base only), no upsampling, a random seed. Steps 1–100, guidance 1–20; a knob the checkpoint
 has no use for is ignored with a warning, and unknown fields are dropped with one. The result is

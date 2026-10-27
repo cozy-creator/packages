@@ -30,7 +30,7 @@ cozy run moss-image/generate prompt='A minimalist travel poster, cream backgroun
              {"box": [0.2, 0.32, 0.8, 0.9], "prompt": "A flat blue mountain illustration"}]'
 ```
 
-Fields: `prompt`, `regions`, `aspect_ratio` (any `W:H`, default 1:1), `megapixels` (default 1), `steps`,
+Fields: `prompt`, `regions`, `aspect_ratio` (`W:H` from 1:16 to 16:1 inclusive, default 1:1), `megapixels` (default 1), `steps`,
 `guidance`, `negative_prompt` (default empty, as upstream's; upstream's user guide suggests
 `nsfw, worst quality, bad anatomy, watermark, jpeg artifact`) and `seed` (random when omitted,
 returned). MOSS-Image has no reference images and no prompt upsampler: `reference_images`,

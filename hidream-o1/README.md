@@ -31,7 +31,7 @@ cozy run hidream-o1/generate_turbo prompt='A dog holds a sign that says "HiDream
 cozy run hidream-o1/generate prompt='remove the earphones' --asset reference_images.0=photo.jpg
 ```
 
-Inputs are the shared image request, the same in every image package: `prompt`, `reference_images`, `aspect_ratio` (any W:H), `megapixels` (any size, 1024² pixels each), `steps`, `guidance`, `negative_prompt`, `seed` and `prompt_upsampling`. `reference_images` are up to 10, and `reference_boxes` places them (below). HiDream-O1 adds `guidance_interval` (below). Left out, each
+Inputs are the shared image request, the same in every image package: `prompt`, `reference_images`, `aspect_ratio` (W:H from 1:16 to 16:1, inclusive), `megapixels` (any size, 1024² pixels each), `steps`, `guidance`, `negative_prompt`, `seed` and `prompt_upsampling`. `reference_images` are up to 10, and `reference_boxes` places them (below). HiDream-O1 adds `guidance_interval` (below). Left out, each
 is the model's default: 50 steps (1–200) at guidance 5.0 (1–20) for `generate`, upstream's unconditional
 caption (a single space) as the negative prompt, and a random seed. `generate_turbo` runs its 28 distilled
 steps and ignores `guidance`, `negative_prompt` and `guidance_interval` with a warning; neither has a prompt
@@ -66,8 +66,8 @@ cozy run hidream-o1/generate prompt='City council members pose on a sunlit terra
 The model was refined at 2048² (report §4.1), and upstream serves only about 4 MP, from 2560×1440 to
 2048². Text-to-image defaults to 1:1 at 4 MP, 2048×2048. `megapixels` (1 MP = 1024² pixels) is held to
 3.52–4: at 1024² and below the model falls apart (upstream issue #9 shows pure noise at 800²). Sides
-are 32 px multiples from 256 to 4096, and a ratio past that is clamped. Each clamp is reported as an
-adjustment.
+are 32 px multiples from 256 to 4096. Runtime rejects ratios outside 1:16–16:1; within that
+global range, sizing moves to fit the model are reported as `clamp` adjustments.
 
 With references, any size input you leave out comes from the first reference: its ratio, its pixel
 count, or both. With one reference and neither input, the output takes the reference's own size on the

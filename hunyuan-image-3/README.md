@@ -31,7 +31,7 @@ cozy run hunyuan-image-3/generate_turbo prompt='Put the cat in a tiny astronaut 
 ```
 
 The request and result are the shared image interface (`ImageRequest`, `ImageResult`): `prompt`,
-`reference_images` (0–3, in order), `aspect_ratio` (any `W:H`; unset, the model picks), `megapixels`, `steps`,
+`reference_images` (0–3, in order), `aspect_ratio` (`W:H` from 1:16 to 16:1 inclusive; unset, the model picks), `megapixels`, `steps`,
 `guidance`, `seed` (random when omitted, returned) and `prompt_upsampling` (unset: on). `negative_prompt` and
 `reference_boxes` warn and are ignored: the model's unconditional branch is the prompt dropped, and it has no
 layout control. The result's `prompt` is the caption the image was made from: the model's rewrite when it thought.
@@ -42,7 +42,7 @@ The model makes about 1 MP, at Tencent's sizes for `image_base_size` 1024: 33 ra
 64 px step (width + height = 2048), plus 1024×768, 1280×720 and their portraits. With no `aspect_ratio` the
 model picks the size itself, as Tencent's `image_size="auto"`: after its recaption when `prompt_upsampling` is
 on, else in one greedy step over its size tokens.
-An `aspect_ratio` is served at the nearest size (Tencent's `get_target_size`); one past 1:4 or 4:1, or a
+Within that global range, an `aspect_ratio` is served at the nearest size (Tencent's `get_target_size`); one past 1:4 or 4:1, or a
 `megapixels` more than 10% off the size made, is reported as a `clamp` adjustment. Tencent's edit postprocess,
 which resizes the output to the reference's exact ratio, is not applied: the output is the model's own size.
 

@@ -31,7 +31,7 @@ cozy run flux-3-klein/generate prompt='Make it night, the lamp lit' \
   --asset reference_images.0=lighthouse.png
 ```
 
-Inputs are the shared image request, the same in every image package: `prompt`, `reference_images`, `aspect_ratio` (any W:H), `megapixels` (any size, 1024² pixels each), `steps`, `guidance`, `negative_prompt`, `seed` and `prompt_upsampling`. Klein adds `reference_boxes`, `regions` (below) and `prompt_drafting`. Left out, each
+Inputs are the shared image request, the same in every image package: `prompt`, `reference_images`, `aspect_ratio` (W:H from 1:16 to 16:1, inclusive), `megapixels` (any size, 1024² pixels each), `steps`, `guidance`, `negative_prompt`, `seed` and `prompt_upsampling`. Klein adds `reference_boxes`, `regions` (below) and `prompt_drafting`. Left out, each
 is the default in the table, no negative prompt (Base's CFG), upsampling on and a random seed; steps run
 1–200 (Base) or 1–100, guidance 1–20, and `generate_turbo` ignores `guidance` and `negative_prompt` with a
 warning. Without references the default is 1:1 at 1 MP (1024×1024, BFL's `default_size`); the size is
@@ -40,6 +40,11 @@ its own size (fitted to at most 4 MP, generated on the 16 px grid and cropped ba
 or its pixel count. Sides stay within BFL's 64–4096 px; a size moved to fit is reported as a `clamp`
 adjustment. The result returns the image, its size, the seed and `prompt`: the caption the image was made
 from.
+
+Runtime checks the output ratio before reference preparation, including when the output inherits the
+first reference's size. Ratios outside 1:16–16:1 are refused. An explicit valid `aspect_ratio` can
+override an extreme reference's ratio, and placed references remain elements inside the requested
+canvas. This bound does not crop input assets.
 
 ## Layout boxes
 
