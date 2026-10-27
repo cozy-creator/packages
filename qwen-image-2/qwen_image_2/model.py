@@ -474,7 +474,7 @@ class QwenImage21Model(Model[QwenImage21Graph], encoded_leaves="accept"):
             ).images
 
     @uses_components("vae")
-    def decode(self, latents: Any, *, width: int, height: int) -> Any:
+    def decode(self, latents: Any, *, width: int, height: int, tel: Telemetry) -> Any:
         vae = self.graph.components["vae"]
         device = torch.device(str(self.device))
         with torch.inference_mode():
@@ -485,10 +485,35 @@ class QwenImage21Model(Model[QwenImage21Graph], encoded_leaves="accept"):
             z = latents * std + mean
             decoded = _decoded_whole(vae, z)
             if decoded is None:
-                # Diffusers' tiled decode (256 px tiles blended over 64 px), F32 like the whole
-                # one; it applies post_quant_conv itself.
-                decoded = vae.tiled_decode(z, return_dict=False)[0]
+                decoded = _decoded_tiled(vae, z, tel)
             return decoded.clamp(-1.0, 1.0)[:, :, 0]
+
+
+#: Tile sides (px) for a canvas the whole decode cannot fit, largest first. 512 px tiles err 7 dB
+#: less against the whole decode than Diffusers' 256 px default (42.9 vs 35.2 dB at 4 MP), whose
+#: seams show in flat sky, but they do not fit an RTX 3070 with 3 GB free.
+_TILES = (512, 256)
+
+
+def _decoded_tiled(vae: Any, z: torch.Tensor, tel: Telemetry) -> torch.Tensor:
+    """Diffusers' tiled decode in the largest tiles that fit."""
+    *larger, smallest = _TILES
+    for tile in larger:
+        try:
+            return _tiled(vae, z, tile, tel)
+        except torch.OutOfMemoryError as error:
+            error.__traceback__ = None  # this attempt's tiles go with its frames
+    return _tiled(vae, z, smallest, tel)
+
+
+def _tiled(vae: Any, z: torch.Tensor, tile: int, tel: Telemetry) -> torch.Tensor:
+    """F32 like the whole decode (it applies post_quant_conv itself), `tile` px tiles blended with
+    their neighbours over a quarter of their side."""
+    vae.tile_sample_min_height = vae.tile_sample_min_width = tile
+    vae.tile_sample_stride_height = vae.tile_sample_stride_width = tile * 3 // 4
+    decoded = vae.tiled_decode(z, return_dict=False)[0]
+    tel.log("tiled vae decode", tile_px=tile)
+    return decoded
 
 
 def _decoded_whole(vae: Any, z: torch.Tensor) -> torch.Tensor | None:
