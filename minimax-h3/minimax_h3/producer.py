@@ -38,7 +38,6 @@ from cozy_runtime.author import (
     AttentionProducer,
     Cut,
     ProducerCall,
-    active_attention_layout,
     register_attention,
     split,
 )
@@ -440,34 +439,25 @@ PRODUCERS = {
         _register(FAST, "kitchen-sol"),
     )
 }
-_BACKENDS = {"_cozy_" + name.replace("-", "_"): name for name in PRODUCERS}
 
 
 class _RetainRotary(ModelHook):  # type: ignore[misc]  # untyped Diffusers hook API
     """Keeps a sharded component's full rotary tables for the CP recipe's sparse calls, before
-    Diffusers' split hook (registered after this one) shards them. Returns them unchanged."""
+    Diffusers' split hook (registered after this one) shards them. Returns them unchanged.
+    Kept whenever the component runs context-parallel, whatever serves now: the transformer
+    computes the rotary once per layout, on a dense step, and the recipe can land after it
+    (a kernel opening during the request), so a step-0 fallback must not leave it without
+    them. The producer checks their length."""
 
-    def __init__(self, component: Any, modules: tuple[Any, ...], key: object) -> None:
+    def __init__(self, component: Any, key: object) -> None:
         super().__init__()
-        self.component, self.modules, self.key = component, modules, key
+        self.component, self.key = component, key
 
     def post_forward(self, module: object, output: object) -> object:
         if getattr(self.component, "_parallel_config", None) is None:
             return output  # one GPU: the producer reads the rotary its call receives
-        state, layout = PRODUCERS[FIXED_MEANS].request_state(), active_attention_layout()
-        # Kept at every step: the transformer computes the rotary once per layout, on a dense
-        # step, and the sparse steps that read it reuse that computation.
-        if state is None or layout is None:
-            return output
-        backends = (getattr(m.processor, "_attention_backend", None) for m in self.modules)
-        names = (_BACKENDS.get(str(getattr(backend, "value", backend))) for backend in backends)
-        if any(name is not None and PRODUCERS[name].context_parallel for name in names):
-            if (
-                not isinstance(output, tuple)
-                or len(output) != 2
-                or output[0].shape[0] != layout.live_tokens
-            ):
-                raise ValueError("H3 full rotary presentation changed before context splitting")
+        state = PRODUCERS[FIXED_MEANS].request_state()
+        if state is not None and isinstance(output, tuple) and len(output) == 2:
             state.parallel_rotary[self.key] = output
         return output
 
@@ -481,7 +471,6 @@ def retain_rotary(component: object) -> None:
     if registry.get_hook(_ROTARY_HOOK) is not None:
         return
     key = object()
-    modules = tuple(block.attn for block in component.transformer_blocks)
-    for attention in modules:
-        attention._cozy_producer_rotary_key = key
-    registry.register_hook(_RetainRotary(component, modules, key), _ROTARY_HOOK)
+    for block in component.transformer_blocks:
+        block.attn._cozy_producer_rotary_key = key
+    registry.register_hook(_RetainRotary(component, key), _ROTARY_HOOK)
