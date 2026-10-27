@@ -172,6 +172,18 @@ cozy run minimax-h3/long_form --input fight.json \
   --asset references.3.video=kick.mp4 --asset references.4.video=throw.mp4
 ```
 
+A clip can be a segment of a longer source: `start` and `end` beside `video` (seconds, `m:ss.s`
+or `h:mm:ss.s`; either may be left out). The `cozy` CLI cuts it once, frame-accurately, keeps
+the cut in `~/.cozy/cache/clips` and sends only the cut; the 15 s truncation applies to the cut.
+
+```yaml
+  - name: Video 1
+    kind: video
+    video: videos/sentry-program.m4v
+    start: "3:19"
+    end: "3:32.7"
+```
+
 ## Voices and audio
 
 A character's `voice` (2–15 s of clean speech) is a timbre reference: the character speaks
