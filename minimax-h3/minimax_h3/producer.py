@@ -265,9 +265,10 @@ def produce(
         )
     statistics = "kmean=previous-step,vscale=current-call" if reuse else "current-call"
     shared = ",".join(f"{kind}:{count}" for kind, count in sorted(shared_counts.items()))
+    clip, VCLIP[0] = VCLIP[0], None  # V-CLIP PROBE (diagnostic only)
     call.served(
         f"comfy_kitchen.sol_attn_chunked(int8, stats={statistics}, vmargin=1.1, "
-        f"prefix=int8, qkv={shared})"
+        f"prefix=int8, qkv={shared}, vclip={clip or 'n/a'})"
     )
     return attn.to_out[1](attn.to_out[0](output.flatten(2, 3)))
 
@@ -304,7 +305,16 @@ def _produce(
         token_aug=0,
     )
     state.statistics[key] = (layout.step, geometry, mean, scale)
+    if prior_mean is not None:  # V-CLIP PROBE (diagnostic only): Kitchen's scale of the values it quantized
+        # against the scale it was given; a channel saturates int8 iff its ratio exceeds VMARGIN.
+        ratio = scale.float() / prior_scale.float().clamp_min(1e-30)
+        VCLIP[0] = f"{float((ratio > VMARGIN).float().mean()) * 100:.2f}%/max{float(ratio.max()):.3f}"
     return output, prior_mean is not None
+
+
+#: V-CLIP PROBE (diagnostic only): this process's last reuse call's clipped-channel share and
+#: worst scale ratio, carried in the served route string so every rank's record shows it.
+VCLIP: list[str | None] = [None]
 
 
 def _project_qkv(
