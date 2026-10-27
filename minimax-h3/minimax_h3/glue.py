@@ -280,11 +280,12 @@ def _next_pow2(n: int) -> int:
     return 1 << (n - 1).bit_length()
 
 
-def _entries() -> Iterator[TritonEntry]:
-    """Every entry the H3 widths need. Row counts never enter one: they size grids."""
+def _entries(fp8s: tuple[int, ...]) -> Iterator[TritonEntry]:
+    """Every entry the H3 widths need, with the epilogues `fp8s` names (0: bf16, 1: fp8). Row
+    counts never enter one: they size grids."""
     block = _next_pow2(HIDDEN)
     for residual in (0, 1):
-        for fp8 in (0, 1):
+        for fp8 in fp8s:
             yield TritonEntry(
                 _norm_mod_kernel,
                 {
@@ -352,7 +353,7 @@ def _entries() -> Iterator[TritonEntry]:
         ),
         _ROW_WARPS,
     )
-    for fp8 in (0, 1):
+    for fp8 in fp8s:
         yield TritonEntry(
             _swiglu_kernel,
             {
@@ -390,7 +391,17 @@ def _entries() -> Iterator[TritonEntry]:
     )
 
 
-GLUE = TritonKernels("minimax-h3-glue", _entries())
+#: Every sm80+ card's set: the bf16 epilogues.
+GLUE = TritonKernels("minimax-h3-glue", _entries((0,)))
+#: With the fp8 epilogues, for cards that have fp8 (sm89+). Triton has no e4m3 below: on an
+#: sm86 the fp8 entries do not build, and one failed entry refuses its whole set, so an RTX 3070
+#: served the eager blocks, which do not fit 15 s in 8 GB.
+GLUE_FP8 = TritonKernels("minimax-h3-glue-fp8", _entries((0, 1)))
+
+
+def kernels(device: Any) -> TritonKernels:
+    """The set `device` builds."""
+    return GLUE_FP8 if torch.cuda.get_device_capability(device) >= (8, 9) else GLUE
 
 
 # ---------------------------------------------------------------------- wrappers
@@ -803,7 +814,9 @@ class FusedMiniMaxH3TransformerBlock(MiniMaxH3TransformerBlock):  # type: ignore
             fp8=self._fusion_attn_fp8,
         )
         attn_output = self.attn(normed, rotary_emb, attention_mask)
-        del normed  # its last use: 1.2 GB at 15 s, not held through the next norm
+        # Each [tokens, 5376] row set goes at its last use (1.2 GB each at 15 s); the caller
+        # holds this block's input throughout.
+        del normed
         hidden_states, normed = gate_add_rmsnorm_modulate(
             self._glue,
             hidden_states,
@@ -816,7 +829,9 @@ class FusedMiniMaxH3TransformerBlock(MiniMaxH3TransformerBlock):  # type: ignore
             self.norm2.eps,
             fp8=self._fusion_ff_fp8,
         )
+        del attn_output
         ff_output = feed_forward(self.ff, normed)
+        del normed
         return gate_add(self._glue, hidden_states, gate_mlp, ff_output, adaln_indices)
 
 
@@ -908,7 +923,7 @@ def _type_name(value: object) -> str:
 
 def identity() -> str:
     """The plan's identity: its kernels' sources and its call/topology contract."""
-    document = {"kernels": GLUE.identity, "plan": CONTRACT}
+    document = {"kernels": [GLUE.identity, GLUE_FP8.identity], "plan": CONTRACT}
     return (
         "sha256:"
         + hashlib.sha256(
@@ -1156,7 +1171,7 @@ def install(model: object, pipe: Any, plan: Plan) -> str:
             _validate_transformer(transformer, name)
         if not transformers:
             return _eager(model, plan, "fusion_no_transformer", "no MiniMax-H3 transformer to fuse")
-        glue = plan.load(GLUE)
+        glue = plan.load(kernels(device))
     except KernelsUnavailable as exc:
         if exc.code == "kernels_corrupt":
             raise GlueRefusal("fusion_kernels_corrupt", str(exc)) from exc

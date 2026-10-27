@@ -36,9 +36,11 @@ from cozy_runtime import lora
 from cozy_runtime.author import (
     AttentionLayout,
     AttentionProducer,
+    Cut,
     ProducerCall,
     active_attention_layout,
     register_attention,
+    split,
 )
 from cozy_runtime.author.kernels import ROWWISE_FP8, PreQuantized
 
@@ -269,7 +271,8 @@ def produce(
         f"comfy_kitchen.sol_attn_chunked(int8, stats={statistics}, vmargin=1.1, "
         f"prefix=int8, qkv={shared})"
     )
-    return attn.to_out[1](attn.to_out[0](output.flatten(2, 3)))
+    # By tokens where the device needs it, as the site's own processor does.
+    return attn.to_out[1](split(attn.to_out[0], output.flatten(2, 3), Cut(1)))
 
 
 def _produce(
