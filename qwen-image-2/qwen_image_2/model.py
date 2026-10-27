@@ -482,11 +482,25 @@ class QwenImage21Model(Model[QwenImage21Graph], encoded_leaves="accept"):
             latents = latents.to(device=device, dtype=vae.dtype)
             mean = latents.new_tensor(vae.config.latents_mean).view(1, vae.config.z_dim, 1, 1, 1)
             std = latents.new_tensor(vae.config.latents_std).view(1, vae.config.z_dim, 1, 1, 1)
-            # The pipeline's final decode, with no cast of F32 source weights, as one frame:
-            # Diffusers' `decode` keeps every convolution's input for a next frame an image
-            # never has (its feature cache, half the decode's memory); the same bits without.
-            x = vae.post_quant_conv(latents * std + mean)
-            return _decoded(vae.decoder, x).clamp(-1.0, 1.0)[:, :, 0]
+            z = latents * std + mean
+            decoded = _decoded_whole(vae, z)
+            if decoded is None:
+                # Diffusers' tiled decode (256 px tiles blended over 64 px), F32 like the whole
+                # one; it applies post_quant_conv itself.
+                decoded = vae.tiled_decode(z, return_dict=False)[0]
+            return decoded.clamp(-1.0, 1.0)[:, :, 0]
+
+
+def _decoded_whole(vae: Any, z: torch.Tensor) -> torch.Tensor | None:
+    """The pipeline's final decode, with no cast of F32 source weights, as one frame: Diffusers'
+    `decode` keeps every convolution's input for a next frame an image never has (its feature
+    cache, half the decode's memory); the same bits without. None when the whole canvas does
+    not fit the device (Qwen at 1 MP with 3 GB free); the caller then tiles."""
+    try:
+        return _decoded(vae.decoder, vae.post_quant_conv(z))
+    except torch.OutOfMemoryError as error:
+        error.__traceback__ = None  # the whole decode's activations go with its frames
+        return None
 
 
 def _decoded(decoder: Any, x: torch.Tensor) -> torch.Tensor:
