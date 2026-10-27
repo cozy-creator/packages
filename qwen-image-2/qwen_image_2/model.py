@@ -145,6 +145,15 @@ class QwenImage21Graph:
             }
         vae = self.components["vae"]
         vae.to(dtype=_stored(config, "vae", vae))
+        # Runtime pages a model by its `_no_split_modules`; Diffusers names none for this VAE, so
+        # its 1.35 GB of F32 weights, encoder included, stayed resident through a decode and left
+        # a 3 GB card short for the decode's activations. Each residual, attention and resample
+        # block is one page instead (every one is called as a module, also by `_decoded`).
+        vae._no_split_modules = [
+            "QwenImage21ResidualBlock",
+            "QwenImage21AttentionBlock",
+            "QwenImage21Resample",
+        ]
         # The pipeline reads hidden states only, so the 1.24 GB language-model head is not
         # built; Runtime skips its stored weight.
         self.components["text_encoder"].lm_head = torch.nn.Identity()
