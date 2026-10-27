@@ -122,7 +122,7 @@ def _generate(
         )
     ctx.raise_if_cancelled()
     with tel.stage("decoding image", overall_range=(0.9, 0.98)):
-        decoded = model.decode(latents, width=width, height=height)
+        decoded = model.decode(latents, width=width, height=height, tel=tel)
         image = decoded_image(decoded)
     with tel.stage("saving image", overall_range=(0.98, 1.0)):
         # WebP cannot represent a side of 16384 pixels; retain every supported canvas.
