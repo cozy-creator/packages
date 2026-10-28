@@ -641,7 +641,7 @@ wheels = [
 
 [[package]]
 name = "minimax-h3"
-version = "0.1.7"
+version = "0.1.8"
 source = { editable = "." }
 dependencies = [
     { name = "birefnet" },
@@ -1170,7 +1170,7 @@ wheels = [
 
 [[package]]
 name = "qwen-image-2"
-version = "0.1.3"
+version = "0.1.8"
 source = { registry = "https://tensorhub.com/v1/index/_/simple/" }
 dependencies = [
     { name = "cozy-runtime", extra = ["media"] },
@@ -1186,7 +1186,7 @@ dependencies = [
     { name = "transformers" },
 ]
 wheels = [
-    { url = "https://tensorhub.com/v1/index/_/qwen-image-2/0.1.3/qwen_image_2-0.1.3-py3-none-any.whl", hash = "sha256:6f4960fad74b1046ccc60fed9ce3c60101eafe807da81ea0e739436490c911c2" },
+    { url = "https://tensorhub.com/v1/index/_/qwen-image-2/0.1.8/qwen_image_2-0.1.8-py3-none-any.whl", hash = "sha256:8789b85bc486fb7b424bc0fd1d71ffcb066cdc3ca0b5fa9b829ceec8bac23080" },
 ]
 
 [[package]]
