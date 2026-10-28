@@ -160,7 +160,7 @@ def generate(
 
 
 @app.entrypoint(
-    defaults={"model": "qwen-image-2.1-turbo@0.1.0"},
+    defaults={"model": "qwen-image-2.1-turbo@0.1.1"},
     memoize=Memoize(requires=["seed"]),
     memo_dependencies=_MEMO,
 )
