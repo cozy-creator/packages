@@ -8,7 +8,7 @@ Qwen3-VL-8B-Instruct (13 of its layers' hidden states, concatenated); the VAE is
 
 | function | checkpoints | default steps | guidance |
 | --- | --- | --- | --- |
-| `generate` | `ideogram-4@0.1.0`, text encoder `qwen3-vl-8b-instruct@0.1.0` | 48 | 7, then 3 on the last `ceil(steps/16)` |
+| `generate` | `ideogram-4@0.1.0`, text encoder `qwen3-vl-8b-instruct@0.1.1` (int8) | 48 | 7, then 3 on the last `ceil(steps/16)` |
 
 There is no distilled checkpoint, so no `generate_turbo`; Ideogram's 20- and 12-step presets are
 `steps=20` and `steps=12`.

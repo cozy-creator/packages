@@ -89,8 +89,8 @@ def caption(payload: GenerateInput, upsampler: QwenUpsampler, *, width: int, hei
 # The upsampler is built and fetched only for a plain prompt with `prompt_upsampling` on. Model
 # parameters are in name order: Runtime refuses a binding set whose paths are not sorted.
 @app.entrypoint(
-    defaults={"model": "ideogram-4@0.1.0", "text_encoder": "qwen3-vl-8b-instruct@0.1.0",
-              "upsampler": "qwen3-vl-8b-instruct@0.1.0"},
+    defaults={"model": "ideogram-4@0.1.0", "text_encoder": "qwen3-vl-8b-instruct@0.1.1",
+              "upsampler": "qwen3-vl-8b-instruct@0.1.1"},
     components={"model": ("transformer", "unconditional_transformer", "vae"), "text_encoder": ("model",),
                 "upsampler": ("model",)},
     on_demand=("upsampler",),
