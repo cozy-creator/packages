@@ -39,4 +39,11 @@ def release_if_tight(hidden: Any, attn: Any) -> None:
     in the cache is split for the next differently sized allocation, and on an 8 GB card the
     holes it leaves then refuse a 1.09 GiB row set (RTX 3070, 15 s)."""
     if not fits(hidden, attn):
+        release()
+
+
+def release() -> None:
+    """`torch.cuda.empty_cache()`, except while a native loop records the step: its pool is
+    sized at recording, and Torch would free other graphs' pools inside the capture."""
+    if not torch.cuda.is_current_stream_capturing():
         torch.cuda.empty_cache()

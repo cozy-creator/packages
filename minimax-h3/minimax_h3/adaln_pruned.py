@@ -50,12 +50,15 @@ class StepInvariants:
     """What one denoise computes once rather than every step: the rotary tables of its packed
     positions and its refined text rows. Each is kept while the same input tensors come back
     unmodified (the same objects at the same in-place version) under the same turbo overlay, so
-    a layout change (a clip's rows leaving before the first sparse step) recomputes it."""
+    a layout change (a clip's rows leaving before the first sparse step) recomputes it.
+    `checked`: the denoise checked every step's rows before its loop, so its forwards read no
+    device value on the host (a `denoise_loop` step)."""
 
-    __slots__ = ("held",)
+    __slots__ = ("checked", "held")
 
-    def __init__(self) -> None:
+    def __init__(self, checked: bool = False) -> None:
         self.held: dict[str, tuple[tuple[tuple[object, int], ...], Any]] = {}
+        self.checked = checked
 
     def get(self, name: str, inputs: tuple[object, ...], compute: Callable[[], Any]) -> Any:
         key = tuple((value, getattr(value, "_version", 0)) for value in inputs)
@@ -80,9 +83,9 @@ _STEP_INVARIANTS: ContextVar[StepInvariants | None] = ContextVar(
 
 
 @contextmanager
-def step_invariants() -> Iterator[StepInvariants]:
+def step_invariants(*, checked: bool = False) -> Iterator[StepInvariants]:
     """One denoise loop's step invariants, dropped when it ends."""
-    memo = StepInvariants()
+    memo = StepInvariants(checked)
     token = _STEP_INVARIANTS.set(memo)
     try:
         yield memo
@@ -113,7 +116,14 @@ class _AdaLNPrunedTimestepLookup(nn.Module):  # type: ignore[misc]
         self._armed: _Armed | None = None
 
     def forward(self, timestep: torch.Tensor) -> torch.Tensor:
-        return self.rows(timestep)
+        """The rows, on the device: the transformer checked them (`rows`) before its forward."""
+        if self._armed is not None:
+            return cast(torch.Tensor, self._armed.source.rows(timestep))
+        return self._lookup(timestep)
+
+    def _lookup(self, timestep: torch.Tensor) -> torch.Tensor:
+        values = timestep.to(dtype=torch.float32).reshape(-1, 1)
+        return (values == self.timesteps.reshape(1, -1)).to(dtype=torch.int64).argmax(dim=1)
 
     def rows(self, timestep: torch.Tensor) -> torch.Tensor:
         if self._armed is not None:
@@ -260,8 +270,6 @@ class AdaLNPrunedMiniMaxH3Transformer(MiniMaxH3Transformer3DModel):  # type: ign
             setattr(self, name, _SelectableHead(head.in_features, head.out_features))
         self._arming: TurboArming | None = None
         self._lora_hooks_installed = False
-        self.register_forward_pre_hook(self._arm, with_kwargs=True)
-        self.register_forward_hook(self._disarm, always_call=True)
 
     @apply_lora_scale("attention_kwargs")  # type: ignore[untyped-decorator]
     def forward(
@@ -281,57 +289,65 @@ class AdaLNPrunedMiniMaxH3Transformer(MiniMaxH3Transformer3DModel):  # type: ign
     ) -> MiniMaxH3TransformerOutput | tuple[torch.Tensor, torch.Tensor]:
         """Diffusers 0.41's forward, the projected rows scoped to the packing: Diffusers keeps
         them to its end, the video's float32 rows (2.25 GB a GPU at H3 15 s, degree 2) through
-        every block."""
-        del attention_kwargs  # `apply_lora_scale` consumed it
-        sequence_length = position_ids.shape[0]
-        if position_ids.ndim != 2 or position_ids.shape[-1] != 3:
-            raise ValueError(f"`position_ids` must be a `(seq_len, 3)` tensor, got {list(position_ids.shape)}.")
-        if token_tags.shape != (sequence_length,) or timestep_indices.shape != (sequence_length,):
-            raise ValueError(
-                "`token_tags` and `timestep_indices` must both be `(seq_len,)` tensors matching "
-                f"`position_ids`, got {list(token_tags.shape)} and {list(timestep_indices.shape)} "
-                f"for seq_len={sequence_length}."
-            )
-
-        def refined() -> torch.Tensor:
-            dtype = get_parameter_dtype(self.context_embedder)
-            return cast(
-                torch.Tensor,
-                self.token_refiner(self.context_embedder(encoder_hidden_states.to(dtype))),
-            )
-
+        every block. It checks the rows and arms a turbo bank `attention_kwargs` names (`_arm`),
+        unless its denoise checked every step's rows ahead (`StepInvariants.checked`), and ends
+        disarmed: in the forward, as a package forward hook would keep it out of native loops."""
         memo = _STEP_INVARIANTS.get()
-        if memo is None:
-            rotary_emb, text = self.rope(position_ids), refined()
-        else:  # inside a denoise loop: once per layout, not once per step
-            rotary_emb = memo.get("rope", (position_ids,), lambda: self.rope(position_ids))
-            overlay = self._arming.overlay if self._arming is not None else None
-            text = memo.get("text", (encoder_hidden_states, overlay), refined)
-        rows = text.new_zeros((text.shape[0], sequence_length, text.shape[-1]))
-        rows = rows.index_copy(1, text_indices, text)
-        del text
-        video = self.proj_in(hidden_states.to(get_parameter_dtype(self.proj_in)))
-        rows = rows.index_copy(1, video_indices, video.to(rows.dtype))
-        del video
-        audio = self.audio_proj_in(audio_hidden_states.to(get_parameter_dtype(self.audio_proj_in)))
-        rows = rows.index_copy(1, audio_indices, audio.to(rows.dtype))
-        del audio
-        # The packing's float32 video rows (2.2 GB at 15 s) leave the cache before the blocks.
-        release_if_tight(rows, self.transformer_blocks[0].attn)
-        temb = self.time_proj(timestep)
-        temb = self.time_embedder(temb.to(get_parameter_dtype(self.time_embedder)))
-        adaln_indices = timestep_indices * MINIMAX_H3_MODALITY_NUM + token_tags
-        for block in self.transformer_blocks:
-            if torch.is_grad_enabled() and self.gradient_checkpointing:
-                rows = self._gradient_checkpointing_func(block, rows, temb, adaln_indices, rotary_emb)
-            else:
-                rows = block(rows, temb, adaln_indices, rotary_emb)
-        rows = self.norm_out(rows, temb, timestep_indices).to(get_parameter_dtype(self.proj_out))
-        video_output = self.proj_out(rows).index_select(1, video_indices)
-        audio_output = self.audio_proj_out(rows).index_select(1, audio_indices)
-        if not return_dict:
-            return (video_output, audio_output)
-        return MiniMaxH3TransformerOutput(sample=video_output, audio_sample=audio_output)
+        if memo is None or not memo.checked:
+            self._arm(timestep, timestep_indices, token_tags, attention_kwargs)
+        del attention_kwargs  # `apply_lora_scale` consumed its scale
+        try:
+            sequence_length = position_ids.shape[0]
+            if position_ids.ndim != 2 or position_ids.shape[-1] != 3:
+                raise ValueError(f"`position_ids` must be a `(seq_len, 3)` tensor, got {list(position_ids.shape)}.")
+            if token_tags.shape != (sequence_length,) or timestep_indices.shape != (sequence_length,):
+                raise ValueError(
+                    "`token_tags` and `timestep_indices` must both be `(seq_len,)` tensors matching "
+                    f"`position_ids`, got {list(token_tags.shape)} and {list(timestep_indices.shape)} "
+                    f"for seq_len={sequence_length}."
+                )
+
+            def refined() -> torch.Tensor:
+                dtype = get_parameter_dtype(self.context_embedder)
+                return cast(
+                    torch.Tensor,
+                    self.token_refiner(self.context_embedder(encoder_hidden_states.to(dtype))),
+                )
+
+            memo = _STEP_INVARIANTS.get()
+            if memo is None:
+                rotary_emb, text = self.rope(position_ids), refined()
+            else:  # inside a denoise loop: once per layout, not once per step
+                rotary_emb = memo.get("rope", (position_ids,), lambda: self.rope(position_ids))
+                overlay = self._arming.overlay if self._arming is not None else None
+                text = memo.get("text", (encoder_hidden_states, overlay), refined)
+            rows = text.new_zeros((text.shape[0], sequence_length, text.shape[-1]))
+            rows = rows.index_copy(1, text_indices, text)
+            del text
+            video = self.proj_in(hidden_states.to(get_parameter_dtype(self.proj_in)))
+            rows = rows.index_copy(1, video_indices, video.to(rows.dtype))
+            del video
+            audio = self.audio_proj_in(audio_hidden_states.to(get_parameter_dtype(self.audio_proj_in)))
+            rows = rows.index_copy(1, audio_indices, audio.to(rows.dtype))
+            del audio
+            # The packing's float32 video rows (2.2 GB at 15 s) leave the cache before the blocks.
+            release_if_tight(rows, self.transformer_blocks[0].attn)
+            temb = self.time_proj(timestep)
+            temb = self.time_embedder(temb.to(get_parameter_dtype(self.time_embedder)))
+            adaln_indices = timestep_indices * MINIMAX_H3_MODALITY_NUM + token_tags
+            for block in self.transformer_blocks:
+                if torch.is_grad_enabled() and self.gradient_checkpointing:
+                    rows = self._gradient_checkpointing_func(block, rows, temb, adaln_indices, rotary_emb)
+                else:
+                    rows = block(rows, temb, adaln_indices, rotary_emb)
+            rows = self.norm_out(rows, temb, timestep_indices).to(get_parameter_dtype(self.proj_out))
+            video_output = self.proj_out(rows).index_select(1, video_indices)
+            audio_output = self.audio_proj_out(rows).index_select(1, audio_indices)
+            if not return_dict:
+                return (video_output, audio_output)
+            return MiniMaxH3TransformerOutput(sample=video_output, audio_sample=audio_output)
+        finally:
+            self._release()
 
     def install_lora_consumers(self) -> None:
         """Install once during turbo-capable construction, before Runtime fill/fusion."""
@@ -346,25 +362,14 @@ class AdaLNPrunedMiniMaxH3Transformer(MiniMaxH3Transformer3DModel):  # type: ign
 
     def _arm(
         self,
-        module: nn.Module,
-        args: tuple[Any, ...],
-        kwargs: dict[str, Any],
-    ) -> tuple[tuple[Any, ...], dict[str, Any]] | None:
-        del module
+        timestep: Any,
+        timestep_indices: Any,
+        token_tags: Any,
+        selector: Any,
+    ) -> None:
+        """Check one forward's rows against the tables it reads: the turbo overlay's, engaged
+        here, when `selector` (its `attention_kwargs`) names the bank."""
         self._release()
-        names = (
-            "hidden_states",
-            "audio_hidden_states",
-            "encoder_hidden_states",
-            "timestep",
-            "timestep_indices",
-            "token_tags",
-        )
-        values = {**dict(zip(names, args, strict=False)), **kwargs}
-        timestep = values.get("timestep")
-        timestep_indices = values.get("timestep_indices")
-        token_tags = values.get("token_tags")
-        selector = values.get("attention_kwargs")
         bank = selector.get(ATTENTION_KWARG) if isinstance(selector, Mapping) else None
         if not all(
             isinstance(value, torch.Tensor) for value in (timestep, timestep_indices, token_tags)
@@ -374,7 +379,7 @@ class AdaLNPrunedMiniMaxH3Transformer(MiniMaxH3Transformer3DModel):  # type: ign
                     "a turbo forward needs typed timestep, timestep_indices and token_tags",
                     code="artifact_config",
                 )
-            return None  # Diffusers owns its ordinary argument diagnostics.
+            return  # Diffusers owns its ordinary argument diagnostics.
         assert isinstance(timestep, torch.Tensor)
         assert isinstance(timestep_indices, torch.Tensor)
         assert isinstance(token_tags, torch.Tensor)
@@ -413,16 +418,6 @@ class AdaLNPrunedMiniMaxH3Transformer(MiniMaxH3Transformer3DModel):  # type: ign
         except Exception:
             self._release()
             raise
-        if isinstance(selector, Mapping) and OVERLAY_KWARG in selector:
-            # The package consumes these keys; Diffusers attention processors receive
-            # only their own options. The caller's dictionary is never mutated.
-            cleaned = {
-                key: value
-                for key, value in selector.items()
-                if key not in (ATTENTION_KWARG, OVERLAY_KWARG)
-            }
-            return args, {**kwargs, "attention_kwargs": cleaned}
-        return None
 
     def _engage(self, overlay: TurboOverlay, step: int) -> None:
         self._arming = TurboArming(overlay, step)
@@ -450,10 +445,6 @@ class AdaLNPrunedMiniMaxH3Transformer(MiniMaxH3Transformer3DModel):  # type: ign
             head = _projection_base(getattr(self, name))
             if isinstance(head, _SelectableHead):
                 head._armed = None
-
-    def _disarm(self, module: nn.Module, args: tuple[Any, ...], output: Any) -> None:
-        del module, args, output
-        self._release()
 
     @classmethod
     def from_official_config(

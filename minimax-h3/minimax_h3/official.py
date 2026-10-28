@@ -81,6 +81,7 @@ from .continuation import (
     export_context,
 )
 from .reference_rows import ClipRows, motion_size, public_video
+from .steps import denoise_fl2va
 from .turbo import ATTENTION_KWARG, TURBO_BANK, TurboOverlay, TurboSchedule
 from .vae_tiles import TileBatchedVideoVAE, encode_condition
 
@@ -1355,16 +1356,32 @@ class OfficialH3Pipeline:
             references, latents = state.normalized_references, state.condition_latents
             clips = ClipRows(block_state, references, latents, scoped.patch_size)
             clips.thin(block_state)
-        with step_invariants():
-            for index, timestep in enumerate(block_state.timesteps):
-                cancel()
-                if clips is not None and index == sol_dense_steps:
-                    clips.release(block_state)
-                with attention_scope(
-                    _attention_layout(block_state, index, sol_dense_steps=sol_dense_steps)
-                ):
-                    _, block_state = loop.loop_step(scoped, block_state, i=index, t=timestep)
-                on_step(index)
+        if (
+            task == "fl2va"
+            and clips is None
+            and context is None
+            and not block_state.attention_kwargs
+            and getattr(scoped.transformer, "_parallel_config", None) is None
+        ):
+            denoise_fl2va(
+                scoped.transformer,
+                scoped,
+                block_state,
+                lambda step: _attention_layout(block_state, step, sol_dense_steps=sol_dense_steps),
+                sol_dense_steps,
+                on_step,
+            )
+        else:
+            with step_invariants():
+                for index, timestep in enumerate(block_state.timesteps):
+                    cancel()
+                    if clips is not None and index == sol_dense_steps:
+                        clips.release(block_state)
+                    with attention_scope(
+                        _attention_layout(block_state, index, sol_dense_steps=sol_dense_steps)
+                    ):
+                        _, block_state = loop.loop_step(scoped, block_state, i=index, t=timestep)
+                    on_step(index)
         loop.set_block_state(state, block_state)
         self._run_with(task, scoped, "denoise.after_denoise", state)
         return facts

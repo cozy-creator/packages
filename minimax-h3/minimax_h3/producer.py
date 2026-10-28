@@ -17,7 +17,9 @@ tables are the full ones a hook keeps before Diffusers splits them (`retain_rota
 from __future__ import annotations
 
 import sys
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from functools import partial
 from typing import Any
@@ -38,12 +40,13 @@ from cozy_runtime.author import (
     AttentionProducer,
     Cut,
     ProducerCall,
+    ProducerSite,
     register_attention,
     split,
 )
 from cozy_runtime.author.kernels import ROWWISE_FP8, PreQuantized
 
-from .fit import fits
+from .fit import fits, release
 from .glue import FusedMiniMaxH3AttnProcessor, H3AttnProcessor
 
 FAST = "kitchen-sol-producer-fast-shared-qkv"
@@ -76,6 +79,51 @@ class RequestState:
                 if reference() is self.rope[2]:
                     cached.pop(key, None)
         self.rope = None
+
+
+@dataclass(frozen=True, slots=True)
+class Carry:
+    """One `denoise_loop` step's Kitchen key means: a carried F32 [H, 128] slot per site, by
+    attention module. A rolling step's calls read the previous step's mean from their slot; every
+    sparse call leaves its own there. Eager reuse decides on `layout.step` in Python, which a
+    recorded step would freeze; the step's phase decides instead (`rolling`)."""
+
+    slots: Mapping[int, torch.Tensor]
+    rolling: bool
+
+
+_CARRY: ContextVar[Carry | None] = ContextVar("minimax_h3_kitchen_carry", default=None)
+
+
+@contextmanager
+def carrying(carry: Carry) -> Iterator[None]:
+    token = _CARRY.set(carry)
+    try:
+        yield
+    finally:
+        _CARRY.reset(token)
+
+
+def present(
+    sites: Sequence[ProducerSite], rotary: tuple[torch.Tensor, torch.Tensor], tokens: int
+) -> None:
+    """Before a `denoise_loop`: the rotary presentation these sites' sparse calls read, and
+    Kitchen's packed table of it, made eagerly so no recorded step allocates them from its pool.
+    `RequestState.close` forgets the table."""
+    states = {
+        id(state): state
+        for site in sites
+        if isinstance(state := site.producer.request_state(), RequestState)
+    }
+    if not states:
+        return
+    first, *others = states.values()
+    presentation = rope_presentation(rotary, tokens, first)
+    for state in others:
+        state.rope = (rotary[0], rotary[1], presentation)
+    build = getattr(sys.modules.get("comfy_kitchen.backends.cuda"), "_packed_rope_fab", None)
+    if callable(build):
+        build(presentation, tokens, presentation.shape[-3] * 2)
 
 
 def rows(value: torch.Tensor | PreQuantized, start: int, stop: int) -> torch.Tensor | PreQuantized:
@@ -281,7 +329,7 @@ def produce(
     # Where the whole call does not fit, as the site's own processor runs it.
     out = attn.to_out[1](split(attn.to_out[0], output.flatten(2, 3), Cut(1)))
     del output
-    torch.cuda.empty_cache()
+    release()
     return out
 
 
@@ -296,9 +344,13 @@ def _produce(
     absmax: Callable[[], torch.Tensor],
 ) -> tuple[torch.Tensor, bool]:
     attn, layout, state = call.module, call.layout, call.state
-    prior_mean, prior_scale = previous_statistics(
-        state, key, layout.step, geometry, replay_safe=PRODUCERS[name].context_parallel
-    )
+    carry = _CARRY.get()
+    if carry is None:
+        prior_mean, prior_scale = previous_statistics(
+            state, key, layout.step, geometry, replay_safe=PRODUCERS[name].context_parallel
+        )
+    else:  # one GPU (H3's `denoise_loop` path)
+        prior_mean, prior_scale = (carry.slots[id(attn)] if carry.rolling else None), None
     if prior_mean is not None:  # the key mean carries; the values are this call's own
         prior_scale = value_scale(absmax())
     output, mean, scale = call.kernel.sol_attn_chunked(
@@ -316,7 +368,10 @@ def _produce(
         sink_q=[0, -(-layout.protected_prefix // 64)],
         token_aug=0,
     )
-    state.statistics[key] = (layout.step, geometry, mean, scale)
+    if carry is None:
+        state.statistics[key] = (layout.step, geometry, mean, scale)
+    else:
+        carry.slots[id(attn)].copy_(mean)
     return output, prior_mean is not None
 
 
