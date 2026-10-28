@@ -9,8 +9,8 @@ Runtime owns construction, memory residency and component execution.
 transparent, and is RGB otherwise; alpha within 4 levels of 0 or 255 (the decoder's noise) snaps
 to it. `seed` is optional and the chosen seed is
 returned. Seeds range from 0 through 9007199254740991 (the interoperable 53-bit
-integer range); omitting one chooses a random seed in that range. Inputs are the shared image request, the same in every image package: `prompt`, `reference_images`, `aspect_ratio` (any W:H), `megapixels` (any size, 1024² pixels each), `steps`, `guidance`, `negative_prompt`, `seed` and `prompt_upsampling`. Steps default to 40 (1–100); a checkpoint that names its own schedule (Turbo's
-`sample_sigmas`, 8 steps) runs it, and a different `steps` is reported as a `clamp` adjustment. Qwen
+integer range); omitting one chooses a random seed in that range. Inputs are the shared image request, the same in every image package: `prompt`, `reference_images`, `aspect_ratio` (any W:H), `megapixels` (any size, 1024² pixels each), `steps`, `guidance`, `negative_prompt`, `seed` and `prompt_upsampling`. Steps default to 40 (1–100); `generate_turbo` runs Turbo's distilled schedule
+(its 8 `sample_sigmas`), and a different `steps` is reported as a `clamp` adjustment. Qwen
 runs no CFG and has no upsampler, so `guidance`, `negative_prompt` and `prompt_upsampling` are ignored
 with a warning, as are unknown fields. The result is `image`, `width`, `height`, `seed` and `prompt`.
 

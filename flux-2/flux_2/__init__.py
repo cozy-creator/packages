@@ -45,15 +45,17 @@ def _generate(ctx: Context, payload: GenerateInput, model: Flux2, turbo: Flux2Tu
     seed = payload.drawn_seed()
     images = [asset.read() for asset in payload.reference_images]
     width, height = payload.size(adj, images[0].size if images else None, SIZES, megapixels=1.0)
+    # The function names the regime (`generate_turbo` passes `turbo`): [dev] 50 steps at guidance 4,
+    # with its Turbo fal's 8 sigmas at 2.5; a [klein] as Base 50 steps of CFG 4, or distilled 4 steps
+    # without guidance (BFL `util.py`).
+    distilled = turbo is not None and not model.dev
     turbo = turbo if model.dev else None
-    # The checkpoint's defaults: [dev] 50 steps at guidance 4, its Turbo fal's 8 sigmas at 2.5,
-    # [klein] Base 50 steps of CFG 4, [klein] distilled 4 steps without guidance (BFL `util.py`).
-    steps = 8 if turbo else 4 if model.distilled else 50
+    steps = 8 if turbo else 4 if distilled else 50
     if payload.steps is not None and turbo and payload.steps != steps:
         adj.clamp("steps", payload.steps, steps, "the Turbo LoRA's own 8-step schedule")
     elif payload.steps is not None:
         steps = held(adj, "steps", payload.steps, 1, 100)
-    if model.distilled:
+    if distilled:
         guidance = None
         payload.ignored(adj, "guidance", reason="FLUX.2 [klein] distilled takes no guidance")
     else:
@@ -62,6 +64,9 @@ def _generate(ctx: Context, payload: GenerateInput, model: Flux2, turbo: Flux2Tu
     cfg = not model.dev and guidance is not None and guidance > 1  # distilled: no guidance
     if not cfg:
         payload.ignored(adj, "negative_prompt", reason="only FLUX.2 [klein] Base runs CFG")
+    tel.log("sampling", model="[dev]" if model.dev else "[klein]",
+            regime="turbo" if turbo else "distilled" if distilled else "base", steps=steps,
+            guidance=guidance, cfg=cfg)
     prompt = payload.prompt
     if payload.prompt_upsampling:
         with tel.stage("upsampling prompt", overall_range=(0.0, 0.15)):

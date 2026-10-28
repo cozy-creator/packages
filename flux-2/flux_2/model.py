@@ -108,7 +108,6 @@ def _armed(transformer: nn.Module, path: str) -> nn.Module | None:
 
 class Flux2Graph:
     def __init__(self, config: Config) -> None:
-        mapping = config.mapping()
         text = config.section("text_encoder").mapping()
         family = str(text["model_type"])
         if family not in TEXT_LAYERS:
@@ -124,8 +123,6 @@ class Flux2Graph:
                 if isinstance(module, nn.Linear):
                     module.register_forward_hook(lora.Hook(partial(_armed, transformer, path)))
         self.family = family
-        index = mapping.get("model_index")
-        self.distilled = isinstance(index, Mapping) and bool(index.get("is_distilled", False))
         # The VAE runs in its stored precision: bf16 in Diffusers' repositories, f32 in BFL's `ae`.
         stored = config.tensor_dtype("vae.encoder.conv_in.weight", default="f32")
         self.components: dict[str, nn.Module] = {
@@ -177,8 +174,9 @@ def _bn(vae: Any, like: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
 
 
 class Flux2(Model[Flux2Graph], encoded_leaves="accept"):
-    """One FLUX.2 checkpoint: [dev] (embedded guidance), [klein] distilled (no guidance) or
-    [klein] Base (CFG)."""
+    """One FLUX.2 checkpoint: [dev] (embedded guidance) or a [klein], which runs as Base (CFG) or
+    distilled (no guidance) as the function names it: the pipeline's `is_distilled` never reaches
+    the model's config."""
 
     graph: Flux2Graph
     tokenizer: Any
@@ -191,11 +189,6 @@ class Flux2(Model[Flux2Graph], encoded_leaves="accept"):
     def dev(self) -> bool:
         """[dev]: Mistral-conditioned, guidance-distilled, with an embedded guidance input."""
         return self.graph.family == "mistral3"
-
-    @property
-    def distilled(self) -> bool:
-        """[klein] distilled: step- and guidance-distilled, no guidance at all."""
-        return self.graph.distilled
 
     @uses_components("text_encoder", memoize=True, memo_dependencies=(tokenizer, processor, text_encoder, _conditioning_only))
     def encode(self, prompt: str) -> torch.Tensor:

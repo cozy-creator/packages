@@ -7,7 +7,7 @@ placement, or offload hook takes part in serving.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable, Iterator, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from typing import Any
 
 import numpy as np
@@ -160,9 +160,6 @@ class QwenImage21Graph:
         self.scheduler_config = config.section("scheduler").mapping()
         # The processor folder's config file, which TensorFS keeps as its component's config.
         self.processor_config = config.section("processor").mapping() if "processor" in config.keys() else {}
-        # A distilled checkpoint (Turbo) names its own schedule; its length is the step count.
-        sigmas = (config.section("model_index").mapping() if "model_index" in config.keys() else {}).get("sample_sigmas")
-        self.sample_sigmas = [float(sigma) for sigma in sigmas] if sigmas else None
 
 
 def build_qwen_image21(config: Config) -> QwenImage21Graph:
@@ -224,16 +221,12 @@ class QwenImage21Model(Model[QwenImage21Graph], encoded_leaves="accept"):
     def execution_plan(self, plan: Plan) -> str:
         return fusion.install(plan, BLOCK, self.graph.components["transformer"])
 
-    @property
-    def sample_sigmas(self) -> list[float] | None:
-        return self.graph.sample_sigmas
-
-    def _pipeline(self) -> _StagedPipeline:
+    def _pipeline(self, sigmas: Sequence[float] | None = None) -> _StagedPipeline:
         pipeline = _StagedPipeline(
             **self.graph.components,
             processor=self.processor,
             scheduler=FlowMatchEulerDiscreteScheduler.from_config(self.graph.scheduler_config),
-            sample_sigmas=self.graph.sample_sigmas,
+            sample_sigmas=None if sigmas is None else list(sigmas),
         )
         pipeline.device_placed = torch.device(str(self.device))
         return pipeline
@@ -295,16 +288,19 @@ class QwenImage21Model(Model[QwenImage21Graph], encoded_leaves="accept"):
         seed: int,
         on_step: Callable[[int], None],
         cancel: Callable[[], None],
+        sigmas: Sequence[float] | None = None,
         reference_images: list[Any] | None = None,
         reference_latents: torch.Tensor | None = None,
         image_pad_mask: torch.Tensor | None = None,
     ) -> Any:
         """Text-to-image with an unpadded prompt runs the cached loop; edits and padded prompts
-        run the Diffusers pipeline."""
+        run the Diffusers pipeline. `sigmas`: a distilled schedule (its length is `steps`), else
+        the pipeline's uniform spacing."""
         cancel()
         if reference_latents is None and reference_images is None and mask is None:
             return self._denoise_cached(
-                embeds, width=width, height=height, steps=steps, seed=seed, on_step=on_step
+                embeds, width=width, height=height, steps=steps, seed=seed, on_step=on_step,
+                sigmas=sigmas,
             )
         return self._denoise_eager(
             embeds,
@@ -313,6 +309,7 @@ class QwenImage21Model(Model[QwenImage21Graph], encoded_leaves="accept"):
             height=height,
             steps=steps,
             seed=seed,
+            sigmas=sigmas,
             on_step=on_step,
             cancel=cancel,
             reference_images=reference_images,
@@ -329,6 +326,7 @@ class QwenImage21Model(Model[QwenImage21Graph], encoded_leaves="accept"):
         steps: int,
         seed: int,
         on_step: Callable[[int], None],
+        sigmas: Sequence[float] | None = None,
     ) -> Any:
         """Extract step 0 eagerly, then steps ``1..N-1`` in cached mode as one `denoise_loop`.
 
@@ -338,7 +336,7 @@ class QwenImage21Model(Model[QwenImage21Graph], encoded_leaves="accept"):
         """
         transformer = self.graph.components["transformer"]
         device = torch.device(str(self.device))
-        pipeline = self._pipeline()
+        pipeline = self._pipeline(sigmas)
         scheduler = pipeline.scheduler
         multiple_of = pipeline.vae_scale_factor * 2
         width = width // multiple_of * multiple_of
@@ -357,12 +355,10 @@ class QwenImage21Model(Model[QwenImage21Graph], encoded_leaves="accept"):
                 rng.generator(seed),
                 None,
             )
-            # The checkpoint's own schedule when it names one (Turbo), else the uniform spacing
-            # the pipeline uses when no `sigmas` is passed. The dynamic shift follows the canvas.
-            sigmas = (
-                np.array(self.graph.sample_sigmas, dtype=np.float32)
-                if self.graph.sample_sigmas
-                else np.linspace(1.0, 1 / steps, steps)
+            # The distilled schedule when given (Turbo), else the uniform spacing the pipeline uses
+            # when no `sigmas` is passed. The dynamic shift follows the canvas.
+            spacing = (
+                np.array(sigmas, dtype=np.float32) if sigmas else np.linspace(1.0, 1 / steps, steps)
             )
             mu = calculate_shift(
                 latents.shape[1],
@@ -371,7 +367,7 @@ class QwenImage21Model(Model[QwenImage21Graph], encoded_leaves="accept"):
                 scheduler.config.get("base_shift", 0.5),
                 scheduler.config.get("max_shift", 1.15),
             )
-            timesteps, steps = retrieve_timesteps(scheduler, steps, device, sigmas=sigmas, mu=mu)
+            timesteps, steps = retrieve_timesteps(scheduler, steps, device, sigmas=spacing, mu=mu)
             scheduler.set_begin_index(0)
 
             # The joint-sequence image mask: no condition images for text-to-image, then one
@@ -444,13 +440,14 @@ class QwenImage21Model(Model[QwenImage21Graph], encoded_leaves="accept"):
         seed: int,
         on_step: Callable[[int], None],
         cancel: Callable[[], None],
+        sigmas: Sequence[float] | None = None,
         reference_images: list[Any] | None = None,
         reference_latents: torch.Tensor | None = None,
         image_pad_mask: torch.Tensor | None = None,
     ) -> Any:
         transformer = self.graph.components["transformer"]
         device = torch.device(str(self.device))
-        pipeline = self._pipeline()
+        pipeline = self._pipeline(sigmas)
         pipeline.reference_latents = reference_latents
         if image_pad_mask is not None:
             pipeline.reference_pad_mask = image_pad_mask.to(device=device)
