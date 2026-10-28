@@ -99,9 +99,10 @@ def condition_references(model: H3Model, task: Task, state: Any, *, tel: Telemet
 class H3Model(
     Model[OfficialH3Pipeline],
     encoded_leaves="accept",
-    # The DiTs' attention holds at 4 bits (fp4 where the GPU has it); the VAEs and the text
+    # The DiTs' attention holds at 4 bits (fp4 where the GPU has it), the video VAE decoder's at 8
+    # (Kitchen INT8 on consumer cards, as ComfyUI's int8 decoder); the audio VAE and the text
     # encoder keep exact attention.
-    attention_bits={"transformer": 4, "transformer_ref": 4},
+    attention_bits={"transformer": 4, "transformer_ref": 4, "vae": 8},
 ):
     """H3 is head-shardable at every divisor of its 56 attention heads up to eight GPUs.
 
