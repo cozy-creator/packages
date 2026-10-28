@@ -7,7 +7,7 @@
 python_version = "3.12"
 files = [
     "anima", "birefnet", "qwen3.5", "seedvr2", "minimax-h3", "sdxl", "qwen-image-2", "qwen-image", "flux-2",
-    "flux-3-klein", "fibo-2", "hidream-o1", "hunyuan-image-3", "ideogram-4", "moss-image", "qwen3.6",
+    "flux-3-klein", "fibo-2", "hidream-o1", "hunyuan-image-3", "ideogram-4", "moss-image", "qwen3.6", "krea-2",
     "scripts", "examples", "minimax-h3-tools/src",
 ]
 strict = true
@@ -46,7 +46,7 @@ warn_unused_ignores = false
 
 # Model classes subclass Diffusers' and Torch's own, which this light environment does not carry.
 [[tool.mypy.overrides]]
-module = ["qwen_image_2.model", "qwen_image.model", "flux_3_klein.klein", "seedvr2.model", "flux_2.model", "flux_2.turbo", "fibo_2.model", "fibo_2.upsampler", "hidream_o1.model", "moss_image.model"]
+module = ["qwen_image_2.model", "qwen_image.model", "flux_3_klein.klein", "seedvr2.model", "flux_2.model", "flux_2.turbo", "fibo_2.model", "fibo_2.upsampler", "hidream_o1.model", "moss_image.model", "krea_2.model"]
 disallow_subclassing_any = false
 warn_unused_ignores = false
 

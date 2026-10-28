@@ -21,6 +21,7 @@ dependencies or qualifying a worker image.
 | `fibo-2/` | Bria Fibo 2.0 text-to-image and editing, Dev and Edit Turbo (CC BY-NC 4.0 model licence) |
 | `ideogram-4/` | Ideogram 4 text-to-image from JSON captions, with layout regions and rendered text (Ideogram Non-Commercial model licence) |
 | `moss-image/` | OpenMOSS MOSS-Image text-to-image with layout boxes for objects and text (Apache-2.0) |
+| `krea-2/` | Krea 2 text-to-image: Raw (`generate`) and its 8-step Turbo (`generate_turbo`), with caller LoRAs (Krea 2 Community License) |
 | `qwen3.6/` | Qwen3.6-35B-A3B and 27B: questions about text, images and videos, on Runtime's shared Qwen-VL code (Apache-2.0) |
 | `examples/` | private `main()` scripts for conversions, uploads and diagnostics; run directly with `cozy run` |
 | `*/pyproject.toml` | release metadata; its one `cozy.application` entry point names the package's App |
