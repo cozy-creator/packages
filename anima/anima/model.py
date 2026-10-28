@@ -116,14 +116,16 @@ class AnimaModel(Model[AnimaPipeline], encoded_leaves="accept"):
         self.pipe = loader.construct(AnimaPipeline, factory=build_pipeline)
 
     def execution_plan(self, plan: Plan) -> str:
-        eager = optimization.apply(self.pipe)
-        # In the run's receipts (`plan_reports`), so a refusal is never silent.
-        outcome: dict[str, object] = {"applied": not eager}
-        if eager:
-            outcome["reason"] = eager
-        plan.report("anima.fused", outcome)
-        print("[anima] " + ("eager: " + eager if eager else "fused CUDA plan"), file=sys.stderr)
-        return "" if eager else "anima.fused"
+        refusals = optimization.apply(self.pipe)
+        parts = dict(zip(("anima.fused", "anima.frame-decode"), refusals, strict=True))
+        for name, refusal in parts.items():
+            # In the run's receipts (`plan_reports`), so a refusal is never silent.
+            outcome: dict[str, object] = {"applied": not refusal}
+            if refusal:
+                outcome["reason"] = refusal
+            plan.report(name, outcome)
+            print(f"[anima] {name}: {refusal or 'applied'}", file=sys.stderr)
+        return "+".join(name for name, refusal in parts.items() if not refusal)
 
     @uses_components("text_encoder", "text_conditioner", "transformer", "vae")
     def render(

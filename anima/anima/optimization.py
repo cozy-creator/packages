@@ -1,10 +1,11 @@
-"""Anima's fused CUDA execution plan, installed on the filled Cosmos transformer.
+"""Anima's execution plan, installed on the filled transformer and VAE.
 
 Only Python callables change: parameters, buffers, state-dict names and storage stay as the
 fill left them. One closed plan for the reviewed Diffusers sources, not a patching
-framework: any drift runs eager and says why. The kernel is the Runtime's public fused
-RMSNorm + split-half RoPE (`cozy_runtime.author.kernels`), compiled into its linux x86
-cp312-abi3 wheel; it maps plane stand-ins for its launch itself.
+framework: any drift runs eager and says why. The transformer's kernel is the Runtime's public
+fused RMSNorm + split-half RoPE (`cozy_runtime.author.kernels`), compiled into its linux x86
+cp312-abi3 wheel; it maps plane stand-ins for its launch itself. The VAE part is plain torch:
+an image is one frame, decoded as ComfyUI's WanVAE does.
 """
 
 from __future__ import annotations
@@ -17,11 +18,17 @@ from types import MethodType
 from typing import Any
 
 import torch
+import torch.nn.functional as F
 from cozy_runtime.author import device
 from cozy_runtime.author.kernels import int8_rows, native, quantize_once, rms_rope_split_half
 from diffusers.models.activations import GELU
 from diffusers.models.attention import FeedForward
 from diffusers.models.attention_dispatch import dispatch_attention_fn
+from diffusers.models.autoencoders.autoencoder_kl_qwenimage import (
+    AutoencoderKLQwenImage,
+    QwenImageCausalConv3d,
+)
+from diffusers.models.autoencoders.vae import DecoderOutput
 from diffusers.models.normalization import RMSNorm
 from diffusers.models.transformers.transformer_cosmos import (
     CosmosAdaLayerNormZero,
@@ -71,6 +78,17 @@ _SOURCE_DIGESTS: dict[str, tuple[Callable[..., object], str]] = {
         "5f758c69ad2f82a37d707e3ca736b88011b41f04a958dbc657ec397b88c2bef5",
     ),
 }
+#: Diffusers 0.40.0's sources the frame decode replaces or mirrors.
+_VAE_DIGESTS: dict[str, tuple[Callable[..., object], str]] = {
+    "QwenImageCausalConv3d.forward": (
+        QwenImageCausalConv3d.forward,
+        "a7700a6340ba271d682ce0b763599b81b8d6820cfec0f53eb08793ceb25ca6ca",
+    ),
+    "AutoencoderKLQwenImage._decode": (
+        AutoencoderKLQwenImage._decode,
+        "5e714669ba0348fba8b2437d4fd4f32299b976fa64a3bd54b79affc41ae2deb0",
+    ),
+}
 #: Anima Base 1.0's transformer, the one the norm and RoPE shapes below are reviewed for: its
 #: constructor arguments. The Runtime's config drops the saving library's `_`-keys (#1786), and
 #: comparing them refused this plan on every construction since.
@@ -106,20 +124,29 @@ class PlanRefusal(RuntimeError):
         self.code = code
 
 
-def apply(pipe: Any) -> str:
-    """Install the plan on a filled pipeline; returns why it runs eager instead, or ""."""
-    refusal = _capability() or _plan_refusal(pipe)
-    if refusal:
-        return refusal
-    transformer = pipe.components["transformer"]
-    before = _tensor_census(transformer)
-    _install_transformer_plan(transformer)
-    if _tensor_census(transformer) != before:
+def apply(pipe: Any) -> tuple[str, str]:
+    """Install the plan on a filled pipeline: why the transformer and why the VAE run as
+    Diffusers wrote them instead, each "" where its part installed."""
+    vae = pipe.components["vae"]
+    decode = _digest_refusal(_VAE_DIGESTS) or (
+        "" if type(vae) is AutoencoderKLQwenImage else f"the VAE is {type(vae).__qualname__}"
+    )
+    if not decode:
+        _unchanged(vae, _install_vae_plan)
+    fused = _capability() or _plan_refusal(pipe)
+    if not fused:
+        _unchanged(pipe.components["transformer"], _install_transformer_plan)
+    return fused, decode
+
+
+def _unchanged(module: Any, install: Callable[[Any], None]) -> None:
+    before = _tensor_census(module)
+    install(module)
+    if _tensor_census(module) != before:
         raise PlanRefusal(
             "anima_optimization_tensor_schema_changed",
             "the post-fill plan changed the tensor schema or parameter/buffer storage identity",
         )
-    return ""
 
 
 def installed(transformer: Any) -> bool:
@@ -168,12 +195,18 @@ def _capability() -> str:
     return native()
 
 
-def _plan_refusal(pipe: Any) -> str:
-    """Why this construction is not the reviewed Anima graph, or "" when it is."""
-    for name, (source, expected) in _SOURCE_DIGESTS.items():
+def _digest_refusal(digests: dict[str, tuple[Callable[..., object], str]]) -> str:
+    for name, (source, expected) in digests.items():
         actual = hashlib.sha256(inspect.getsource(source).encode()).hexdigest()
         if actual != expected:
             return f"{name} has source sha256:{actual}, not the reviewed sha256:{expected}"
+    return ""
+
+
+def _plan_refusal(pipe: Any) -> str:
+    """Why this construction is not the reviewed Anima graph, or "" when it is."""
+    if refusal := _digest_refusal(_SOURCE_DIGESTS):
+        return refusal
     transformer = pipe.components["transformer"]
     if type(transformer) is not CosmosTransformer3DModel:
         return f"the transformer is {type(transformer).__qualname__}, not CosmosTransformer3DModel"
@@ -472,3 +505,36 @@ def _install_transformer_plan(transformer: Any) -> None:
             rope.clear()
 
     transformer.forward = MethodType(forward, transformer)
+
+
+def _install_vae_plan(vae: Any) -> None:
+    vae._decode = MethodType(_decode_frame, vae)
+    for conv in (vae.post_quant_conv, *vae.decoder.modules()):
+        if (
+            type(conv) is QwenImageCausalConv3d
+            and conv.stride[0] == 1
+            and conv.dilation[0] == 1
+            and conv._padding[4] == conv.kernel_size[0] - 1
+        ):
+            conv.forward = MethodType(_causal_frame_forward, conv)
+
+
+def _decode_frame(vae: Any, z: Any, return_dict: bool = True) -> Any:
+    """`AutoencoderKLQwenImage._decode` for one latent frame, without the feature cache: one
+    frame never reads it, and Diffusers clones every causal conv's input into it."""
+    if z.shape[2] != 1 or vae.use_tiling:
+        return type(vae)._decode(vae, z, return_dict=return_dict)
+    out = vae.decoder(vae.post_quant_conv(z)).clamp(-1.0, 1.0)
+    return DecoderOutput(sample=out) if return_dict else (out,)
+
+
+def _causal_frame_forward(conv: Any, x: Any, cache_x: Any = None) -> Any:
+    """`QwenImageCausalConv3d.forward` on one frame without a cache: the causal pad is zeros,
+    so only the kernel's last time tap reads data (ComfyUI's WanVAE fast path): a third of the
+    math, and no time padding."""
+    if cache_x is not None or x.shape[2] != 1:
+        return type(conv).forward(conv, x, cache_x)
+    spatial = conv._padding[:4]
+    if any(spatial):
+        x = F.pad(x, spatial)
+    return conv._conv_forward(x, conv.weight[:, :, -1:], conv.bias)
