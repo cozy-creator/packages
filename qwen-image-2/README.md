@@ -77,6 +77,9 @@ With references, what is not given is the FIRST reference's (the image being edi
 (reported as a `clamp` adjustment when held). Upstream takes the LAST reference's; every Cozy image
 package takes the first.
 
+The VAE runs in bf16 on GPUs that compute it natively (Turbo stores it so; the base release
+stores F32), else in its stored dtype.
+
 Reference VAE encoding and multimodal prompt encoding each run once before
 denoising, in separate component residency leases. Denoising reuses their tensors
 and the upstream prefix KV cache across steps. Reference images add tokens and
