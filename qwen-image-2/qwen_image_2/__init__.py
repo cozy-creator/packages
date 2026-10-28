@@ -86,6 +86,7 @@ def _generate(
     tel.log("sampling", regime="turbo" if sigmas else "base", steps=steps,
             schedule="distilled sigmas" if sigmas else "uniform, dynamic shift")
     seed = payload.drawn_seed()
+    model.hold_vae(tel)
     ctx.raise_if_cancelled()
     # Phase order for residency: references encode on the VAE first, then the text encoder, the
     # transformer denoise (the `denoise_loop`), and the VAE decode.

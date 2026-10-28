@@ -43,6 +43,7 @@ from cozy_runtime.author import (
     Model,
     Telemetry,
     denoise_loop,
+    hold_dtype,
     uses_components,
 )
 from cozy_runtime.author.kernels import Plan
@@ -220,6 +221,19 @@ class QwenImage21Model(Model[QwenImage21Graph], encoded_leaves="accept"):
 
     def execution_plan(self, plan: Plan) -> str:
         return fusion.install(plan, BLOCK, self.graph.components["transformer"])
+
+    def hold_vae(self, tel: Telemetry) -> None:
+        """Run the VAE in bf16 where the GPU computes it natively, as ComfyUI stages it and as Turbo
+        stores it; the base release stores F32, whose decode took 2.0 s on an 8 GB RTX 3070 against
+        ComfyUI's 0.93 s. The Runtime casts the stored bytes when it next fills them; call this
+        before any VAE scope opens."""
+        vae = self.graph.components["vae"]
+        device = torch.device(str(self.device))
+        if device.type != "cuda" or not torch.cuda.is_bf16_supported(including_emulation=False):
+            return
+        if next(vae.parameters()).dtype != torch.bfloat16:
+            hold_dtype(vae, torch.bfloat16)
+            tel.log("vae representation", dtype="bfloat16")
 
     def _pipeline(self, sigmas: Sequence[float] | None = None) -> _StagedPipeline:
         pipeline = _StagedPipeline(
