@@ -4,10 +4,10 @@ Krea's open text-to-image model: a 12.8B single-stream DiT conditioned on twelve
 Qwen3-VL-4B, decoded by the Qwen-Image VAE. It ships as two checkpoints, and the package has a function
 for each:
 
-| function | default model | default steps | guidance |
-| --- | --- | --- | --- |
-| `generate` | Krea 2 Raw (`krea-2`) | 52 | 3.5 (CFG) |
-| `generate_turbo` | Krea 2 Turbo (`krea-2-turbo`) | 8 | none |
+| function | default model | default steps | guidance | default size |
+| --- | --- | --- | --- | --- |
+| `generate` | Krea 2 Raw (`krea-2`) | 52 | 3.5 (CFG) | 1024² |
+| `generate_turbo` | Krea 2 Turbo (`krea-2-turbo`) | 8 | none | 2048² |
 
 Krea recommends training LoRAs on Raw and running them on Turbo. The checkpoint sets the defaults and the
 schedule, so either model runs correctly in either function (`model.model=krea-2`).
@@ -25,7 +25,7 @@ cozy run krea-2/generate prompt='a red fox in fresh snow at golden hour' seed=7
 cozy run krea-2/generate_turbo --input request.yaml --lora model:transformer=<org/krea-2-lora>,0.8
 ```
 
-Fields: `prompt`, `aspect_ratio` (any `W:H`, default 1:1), `megapixels` (default 1), `steps` (1–100),
+Fields: `prompt`, `aspect_ratio` (any `W:H`, default 1:1), `megapixels` (Raw 1, Turbo 4), `steps` (1–100),
 `guidance` (0–20; 0 runs no negative branch), `negative_prompt` (default empty, as Krea's) and `seed`
 (random when omitted, returned). Krea 2 makes images from text only and has no prompt upsampler:
 `reference_images` is refused, `reference_boxes` and `prompt_upsampling` are warned about and ignored.
@@ -36,8 +36,10 @@ ComfyUI's cfg 1.
 
 ## Sizes
 
-Raw is trained up to 1 MP; Turbo makes 1–4 MP (Krea's example is 2048²). `megapixels` is held to 0.25–4,
-sides to 256–4096 px on the 16 px grid, and each clamp is reported as an adjustment.
+Each checkpoint defaults to the most Krea gives it: Raw is trained up to 1 MP, Turbo makes 1–4 MP and Krea
+runs it at 2048². `megapixels` is held to 0.25–4, sides to 256–4096 px on the 16 px grid, and each clamp is
+reported as an adjustment. The decode runs whole, or in 512 px tiles (256 px where those do not fit) when
+the canvas does not fit the card.
 
 ## Pipeline
 
@@ -53,8 +55,10 @@ Turbo: 1.15), bf16 noise from `seed` drawn on the CPU, and the VAE in bf16. Two 
 - Only the text encoder's layers 0–34 are built; layer 35, the final norm and the vision tower are never
   read.
 
-The loop is a pure function of the latents and the step's index, which is where `author.denoise_loop`
-takes it once a Runtime release carries it.
+The steps are one `author.denoise_loop` (Runtime ≥ 0.35.0), which the Runtime runs eagerly, as one
+resident program or as streamed blocks. The step is `Krea2Transformer2DModel.forward` op for op, with what
+no step changes built once: each prompt's text fusion and projection, and its rotary tables. With CFG the
+two branches pass through each block in turn, so a streamed block comes in once per step, not twice.
 
 ## LoRAs
 

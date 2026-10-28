@@ -9,6 +9,7 @@ constructs and fills the modules and owns their residency.
 from __future__ import annotations
 
 import json
+import math
 from collections.abc import Callable, Mapping
 from typing import Any
 
@@ -22,6 +23,8 @@ from cozy_runtime.author import (
     MemoDistribution,
     Model,
     ModelAssets,
+    Telemetry,
+    denoise_loop,
     uses_components,
 )
 from diffusers import AutoencoderKLQwenImage, FlowMatchEulerDiscreteScheduler, Krea2Transformer2DModel
@@ -30,6 +33,7 @@ from diffusers.pipelines.krea2.pipeline_krea2 import Krea2Pipeline, calculate_sh
 from PIL import Image
 from tokenizers import Tokenizer
 from torch import nn
+from torch.nn import functional as F
 from transformers import PreTrainedTokenizerFast, Qwen3VLConfig
 from transformers.initialization import no_init_weights
 from transformers.models.qwen3_vl.modeling_qwen3_vl import Qwen3VLTextModel
@@ -119,7 +123,7 @@ class Krea2(Model[Krea2Graph], encoded_leaves="accept"):
     """One Krea 2 checkpoint: Raw (CFG, the token count's shift) or Turbo (distilled: no CFG, shift 1.15)."""
 
     #: Caller LoRAs on the DiT, at any strength: the Runtime bakes them into the weights.
-    __adapter_compatibility__ = (AdapterCompatibility("lora", "", ("transformer",), -np.inf, np.inf),)
+    __adapter_compatibility__ = (AdapterCompatibility("lora", "", ("transformer",), -math.inf, math.inf),)
 
     graph: Krea2Graph
     tokenizer: PreTrainedTokenizerFast
@@ -167,62 +171,112 @@ class Krea2(Model[Krea2Graph], encoded_leaves="accept"):
         guidance: float,
         seed: int,
         on_step: Callable[[int], None],
-        cancel: Callable[[], None],
     ) -> torch.Tensor:
-        """`Krea2Pipeline.__call__`'s loop: bf16 noise from `seed` drawn on the CPU, Euler on
-        `linspace(1, 1/steps)` time-shifted by mu, and Krea's guidance `cond + g(cond - uncond)` when
-        `negative` is given. Returns the packed latents [1, (H/16)(W/16), 64] on the CPU.
+        """`Krea2Pipeline.__call__`'s loop as one `denoise_loop`: bf16 noise from `seed` drawn on the CPU,
+        Euler on `linspace(1, 1/steps)` time-shifted by mu, and Krea's guidance `cond + g(cond - uncond)`
+        when `negative` is given. Returns the packed latents [1, (H/16)(W/16), 64] on the CPU.
 
-        Each step is one pure function of (latents, step index) and the request's tensors: the place
-        `author.denoise_loop` (xs-127) takes it once a Runtime release carries it."""
+        The step is `Krea2Transformer2DModel.forward` op for op, with what no step changes built once
+        before the loop: each prompt's text-fusion and projection, and its rotary tables. With CFG both
+        branches pass through each block in turn, so a streamed block comes in once per step."""
         transformer = self.graph.components["transformer"]
         device = torch.device(str(self.device))
         rows, columns = height // PATCH, width // PATCH
         channels = transformer.config.in_channels // 4
-        noise = rng.noise((1, channels, rows * 2, columns * 2), seed, dtype=DTYPE)
-        latents = noise.view(1, channels, rows, 2, columns, 2).permute(0, 2, 4, 1, 3, 5)
-        latents = latents.reshape(1, rows * columns, channels * 4).to(device)
         scheduler = FlowMatchEulerDiscreteScheduler.from_config(dict(self.graph.scheduler_config))
         config = scheduler.config
         mu = DISTILLED_MU if self.distilled else calculate_shift(
             rows * columns, config.get("base_image_seq_len", 256), config.get("max_image_seq_len", 6400),
             config.get("base_shift", 0.5), config.get("max_shift", 1.15),
         )
-        timesteps, _ = retrieve_timesteps(
-            scheduler, steps, device, sigmas=np.linspace(1.0, 1 / steps, steps), mu=mu
-        )
-        texts = [positive, *([] if negative is None else [negative])]
-        texts = [(text.to(device=device, dtype=DTYPE),
-                  Krea2Pipeline.prepare_position_ids(text.shape[1], rows, columns, device)) for text in texts]
-        scheduler.set_begin_index(0)
-        with torch.inference_mode():
-            for index, t in enumerate(timesteps):
-                cancel()
-                timestep = (t / config.num_train_timesteps).expand(1).to(DTYPE)
-                predictions = [
-                    transformer(hidden_states=latents, encoder_hidden_states=text, timestep=timestep,
-                                position_ids=ids, return_dict=False)[0]
-                    for text, ids in texts
-                ]
-                prediction = predictions[0]
-                if negative is not None:
-                    prediction = prediction + guidance * (prediction - predictions[1])
-                latents = scheduler.step(prediction, t, latents, return_dict=False)[0]
-                on_step(index)
+        retrieve_timesteps(scheduler, steps, device, sigmas=np.linspace(1.0, 1 / steps, steps), mu=mu)
+        with torch.inference_mode(False), torch.no_grad():
+            noise = rng.noise((1, channels, rows * 2, columns * 2), seed, dtype=DTYPE)
+            latents = noise.view(1, channels, rows, 2, columns, 2).permute(0, 2, 4, 1, 3, 5)
+            latents = latents.reshape(1, rows * columns, channels * 4).to(device)
+            branches: list[torch.Tensor] = []
+            for text in (positive, *([] if negative is None else [negative])):
+                text = text.to(device=device, dtype=DTYPE)
+                ids = Krea2Pipeline.prepare_position_ids(text.shape[1], rows, columns, device)
+                branches += [transformer.txt_in(transformer.text_fusion(text)), *transformer.rotary_emb(ids)]
+            # The pipeline divides the f32 timestep by 1000 and then casts it; Euler adds the bf16
+            # product of the f32 sigma delta and the bf16 velocity to the f32 latents.
+            times = (scheduler.timesteps / config.num_train_timesteps).to(DTYPE)
+            deltas = (scheduler.sigmas[1:] - scheduler.sigmas[:-1]).to(device)
+        blocks = transformer.transformer_blocks
+
+        def step(i: torch.Tensor, latents: torch.Tensor, times: torch.Tensor, deltas: torch.Tensor,
+                 *branches: torch.Tensor) -> None:
+            temb = transformer.time_embed(times.index_select(0, i), dtype=latents.dtype)
+            modulation = transformer.time_mod_proj(F.gelu(temb, approximate="tanh"))
+            image = transformer.img_in(latents)
+            texts = branches[0::3]
+            hidden = [torch.cat([text, image], dim=1) for text in texts]
+            rotary = list(zip(branches[1::3], branches[2::3], strict=True))
+            for block in blocks:
+                hidden = [block(h, modulation, rope) for h, rope in zip(hidden, rotary, strict=True)]
+            velocity = [transformer.final_layer(h[:, text.shape[1]:], temb) for h, text in zip(hidden, texts, strict=True)]
+            prediction = velocity[0]
+            if len(velocity) > 1:
+                prediction = prediction + guidance * (prediction - velocity[1])
+            delta = deltas.index_select(0, i).reshape(())
+            latents.copy_((latents.float() + delta * prediction).to(latents.dtype))
+
+        denoise_loop(step, range(steps), state=(latents,), inputs=(times, deltas, *branches), on_step=on_step)
         return latents.cpu()
 
     @uses_components("vae")
-    def decode(self, latents: torch.Tensor, *, width: int, height: int) -> Image.Image:
-        """Diffusers' decode of the one frame. The decoder runs without Diffusers' feature cache, which
-        only keeps each convolution's input for a next frame an image never has."""
+    def decode(self, latents: torch.Tensor, *, width: int, height: int, tel: Telemetry) -> Image.Image:
+        """Diffusers' decode of the one frame, whole, or in the largest tiles that fit. The whole decode
+        runs without Diffusers' feature cache, which only keeps each convolution's input for a next frame
+        an image never has."""
         vae = self.graph.components["vae"]
         device = torch.device(str(self.device))
         with torch.inference_mode():
             z = unpack(latents, height, width).to(device=device, dtype=vae.dtype)
             mean = z.new_tensor(vae.config.latents_mean).view(1, -1, 1, 1, 1)
             inverse = 1.0 / z.new_tensor(vae.config.latents_std).view(1, -1, 1, 1, 1)
-            image = vae.decoder(vae.post_quant_conv(z / inverse + mean)).clamp(-1, 1)[:, :, 0]
+            z = z / inverse + mean
+            image = _decoded_whole(vae, z)
+            if image is None:
+                image = _decoded_tiled(vae, z, tel)
+            image = image.clamp(-1, 1)[:, :, 0]
             if not torch.isfinite(image).all():
                 raise ValueError("Krea 2's decoder produced non-finite pixels")
             (picture,) = VaeImageProcessor(vae_scale_factor=PATCH).postprocess(image.float(), output_type="pil")
         return picture  # type: ignore[no-any-return]
+
+
+#: Tile sides (px) for a canvas the whole decode cannot fit, largest first: Diffusers' 256 px tiles
+#: leave seams in flat regions that 512 px tiles do not (qwen-image-2, the same decoder family).
+_TILES = (512, 256)
+
+
+def _decoded_whole(vae: Any, z: torch.Tensor) -> torch.Tensor | None:
+    """The pipeline's decode without its feature cache; None when the canvas does not fit the device."""
+    try:
+        return vae.decoder(vae.post_quant_conv(z))  # type: ignore[no-any-return]
+    except torch.OutOfMemoryError as error:
+        error.__traceback__ = None  # the whole decode's activations go with its frames
+        return None
+
+
+def _decoded_tiled(vae: Any, z: torch.Tensor, tel: Telemetry) -> torch.Tensor:
+    """Diffusers' tiled decode in the largest tiles that fit, blended over a quarter of their side."""
+    *larger, smallest = _TILES
+    for tile in (*larger, smallest):
+        vae.tile_sample_min_height = vae.tile_sample_min_width = tile
+        vae.tile_sample_stride_height = vae.tile_sample_stride_width = tile * 3 // 4
+        try:
+            decoded = vae.tiled_decode(z, return_dict=False)[0]
+        except torch.OutOfMemoryError as error:
+            if tile == smallest:
+                raise
+            error.__traceback__ = None
+            continue
+        finally:
+            # An attempt that ran out of memory leaves its tile's feature cache on the VAE.
+            vae.clear_cache()
+        tel.log("tiled vae decode", tile_px=tile)
+        return decoded  # type: ignore[no-any-return]
+    raise AssertionError("unreachable")
