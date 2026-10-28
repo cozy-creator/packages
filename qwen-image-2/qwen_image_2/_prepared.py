@@ -1,36 +1,27 @@
-"""Qwen-Image-2.1's native cached-denoise interval; Runtime owns the transformer weights.
+"""Qwen-Image-2.1's cached denoise step: its Euler tables and the layout it reads.
 
-Step 0 runs eagerly in the transformer's ``extract`` mode, prefilling the per-layer text and
-condition-image K/V cache over the full joint sequence. Steps ``1..N-1`` are the ``cached``
-pass over the target-image tokens only, and they are identical from one step to the next but
-for the timestep and the running latent. That repeated interval is captured once and replayed
-as one native submission. A resident transformer uses one repeated graph; a capacity
-refusal prepares source-backed block stages that share graph scratch and repeat the whole
-cached step in native Runtime. The eager extract pass remains outside that submission.
+Step 0 runs in the transformer's ``extract`` mode, prefilling the per-layer text and
+condition-image K/V cache over the full joint sequence. Steps ``1..N-1`` are the ``cached`` pass
+over the target-image tokens only, identical from one step to the next but for the timestep and
+the running latent, so they run as one `denoise_loop` the Runtime may capture.
 
-What makes the cached step capturable is that everything except the latent is a function of the
-request *layout* (prompt and reference length, canvas), not of the step: the rotary tables, the
-target-token modulation mask and the key-valid mask are all derived once, eagerly, by `_Layout`
-out of the body, so the captured body carries no host sync, no Python scalar read and no
-data-dependent shape. The body calls the transformer's own ``img_in``/``time_text_embed``/
+Everything except the latent is a function of the request *layout* (prompt length, canvas), not
+of the step: the rotary tables, the target-token modulation mask and the key-valid mask are
+derived once, eagerly, by `_Layout`, so the step carries no host sync, no Python scalar read and
+no data-dependent shape. The step calls the transformer's own ``img_in``/``time_text_embed``/
 ``modulation``/``norm_out``/``proj_out`` and the installed blocks, so the numerics are the
-Diffusers/Runtime ones; the parity gate is this path against the eager Diffusers loop.
+Diffusers/Runtime ones.
 """
 
 from __future__ import annotations
 
-import os
-import time
-import weakref
 from typing import Any
 
 import torch
-from cozy_runtime.author import CapabilityError, Context, OutputError, Telemetry
-from cozy_runtime.compute import PreparedRepeat, PreparedSequence
 
 
 class _FlowEuler:
-    """FlowMatch Euler device schedules for the cached interval (steps ``start..N-1``).
+    """FlowMatch Euler device schedules, indexed by the global step.
 
     The pipeline casts the timestep to the latent dtype and only then divides by 1000, so the
     captured step must round in that order; `ts` holds that bf16 value. The non-stochastic
@@ -38,11 +29,10 @@ class _FlowEuler:
     per-step sigma delta in f32 — the exact `FlowMatchEulerDiscreteScheduler.step` arithmetic.
     """
 
-    def __init__(self, scheduler: Any, device: Any, start: int) -> None:
-        timesteps = scheduler.timesteps
+    def __init__(self, scheduler: Any, device: Any) -> None:
         sigmas = scheduler.sigmas
-        self.ts = (timesteps[start:].to(torch.bfloat16) / 1000).to(device=device)
-        self.dt = (sigmas[start + 1 :] - sigmas[start:-1]).to(device=device)
+        self.ts = (scheduler.timesteps.to(torch.bfloat16) / 1000).to(device=device)
+        self.dt = (sigmas[1:] - sigmas[:-1]).to(device=device)
 
     def timestep(self, index: torch.Tensor) -> torch.Tensor:
         # causal_condition: the sampled row for the target tokens plus the trailing t=0 row the
@@ -94,280 +84,3 @@ class _Layout:
         self.rotary_emb = rotary_emb[prefix_len:]
         self.modulation_mask = target_token_mask[prefix_len:]
         self.attention_mask = None if joint_key_valid is None else joint_key_valid[:, None, None, :]
-
-
-class ResidentDenoise:
-    """Prefer one resident repeat, then native block streaming when residency refuses.
-
-    The program lives for one denoise: its captured graphs and their pool are released before
-    the call goes on to the VAE decode, which at 4 MP needs that memory back.
-    """
-
-    def run(
-        self,
-        *,
-        transformer: Any,
-        scheduler: Any,
-        latents: torch.Tensor,
-        kv_cache: Any,
-        layout: _Layout,
-        ctx: Context,
-        tel: Telemetry,
-    ) -> torch.Tensor | None:
-        total = len(scheduler.timesteps)
-        if (
-            not latents.is_cuda
-            or latents.dtype != torch.bfloat16
-            or total < 2
-            or scheduler.sigmas.shape[0] != total + 1
-        ):
-            return None
-        with torch.inference_mode(False), torch.no_grad():
-            euler = _FlowEuler(scheduler, latents.device, 1)
-        caches = [kv_cache.get_layer(index) for index in range(len(transformer.transformer_blocks))]
-        inputs = (
-            latents,
-            euler.ts,
-            euler.dt,
-            layout.rotary_emb,
-            layout.modulation_mask,
-            *(tensor for cache in caches for tensor in cache.get()),
-            *((layout.attention_mask,) if layout.attention_mask is not None else ()),
-        )
-        began = time.perf_counter()
-        program: _Denoise | None = None
-        try:
-            program = _Denoise(transformer, inputs, euler, caches, layout, total)
-        except CapabilityError as error:
-            if error.code != "prepared_graph_ineligible":
-                raise
-            if "capture requires the component's weights to be resident" not in str(error):
-                tel.log("eager denoise", reason=str(error))
-                return None
-        except torch.OutOfMemoryError:
-            pass  # No accepted work: try native block streaming at the same boundary.
-        if program is None:
-            try:
-                program = _StreamedDenoise(transformer, inputs, euler, caches, layout, total)
-            except CapabilityError as error:
-                if error.code not in ("prepared_graph_ineligible", "prepared_load_unavailable"):
-                    raise
-                # A not-local source is refused before submission. The ordinary
-                # eager loader can fetch it; accepted native work is never retried.
-                tel.log("eager denoise", reason=str(error))
-                return None
-            except torch.OutOfMemoryError:
-                tel.log("eager denoise", reason="native block preparation exceeded capacity")
-                return None
-        tel.metric("request_path.denoise_capture_ms", (time.perf_counter() - began) * 1000)
-        # No fallback after submission: cancellation/device failures join before disposal.
-        try:
-            began = time.perf_counter()
-            program.update(inputs)
-            tel.metric(
-                "request_path.denoise_input_enqueue_ms", (time.perf_counter() - began) * 1000
-            )
-            launches = int(program.plan.facts()["host_graph_launches"])
-            execution = ctx.plan(program.plan)
-            observed = -1
-            while True:
-                ctx.raise_if_cancelled()
-                progress = execution.poll()
-                completed = (
-                    int(execution.facts()["sequence"]["completed_passes"])
-                    if program.streaming
-                    else progress.completed_steps
-                )
-                if completed != observed:
-                    observed = completed
-                    fraction = (1 + observed) / total
-                    tel.progress(
-                        fraction, stage="generating image", overall_fraction=0.1 + 0.8 * fraction
-                    )
-                if progress.done:
-                    break
-                time.sleep(0.05)
-            (result,) = execution.wait()
-            if progress.canceled or observed != total - 1:
-                raise OutputError("prepared denoising stopped early", code="incomplete_denoise")
-            tel.metric("request_path.denoise_native_steps", float(observed))
-            tel.metric("request_path.denoise_streamed", float(program.streaming))
-            tel.metric(
-                "request_path.denoise_host_launches",
-                float(int(execution.facts()["host_graph_launches"]) - launches),
-            )
-            tel.log(
-                "native denoise definition",
-                pid=os.getpid(),
-                plan=f"{id(program.plan):x}",
-                streamed=program.streaming,
-            )
-            # Execution.wait returns its own completed readout, not the plan's state.
-            return result
-        finally:
-            program.plan.close()
-
-
-class _Denoise:
-    streaming = False
-
-    def __init__(
-        self,
-        transformer: Any,
-        inputs: tuple[torch.Tensor, ...],
-        euler: _FlowEuler,
-        caches: list[Any],
-        layout: _Layout,
-        total: int,
-    ) -> None:
-        with torch.inference_mode(False), torch.no_grad():
-            state = inputs[0].clone()
-        slots = (state, *inputs[1:])
-        rot, mask_t, attention_mask = (
-            layout.rotary_emb,
-            layout.modulation_mask,
-            layout.attention_mask,
-        )
-        blocks = transformer.transformer_blocks
-
-        def body(index: torch.Tensor) -> None:
-            with torch.no_grad():
-                hidden = transformer.img_in(state)
-                temb = transformer.time_text_embed(euler.timestep(index), hidden)
-                modulation = transformer.modulation(temb)
-                for block, cache in zip(blocks, caches, strict=True):
-                    hidden = block(
-                        hidden_states=hidden,
-                        modulation=modulation,
-                        rotary_emb=rot,
-                        attention_mask=attention_mask,
-                        target_token_mask=mask_t,
-                        layer_cache=cache,
-                        kv_cache_mode="cached",
-                        cache_write_slice=None,
-                        segments=None,
-                        key_valid=None,
-                    )
-                hidden = transformer.norm_out(hidden, temb, mask_t)
-                noise = transformer.proj_out(hidden)
-                state.copy_((state.float() + euler.delta(index) * noise).to(state.dtype))
-
-        self.plan = PreparedRepeat.capture(
-            body,
-            state=(state,),
-            steps=total - 1,
-            owners=(transformer, *slots[1:]),
-            resident_only=True,
-        )
-        # The native definition owns these inputs. Weak references let ordinary Runtime
-        # graph retirement free K/V/layout buffers immediately under pressure; this cache
-        # keeps no second strong owner or text-encoder weight binding.
-        # Explicit owners also cover inputs unused by a particular selected kernel.
-        self._inputs = tuple(weakref.ref(value) for value in slots)
-
-    def update(self, inputs: tuple[torch.Tensor, ...]) -> None:
-        with torch.no_grad():
-            for reference, value in zip(self._inputs, inputs, strict=True):
-                target = reference()
-                if target is None:
-                    raise RuntimeError("prepared denoise inputs were retired")
-                if target is not value:
-                    target.copy_(value)
-
-
-class _StreamedDenoise(_Denoise):
-    streaming = True
-
-    def __init__(self, transformer, inputs, euler, caches, layout, total):
-        if not callable(getattr(PreparedSequence, "record", None)):
-            raise CapabilityError(
-                "native streamed sequence recording is unavailable",
-                code="prepared_graph_ineligible",
-            )
-        if inputs[0].shape[0] != 1 or not transformer.config.causal_condition:
-            raise CapabilityError(
-                "streamed Qwen requires one causal cached sample", code="prepared_graph_ineligible"
-            )
-        blocks = transformer.transformer_blocks
-        if not blocks or len(caches) != len(blocks):
-            raise CapabilityError(
-                "streamed Qwen requires every layer cache", code="prepared_graph_ineligible"
-            )
-        with torch.inference_mode(False), torch.no_grad():
-            state = inputs[0].clone()
-            index = torch.zeros((1,), dtype=torch.int64, device=state.device)
-            hidden = torch.zeros(
-                (*state.shape[:2], transformer.inner_dim), dtype=state.dtype, device=state.device
-            )
-            temb = torch.zeros((2, transformer.inner_dim), dtype=state.dtype, device=state.device)
-            modulation = torch.zeros(
-                (2, 4 * transformer.inner_dim), dtype=state.dtype, device=state.device
-            )
-        slots = (state, *inputs[1:])
-        rot, mask, attention = layout.rotary_emb, layout.modulation_mask, layout.attention_mask
-
-        with PreparedSequence.record() as recording:
-            # Explicit owners also retain immutable inputs unused by a selected native kernel.
-            # All cross-stage state is allocated outside the shared graph scratch pool.
-            def reset(_):
-                index.zero_()
-
-            stages = [
-                recording.capture(
-                    reset, state=(index,), steps=1, owners=(*slots, hidden, temb, modulation)
-                )
-            ]
-
-            def enter(_):
-                hidden.copy_(transformer.img_in(state))
-                temb.copy_(transformer.time_text_embed(euler.timestep(index), hidden))
-                modulation.copy_(transformer.modulation(temb))
-
-            stages.append(
-                recording.capture_stage(
-                    enter, state=(hidden, temb, modulation), owner=transformer, paths=()
-                )
-            )
-            for number, (block, cache) in enumerate(zip(blocks, caches, strict=True)):
-
-                def body(_, block=block, cache=cache):
-                    hidden.copy_(
-                        block(
-                            hidden_states=hidden,
-                            modulation=modulation,
-                            rotary_emb=rot,
-                            attention_mask=attention,
-                            target_token_mask=mask,
-                            layer_cache=cache,
-                            kv_cache_mode="cached",
-                            cache_write_slice=None,
-                            segments=None,
-                            key_valid=None,
-                        )
-                    )
-
-                stages.append(
-                    recording.capture_stage(
-                        body,
-                        state=(hidden,),
-                        owner=transformer,
-                        paths=(f"transformer_blocks.{number}",),
-                    )
-                )
-
-            def sample(_):
-                normalized = transformer.norm_out(hidden, temb, mask)
-                noise = transformer.proj_out(normalized)
-                state.copy_((state.float() + euler.delta(index) * noise).to(state.dtype))
-                index.add_(1)
-
-            stages.append(
-                recording.capture_stage(sample, state=(state, index), owner=transformer, paths=())
-            )
-            if any(not stage.valid() for stage in stages):
-                raise CapabilityError(
-                    "Qwen stage identity changed during preparation",
-                    code="prepared_graph_ineligible",
-                )
-            self.plan = recording.finish(outputs=(state,), repeat=(1, len(blocks) + 3, total - 1))
-        self._inputs = tuple(weakref.ref(value) for value in slots)

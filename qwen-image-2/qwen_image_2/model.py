@@ -38,16 +38,16 @@ from cozy_runtime import fusion, rng, vlm
 from cozy_runtime.author import (
     Config,
     ConformanceError,
-    Context,
     Loader,
     MemoDistribution,
     Model,
     Telemetry,
+    denoise_loop,
     uses_components,
 )
 from cozy_runtime.author.kernels import Plan
 
-from ._prepared import ResidentDenoise, _Layout
+from ._prepared import _FlowEuler, _Layout
 
 
 def _modulation(block: Any, arguments: Mapping[str, Any]) -> fusion.Modulation:
@@ -220,7 +220,6 @@ class QwenImage21Model(Model[QwenImage21Graph], encoded_leaves="accept"):
     def load(self, loader: Loader) -> None:
         self.graph = loader.construct(QwenImage21Graph, factory=build_qwen_image21)
         self.processor = vlm.processor(loader.assets, "processor/", self.graph.processor_config)
-        self._native_denoise = ResidentDenoise()
 
     def execution_plan(self, plan: Plan) -> str:
         return fusion.install(plan, BLOCK, self.graph.components["transformer"])
@@ -296,31 +295,17 @@ class QwenImage21Model(Model[QwenImage21Graph], encoded_leaves="accept"):
         seed: int,
         on_step: Callable[[int], None],
         cancel: Callable[[], None],
-        ctx: Context,
-        tel: Telemetry,
         reference_images: list[Any] | None = None,
         reference_latents: torch.Tensor | None = None,
         image_pad_mask: torch.Tensor | None = None,
     ) -> Any:
-        """Eager step 0 then one captured native interval, or the eager Diffusers loop.
-
-        The native path removes Python from steps ``1..N-1``; a capability or capacity refusal
-        before submission falls through to the ordinary pipeline, which produces the same image
-        at the same seed. Q1 covers the text-to-image case (no reference images, unpadded single
-        prompt); other requests take the eager path.
-        """
+        """Text-to-image with an unpadded prompt runs the cached loop; edits and padded prompts
+        run the Diffusers pipeline."""
         cancel()
-        if (
-            ctx.device.type == "cuda"
-            and reference_latents is None
-            and reference_images is None
-            and mask is None
-        ):
-            latents = self._denoise_resident(
-                embeds, width=width, height=height, steps=steps, seed=seed, ctx=ctx, tel=tel
+        if reference_latents is None and reference_images is None and mask is None:
+            return self._denoise_cached(
+                embeds, width=width, height=height, steps=steps, seed=seed, on_step=on_step
             )
-            if latents is not None:
-                return latents
         return self._denoise_eager(
             embeds,
             mask,
@@ -335,7 +320,7 @@ class QwenImage21Model(Model[QwenImage21Graph], encoded_leaves="accept"):
             image_pad_mask=image_pad_mask,
         )
 
-    def _denoise_resident(
+    def _denoise_cached(
         self,
         embeds: Any,
         *,
@@ -343,14 +328,13 @@ class QwenImage21Model(Model[QwenImage21Graph], encoded_leaves="accept"):
         height: int,
         steps: int,
         seed: int,
-        ctx: Context,
-        tel: Telemetry,
+        on_step: Callable[[int], None],
     ) -> Any:
-        """Run eager extract step 0 then the captured cached interval; ``None`` on refusal.
+        """Extract step 0 eagerly, then steps ``1..N-1`` in cached mode as one `denoise_loop`.
 
         The preparation mirrors `QwenImage21Pipeline.__call__` for the text-to-image case,
         reusing the pipeline's own `prepare_latents`/`calculate_shift`/`retrieve_timesteps` so
-        the schedule, noise and layout match the eager loop exactly.
+        the schedule, noise and layout match the Diffusers loop exactly.
         """
         transformer = self.graph.components["transformer"]
         device = torch.device(str(self.device))
@@ -388,8 +372,6 @@ class QwenImage21Model(Model[QwenImage21Graph], encoded_leaves="accept"):
                 scheduler.config.get("max_shift", 1.15),
             )
             timesteps, steps = retrieve_timesteps(scheduler, steps, device, sigmas=sigmas, mu=mu)
-            if len(timesteps) < 2:
-                return None
             scheduler.set_begin_index(0)
 
             # The joint-sequence image mask: no condition images for text-to-image, then one
@@ -401,10 +383,7 @@ class QwenImage21Model(Model[QwenImage21Graph], encoded_leaves="accept"):
             img_shapes = [[(1, height // pipeline.vae_scale_factor, width // pipeline.vae_scale_factor)]]
             layout = _Layout(transformer, img_shapes, image_pad_mask, None, device)
 
-            # This attempt may be discarded if capture refuses after step 0. Keep its
-            # real timing separate from the full eager fallback's denoise callbacks.
-            observe_step0 = tel.step_callback(steps, stage="native preparation step 0")
-            # Eager step 0 prefills the prefix K/V over the full joint sequence.
+            # Step 0 prefills the prefix K/V over the full joint sequence.
             kv_cache = QwenImage21KVCache(len(transformer.transformer_blocks))
             timestep = timesteps[0:1].to(transformer.dtype) / 1000
             noise = transformer(
@@ -421,17 +400,38 @@ class QwenImage21Model(Model[QwenImage21Graph], encoded_leaves="accept"):
             )[0]
             noise = noise[:, -latents.shape[1] :]
             latents = scheduler.step(noise, timesteps[0], latents, return_dict=False)[0]
-            observe_step0(0)
+            on_step(0)
+            if steps < 2:
+                return latents
+            euler = _FlowEuler(scheduler, device)
+        blocks = transformer.transformer_blocks
+        caches = [kv_cache.get_layer(index) for index in range(len(blocks))]
+        rotary, target, attention = layout.rotary_emb, layout.modulation_mask, layout.attention_mask
 
-        return self._native_denoise.run(
-            transformer=transformer,
-            scheduler=scheduler,
-            latents=latents,
-            kv_cache=kv_cache,
-            layout=layout,
-            ctx=ctx,
-            tel=tel,
-        )
+        def step(i: torch.Tensor, latents: torch.Tensor) -> None:
+            with torch.no_grad():
+                hidden = transformer.img_in(latents)
+                temb = transformer.time_text_embed(euler.timestep(i), hidden)
+                modulation = transformer.modulation(temb)
+                for block, cache in zip(blocks, caches, strict=True):
+                    hidden = block(
+                        hidden_states=hidden,
+                        modulation=modulation,
+                        rotary_emb=rotary,
+                        attention_mask=attention,
+                        target_token_mask=target,
+                        layer_cache=cache,
+                        kv_cache_mode="cached",
+                        cache_write_slice=None,
+                        segments=None,
+                        key_valid=None,
+                    )
+                hidden = transformer.norm_out(hidden, temb, target)
+                noise = transformer.proj_out(hidden)
+                latents.copy_((latents.float() + euler.delta(i) * noise).to(latents.dtype))
+
+        denoise_loop(step, range(1, steps), state=(latents,), on_step=on_step)
+        return latents
 
     def _denoise_eager(
         self,
