@@ -100,7 +100,7 @@ _MEMO = ("qwen_image", "qwen_image.model")
 # The edit DiT is all `edit_model` binds: the text encoder, VAE and tokenizer are `model`'s. It, and
 # its LoRA, are fetched and built by the first request with references.
 @app.entrypoint(
-    defaults={"model": "qwen-image-2512@0.1.0", "edit_model": "qwen-image-edit-2511@0.1.0"},
+    defaults={"model": "qwen-image-2512@0.1.1", "edit_model": "qwen-image-edit-2511@0.1.0"},
     components={"edit_model": ("transformer",)},
     on_demand=("edit_model",),
     memoize=Memoize(requires=["seed"]),
@@ -130,7 +130,7 @@ def generate(
 
 @app.entrypoint(
     defaults={
-        "model": "qwen-image-2512@0.1.0",
+        "model": "qwen-image-2512@0.1.1",
         "edit_model": "qwen-image-edit-2511@0.1.0",
         "turbo_lora": "qwen-image-2512-lightning-lora@0.1.0",
         "edit_turbo_lora": "qwen-image-edit-2511-lightning-lora@0.1.0",
