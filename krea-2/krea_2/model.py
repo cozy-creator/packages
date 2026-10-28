@@ -335,10 +335,10 @@ class Krea2(Model[Krea2Graph], encoded_leaves="accept"):
 #: megapixel in bf16 (9.8 GB at 2048²): above 1 MP it no longer fits beside the resident DiT and text
 #: encoder on a 24 GB card, as ComfyUI's 21.2 GB peak at 2048² does. Larger canvases decode in tiles.
 WHOLE_PIXELS = 1024 * 1024
-#: Tile sides (px), largest first, as qwen-image-2 decodes the same family: 512 px tiles err 7 dB less
-#: against the whole decode than Diffusers' 256 px default, whose seams show in flat sky; 256 px where
-#: 512 px tiles do not fit.
-_TILES = (512, 256)
+#: Tile sides (px), largest first: tiles the size of the largest canvas decoded whole, smaller ones where
+#: those do not fit. At 2048² that is 9 tiles of 1024 px, not 36 of 512: a quarter of the launches, which
+#: a slow host pays for, and fewer seams.
+_TILES = (1024, 512, 256)
 
 
 def _decoded_whole(vae: Any, z: torch.Tensor) -> torch.Tensor | None:
