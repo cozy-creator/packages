@@ -15,7 +15,7 @@ from typing import Any
 
 import numpy as np
 import torch
-from cozy_runtime import fusion, rng
+from cozy_runtime import fusion, rng, tiles
 from cozy_runtime.author import (
     AdapterCompatibility,
     Config,
@@ -311,9 +311,9 @@ class Krea2(Model[Krea2Graph], encoded_leaves="accept"):
 
     @uses_components("vae")
     def decode(self, latents: torch.Tensor, *, width: int, height: int, tel: Telemetry) -> Image.Image:
-        """Diffusers' decode of the one frame: whole up to 1 MP, else in tiles (`WHOLE_PIXELS`). The whole
-        decode runs without Diffusers' feature cache, which only keeps each convolution's input for a next
-        frame an image never has."""
+        """Diffusers' decode of the one frame: whole up to 1 MP, else in tiles (`WHOLE_PIXELS`). Every decode
+        runs without Diffusers' feature cache, which only keeps each convolution's input for a next frame an
+        image never has."""
         vae = self.graph.components["vae"]
         device = torch.device(str(self.device))
         with torch.inference_mode():
@@ -335,19 +335,24 @@ class Krea2(Model[Krea2Graph], encoded_leaves="accept"):
 #: megapixel in bf16 (9.8 GB at 2048²): above 1 MP it no longer fits beside the resident DiT and text
 #: encoder on a 24 GB card, as ComfyUI's 21.2 GB peak at 2048² does. Larger canvases decode in tiles.
 WHOLE_PIXELS = 1024 * 1024
-#: Tile sides (px), largest first, as qwen-image-2 decodes the same family: 512 px tiles err 7 dB less
-#: against the whole decode than Diffusers' 256 px default, whose seams show in flat sky; 256 px where
-#: 512 px tiles do not fit.
-_TILES = (512, 256)
+#: Tile sides (px), largest first: tiles the size of the largest canvas decoded whole, smaller ones where
+#: those do not fit. At 2048² that is 9 tiles of 1024 px, not 36 of 512: a quarter of the launches, which
+#: a slow host pays for, and fewer seams.
+_TILES = (1024, 512, 256)
 
 
 def _decoded_whole(vae: Any, z: torch.Tensor) -> torch.Tensor | None:
-    """The pipeline's decode without its feature cache; None when the canvas does not fit the device."""
+    """The whole canvas; None when it does not fit the device."""
     try:
-        return vae.decoder(vae.post_quant_conv(z))  # type: ignore[no-any-return]
+        return _decoded(vae, z)
     except torch.OutOfMemoryError as error:
         error.__traceback__ = None  # the whole decode's activations go with its frames
         return None
+
+
+def _decoded(vae: Any, z: torch.Tensor) -> torch.Tensor:
+    """The pipeline's decode without its feature cache."""
+    return vae.decoder(vae.post_quant_conv(z))  # type: ignore[no-any-return]
 
 
 def _decoded_tiled(vae: Any, z: torch.Tensor, tel: Telemetry) -> torch.Tensor:
@@ -362,15 +367,8 @@ def _decoded_tiled(vae: Any, z: torch.Tensor, tel: Telemetry) -> torch.Tensor:
 
 
 def _tiled(vae: Any, z: torch.Tensor, tile: int, tel: Telemetry) -> torch.Tensor:
-    """`tile` px tiles (Diffusers applies post_quant_conv), blended with their neighbours over a quarter of
-    their side."""
-    vae.tile_sample_min_height = vae.tile_sample_min_width = tile
-    vae.tile_sample_stride_height = vae.tile_sample_stride_width = tile * 3 // 4
-    try:
-        decoded = vae.tiled_decode(z, return_dict=False)[0]
-    finally:
-        # Every attempt ends with an empty feature cache (`_feat_map`): one that ran out of memory left
-        # its tile's there, and every later request on a small card failed.
-        vae.clear_cache()
+    """`tile` px tiles blended with their neighbours over a quarter of their side, Diffusers' bits in a few
+    kernels a blend (`cozy_runtime.tiles`)."""
+    decoded = tiles.tiled(lambda t: _decoded(vae, t), z, scale=VAE_SCALE, side=tile, stride=tile * 3 // 4)
     tel.log("tiled vae decode", tile_px=tile)
-    return decoded  # type: ignore[no-any-return]
+    return decoded

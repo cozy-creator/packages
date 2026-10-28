@@ -34,7 +34,7 @@ from transformers import (
 )
 from transformers import initialization as transformer_init
 
-from cozy_runtime import fusion, rng, vlm
+from cozy_runtime import fusion, rng, tiles, vlm
 from cozy_runtime.author import (
     Config,
     ConformanceError,
@@ -504,16 +504,16 @@ def _decoded_tiled(vae: Any, z: torch.Tensor, tel: Telemetry) -> torch.Tensor:
 
 
 def _tiled(vae: Any, z: torch.Tensor, tile: int, tel: Telemetry) -> torch.Tensor:
-    """F32 like the whole decode (it applies post_quant_conv itself), `tile` px tiles blended with
-    their neighbours over a quarter of their side."""
-    vae.tile_sample_min_height = vae.tile_sample_min_width = tile
-    vae.tile_sample_stride_height = vae.tile_sample_stride_width = tile * 3 // 4
-    try:
-        decoded = vae.tiled_decode(z, return_dict=False)[0]
-    finally:
-        # A decode that ran out of memory left its tile's feature cache on the VAE (0.94 GB of
-        # 512 px tiles), and every later request on a 3 GB card failed within a second.
-        vae.clear_cache()
+    """F32 like the whole decode, `tile` px tiles blended with their neighbours over a quarter of
+    their side: Diffusers' bits, each tile decoded as the whole canvas is (`_decoded`, no feature
+    cache), a few kernels a blend (`cozy_runtime.tiles`)."""
+    decoded = tiles.tiled(
+        lambda t: _decoded(vae.decoder, vae.post_quant_conv(t)),
+        z,
+        scale=vae.spatial_compression_ratio,
+        side=tile,
+        stride=tile * 3 // 4,
+    )
     tel.log("tiled vae decode", tile_px=tile)
     return decoded
 
