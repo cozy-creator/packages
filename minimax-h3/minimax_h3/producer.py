@@ -374,11 +374,14 @@ def _parallel_produce(
         raise ValueError("H3 CP producer requires this component's full pre-split rotary tables")
     freqs = rope_presentation(rotary, tokens, state)
     query, key_tensor, value = _project_qkv(attn, hidden, expected, call.quantize, counts)
-    heads = attn.heads // degree
-    reuse = False
+    reuse, groups = False, 0
 
     def compute(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
-        nonlocal reuse
+        # Where a GPU's room is short, the exchange hands this call its heads in groups, one
+        # `compute` each (`internal.parallel.ulysses.exchange`): each group's statistics are its own.
+        nonlocal reuse, groups
+        heads, group = q.shape[2], groups
+        groups += 1
 
         def chunks() -> Iterator[torch.Tensor]:
             for start in range(0, tokens, CHUNK):
@@ -388,10 +391,10 @@ def _parallel_produce(
 
         output, reuse = _produce(
             call,
-            key,
+            (*key, group),
             name,
             heads,
-            (tokens, heads, layout.protected_prefix, degree, rank),
+            (tokens, heads, layout.protected_prefix, degree, rank, group),
             freqs,
             chunks,
             lambda: v[0].abs().amax(dim=0).float(),
