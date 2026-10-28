@@ -39,13 +39,13 @@ tasks:
         held() {
           for h in {{.HUBS}}; do
             out=$(COZY_HUB_URL="$h" cozy package info "$1" --json 2>/dev/null) || true
+            # if, not &&: Task's shell exits on a false && inside a function's loop.
             if jq -e .releases <<< "$out" >/dev/null 2>&1; then
-              jq -e --arg v "$(ver "$1")" 'any(.releases[]; .release == $v)' <<< "$out" >/dev/null && printf '%s ' "$h"
-            else
-              [ "$(jq -r '.error.code // empty' <<< "$out" 2>/dev/null)" = package_not_found ] ||
-                { echo "$h cannot say whether it holds $1 $(ver "$1"): nothing more published" >&2; exit 1; }
+              if jq -e --arg v "$(ver "$1")" 'any(.releases[]; .release == $v)' <<< "$out" >/dev/null; then printf '%s ' "$h"; fi
+            elif [ "$(jq -r '.error.code // empty' <<< "$out" 2>/dev/null)" != package_not_found ]; then
+              echo "$h cannot say whether it holds $1 $(ver "$1"): nothing more published" >&2; exit 1
             fi
-          done; true
+          done
         }
         # A version a hub already holds is never published or yanked again: bump it on master first.
         for r in $roots; do on=$(held "$r")
