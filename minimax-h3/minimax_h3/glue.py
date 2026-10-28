@@ -67,7 +67,7 @@ from cozy_runtime.author.kernels import (
 from cozy_runtime.rows import Rows, rows
 
 from .adaln_pruned import AdaLNPrunedMiniMaxH3Transformer
-from .fit import fits
+from .fit import fits, release
 
 CONTRACT = "h3-glue-call-and-topology/2"
 #: The widths compiled: a transformer with others is not installable.
@@ -675,7 +675,7 @@ class H3AttnProcessor(MiniMaxH3AttnProcessor):  # type: ignore[misc]
             attended = split(heads, heads, Cut(2))
         out = attn.to_out[1](split(attn.to_out[0], attended.flatten(2, 3), Cut(1)))
         del attended
-        torch.cuda.empty_cache()
+        release()
         return out
 
     def whole(
