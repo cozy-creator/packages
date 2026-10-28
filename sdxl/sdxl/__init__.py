@@ -1,12 +1,9 @@
 """se-008 — the SDXL launch package: `generate`, text to image, four components.
 
 The second launch family, and the ENGINELESS-PATH REFERENCE (`cozy-runtime-sdxl.md`): one
-`Model` class with author-written `load`, three public methods each declaring the
+`Model` class with author-written `load`, public methods each declaring the
 heavyweight components it may touch, one entrypoint. Runtime owns placement, offload and
-pinning. An explicitly prepared resident variant can run text encoding, all Euler steps
-and VAE decoding in one native submission. Its input buffers survive prompt/seed changes;
-Runtime retires the definition before reclaiming its weights. The existing native UNet
-interval and streamed eager path remain available when the full pipeline cannot be resident.
+pinning, and runs the Euler steps (`denoise_loop`) eagerly or as a native program.
 
 What it adds over cr-008b's corpus fixture, which it is otherwise faithful to:
 
@@ -64,6 +61,7 @@ from cozy_runtime.author import (
     ReferenceImages,
     Sizes,
     Telemetry,
+    denoise_loop,
     held,
     uses_components,
 )
@@ -80,14 +78,7 @@ from transformers import (
 )
 from transformers import initialization as transformer_init
 
-from ._prepared import (
-    ResidentPipeline,
-    decode_latents,
-    encode_tokens,
-    hold_decode_dtype,
-    repeat_euler,
-)
-from ._streamed import stream_euler
+from ._numerics import _Euler, decode_latents, encode_tokens, hold_decode_dtype
 
 app = App()
 
@@ -213,7 +204,6 @@ class SdxlPipeline:
         unet._cozy_hidiffusion_active = False
         self.scheduler_config: dict[str, Any] = dict(mapping["scheduler"])
         self.vae_scale: float = float(mapping["vae"]["scaling_factor"])
-        self.prepared = ResidentPipeline()
 
 
 def warmup() -> None:
@@ -304,6 +294,83 @@ class SdxlModel(Model[SdxlPipeline], encoded_leaves="accept"):
                 encoder_hidden_states=prompt,
                 added_cond_kwargs={"text_embeds": text_embeds, "time_ids": time_ids},
             ).sample
+
+    @uses_components("text_encoder", "text_encoder_2", "unet", "vae")
+    def generate_euler(
+        self,
+        tokens: tuple[Any, Any],
+        negative_tokens: tuple[Any, Any] | None,
+        *,
+        width: int,
+        height: int,
+        steps: int,
+        guidance: float,
+        seed: int,
+        on_step: Any,
+    ) -> tuple[Any, Any, Any, Any]:
+        """Text encoding, every epsilon-Euler step and the decode as one `denoise_loop`: the
+        encoders in `before`, the VAE in `after`. Returns the image, conditioning and latents."""
+        first, second, unet, vae = (
+            self.pipe.components[name]
+            for name in ("text_encoder", "text_encoder_2", "unet", "vae")
+        )
+        device = torch.device(str(self.device))
+        scheduler = EulerDiscreteScheduler.from_config(self.pipe.scheduler_config)  # type: ignore[no-untyped-call]
+        scheduler.set_timesteps(steps, device=device)
+        unet.begin_denoise_request(steps, False, 0)
+        unet.cozy_step = 0
+        classifier_free = negative_tokens is not None
+        batch = 2 if classifier_free else 1
+        dtype, scale = next(vae.parameters()).dtype, self.pipe.vae_scale
+        latents = (
+            rng.noise((1, 4, height // 8, width // 8), rng.generator(seed), dtype=torch.float16, device=device)
+            * scheduler.init_noise_sigma
+        )
+        image = torch.empty((1, 3, height, width), dtype=dtype, device=device)
+        prompt = torch.empty(
+            (batch, tokens[0].shape[-1], first.config.hidden_size + second.config.hidden_size),
+            dtype=torch.float16,
+            device=device,
+        )
+        pooled = torch.empty((batch, second.config.projection_dim), dtype=torch.float16, device=device)
+        # SDXL's micro-conditioning: (original_h, original_w, crop_top, crop_left, target_h,
+        # target_w). The bucket IS the original size — these fine-tunes were trained on it.
+        time_ids = torch.tensor(
+            [[height, width, 0, 0, height, width]] * batch, device=device, dtype=torch.float16
+        )
+        ids = tuple(t.to(device) for t in (*tokens, *(negative_tokens or ())))
+        euler = _Euler(scheduler, device)
+
+        def before(latents: Any, image: Any, prompt: Any, pooled: Any, *inputs: Any) -> None:
+            ids = inputs[2:]
+            positive, positive_pool = encode_tokens(first, second, ids[0], ids[1])
+            if classifier_free:
+                negative, negative_pool = encode_tokens(first, second, ids[2], ids[3])
+                prompt.copy_(torch.cat([negative, positive]))
+                pooled.copy_(torch.cat([negative_pool, positive_pool]))
+            else:
+                prompt.copy_(positive)
+                pooled.copy_(positive_pool)
+
+        def step(i: Any, latents: Any, image: Any, prompt: Any, pooled: Any, *inputs: Any) -> None:
+            time_ids, table = inputs[0], inputs[1]
+            _Euler.step(unet, i, latents, prompt, pooled, time_ids, table, guidance)
+
+        def after(latents: Any, image: Any, prompt: Any, pooled: Any, *inputs: Any) -> None:
+            image.copy_(decode_latents(vae, latents.to(dtype=dtype), scale))
+
+        denoise_loop(
+            step,
+            range(len(scheduler.timesteps)),
+            state=(latents, image),
+            carried=(prompt, pooled),
+            inputs=(time_ids, euler.table, *ids),
+            key=("sdxl.euler", float(guidance)),
+            before=before,
+            after=after,
+            on_step=on_step,
+        )
+        return image, prompt, pooled, latents
 
     @uses_components("vae")
     def decode(self, latents: Any) -> Any:
@@ -420,9 +487,23 @@ def _sample(
     ctx: Context,
     tel: Telemetry,
 ) -> Any:
-    """The existing streamed/eager path; preparation refusal reaches it before submission."""
-    ids, ids_2 = tokens
+    """Epsilon Euler: encode, denoise and decode as one `denoise_loop`. HiDiffusion's DDIM, or
+    a checkpoint whose Euler predicts something else: encode, the scheduler loop, decode."""
     classifier_free = guidance > 1.0
+    epsilon = model.pipe.scheduler_config.get("prediction_type", "epsilon") == "epsilon"
+    if not hidiffusion_applied and epsilon:
+        on_step = tel.step_callback(steps, stage="denoise", overall_range=(0.02, 0.98))
+        with tel.stage("generate", overall_range=(0.02, 0.98)):
+            image, prompt, pooled, latents = model.generate_euler(
+                tokens, negative_tokens if classifier_free else None,
+                width=width, height=height, steps=steps, guidance=guidance, seed=seed,
+                on_step=on_step,
+            )
+        tel.metric("prompt_absmax", _finite(torch, prompt))
+        tel.metric("pooled_absmax", _finite(torch, pooled))
+        tel.metric("latent_absmax", _finite(torch, latents))
+        return image
+    ids, ids_2 = tokens
     if classifier_free:
         assert negative_tokens is not None
         neg, neg_2 = negative_tokens
@@ -444,11 +525,6 @@ def _sample(
     scheduler = sampler.from_config(model.pipe.scheduler_config)  # type: ignore[no-untyped-call]
     scheduler.set_timesteps(steps, device=device)
     generator = rng.generator(seed)
-    step = (
-        functools.partial(scheduler.step, eta=1.0, generator=generator)
-        if hidiffusion_applied
-        else scheduler.step
-    )
     shape = (1, 4, height // 8, width // 8)
     latents = rng.noise(shape, generator, dtype=torch.float16, device=device) * scheduler.init_noise_sigma
     # SDXL's micro-conditioning: (original_h, original_w, crop_top, crop_left, target_h,
@@ -467,69 +543,33 @@ def _sample(
     # HiDiffusion's window blocks seed torch's CPU RNG from the request (`_cozy_draw`): the
     # RNG state outside the loop is left as it was.
     with torch.random.fork_rng(devices=[]), tel.stage("denoise", overall_range=(0.10, 0.90)):
-        loaded = None
-        if not hidiffusion_applied:
-            unet = model.pipe.components["unet"]
-            unet.begin_denoise_request(steps, False, seed)
-            unet.cozy_step = 0
-            loaded = repeat_euler(
-                unet=unet,
-                scheduler=scheduler,
-                latents=latents,
-                prompt=batch_prompt,
-                pooled=batch_pooled,
-                time_ids=batch_ids,
-                guidance=guidance,
-                ctx=ctx,
-                tel=tel,
-                load_from_storage=True,
+        update = (
+            functools.partial(scheduler.step, eta=1.0, generator=generator)
+            if hidiffusion_applied
+            else scheduler.step
+        )
+        for index, timestep in enumerate(scheduler.timesteps):
+            ctx.raise_if_cancelled()
+            batch = torch.cat([latents] * 2) if classifier_free else latents
+            model_input = scheduler.scale_model_input(batch, timestep)
+            noise = model.denoise(
+                model_input,
+                timestep,
+                batch_prompt,
+                batch_pooled,
+                batch_ids,
+                index,
+                steps,
+                hidiffusion_applied,
+                seed,
             )
-            if loaded is None:
-                loaded = stream_euler(
-                    unet=unet, scheduler=scheduler, latents=latents,
-                    prompt=batch_prompt, pooled=batch_pooled, time_ids=batch_ids,
-                    guidance=guidance, ctx=ctx, tel=tel,
-                )
-        if loaded is not None:
-            latents = loaded
-        else:
-            for index, timestep in enumerate(scheduler.timesteps):
-                ctx.raise_if_cancelled()
-                batch = torch.cat([latents] * 2) if classifier_free else latents
-                model_input = scheduler.scale_model_input(batch, timestep)
-                noise = model.denoise(
-                    model_input,
-                    timestep,
-                    batch_prompt,
-                    batch_pooled,
-                    batch_ids,
-                    index,
-                    steps,
-                    hidiffusion_applied,
-                    seed,
-                )
-                if classifier_free:
-                    uncond, cond = noise.chunk(2)
-                    noise = uncond + guidance * (cond - uncond)
-                if index == 0:
-                    tel.metric("noise_absmax_step0", _finite(torch, noise))
-                latents = step(noise, timestep, latents).prev_sample
-                on_step(index)
-                if index == 0 and not hidiffusion_applied:
-                    prepared = repeat_euler(
-                        unet=model.pipe.components["unet"],
-                        scheduler=scheduler,
-                        latents=latents,
-                        prompt=batch_prompt,
-                        pooled=batch_pooled,
-                        time_ids=batch_ids,
-                        guidance=guidance,
-                        ctx=ctx,
-                        tel=tel,
-                    )
-                    if prepared is not None:
-                        latents = prepared
-                        break
+            if classifier_free:
+                uncond, cond = noise.chunk(2)
+                noise = uncond + guidance * (cond - uncond)
+            if index == 0:
+                tel.metric("noise_absmax_step0", _finite(torch, noise))
+            latents = update(noise, timestep, latents).prev_sample
+            on_step(index)
     tel.metric("latent_absmax", _finite(torch, latents))
 
     with tel.stage("decode", overall_range=(0.90, 0.98)):
@@ -548,7 +588,7 @@ class GenerateFacts(msgspec.Struct, frozen=True):
 
 
 def resolve_generate(payload: GenerateInput) -> GenerateFacts:
-    """Resolve one variant identically for admitted preparation and ordinary inference."""
+    """Resolve the request's size, steps, guidance and HiDiffusion choice."""
     adj = AdjustmentRows()
     target = payload.target(None, megapixels=1.0)
     sizes = _SQUARE if target.ratio[0] == target.ratio[1] else _SIZES
@@ -568,42 +608,10 @@ def resolve_generate(payload: GenerateInput) -> GenerateFacts:
     )
 
 
-def prepare_generate(
-    ctx: Context,
-    facts: Preflight[GenerateFacts],
-    model: SdxlModel,
-    tel: Telemetry,
-    adj: Adjustments,
-) -> bool:
-    """Prepare one known resident variant in Runtime's admitted GPU warm turn."""
-    adj.extend(facts.adjustments)
-    if facts.hidiffusion_applied:
-        return False
-    ctx.plan({"text_encoder", "text_encoder_2"}, "unet", "vae")
-    hold_decode_dtype(model.pipe.components["vae"], tel)
-    # Real tokenizer IDs initialize fixed-shape slots; request values replace them later.
-    # Preparation does not draw a seed or submit an image-generation request.
-    tokens = _tokenize(model.tokenizers, "")
-    return model.pipe.prepared.prepare(
-        components=model.pipe.components,
-        scheduler_config=model.pipe.scheduler_config,
-        vae_scale=model.pipe.vae_scale,
-        tokens=tokens,
-        negative_tokens=tokens if facts.guidance > 1.0 else None,
-        width=facts.width,
-        height=facts.height,
-        steps=facts.resolved_steps,
-        guidance=facts.guidance,
-        ctx=ctx,
-        tel=tel,
-    )
-
-
 @app.entrypoint(
     defaults={"model": "sdxl@1.0.0"},
     memoize=Memoize(requires=["seed"]),
     preflight=resolve_generate,
-    prepare=prepare_generate,
 )
 def generate(
     ctx: Context,
@@ -632,32 +640,11 @@ def generate(
         if classifier_free:
             neg, neg_2 = _tokenize(model.tokenizers, negative_prompt)
 
-    tokens = (ids, ids_2)
-    negative_tokens = (neg, neg_2) if classifier_free else None
-    if hidiffusion_applied:
-        model.pipe.prepared.close()  # HiDiffusion mutates the UNet implementation.
-        image = None
-    else:
-        image = model.pipe.prepared.run(
-            components=model.pipe.components,
-            scheduler_config=model.pipe.scheduler_config,
-            vae_scale=model.pipe.vae_scale,
-            tokens=tokens,
-            negative_tokens=negative_tokens,
-            width=width,
-            height=height,
-            steps=steps,
-            guidance=guidance,
-            seed=seed,
-            ctx=ctx,
-            tel=tel,
-        )
-    if image is None:
-        image = _sample(
-            model, tokens, negative_tokens,
-            width=width, height=height, steps=steps, guidance=guidance,
-            hidiffusion_applied=hidiffusion_applied, seed=seed, ctx=ctx, tel=tel,
-        )
+    image = _sample(
+        model, (ids, ids_2), (neg, neg_2) if classifier_free else None,
+        width=width, height=height, steps=steps, guidance=guidance,
+        hidiffusion_applied=hidiffusion_applied, seed=seed, ctx=ctx, tel=tel,
+    )
     tel.metric("image_absmax", _finite(torch, image))
     pixels = ((image / 2 + 0.5).clamp(0, 1)[0] * 255).to(torch.uint8).permute(1, 2, 0).contiguous()
     _integrity(torch, image, pixels, tel)
