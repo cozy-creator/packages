@@ -47,8 +47,14 @@ Ideogram 4 reads only JSON captions (`high_level_description`, `style_descriptio
 [prompting guide](https://github.com/ideogram-oss/ideogram4/blob/main/docs/prompting.md)). A JSON
 `prompt` is used as given. A plain one is expanded by the upsampler: Diffusers' local prompt enhancer,
 the same Qwen3-VL with its language head, Ideogram's system message and the target ratio, sampled at
-temperature 1 from the request's seed and constrained to the caption schema (`outlines`). With
-`prompt_upsampling=false` a plain prompt becomes the caption's one-line description.
+temperature 1 from the request's seed and constrained to the caption schema (`outlines`). A plain prompt
+with `prompt_upsampling=false` is refused: the model reads only captions, and draws its own refusal card
+on a bare description.
+
+Ideogram 4's weights draw a flat grey "Image blocked by safety filter" card for some captions and seeds,
+harmless ones included, at any precision (its post-training; Ideogram's own code shows the same). The
+package does not retry around it. A run whose image looks like that card carries a warning; a more
+detailed prompt or another seed usually renders.
 
 `regions` places elements by box, in the shared box format: `box` is `[x0, y0, x1, y1]`, normalized
 0–1, origin top-left. `prompt` describes the element; with `text` it is that literal text, rendered in

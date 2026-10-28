@@ -6,6 +6,7 @@ import json
 from typing import Annotated, Any
 
 import msgspec
+import numpy as np
 from cozy_runtime.author import (
     MEGAPIXEL,
     Adjustments,
@@ -72,18 +73,34 @@ def _with_regions(caption: dict[str, Any], regions: list[Region]) -> str:
 def caption(payload: GenerateInput, upsampler: QwenUpsampler, *, width: int, height: int, seed: int,
             tel: Telemetry) -> str:
     """The JSON caption Ideogram 4 reads. A JSON prompt is the caption as given; otherwise the
-    upsampler writes one, or with `prompt_upsampling=false` the prompt is its one-line description.
-    `regions` are appended to its elements."""
+    upsampler writes one. `regions` are appended to its elements. A plain prompt without the
+    upsampler is refused: Ideogram 4 reads only captions, and on a bare description it draws its own
+    "Image blocked by safety filter" card (runs 19807, 19809), so this package writes no caption
+    content the request did not give."""
     given = _json_object(payload.prompt)
     if given is not None:
         return _with_regions(given, payload.regions) if payload.regions else payload.prompt
     if payload.prompt_upsampling is False:
-        written: dict[str, Any] = {"high_level_description": payload.prompt,
-                                   "compositional_deconstruction": {"background": "", "elements": []}}
-    else:
-        with tel.stage("upsampling prompt", overall_range=(0.0, 0.15)):
-            written = json.loads(upsampler.caption(payload.prompt, width=width, height=height, seed=seed))
+        raise UnsupportedInput(
+            "Ideogram 4 reads a JSON caption, and a plain prompt with prompt_upsampling=false has none: "
+            "leave prompt_upsampling on (the default) to have the upsampler write it, or pass the caption "
+            "itself as the prompt (high_level_description, and compositional_deconstruction with its "
+            "background and elements)", code="prompt", fields=("prompt", "prompt_upsampling"))
+    with tel.stage("upsampling prompt", overall_range=(0.0, 0.15)):
+        written = json.loads(upsampler.caption(payload.prompt, width=width, height=height, seed=seed))
     return _with_regions(written, payload.regions)
+
+
+def refusal_card(image: Any) -> bool:
+    """Whether `image` looks like Ideogram 4's own refusal, the flat grey "Image blocked by safety
+    filter" card its weights draw for some captions and seeds (RGB about 114 with one line of light
+    text): every pixel grey, and nearly all of them the field's one shade. A flat grey design can
+    match too, so this only warns."""
+    rgb = np.asarray(image.convert("RGB").reduce(4), dtype=np.int16)
+    luma = rgb.mean(axis=-1)
+    field = float(np.median(luma))
+    return (float(np.percentile(rgb.max(axis=-1) - rgb.min(axis=-1), 99)) <= 12 and 95 <= field <= 135
+            and float((np.abs(luma - field) <= 8).mean()) >= 0.85)
 
 
 # The upsampler is built and fetched only for a plain prompt with `prompt_upsampling` on. Model
@@ -121,6 +138,10 @@ def generate(ctx: Context, payload: GenerateInput, model: Ideogram4, text_encode
         )
     with tel.stage("decoding image", overall_range=(0.96, 0.99)):
         image = model.decode(latents, width=width, height=height)
+    if refusal_card(image):
+        tel.log("the image looks like Ideogram 4's own refusal card (\"Image blocked by safety filter\"): "
+                "its weights draw it for some captions and seeds, harmless ones included; a more detailed "
+                "prompt or another seed usually renders", level="warning", seed=seed)
     with tel.stage("saving image", overall_range=(0.99, 1.0)):
         asset = out.save_image(image, format="png")
     return ImageResult(asset, width, height, seed, written)
