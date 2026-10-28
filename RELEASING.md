@@ -12,7 +12,9 @@ relocked to it (`cozy package lock --upgrade-package <it>` against production, p
 `cozy-runtime` or `tensorfs` when its floor is above the dependent's lock),
 patch-bumped, pushed to master and published the same way. A dependent whose
 master version is unpublished stops it too: its merged changes are not released yet.
-Republishing a release is a no-op, so rerun the same command after a fix.
+Bump the package's version on master first: a version any Hub already holds is refused before
+anything is published, and nothing is ever yanked but what that run just published. A dependent
+takes the next patch version no Hub holds. After a failed run, bump and run again.
 
 Complete the [dependency qualification checklist](DEPENDENCIES.md) first. Worker images
 are OS/CUDA/PyTorch bases named by tag; the CLI updates the machine, Runtime and TensorFS

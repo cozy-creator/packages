@@ -11,7 +11,8 @@ tasks:
   # Every release is a candidate: published and yanked at once (an exact pin installs it; the unversioned default skips
   # it). The release agent tests it by hand (cozy-creator's release gate, the printed pins) and records the result; then
   # `task promote` un-yanks the gated releases (tracker design ci-v2, pre-release and promotion). Nothing here starts a
-  # test. A dependent relocks to a yanked callee only when it pins it with ==.
+  # test. A dependent relocks to a yanked callee only when it pins it with ==. A version any hub already holds is never
+  # published or yanked: a root at one refuses before anything is published, a dependent bumps to the next free patch.
   publish:
     desc: "Publish candidates from master to every hub (yanked), then cascade to their in-repo dependents: task publish -- qwen-image-2"
     cmds:
@@ -34,11 +35,30 @@ tasks:
           i=$(grep -om1 'https\?://[^"]*/v1/index/[^/]*/simple/' "$1/uv.lock"); a=${i%/simple/}
           COZY_HUB_URL="${i%%/v1/*}" cozy package info "${a##*/}/$1" --json | jq -e --arg v "$(ver "$1")" 'any(.releases[]; .release == $v)' >/dev/null
         }
+        # held <package>: the hubs that already hold its master version. A hub that cannot say stops everything.
+        held() {
+          for h in {{.HUBS}}; do
+            out=$(COZY_HUB_URL="$h" cozy package info "$1" --json 2>/dev/null) || true
+            if jq -e .releases <<< "$out" >/dev/null 2>&1; then
+              jq -e --arg v "$(ver "$1")" 'any(.releases[]; .release == $v)' <<< "$out" >/dev/null && printf '%s ' "$h"
+            else
+              [ "$(jq -r '.error.code // empty' <<< "$out" 2>/dev/null)" = package_not_found ] ||
+                { echo "$h cannot say whether it holds $1 $(ver "$1"): nothing more published" >&2; exit 1; }
+            fi
+          done; true
+        }
+        # A version a hub already holds is never published or yanked again: bump it on master first.
+        for r in $roots; do on=$(held "$r")
+          [ -z "$on" ] || { echo "$r $(ver "$r") already exists on $on: bump its version on master; nothing published" >&2; exit 1; }
+        done
         shipped=
         ship() {
+          on=$(held "$1"); [ -z "$on" ] || { echo "$1 $(ver "$1") already exists on $on: not published, not yanked" >&2; exit 1; }
           for h in {{.HUBS}}; do
             rm -rf "${work:?}/$1"; git archive HEAD "$1" | tar -x -C "$work"
-            (cd "$work/$1" && COZY_HUB_URL="$h" cozy package publish --root) && COZY_HUB_URL="$h" cozy package yank "$1@$(ver "$1")" -y
+            (cd "$work/$1" && COZY_HUB_URL="$h" cozy package publish --root)
+            COZY_HUB_URL="$h" cozy package yank "$1@$(ver "$1")" -y ||
+              { echo "$1 $(ver "$1") is published on $h but NOT yanked: yank it there now" >&2; exit 1; }
           done
           shipped="$shipped${shipped:+,}$1@$(ver "$1")"
         }
@@ -63,8 +83,12 @@ tasks:
           [ -n "$up" ] || continue
           changed="$changed$p "
           published "$p" || { echo "$p $(ver "$p") on master is unpublished; release it first: task publish -- $p" >&2; exit 1; }
-          if pinned "$p"; then ship "$p"; continue; fi
-          uv version -q --bump patch --frozen --project "$p"
+          ! pinned "$p" || { echo "$p $(ver "$p") is released and already locks $up: nothing to cascade; release it by hand" >&2; exit 1; }
+          # The next patch version no hub holds.
+          for _ in 1 2 3 4 5 6 7 8 9 10; do
+            uv version -q --bump patch --frozen --project "$p"; on=$(held "$p"); [ -n "$on" ] || break
+          done
+          [ -z "$on" ] || { echo "$p: ten patch versions past master are all taken; bump it by hand" >&2; exit 1; }
           (cd "$p" && COZY_HUB_URL={{.LOCK_HUB}} cozy package lock --root $(printf ' --upgrade-package=%s' $up $(raised "$p")))
           pinned "$p" || { echo "$p: the relock did not take $up at their released versions" >&2; exit 1; }
           release "$p"
