@@ -15,7 +15,7 @@ from typing import Any
 
 import numpy as np
 import torch
-from cozy_runtime import rng
+from cozy_runtime import fusion, rng
 from cozy_runtime.author import (
     AdapterCompatibility,
     Config,
@@ -28,6 +28,7 @@ from cozy_runtime.author import (
     hold_dtype,
     uses_components,
 )
+from cozy_runtime.author.kernels import Plan
 from diffusers import AutoencoderKLQwenImage, FlowMatchEulerDiscreteScheduler, Krea2Transformer2DModel
 from diffusers.image_processor import VaeImageProcessor
 from diffusers.models.transformers.transformer_krea2 import Krea2TransformerBlock
@@ -87,6 +88,39 @@ class Block(Krea2TransformerBlock):
         hidden_states = hidden_states + pregate * attn_out
         ff_out = self.ff((1.0 + postscale) * self.norm2(hidden_states) + postshift)
         return hidden_states + postgate * ff_out
+
+
+def _modulation(block: Any, arguments: Mapping[str, Any]) -> fusion.Modulation:
+    """`Block.forward`'s six adaLN rows in the activations' dtype; a batch of one reads row 0."""
+    hidden = arguments["hidden_states"]
+    table = (arguments["temb"].unflatten(-1, (6, -1)) + block.scale_shift_table).to(hidden.dtype)
+    rows = [row.reshape(-1, row.shape[-1]) for row in table.unbind(-2)]
+    batch, tokens = hidden.shape[:2]
+    index = torch.arange(batch, device=hidden.device).repeat_interleave(tokens)
+    prescale, preshift, pregate, postscale, postshift, postgate = rows
+    return fusion.Modulation(index[:1] if batch == 1 else index, prescale, pregate, postscale,
+                             postgate, preshift, postshift)
+
+
+#: `Block` as Runtime fuses it: zero-centered fp32 RMSNorms (rounding once), modulated by `1 + scale`
+#: and `shift`, identity gates, per-head q/k norms with Flux's interleaved RoPE, a SwiGLU MLP. The GEMMs
+#: stay the model's own (int8 leaves quantize each normed row once for every projection reading it).
+BLOCK = fusion.DiTBlock(
+    Block,
+    width=6144,
+    head_dim=128,
+    modulation=_modulation,
+    norms=("norm1", "norm2"),
+    norm="rms",
+    attention="attn",
+    arguments=("attention_mask", "image_rotary_emb"),
+    mlp=fusion.GatedMLP("ff", gate="gate", up="up", down="down"),
+    rope=fusion.Rope("image_rotary_emb", interleaved=True),
+    shift=True,
+    weights="fp32",
+    centered=True,
+    rms_rounding="once",
+)
 
 
 def as_stored(config: Config, component: str, root: nn.Module) -> None:
@@ -174,6 +208,9 @@ class Krea2(Model[Krea2Graph], encoded_leaves="accept"):
     def load(self, loader: Loader) -> None:
         self.graph = loader.construct(Krea2Graph, factory=Krea2Graph)
         self.tokenizer = build_tokenizer(loader.assets)
+
+    def execution_plan(self, plan: Plan) -> str:
+        return fusion.install(plan, BLOCK, self.graph.components["transformer"])
 
     def hold_vae(self) -> None:
         """Decode in bf16, as Diffusers' and Krea's pipelines do: the Runtime casts the VAE's stored
