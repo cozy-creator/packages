@@ -21,7 +21,8 @@ ingested or already fetched the input, its objects are in the pod Store and noth
 
 Its quantized lanes are recipes (`FP8`, `INT8`, `NVFP4`, `W4A8` in `h3_tables.job`): code, as a
 `DerivationHook`, since what a lane encodes depends on what the source still holds plain. Both
-DiTs and the text conditioner's 350 decoder linears, encoding what is still plain; CPU:
+DiTs and the text conditioner's 350 decoder linears, and in int8, nvfp4 and w4a8 the video VAE
+decoder's 216 block linears at int8.convrot, encoding what is still plain; CPU:
 
 ```sh
 cozy model quantize minimax-h3@sha256:<pruned commit> --lane fp8 --package minimax-h3-tools --on NAME

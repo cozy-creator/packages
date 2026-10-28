@@ -402,7 +402,9 @@ app.entrypoint(
 #: W4A4 at prompt length, and the conditioner runs once a request); `NVFP4_DIT_INT8` serve int8.convrot.
 #: w4a8 (xs-062) takes nvfp4's kept keys with every other DiT linear in W4A8 (its per-token
 #: activation scales have none of nvfp4's subnormal-scale hazard), the conditioner int8.convrot.
-#: int8 also takes the video VAE decoder's block linears minus `VAE_INT8_KEEP`.
+#: int8, nvfp4 and w4a8 also take the video VAE decoder's block linears at int8.convrot minus
+#: `VAE_INT8_KEEP` (the decoder is one ViT on every card; fp8's B300 keeps it f16).
+_VAE_INT8 = _lanes.Treatment(encode="int8.convrot", keep=_lanes.VAE_INT8_KEEP)
 QUANTIZER_RECIPES: Mapping[str, Mapping[str, _lanes.Treatment]] = {
     "fp8.rowwise": {
         component: _lanes.Treatment(encode="fp8.rowwise", keep=treatment.keep)
@@ -413,7 +415,7 @@ QUANTIZER_RECIPES: Mapping[str, Mapping[str, _lanes.Treatment]] = {
             component: _lanes.Treatment(encode="int8.convrot", keep=treatment.keep)
             for component, treatment in LANES["fp8"].components.items()
         },
-        "vae": _lanes.Treatment(encode="int8.convrot", keep=_lanes.VAE_INT8_KEEP),
+        "vae": _VAE_INT8,
     },
     "nvfp4": {
         **{dit: _lanes.Treatment(
@@ -421,11 +423,13 @@ QUANTIZER_RECIPES: Mapping[str, Mapping[str, _lanes.Treatment]] = {
                encode_as=tuple((key, "int8.convrot") for key in _lanes.NVFP4_DIT_INT8),
            ) for dit in sorted(_lanes.DIT_COMPONENTS)},
         "text_encoder": _lanes.Treatment(encode="int8.convrot", keep=_lanes.TEXT_ENCODER_KEEP),
+        "vae": _VAE_INT8,
     },
     "w4a8.convrot": {
         **{dit: _lanes.Treatment(encode="w4a8.convrot", keep=_lanes.NVFP4_DIT_KEEP)
            for dit in sorted(_lanes.DIT_COMPONENTS)},
         "text_encoder": _lanes.Treatment(encode="int8.convrot", keep=_lanes.TEXT_ENCODER_KEEP),
+        "vae": _VAE_INT8,
     },
 }
 
