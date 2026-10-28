@@ -68,9 +68,8 @@ CALIBRATION = (
 
 def calibrate(ctx: Context, tel: Telemetry, model: QwenImage21Model, record: Any) -> None:
     """Qwen-Image-2.1 at 16 bits generates each of `CALIBRATION` at 1 MP on the checkpoint's
-    schedule while each svdq linear's inputs are recorded."""
-    sigmas = model.sample_sigmas
-    steps = len(sigmas) if sigmas else 20
+    base schedule while each svdq linear's inputs are recorded."""
+    steps = 20
     with record(model.graph.components), tel.stage("calibrating", overall_range=(0.0, 0.3)):
         for seed, prompt in enumerate(CALIBRATION):
             embeds, mask = model.encode(prompt)

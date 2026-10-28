@@ -31,6 +31,10 @@ app = App()
 SIZES = Sizes((1.0, 4.0), (32, 2048 * 16), 32, "the 1-4 MP Qwen-Image serves")
 #: Steps without a checkpoint schedule (Turbo names its own 8), and the most admitted.
 _STEPS, _MAX_STEPS = 40, 100
+#: Qwen-Image-2.1-Turbo's distilled schedule, its `model_index.json` `sample_sigmas`
+#: (hf://Qwen/Qwen-Image-2.1-Turbo@fc13ba19). The Runtime's model config holds components only,
+#: so the function, not the checkpoint, names the regime.
+TURBO_SIGMAS = (1.0, 0.978453, 0.95418, 0.926626, 0.89508, 0.845148, 0.704534, 0.414568)
 
 
 class GenerateInput(ImageRequest):
@@ -67,17 +71,20 @@ def _generate(
     out: Outputs,
     tel: Telemetry,
     adj: Adjustments,
+    sigmas: tuple[float, ...] | None,
 ) -> ImageResult:
-    """Both functions' body: the checkpoint decides the schedule."""
+    """Both functions' body: `sigmas` is the distilled schedule (`generate_turbo`), else the base
+    model's uniform spacing."""
     payload.ignored(adj, "guidance", "negative_prompt", "prompt_upsampling",
                     reason="Qwen-Image-2.1 samples without CFG and has no prompt upsampler")
-    sigmas = model.sample_sigmas
     if sigmas:
         steps = len(sigmas)
         if payload.steps not in (None, steps):
-            adj.clamp("steps", payload.steps, steps, "the checkpoint's own schedule")
+            adj.clamp("steps", payload.steps, steps, "Turbo's own distilled schedule")
     else:
         steps = held(adj, "steps", payload.steps or _STEPS, 1, _MAX_STEPS)
+    tel.log("sampling", regime="turbo" if sigmas else "base", steps=steps,
+            schedule="distilled sigmas" if sigmas else "uniform, dynamic shift")
     seed = payload.drawn_seed()
     ctx.raise_if_cancelled()
     # Phase order for residency: references encode on the VAE first, then the text encoder, the
@@ -116,6 +123,7 @@ def _generate(
             cancel=ctx.raise_if_cancelled,
             ctx=ctx,
             tel=tel,
+            sigmas=sigmas,
             reference_images=reference_images,
             reference_latents=reference_latents,
             image_pad_mask=image_pad_mask,
@@ -148,7 +156,7 @@ def generate(
     adj: Adjustments,
 ) -> ImageResult:
     """Qwen-Image-2.1, the 40-step base model."""
-    return _generate(ctx, payload, model, out, tel, adj)
+    return _generate(ctx, payload, model, out, tel, adj, None)
 
 
 @app.entrypoint(
@@ -164,5 +172,5 @@ def generate_turbo(
     tel: Telemetry,
     adj: Adjustments,
 ) -> ImageResult:
-    """Qwen-Image-2.1-Turbo: the same inputs, on its checkpoint's 8-step schedule."""
-    return _generate(ctx, payload, model, out, tel, adj)
+    """Qwen-Image-2.1-Turbo: the same inputs, on its 8-step distilled schedule."""
+    return _generate(ctx, payload, model, out, tel, adj, TURBO_SIGMAS)
