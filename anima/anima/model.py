@@ -242,9 +242,10 @@ class _BatchedDenoiser(AnimaLoopDenoiser):
             for key in self._guider_input_fields
         }
         count = len(batches)
+        # One timestep for every condition: the modulation is computed once and broadcast.
         predictions = transformer(
             hidden_states=torch.cat([block_state.latent_model_input] * count),
-            timestep=torch.cat([block_state.timestep] * count),
+            timestep=block_state.timestep,
             padding_mask=block_state.padding_mask,
             return_dict=False,
             **conditions,

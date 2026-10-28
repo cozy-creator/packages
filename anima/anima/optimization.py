@@ -382,7 +382,13 @@ def _normed(norm: Any, hidden: Any, timestep: Any, temb: Any, consumers: tuple[A
     if table.ndim == 2:
         shift, scale, gate = (t.unsqueeze(1) for t in (shift, scale, gate))
     rows = int8_rows(hidden, consumers, norm="layer", eps=norm.norm.eps, scale=scale, shift=shift)
-    if rows is None:
+    if rows is None and table.ndim == 2 and table.shape[0] == 1:
+        # One modulation row for the batch (both CFG halves share the timestep): it is the
+        # LayerNorm's own affine, one pass and one rounding instead of three.
+        width = norm.norm.normalized_shape
+        weight, bias = (1 + scale).reshape(width), shift.reshape(width)
+        rows = F.layer_norm(hidden, width, weight, bias, norm.norm.eps)
+    elif rows is None:
         rows = norm.norm(hidden) * (1 + scale) + shift
     return rows, gate
 
