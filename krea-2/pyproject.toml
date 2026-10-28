@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "Cozy text-to-image with Krea 2: Raw, the full model, and Turbo, its 8-step distillation"
 requires-python = ">=3.12"
 dependencies = [
-    "cozy-runtime[adapters,media]>=0.34",
+    "cozy-runtime[adapters,media]>=0.35.0",
     # Krea2Pipeline and its modules are in Diffusers since 0.39.
     "diffusers>=0.39",
     "msgspec>=0.19",
