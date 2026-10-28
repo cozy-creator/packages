@@ -1,6 +1,6 @@
 [project]
 name = "qwen-image"
-version = "0.1.0"
+version = "0.1.1"
 description = "Cozy image generation and editing using Qwen-Image-2512 and Qwen-Image-Edit-2511, full and Lightning"
 requires-python = ">=3.12"
 dependencies = [
