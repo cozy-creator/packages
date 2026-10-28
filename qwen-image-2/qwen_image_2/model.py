@@ -18,7 +18,13 @@ from diffusers import (
     QwenImage21Pipeline,
     QwenImage21Transformer2DModel,
 )
-from diffusers.models.autoencoders.autoencoder_kl_qwenimage21 import QwenImage21ResidualUpBlock
+from diffusers.models.autoencoders.autoencoder_kl_qwenimage21 import (
+    QwenImage21Decoder3d,
+    QwenImage21Encoder3d,
+    QwenImage21ResidualBlock,
+    QwenImage21ResidualUpBlock,
+    QwenImage21RMS_norm,
+)
 from diffusers.models.transformers.transformer_qwenimage21 import (
     QwenImage21KVCache,
     QwenImage21TransformerBlock,
@@ -85,6 +91,16 @@ BLOCK = fusion.DiTBlock(
     mlp=fusion.GatedMLP("img_mlp", gate="gate_layer", up="proj", down="out"),
     rope=fusion.Rope("rotary_emb", interleaved=True),
     gate="tanh",
+)
+#: The VAE's RMS norms in one kernel each, with the SiLU each residual block and each head applies
+#: after them; Diffusers computes them in F32 copies of every activation.
+VAE_NORM = fusion.ChannelNorm(
+    QwenImage21RMS_norm,
+    silu=(
+        (QwenImage21ResidualBlock, ("norm1", "norm2")),
+        (QwenImage21Decoder3d, ("norm_out",)),
+        (QwenImage21Encoder3d, ("norm_out",)),
+    ),
 )
 
 
@@ -220,7 +236,11 @@ class QwenImage21Model(Model[QwenImage21Graph], encoded_leaves="accept"):
         self.processor = vlm.processor(loader.assets, "processor/", self.graph.processor_config)
 
     def execution_plan(self, plan: Plan) -> str:
-        return fusion.install(plan, BLOCK, self.graph.components["transformer"])
+        installed = (
+            fusion.install(plan, BLOCK, self.graph.components["transformer"]),
+            fusion.install_norms(plan, VAE_NORM, self.graph.components["vae"]),
+        )
+        return "+".join(identity for identity in installed if identity)
 
     def hold_vae(self, tel: Telemetry) -> None:
         """Run the VAE in bf16 where the GPU computes it natively, as ComfyUI stages it and as Turbo
