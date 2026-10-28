@@ -9,7 +9,8 @@ speed generates an image, or edits when `reference_images` are given (up to ten,
 | `generate` | [dev]: 50 steps, guidance 4 | [klein] Base: `flux-2-klein-9b-base`, `flux-2-klein-4b-base` (50 steps, CFG 4) |
 | `generate_turbo` | [dev] + fal's Turbo LoRA: 8 steps, guidance 2.5 | [klein]: `flux-2-klein-9b`, `flux-2-klein-4b` (4 steps, no guidance) |
 
-The checkpoint sets the defaults, so any model runs correctly in either function. Klein 4B (Apache-2.0,
+The function sets the regime: `generate` runs a [klein] as Base, `generate_turbo` as distilled, so give each its
+own checkpoint. Klein 4B (Apache-2.0,
 8 GB of weights at int8) is the choice for consumer cards:
 
 Write the request in a file, `request.yaml`:
