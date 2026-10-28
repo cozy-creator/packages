@@ -1,7 +1,8 @@
 # H3 attention
 
-`H3Model` declares `attention_bits={"transformer": 4, "transformer_ref": 4}` (`minimax_h3/model.py`):
-its DiTs' attention may run at 4 bits, and the VAEs and text encoder keep exact attention. The
+`H3Model` declares `attention_bits={"transformer": 4, "transformer_ref": 4, "vae": 8}` (`minimax_h3/model.py`):
+its DiTs' attention may run at 4 bits, the video VAE decoder's at 8 (Kitchen INT8 on consumer cards, as
+ComfyUI's int8 decoder), and the audio VAE and text encoder keep exact attention. The
 package names no GPU and no kernel. Runtime serves each site with the first kernel of the GPU
 family's cell at that level ([precision tiers §2.4](https://github.com/cozy-creator/tracker/blob/master/design/precision-tiers.md)):
 FP4 Sage3 dense rows on RTX 50-class cards, the 8-bit cell elsewhere (Sage2 on Hopper, FA4 FP8
