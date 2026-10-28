@@ -71,10 +71,10 @@ _SOURCE_DIGESTS: dict[str, tuple[Callable[..., object], str]] = {
         "5f758c69ad2f82a37d707e3ca736b88011b41f04a958dbc657ec397b88c2bef5",
     ),
 }
-#: Anima Base 1.0's transformer, the one the norm and RoPE shapes below are reviewed for.
+#: Anima Base 1.0's transformer, the one the norm and RoPE shapes below are reviewed for: its
+#: constructor arguments. The Runtime's config drops the saving library's `_`-keys (#1786), and
+#: comparing them refused this plan on every construction since.
 _TRANSFORMER_CONFIG = {
-    "_class_name": "CosmosTransformer3DModel",
-    "_diffusers_version": "0.39.0.dev0",
     "adaln_lora_dim": 256,
     "attention_head_dim": 128,
     "concat_padding_mask": True,
@@ -177,7 +177,8 @@ def _plan_refusal(pipe: Any) -> str:
     transformer = pipe.components["transformer"]
     if type(transformer) is not CosmosTransformer3DModel:
         return f"the transformer is {type(transformer).__qualname__}, not CosmosTransformer3DModel"
-    if json.loads(json.dumps(dict(transformer.config))) != _TRANSFORMER_CONFIG:
+    arguments = {k: v for k, v in dict(transformer.config).items() if not k.startswith("_")}
+    if json.loads(json.dumps(arguments)) != _TRANSFORMER_CONFIG:
         return "the filled Cosmos transformer config is not the Anima Base 1.0 config"
     return ""
 

@@ -117,6 +117,11 @@ class AnimaModel(Model[AnimaPipeline], encoded_leaves="accept"):
 
     def execution_plan(self, plan: Plan) -> str:
         eager = optimization.apply(self.pipe)
+        # In the run's receipts (`plan_reports`), so a refusal is never silent.
+        outcome: dict[str, object] = {"applied": not eager}
+        if eager:
+            outcome["reason"] = eager
+        plan.report("anima.fused", outcome)
         print("[anima] " + ("eager: " + eager if eager else "fused CUDA plan"), file=sys.stderr)
         return "" if eager else "anima.fused"
 
