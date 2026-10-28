@@ -40,6 +40,7 @@ class GenerateInput(ImageRequest):
 
 def _generate(ctx: Context, payload: GenerateInput, model: Krea2, out: Outputs, tel: Telemetry,
               adj: Adjustments) -> ImageResult:
+    model.hold_vae()
     payload.ignored(adj, "reference_boxes", reason="Krea 2 takes no references")
     payload.ignored(adj, "prompt_upsampling", reason="Krea 2 has no prompt upsampler")
     steps, guidance, megapixels = TURBO if model.distilled else RAW

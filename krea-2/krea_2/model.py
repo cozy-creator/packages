@@ -25,10 +25,12 @@ from cozy_runtime.author import (
     ModelAssets,
     Telemetry,
     denoise_loop,
+    hold_dtype,
     uses_components,
 )
 from diffusers import AutoencoderKLQwenImage, FlowMatchEulerDiscreteScheduler, Krea2Transformer2DModel
 from diffusers.image_processor import VaeImageProcessor
+from diffusers.models.transformers.transformer_krea2 import Krea2TransformerBlock
 from diffusers.pipelines.krea2.pipeline_krea2 import Krea2Pipeline, calculate_shift, retrieve_timesteps
 from PIL import Image
 from tokenizers import Tokenizer
@@ -57,8 +59,7 @@ PROMPT_SUFFIX = "<|im_end|>\n<|im_start|>assistant\n"
 PREFIX_TOKENS, SUFFIX_TOKENS = 34, 5
 #: The turbo checkpoint's fixed timestep shift (`is_distilled`); Raw's follows the token count.
 DISTILLED_MU = 1.15
-#: Lightweight modules Diffusers keeps in F32 under a bf16 load.
-_F32 = frozenset(Krea2Transformer2DModel._keep_in_fp32_modules)
+_DTYPES = {"f32": torch.float32, "bf16": torch.bfloat16, "f16": torch.float16}
 
 
 class TextEncoder(nn.Module):
@@ -73,6 +74,33 @@ class TextEncoder(nn.Module):
         self.language_model.norm = nn.Identity()
 
 
+class Block(Krea2TransformerBlock):
+    """Diffusers' block with its modulation in the activations' dtype: the checkpoint stores the
+    block's `scale_shift_table` in F32, which Diffusers' bf16 load would cast."""
+
+    def forward(self, hidden_states: torch.Tensor, temb: torch.Tensor, image_rotary_emb: Any,
+                attention_mask: torch.Tensor | None = None) -> torch.Tensor:
+        modulation = (temb.unflatten(-1, (6, -1)) + self.scale_shift_table).to(hidden_states.dtype)
+        prescale, preshift, pregate, postscale, postshift, postgate = modulation.unbind(-2)
+        attn_out = self.attn((1.0 + prescale) * self.norm1(hidden_states) + preshift,
+                             attention_mask=attention_mask, image_rotary_emb=image_rotary_emb)
+        hidden_states = hidden_states + pregate * attn_out
+        ff_out = self.ff((1.0 + postscale) * self.norm2(hidden_states) + postshift)
+        return hidden_states + postgate * ff_out
+
+
+def as_stored(config: Config, component: str, root: nn.Module) -> None:
+    """Each parameter in the dtype the checkpoint stores it in, which the Runtime fills without a
+    cast. Krea's Diffusers checkpoint keeps the norms, the modulation tables, the embedders and the
+    final layer in F32 (the reference checkpoint has those in bf16, its norms in F32)."""
+    for path, module in root.named_modules():
+        for name, param in list(module.named_parameters(recurse=False)):
+            stored = config.tensor_dtype(f"{component}.{path}.{name}" if path else f"{component}.{name}", default="bf16")
+            dtype = _DTYPES.get(stored)
+            if dtype is not None and param.dtype != dtype:
+                module.register_parameter(name, nn.Parameter(param.to(dtype), requires_grad=False))
+
+
 class Krea2Graph:
     def __init__(self, config: Config) -> None:
         index = config.section("model_index").mapping() if "model_index" in config.keys() else {}
@@ -83,15 +111,14 @@ class Krea2Graph:
             transformer = Krea2Transformer2DModel.from_config(config.section("transformer").mapping())
             encoder = TextEncoder(Qwen3VLConfig(**config.section("text_encoder").mapping()), max(self.taps))
             vae = AutoencoderKLQwenImage.from_config(config.section("vae").mapping())
-        transformer.to(DTYPE)
-        for name, module in transformer.named_modules():
-            if name.rsplit(".", 1)[-1] in _F32:
-                module.float()
+        for block in transformer.transformer_blocks:
+            block.__class__ = Block
+        as_stored(config, "transformer", transformer)
+        as_stored(config, "vae", vae)
         self.components: dict[str, nn.Module] = {
             "transformer": transformer.eval(),
             "text_encoder": encoder.eval(),
-            # bf16, as Diffusers' and Krea's pipelines run it; the checkpoint stores F32.
-            "vae": vae.to(DTYPE).eval(),
+            "vae": vae.eval(),
         }
         self.scheduler_config: Mapping[str, Any] = config.section("scheduler").mapping()
 
@@ -115,6 +142,25 @@ def unpack(latents: torch.Tensor, height: int, width: int) -> torch.Tensor:
     return latents.reshape(1, channels, 1, rows * 2, columns * 2)
 
 
+def _dtype(module: nn.Module) -> torch.dtype:
+    return next(module.parameters()).dtype
+
+
+def fused_text(transformer: Any, text: torch.Tensor) -> torch.Tensor:
+    """`Krea2TextFusion` then `txt_in` over one prompt's tapped states, each module in its stored dtype:
+    the step-invariant text stream of the DiT's forward."""
+    fusion = transformer.text_fusion
+    batch, length, layers, width = text.shape
+    hidden = text.reshape(batch * length, layers, width)
+    for block in fusion.layerwise_blocks:
+        hidden = block(hidden.contiguous())
+    hidden = hidden.reshape(batch, length, layers, width).permute(0, 1, 3, 2)
+    hidden = fusion.projector(hidden.to(_dtype(fusion.projector))).squeeze(-1).to(text.dtype)
+    for block in fusion.refiner_blocks:
+        hidden = block(hidden)
+    return transformer.txt_in(hidden.to(_dtype(transformer.txt_in))).to(text.dtype)  # type: ignore[no-any-return]
+
+
 #: Code the memoized encode reads beyond its own body.
 _CODE = (build_tokenizer, TextEncoder, MemoDistribution("transformers"), MemoDistribution("tokenizers"))
 
@@ -135,6 +181,11 @@ class Krea2(Model[Krea2Graph], encoded_leaves="accept"):
     @property
     def distilled(self) -> bool:
         return self.graph.distilled
+
+    def hold_vae(self) -> None:
+        """Decode in bf16, as Diffusers' and Krea's pipelines do: the Runtime casts the VAE's stored
+        F32 when it next fills it. Called before any VAE scope opens."""
+        hold_dtype(self.graph.components["vae"], DTYPE)
 
     @uses_components("text_encoder", memoize=True, memo_dependencies=_CODE)
     def encode(self, prompt: str) -> torch.Tensor:
@@ -198,7 +249,7 @@ class Krea2(Model[Krea2Graph], encoded_leaves="accept"):
             for text in (positive, *([] if negative is None else [negative])):
                 text = text.to(device=device, dtype=DTYPE)
                 ids = Krea2Pipeline.prepare_position_ids(text.shape[1], rows, columns, device)
-                branches += [transformer.txt_in(transformer.text_fusion(text)), *transformer.rotary_emb(ids)]
+                branches += [fused_text(transformer, text), *transformer.rotary_emb(ids)]
             # The pipeline divides the f32 timestep by 1000 and then casts it; Euler adds the bf16
             # product of the f32 sigma delta and the bf16 velocity to the f32 latents.
             times = (scheduler.timesteps / config.num_train_timesteps).to(DTYPE)
@@ -207,15 +258,17 @@ class Krea2(Model[Krea2Graph], encoded_leaves="accept"):
 
         def step(i: torch.Tensor, latents: torch.Tensor, times: torch.Tensor, deltas: torch.Tensor,
                  *branches: torch.Tensor) -> None:
-            temb = transformer.time_embed(times.index_select(0, i), dtype=latents.dtype)
-            modulation = transformer.time_mod_proj(F.gelu(temb, approximate="tanh"))
-            image = transformer.img_in(latents)
+            # The embedders and the final layer run in their stored F32; the blocks in bf16.
+            temb = transformer.time_embed(times.index_select(0, i), dtype=_dtype(transformer.time_embed))
+            modulation = transformer.time_mod_proj(F.gelu(temb, approximate="tanh").to(_dtype(transformer.time_mod_proj)))
+            image = transformer.img_in(latents.to(_dtype(transformer.img_in))).to(latents.dtype)
             texts = branches[0::3]
             hidden = [torch.cat([text, image], dim=1) for text in texts]
             rotary = list(zip(branches[1::3], branches[2::3], strict=True))
             for block in blocks:
                 hidden = [block(h, modulation, rope) for h, rope in zip(hidden, rotary, strict=True)]
-            velocity = [transformer.final_layer(h[:, text.shape[1]:], temb) for h, text in zip(hidden, texts, strict=True)]
+            velocity = [transformer.final_layer(h[:, text.shape[1]:], temb.to(_dtype(transformer.final_layer)))
+                        for h, text in zip(hidden, texts, strict=True)]
             prediction = velocity[0]
             if len(velocity) > 1:
                 prediction = prediction + guidance * (prediction - velocity[1])
