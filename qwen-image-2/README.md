@@ -153,6 +153,6 @@ image = await generate(
 
 The Hub package is the first-party `qwen-image-2` (no owner); its callables are `generate` and
 `generate_turbo`. Their default models are the first-party `qwen-image-2.1@0.1.0` and
-`qwen-image-2.1-turbo@0.1.0`: a model with no org is the root namespace's.
+`qwen-image-2.1-turbo@0.1.1`: a model with no org is the root namespace's.
 Installing the wheel alone does not turn GPU execution into an in-process call;
 Cozy supplies the managed caller when composing package functions.
