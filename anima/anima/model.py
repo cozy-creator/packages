@@ -7,7 +7,7 @@ import sys
 from collections.abc import Callable
 from contextlib import AbstractContextManager
 from pathlib import Path
-from types import TracebackType
+from types import MethodType, TracebackType
 from typing import Any, NamedTuple
 
 import torch
@@ -30,6 +30,7 @@ from diffusers.hooks.first_block_cache import (
     apply_first_block_cache,
 )
 from diffusers.hooks.hooks import HookRegistry
+from diffusers.models.autoencoders.vae import DecoderOutput
 from diffusers.models.transformers.transformer_cosmos import CosmosTransformerBlock
 from diffusers.modular_pipelines import ModularPipelineBlocks
 from diffusers.modular_pipelines.anima.denoise import AnimaLoopDenoiser
@@ -90,6 +91,7 @@ class AnimaPipeline:
 
         for component in (transformer, text_encoder, text_conditioner, vae):
             component.eval()
+        vae._decode = MethodType(_decode_frame, vae)
         self.scheduler_config = mapping["scheduler"]
         self.tokenizer = _tokenizer(_ROOT / "tokenizer")
         self.t5_tokenizer = _tokenizer(_ROOT / "t5_tokenizer")
@@ -99,6 +101,16 @@ class AnimaPipeline:
             "text_conditioner": text_conditioner,
             "vae": vae,
         }
+
+
+def _decode_frame(vae: Any, z: torch.Tensor, return_dict: bool = True) -> Any:
+    """Diffusers' `_decode` for one frame, without its feature cache: a single frame never
+    reads it, but Diffusers keeps a copy of every causal conv's input in it for a next frame, and
+    with them Anima's decode did not fit 3 GB. The same bits otherwise."""
+    if z.shape[2] != 1 or vae.use_tiling:
+        return type(vae)._decode(vae, z, return_dict=return_dict)
+    out = vae.decoder(vae.post_quant_conv(z)).clamp(-1.0, 1.0)
+    return DecoderOutput(sample=out) if return_dict else (out,)
 
 
 def build_pipeline(config: Any) -> AnimaPipeline:
