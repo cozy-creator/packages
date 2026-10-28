@@ -1,0 +1,44 @@
+[project]
+name = "krea-2"
+version = "0.1.0"
+description = "Cozy text-to-image with Krea 2: Raw, the full model, and Turbo, its 8-step distillation"
+requires-python = ">=3.12"
+dependencies = [
+    "cozy-runtime[adapters,media]>=0.34",
+    # Krea2Pipeline and its modules are in Diffusers since 0.39.
+    "diffusers>=0.39",
+    "msgspec>=0.19",
+    "numpy>=1.26",
+    "pillow>=12",
+    "tensorfs>=0.17",
+    "tokenizers>=0.23.1",
+    "torch>=2.14",
+    "transformers>=5.17",
+]
+
+[project.entry-points."cozy.application"]
+default = "krea_2:app"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["krea_2"]
+
+[tool.uv]
+environments = [
+    "sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "sys_platform == 'linux' and platform_machine == 'aarch64'",
+    "sys_platform == 'darwin' and platform_machine == 'arm64'",
+    "sys_platform == 'win32' and platform_machine == 'AMD64'",
+]
+
+# PyPI's torch is CUDA on Linux and MPS on macOS but CPU-only on Windows: Windows takes PyTorch's CUDA build.
+[[tool.uv.index]]
+name = "pytorch-cu130"
+url = "https://download.pytorch.org/whl/cu130"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu130", marker = "sys_platform == 'win32'" }
