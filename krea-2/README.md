@@ -9,8 +9,9 @@ for each:
 | `generate` | Krea 2 Raw (`krea-2`) | 52 | 3.5 (CFG) | 1024² |
 | `generate_turbo` | Krea 2 Turbo (`krea-2-turbo`) | 8 | none | 2048² |
 
-Krea recommends training LoRAs on Raw and running them on Turbo. The checkpoint sets the defaults and the
-schedule, so either model runs correctly in either function (`model.model=krea-2`).
+Krea recommends training LoRAs on Raw and running them on Turbo. The function sets the regime: `generate`
+samples as Raw (CFG, the token count's shift), `generate_turbo` as Turbo (no CFG, shift 1.15). The two
+checkpoints have identical configs, so pass a fine-tune of each to its own function (`model.model=`).
 
 Write the request in a file, `request.yaml`:
 

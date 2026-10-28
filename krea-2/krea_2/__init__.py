@@ -39,11 +39,11 @@ class GenerateInput(ImageRequest):
 
 
 def _generate(ctx: Context, payload: GenerateInput, model: Krea2, out: Outputs, tel: Telemetry,
-              adj: Adjustments) -> ImageResult:
+              adj: Adjustments, *, distilled: bool) -> ImageResult:
     model.hold_vae()
     payload.ignored(adj, "reference_boxes", reason="Krea 2 takes no references")
     payload.ignored(adj, "prompt_upsampling", reason="Krea 2 has no prompt upsampler")
-    steps, guidance, megapixels = TURBO if model.distilled else RAW
+    steps, guidance, megapixels = TURBO if distilled else RAW
     steps = held(adj, "steps", payload.steps or steps, 1, 100, "Krea 2's 1-100 steps")
     guidance = held(adj, "guidance", guidance if payload.guidance is None else payload.guidance, 0.0, 20.0,
                     "Krea 2's guidance 0-20")
@@ -59,7 +59,7 @@ def _generate(ctx: Context, payload: GenerateInput, model: Krea2, out: Outputs, 
     with tel.stage("generating image", overall_range=(0.05, 0.95)):
         latents = model.denoise(
             positive, negative, width=width, height=height, steps=steps, guidance=guidance, seed=seed,
-            on_step=tel.step_callback(steps, stage="generating image", overall_range=(0.05, 0.95)),
+            distilled=distilled, on_step=tel.step_callback(steps, stage="generating image", overall_range=(0.05, 0.95)),
         )
     with tel.stage("decoding image", overall_range=(0.95, 0.99)):
         image = model.decode(latents, width=width, height=height, tel=tel)
@@ -76,13 +76,13 @@ _MEMO = ("krea_2", "krea_2.model")
                 memo_dependencies=_MEMO)
 def generate(ctx: Context, payload: GenerateInput, model: Krea2, out: Outputs, tel: Telemetry,
              adj: Adjustments) -> ImageResult:
-    """The full model, Krea 2 Raw: 52 steps at guidance 3.5, 1 MP."""
-    return _generate(ctx, payload, model, out, tel, adj)
+    """The full model, Krea 2 Raw (or a fine-tune of it): 52 steps at guidance 3.5, 1 MP."""
+    return _generate(ctx, payload, model, out, tel, adj, distilled=False)
 
 
 @app.entrypoint(defaults={"model": "krea-2-turbo@0.1.0"}, components=_COMPONENTS,
                 memoize=Memoize(requires=["seed"]), memo_dependencies=_MEMO)
 def generate_turbo(ctx: Context, payload: GenerateInput, model: Krea2, out: Outputs, tel: Telemetry,
                    adj: Adjustments) -> ImageResult:
-    """The fast model, Krea 2 Turbo: 8 steps without guidance, 2048²."""
-    return _generate(ctx, payload, model, out, tel, adj)
+    """The fast model, Krea 2 Turbo (or a fine-tune of it): 8 steps without guidance at its fixed shift, 2048²."""
+    return _generate(ctx, payload, model, out, tel, adj, distilled=True)

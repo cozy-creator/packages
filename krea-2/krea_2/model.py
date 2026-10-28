@@ -45,7 +45,7 @@ PATCH = 16
 VAE_SCALE = 8
 #: The DiT's activations; its RMSNorm scales stay F32 (Diffusers' `_keep_in_fp32_modules`).
 DTYPE = torch.bfloat16
-#: The text encoder's hidden states the DiT reads when the checkpoint's index names none.
+#: The text encoder's hidden states the DiT reads (`Krea2Pipeline`'s `text_encoder_select_layers`).
 TAPS = (2, 5, 8, 11, 14, 17, 20, 23, 26, 29, 32, 35)
 #: Diffusers' fixed text length: at most 512 tokens after the dropped system prefix.
 TEXT_TOKENS = 512
@@ -57,7 +57,7 @@ PROMPT_PREFIX = (
 )
 PROMPT_SUFFIX = "<|im_end|>\n<|im_start|>assistant\n"
 PREFIX_TOKENS, SUFFIX_TOKENS = 34, 5
-#: The turbo checkpoint's fixed timestep shift (`is_distilled`); Raw's follows the token count.
+#: Turbo's fixed timestep shift (Diffusers' `is_distilled`); Raw's follows the token count.
 DISTILLED_MU = 1.15
 _DTYPES = {"f32": torch.float32, "bf16": torch.bfloat16, "f16": torch.float16}
 
@@ -103,13 +103,9 @@ def as_stored(config: Config, component: str, root: nn.Module) -> None:
 
 class Krea2Graph:
     def __init__(self, config: Config) -> None:
-        index = config.section("model_index").mapping() if "model_index" in config.keys() else {}
-        taps: Any = index.get("text_encoder_select_layers") or TAPS
-        self.taps = tuple(int(i) for i in taps)
-        self.distilled = bool(index.get("is_distilled", False))
         with no_init_weights():
             transformer = Krea2Transformer2DModel.from_config(config.section("transformer").mapping())
-            encoder = TextEncoder(Qwen3VLConfig(**config.section("text_encoder").mapping()), max(self.taps))
+            encoder = TextEncoder(Qwen3VLConfig(**config.section("text_encoder").mapping()), max(TAPS))
             vae = AutoencoderKLQwenImage.from_config(config.section("vae").mapping())
         for block in transformer.transformer_blocks:
             block.__class__ = Block
@@ -166,7 +162,8 @@ _CODE = (build_tokenizer, TextEncoder, MemoDistribution("transformers"), MemoDis
 
 
 class Krea2(Model[Krea2Graph], encoded_leaves="accept"):
-    """One Krea 2 checkpoint: Raw (CFG, the token count's shift) or Turbo (distilled: no CFG, shift 1.15)."""
+    """One Krea 2 checkpoint, Raw or Turbo. Their configs are identical and the pipeline's `is_distilled` is
+    not in the model's config, so the caller names the regime (`denoise(distilled=)`)."""
 
     #: Caller LoRAs on the DiT, at any strength: the Runtime bakes them into the weights.
     __adapter_compatibility__ = (AdapterCompatibility("lora", "", ("transformer",), -math.inf, math.inf),)
@@ -177,10 +174,6 @@ class Krea2(Model[Krea2Graph], encoded_leaves="accept"):
     def load(self, loader: Loader) -> None:
         self.graph = loader.construct(Krea2Graph, factory=Krea2Graph)
         self.tokenizer = build_tokenizer(loader.assets)
-
-    @property
-    def distilled(self) -> bool:
-        return self.graph.distilled
 
     def hold_vae(self) -> None:
         """Decode in bf16, as Diffusers' and Krea's pipelines do: the Runtime casts the VAE's stored
@@ -207,7 +200,7 @@ class Krea2(Model[Krea2Graph], encoded_leaves="accept"):
         with torch.inference_mode():
             hidden = encoder(input_ids=ids, position_ids=positions, output_hidden_states=True,
                              use_cache=False).hidden_states
-            stacked = torch.stack([hidden[i] for i in self.graph.taps], dim=2)[:, PREFIX_TOKENS:]
+            stacked = torch.stack([hidden[i] for i in TAPS], dim=2)[:, PREFIX_TOKENS:]
         return stacked.to(DTYPE).cpu()
 
     @uses_components("transformer")
@@ -221,6 +214,7 @@ class Krea2(Model[Krea2Graph], encoded_leaves="accept"):
         steps: int,
         guidance: float,
         seed: int,
+        distilled: bool,
         on_step: Callable[[int], None],
     ) -> torch.Tensor:
         """`Krea2Pipeline.__call__`'s loop as one `denoise_loop`: bf16 noise from `seed` drawn on the CPU,
@@ -236,7 +230,7 @@ class Krea2(Model[Krea2Graph], encoded_leaves="accept"):
         channels = transformer.config.in_channels // 4
         scheduler = FlowMatchEulerDiscreteScheduler.from_config(dict(self.graph.scheduler_config))
         config = scheduler.config
-        mu = DISTILLED_MU if self.distilled else calculate_shift(
+        mu = DISTILLED_MU if distilled else calculate_shift(
             rows * columns, config.get("base_image_seq_len", 256), config.get("max_image_seq_len", 6400),
             config.get("base_shift", 0.5), config.get("max_shift", 1.15),
         )
