@@ -7,7 +7,7 @@ DiT changes between requests.
 
 | function | without references | with references | default steps | guidance |
 | --- | --- | --- | --- | --- |
-| `generate` | `qwen-image-2512@0.1.0` | `qwen-image-edit-2511@0.1.0` | 50 / 40 | true CFG 4.0 |
+| `generate` | `qwen-image-2512@0.1.1` | `qwen-image-edit-2511@0.1.0` | 50 / 40 | true CFG 4.0 |
 | `generate_turbo` | the same, with `qwen-image-2512-lightning-lora@0.1.0` | the same, with `qwen-image-edit-2511-lightning-lora@0.1.0` | 8 | none |
 
 Write the request in a file, `request.yaml`:
