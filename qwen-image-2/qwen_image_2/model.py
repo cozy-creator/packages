@@ -41,6 +41,7 @@ from cozy_runtime.author import (
     Loader,
     MemoDistribution,
     Model,
+    Telemetry,
     denoise_loop,
     uses_components,
 )
