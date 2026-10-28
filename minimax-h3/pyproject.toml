@@ -1,6 +1,6 @@
 [project]
 name = "minimax-h3"
-version = "0.1.5"
+version = "0.1.6"
 description = "MiniMax H3 video with sound: from keyframes, references, or several segments"
 requires-python = ">=3.12"
 dependencies = [
