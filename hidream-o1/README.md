@@ -103,8 +103,8 @@ upstream's.
 Upstream ships f32 weights (35 GB per checkpoint). Upload each repository as it is:
 
 ```sh
-cozy model upload hf://HiDream-ai/HiDream-O1-Image@0b0901d99f200389e138c61946af1185f5f49a13 hidream-o1 --lane f32 --on <machine>
-cozy model upload hf://HiDream-ai/HiDream-O1-Image-Dev@c0bada0e15c54a9f96a6d1ecc35575b32bc21544 hidream-o1-dev --lane f32 --on <machine>
+cozy model upload hf://HiDream-ai/HiDream-O1-Image@0b0901d99f200389e138c61946af1185f5f49a13 hidream-ai/hidream-o1 --lane f32 --on <machine>
+cozy model upload hf://HiDream-ai/HiDream-O1-Image-Dev@c0bada0e15c54a9f96a6d1ecc35575b32bc21544 hidream-ai/hidream-o1-dev --lane f32 --on <machine>
 ```
 
 Each lane is written from the f32 upload. `bf16` rounds every f32 tensor to bf16. `int8` (the default
@@ -115,8 +115,8 @@ CFG 5 turns W8A8's per-pass error (33–37 dB teacher-forced) into visible grain
 Keeping v, o and down in bf16 was the best of nine measured keep-lists (23/28/36 dB at t 999/702/290).
 
 ```sh
-cozy model quantize hidream-o1@sha256:<f32 commit> --lane bf16 --package hidream-o1 --on <machine>
-cozy model quantize hidream-o1@sha256:<f32 commit> --lane int8 --package hidream-o1 --on <machine>
+cozy model quantize hidream-ai/hidream-o1@sha256:<f32 commit> --lane bf16 --package hidream-o1 --on <machine>
+cozy model quantize hidream-ai/hidream-o1@sha256:<f32 commit> --lane int8 --package hidream-o1 --on <machine>
 ```
 
 ## Measured (one L40S, 4 MP)

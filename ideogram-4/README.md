@@ -8,7 +8,7 @@ Qwen3-VL-8B-Instruct (13 of its layers' hidden states, concatenated); the VAE is
 
 | function | checkpoints | default steps | guidance |
 | --- | --- | --- | --- |
-| `generate` | `ideogram-4@0.1.0`, text encoder `qwen3-vl-8b-instruct@0.1.1` (int8) | 48 | 7, then 3 on the last `ceil(steps/16)` |
+| `generate` | `ideogram-ai/ideogram-4@0.1.0`, text encoder `qwen/qwen3-vl-8b-instruct@0.1.1` (int8) | 48 | 7, then 3 on the last `ceil(steps/16)` |
 
 There is no distilled checkpoint, so no `generate_turbo`; Ideogram's 20- and 12-step presets are
 `steps=20` and `steps=12`.
@@ -79,9 +79,9 @@ GPU (sm_89 and newer: RTX 4090, L40S, H100, Blackwell); 3090-class cards have no
 repository is gated: accept Ideogram's licence on Hugging Face with the account whose token cozy uses.
 
 ```sh
-cozy model upload hf://ideogram-ai/ideogram-4-fp8@ee79a7237b519f1402ceacf952f30c8a31ec5073 ideogram-4 --lane fp8 --on <machine>
-cozy model upload hf://Qwen/Qwen3-VL-8B-Instruct@0c351dd01ed87e9c1b53cbc748cba10e6187ff3b qwen3-vl-8b-instruct --lane bf16 --on <machine>
-cozy model quantize qwen3-vl-8b-instruct@sha256:<bf16 commit> --lane int8 --package ./ideogram-4 --on <machine>
+cozy model upload hf://ideogram-ai/ideogram-4-fp8@ee79a7237b519f1402ceacf952f30c8a31ec5073 ideogram-ai/ideogram-4 --lane fp8 --on <machine>
+cozy model upload hf://Qwen/Qwen3-VL-8B-Instruct@0c351dd01ed87e9c1b53cbc748cba10e6187ff3b qwen/qwen3-vl-8b-instruct --lane bf16 --on <machine>
+cozy model quantize qwen/qwen3-vl-8b-instruct@sha256:<bf16 commit> --lane int8 --package ./ideogram-4 --on <machine>
 ```
 
 The two DiTs are 19 GB at fp8. The text encoder's `int8` (from Qwen's bf16, 16 GB to 8 GB) takes its 36

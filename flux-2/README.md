@@ -68,8 +68,8 @@ Its first use fetches [dev]'s text encoder.
 Upload each repository as it is, as lane `bf16`:
 
 ```sh
-cozy model upload hf://black-forest-labs/FLUX.2-dev@26afe3a78bb242c0a8bb181dcc8937bb16e5c66c flux-2-dev --lane bf16 --on <machine>
-cozy model upload hf://fal/FLUX.2-dev-Turbo@9ee51cd87578162cf8d02355a870bc5f4570045c flux-2-dev-turbo --lane bf16 --on <machine>
+cozy model upload hf://black-forest-labs/FLUX.2-dev@26afe3a78bb242c0a8bb181dcc8937bb16e5c66c black-forest-labs/flux-2-dev --lane bf16 --on <machine>
+cozy model upload hf://fal/FLUX.2-dev-Turbo@9ee51cd87578162cf8d02355a870bc5f4570045c fal/flux-2-dev-turbo --lane bf16 --on <machine>
 cozy model upload hf://black-forest-labs/FLUX.2-klein-9B@92196c8e11f7b6cf2b7493e037d8c5345c559216 flux-2-klein-9b --lane bf16 --on <machine>
 cozy model upload hf://black-forest-labs/FLUX.2-klein-base-9B@32773329fbe7e81a90ef971740e8ba4b0364ecf3 flux-2-klein-9b-base --lane bf16 --on <machine>
 cozy model upload hf://black-forest-labs/FLUX.2-klein-4B@e7b7dc27f91deacad38e78976d1f2b499d76a294 flux-2-klein-4b --lane bf16 --on <machine>
@@ -88,9 +88,9 @@ do the VAE and Mistral's vision tower. Each lane is written from the 16-bit uplo
 them all:
 
 ```sh
-cozy model quantize flux-2-dev@sha256:<bf16 commit> --lane int8 --package flux-2 --on <machine>
-cozy model quantize flux-2-dev@sha256:<bf16 commit> --lane nvfp4 --package flux-2 --on <machine>
-cozy model publish flux-2-dev 0.1.0 sha256:<bf16 commit> sha256:<int8 commit> sha256:<nvfp4 commit>
+cozy model quantize black-forest-labs/flux-2-dev@sha256:<bf16 commit> --lane int8 --package flux-2 --on <machine>
+cozy model quantize black-forest-labs/flux-2-dev@sha256:<bf16 commit> --lane nvfp4 --package flux-2 --on <machine>
+cozy model publish black-forest-labs/flux-2-dev 0.1.0 sha256:<bf16 commit> sha256:<int8 commit> sha256:<nvfp4 commit>
 ```
 
 Measured on an A40 (int8), seconds per step at 1 MP: [dev] 1.93, [klein] 4B 0.62 (bf16 0.82), [klein] 9B

@@ -25,7 +25,7 @@ DiTs and the text conditioner's 350 decoder linears, and in int8, nvfp4 and w4a8
 decoder's 216 block linears at int8.convrot, encoding what is still plain; CPU:
 
 ```sh
-cozy model quantize minimax-h3@sha256:<pruned commit> --lane fp8 --package minimax-h3-tools --on NAME
+cozy model quantize minimaxai/minimax-h3@sha256:<pruned commit> --lane fp8 --package minimax-h3-tools --on NAME
 ```
 
 The conditioner keeps `embed_tokens` and its vision tower at bf16 (`lanes.TEXT_ENCODER_KEEP`); a

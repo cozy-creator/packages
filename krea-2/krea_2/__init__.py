@@ -72,7 +72,7 @@ _COMPONENTS = {"model": ("transformer", "text_encoder", "vae")}
 _MEMO = ("krea_2", "krea_2.model")
 
 
-@app.entrypoint(defaults={"model": "krea-2@0.1.0"}, components=_COMPONENTS, memoize=Memoize(requires=["seed"]),
+@app.entrypoint(defaults={"model": "krea/krea-2@0.1.0"}, components=_COMPONENTS, memoize=Memoize(requires=["seed"]),
                 memo_dependencies=_MEMO)
 def generate(ctx: Context, payload: GenerateInput, model: Krea2, out: Outputs, tel: Telemetry,
              adj: Adjustments) -> ImageResult:
@@ -80,7 +80,7 @@ def generate(ctx: Context, payload: GenerateInput, model: Krea2, out: Outputs, t
     return _generate(ctx, payload, model, out, tel, adj, distilled=False)
 
 
-@app.entrypoint(defaults={"model": "krea-2-turbo@0.1.0"}, components=_COMPONENTS,
+@app.entrypoint(defaults={"model": "krea/krea-2-turbo@0.1.0"}, components=_COMPONENTS,
                 memoize=Memoize(requires=["seed"]), memo_dependencies=_MEMO)
 def generate_turbo(ctx: Context, payload: GenerateInput, model: Krea2, out: Outputs, tel: Telemetry,
                    adj: Adjustments) -> ImageResult:

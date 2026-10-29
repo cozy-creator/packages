@@ -50,8 +50,9 @@ dependencies or qualifying a worker image.
 ## Model defaults
 
 A package publishes model slots (`<callable>.models.<param>`) and, beside the callable, each
-slot's default release: `defaults={"model": "sdxl@1.0.0"}`. A default names a release, never a
-lane; an org-less one names a first-party model. To change a default, publish the package
+slot's default release: `defaults={"model": "stabilityai/sdxl@1.0.0"}`. A default names a release, never a
+lane. Upstream models live in their authors' parked orgs (`stabilityai/sdxl`); an org-less one names a model we
+make ourselves. To change a default, publish the package
 again. A request overrides one slot with `model.<param>=<org/model@release>`. A lane is one
 commit in the release; `<org/model>@sha256:<commit>` pins one.
 
@@ -117,8 +118,8 @@ Four-GPU placement is chosen when submitting the run, not by the composition fun
 The `fl2va_turbo` and `ref2va_turbo` functions take two independent model slots:
 `base_model: H3TurboBase` holds an AdaLN-pruned five-root checkpoint, and
 `turbo_lora: H3TurboLoRA` holds only `fl2va_turbo` and `ref2va_turbo`. Both
-checkpoints must have matching DiT configurations. They default to `minimax-h3@1.0.0-rc.4` and
-`minimax-h3-turbo-lora@1.0.1`; callers can select other releases that carry timestep plans.
+checkpoints must have matching DiT configurations. They default to `minimaxai/minimax-h3@1.0.0-rc.4` and
+`alibaba-pai/minimax-h3-turbo-lora@1.0.1`; callers can select other releases that carry timestep plans.
 Each sampling scope holds its base DiT and separate overlay together. LoRA hooks
 are installed during construction, before Runtime chooses fusion or Ulysses
 execution. All three model classes declare degrees 2 and 4.
@@ -271,7 +272,7 @@ AdaLN-pruned extension inherits Diffusers' forward and changes only those projec
 does not interpolate a curve or carry a second model port. The machine selects the lane before
 fetch (Model defaults above); model computation and environment variables do not choose one.
 
-`minimax-h3@1.0.0-rc.4` serves AdaLN-pruned lanes `bf16`, `fp8`, `int8` and `nvfp4`, and the
+`minimaxai/minimax-h3@1.0.0-rc.4` serves AdaLN-pruned lanes `bf16`, `fp8`, `int8` and `nvfp4`, and the
 FULL reference lane `bf16-full`. `adaln-curve` is reserved for approximate community curve
 artifacts and is not a lane.
 
@@ -400,7 +401,7 @@ Turn it on per request when throughput matters more than faces.
 
 ### Card conventions, for whoever is writing the prompt
 
-`anima@1.0.0` is CircleStone Labs **Anima Base v1.0** (`circlestone-labs/Anima-Base-v1.0-Diffusers`).
+`circlestone-labs/anima@1.0.0` is CircleStone Labs **Anima Base v1.0** (`circlestone-labs/Anima-Base-v1.0-Diffusers`).
 
 - **Two independent quality-tag systems**, and any combination of them works: the
   aesthetic-classifier buckets `score_1`…`score_9` (`score_9` is the maximum; the card

@@ -28,7 +28,7 @@ INT8 = Recipe(
 )
 
 
-@app.entrypoint(defaults={"model": "qwen3.5-9b@0.2.0"}, memoize=True, memo_version="ask-v1")
+@app.entrypoint(defaults={"model": "qwen/qwen3.5-9b@0.2.0"}, memoize=True, memo_version="ask-v1")
 def ask(ctx: Context, payload: AskRequest, model: VisionLM, tel: Telemetry) -> AskResult:
     """Answer each prompt about its text, images and videos, all prompts in one pass."""
     return vlm.ask(ctx, payload, model, tel)

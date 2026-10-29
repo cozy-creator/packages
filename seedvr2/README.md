@@ -75,4 +75,4 @@ tfs import \
   --name seedvr2-7b
 ```
 
-Publish the result as `seedvr2-7b@0.1.0`, lane `bf16`: the package's default release.
+Publish the result as `bytedance-seed/seedvr2-7b@0.1.0`, lane `bf16`: the package's default release.

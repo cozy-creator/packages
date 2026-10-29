@@ -1,6 +1,6 @@
 [project]
 name = "flux-3-klein"
-version = "0.1.0"
+version = "0.1.1"
 description = "Cozy text-to-image and reference editing with FLUX.3 Image Klein, distilled and base"
 requires-python = ">=3.12"
 dependencies = [
