@@ -6,12 +6,12 @@ Diffusers has no MOSS-Image. The text encoder is Transformers' Qwen3.5 text mode
 `AutoencoderKLFlux2`. Runtime constructs and fills the modules and owns their residency; the denoise is
 one `denoise_loop`.
 
-On a GPU a DiT block runs as ComfyUI's MOSS-Image does, with the Runtime's public kernels: each
-modulated RMSNorm comes out of the int8 leaves' quantization pass (`int8_rows`, the norm weight folded
-into `1 + scale`), the q/k norms and split-half RoPE are one kernel (`rms_rope_split_half`), SiTU is
-this package's (`glue`) and each gated residual one in-place `addcmul`. The int8 lane's DiT blocks
+On a GPU a DiT block runs as ComfyUI's MOSS-Image does, with the Runtime's prebuilt kernels: each
+modulated RMSNorm and SiTU comes out of the int8 leaves' quantization pass (`int8_rows`, the norm
+weight folded into `1 + scale`), the q/k norms and split-half RoPE are one kernel
+(`rms_rope_split_half`) and each gated residual one in-place `addcmul`. The int8 lane's DiT blocks
 attend at 8 bits, as Comfy-Org's int8 file declares (`comfy_attention.config`); the bf16 lane stays
-exact. On the CPU every block runs upstream's eager composition.
+exact. Elsewhere (the CPU, the bf16 lane's norms and SiTU) a block runs upstream's eager composition.
 """
 
 from __future__ import annotations
@@ -34,7 +34,7 @@ from cozy_runtime.author import (
     hold_dtype,
     uses_components,
 )
-from cozy_runtime.author.kernels import Launch, Plan, int8_rows, native, quantize_once, rms_rope_split_half
+from cozy_runtime.author.kernels import PreQuantized, int8_rows, native, quantize_once, rms_rope_split_half
 from diffusers import AutoencoderKLFlux2, FlowMatchEulerDiscreteScheduler
 from diffusers.configuration_utils import register_to_config
 from diffusers.image_processor import VaeImageProcessor
@@ -43,8 +43,6 @@ from tokenizers import Tokenizer
 from transformers import PreTrainedTokenizerFast, Qwen3_5Config
 from transformers.initialization import no_init_weights
 from transformers.models.qwen3_5.modeling_qwen3_5 import Qwen3_5TextModel
-
-from . import glue
 
 #: The DiT's activations and the dtype upstream casts each linear's input to (its weights' in bf16).
 DTYPE = torch.bfloat16
@@ -85,6 +83,10 @@ def attention(
 ) -> torch.Tensor:
     shape = (*q.shape[:2], site.heads, site.head_dim)
     return site(rotate(q.reshape(shape), rope), rotate(k.reshape(shape), rope), v.reshape(shape)).flatten(2)
+
+
+def path(rows: Any) -> str:
+    return "int8 prologue" if isinstance(rows, PreQuantized) else "eager"
 
 
 def modulated(x: torch.Tensor, norm: RMSNorm, scale: torch.Tensor, shift: torch.Tensor,
@@ -146,8 +148,8 @@ class Block(torch.nn.Module):
         )
         self.proj["ffn_up_gate"] = torch.nn.Linear(dim, 2 * ffn_dim, bias=False)
         self.proj["ffn_down"] = torch.nn.Linear(ffn_dim, dim, bias=False)
-        #: The package's SiTU kernel once it is built here (`glue.install`); eager until then.
-        self.situ_launch: Launch | None = None
+        #: How its last call ran the modulated norms and SiTU, for the run record.
+        self.served = {"norms": "", "situ": ""}
 
     def forward(self, x: torch.Tensor, rope: torch.Tensor, modulation: torch.Tensor) -> torch.Tensor:
         shift_a, scale_a, gate_a, shift_f, scale_f, gate_f = modulation.unbind(1)
@@ -162,7 +164,8 @@ class Block(torch.nn.Module):
             q, k = rotate(self.q_norm(q), rope), rotate(self.k_norm(k), rope)
         x.addcmul_(proj["o"](self.attn(q, k, v).flatten(2)), gate_a[:, None])
         hidden = proj["ffn_up_gate"](modulated(x, self.norm2, scale_f, shift_f, (proj["ffn_up_gate"],)))
-        activated = None if self.situ_launch is None else glue.situ(self.situ_launch, hidden)
+        activated = int8_rows(hidden, (proj["ffn_down"],), activation="situ")
+        self.served = {"norms": path(rows), "situ": path(activated)}
         if activated is None:
             activated = situ(*hidden.chunk(2, -1))
         return x.addcmul_(proj["ffn_down"](activated), gate_f[:, None])
@@ -319,9 +322,6 @@ class MossImage(Model[MossGraph], encoded_leaves="accept", attention_bits={"tran
         self.graph = loader.construct(MossGraph, factory=MossGraph)
         self.tokenizer = build_tokenizer(loader.assets)
 
-    def execution_plan(self, plan: Plan) -> str:
-        return glue.install(plan, list(self.graph.components["transformer"].layers))
-
     def hold_vae(self, tel: Telemetry) -> None:
         """Decode in bf16 where the GPU computes it natively, as ComfyUI stages FLUX.2's VAE; the
         checkpoint stores F32, which the CPU and other GPUs keep. The Runtime casts the stored bytes
@@ -365,6 +365,7 @@ class MossImage(Model[MossGraph], encoded_leaves="accept", attention_bits={"tran
         guidance: float,
         seed: int,
         on_step: Callable[[int], None],
+        tel: Telemetry,
     ) -> torch.Tensor:
         """Upstream's sampler as one `denoise_loop`: f32 noise from `seed` on the CPU, CFG against
         `negative` with block 22 skipped in its branch, Euler in f32. Returns the latents
@@ -406,6 +407,7 @@ class MossImage(Model[MossGraph], encoded_leaves="accept", attention_bits={"tran
             latents.add_(deltas.index_select(0, i) * prediction)
 
         denoise_loop(step, range(len(times)), state=(latents,), inputs=(times, deltas, *branches), on_step=on_step)
+        tel.log("dit block", rope="fused" if fused else "eager", **blocks[0].served)
         return latents.cpu()
 
     @uses_components("vae")

@@ -63,7 +63,7 @@ def layout_prompt(prompt: str, regions: list[Region] | None, width: int, height:
     return json.dumps(layout, ensure_ascii=False, separators=(",", ":"))
 
 
-_MEMO = ("moss_image", "moss_image.model", "moss_image.glue")
+_MEMO = ("moss_image", "moss_image.model")
 
 
 @app.entrypoint(defaults={"model": "moss-image@0.1.0"}, components={"model": ("transformer", "text_encoder", "vae")},
@@ -91,7 +91,7 @@ def generate(ctx: Context, payload: GenerateInput, model: MossImage, out: Output
     with tel.stage("generating image", overall_range=(0.05, 0.97)):
         latents = model.denoise(
             positive, negative, width=width, height=height, steps=steps,
-            guidance=guidance, seed=seed,
+            guidance=guidance, seed=seed, tel=tel,
             on_step=tel.step_callback(steps, stage="generating image", overall_range=(0.05, 0.97)),
         )
     with tel.stage("decoding image", overall_range=(0.97, 0.99)):
