@@ -121,9 +121,9 @@ def denoise_refine(
     """The Regenerate refine (NVlabs `open_h3/pipeline.py` `refine`) as a `denoise_loop`: Euler on
     the video rows `video` alone, every step's velocity from the FL2VA DiT under `overlay`.
 
-    `windows` are row spans of `video` sharing one packed layout (`fields`; RoPE is relative, so a
-    window's own positions serve every window), `weights` their per-row blend; one span is the
-    whole canvas. `audio` is the clean conditioning rows one window carries; `plan` each step's
+    `windows` are equal row spans of `video`, each laid out as a clip of its own (`fields`: H3's
+    positions start at every clip's text), so one layout and one rotary table serve them all;
+    `weights` are their per-row blend. One span is the whole canvas. `audio` is the clean conditioning rows one window carries; `plan` each step's
     `(timesteps, timestep_indices)`.
     """
     position_ids, tags = fields["position_ids"], fields["token_tags"]

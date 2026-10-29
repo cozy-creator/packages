@@ -177,8 +177,10 @@ async def regenerate_lora(
         write_config(out, canonical_json.encode(document))
         if out.done is None:
             out.component(COMPONENT).asset(TIMESTEP_PLAN, refine.canonical_bytes)
-        for site, (inputs, outputs) in _sites(config).items():
+        sites = _sites(config)
+        for done, (site, (inputs, outputs)) in enumerate(sites.items()):
             ctx.raise_if_cancelled()
+            tel.progress(done / len(sites), stage="regenerate-factors")
             for suffix, key, shape in (
                 ("lora_down", f"{site}.lora_A.weight", (RANK, inputs)),
                 ("lora_up", f"{site}.lora_B.weight", (outputs, RANK)),
