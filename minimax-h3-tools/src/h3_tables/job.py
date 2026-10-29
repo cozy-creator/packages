@@ -664,3 +664,8 @@ app.entrypoint(
 from .turbo import turbo_lora  # noqa: E402
 
 app.entrypoint(turbo_lora, name="turbo-lora", weights=(WeightsOutput("pdd8", 1 << 29),))
+
+from .regenerate import regenerate_lora  # noqa: E402
+
+# New bytes: the rank-576 factors cast to bf16 (6.2 GB) and the refine tables.
+app.entrypoint(regenerate_lora, name="regenerate-lora", weights=(WeightsOutput("bf16", 7 << 30),))

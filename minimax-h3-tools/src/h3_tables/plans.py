@@ -33,6 +33,9 @@ _TOP_LEVEL = {
     "video_shift",
 }
 _SCHEDULE = {"transformer_evaluations", "sigma_grid_points", "evaluations", "terminal"}
+#: A refine plan (`"kind": "refine"`) re-noises a finished latent to its schedule's first video sigma
+#: and denoises video alone: every evaluation's audio sigma is zero, its rows clean conditioning.
+REFINE = "refine"
 
 
 @dataclass(frozen=True, slots=True)
@@ -43,6 +46,9 @@ class TimestepPlan:
     timesteps: tuple[float, ...]
     block_rows: tuple[tuple[int, int], ...]
     steps: tuple[int, ...]
+    #: Each schedule's first video sigma; a refine plan's schedules differ by it.
+    starts: tuple[float, ...] = ()
+    refine: bool = False
 
     @property
     def table_keys(self) -> dict[str, Any]:
@@ -91,8 +97,11 @@ _EXPECTED_CLASSES = (
 )
 
 
-def _parse_schedule(value: object, field: str, class_rows: list[dict[str, Any]]) -> int:
-    """Validate one schedule, append its row classes in order, return its step count."""
+def _parse_schedule(
+    value: object, field: str, class_rows: list[dict[str, Any]], *, refine: bool = False
+) -> tuple[int, float]:
+    """Validate one schedule, append its row classes in order, return its step count and first
+    video sigma."""
     schedule = _closed(value, _SCHEDULE, field)
     grid_points = schedule["sigma_grid_points"]
     forwards = schedule["transformer_evaluations"]
@@ -155,12 +164,18 @@ def _parse_schedule(value: object, field: str, class_rows: list[dict[str, Any]])
             if _hex_f32(item["timestep"], f"{name} timestep") != timestep:
                 raise ValueError(f"{name} row class {position} has the wrong timestep")
             class_rows.append(item)
+    if refine:
+        if not 0.0 < video_sigmas[0] <= 1.0 or any(a <= b or b <= 0.0 for a, b in pairwise(video_sigmas)):
+            raise ValueError(f"{field} video sigmas are not strictly descending within (0, 1]")
+        if any(sigma != 0.0 for sigma in audio_sigmas):
+            raise ValueError(f"{field} refines video alone: every audio sigma is zero")
+        return forwards, video_sigmas[0]
     for modality, sigmas in (("video", video_sigmas), ("audio", audio_sigmas)):
         if sigmas[0] != 1.0 or any(a <= b or b <= 0.0 for a, b in pairwise(sigmas)):
             raise ValueError(
                 f"{field} {modality} sigmas are not strictly descending from one toward zero"
             )
-    return forwards
+    return forwards, video_sigmas[0]
 
 
 def parse_plan(raw: bytes, *, task: str) -> TimestepPlan:
@@ -172,7 +187,10 @@ def parse_plan(raw: bytes, *, task: str) -> TimestepPlan:
         decoded = canonical_json.decode(raw)
     except ValueError as exc:
         raise ValueError("timestep plan is not JSON") from exc
-    document = _closed(decoded, _TOP_LEVEL, "TimestepPlan")
+    refine = isinstance(decoded, dict) and "kind" in decoded
+    document = _closed(decoded, _TOP_LEVEL | ({"kind"} if refine else set()), "TimestepPlan")
+    if refine and document["kind"] != REFINE:
+        raise ValueError(f"timestep plan kind {document['kind']!r} is not {REFINE!r}")
     canonical = _canonical(document)
     typed_task: Task = task
     if document["task"] != task:
@@ -196,11 +214,14 @@ def parse_plan(raw: bytes, *, task: str) -> TimestepPlan:
     if not isinstance(schedules, list) or not schedules:
         raise ValueError("the plan must list at least one schedule")
     class_rows: list[dict[str, Any]] = []
-    steps = tuple(
-        _parse_schedule(value, f"schedules[{index}]", class_rows)
+    parsed = [
+        _parse_schedule(value, f"schedules[{index}]", class_rows, refine=refine)
         for index, value in enumerate(schedules)
-    )
-    if any(left >= right for left, right in pairwise(steps)):
+    ]
+    steps, starts = tuple(n for n, _ in parsed), tuple(start for _, start in parsed)
+    if refine and any(left >= right for left, right in pairwise(starts)):
+        raise ValueError("refine schedules must be listed by strictly ascending start sigma")
+    if not refine and any(left >= right for left, right in pairwise(steps)):
         raise ValueError("schedules must be listed by strictly ascending step count")
 
     keys = _closed(
@@ -242,7 +263,60 @@ def parse_plan(raw: bytes, *, task: str) -> TimestepPlan:
         for row in block_expected
     )
     digest = canonical_json.digest(document)
-    return TimestepPlan(typed_task, digest, canonical, timesteps, block_rows, steps)
+    return TimestepPlan(typed_task, digest, canonical, timesteps, block_rows, steps, starts, refine)
+
+
+def refine_plan(task: Task, schedules: list[tuple[float, ...]], *, shift: float) -> TimestepPlan:
+    """The canonical refine plan of `schedules` (each its video sigmas, terminal zero excluded),
+    as minimax-h3's `TimestepPlan(kind="refine")` writes it, parsed back."""
+
+    def hexf(value: float) -> str:
+        return _f32(value).hex()
+
+    def modulation(name: str, timestep: float, modality: str, tag: int, presence: str) -> dict[str, Any]:
+        return {"name": name, "timestep": hexf(timestep), "modality": modality,
+                "modality_tag": tag, "presence": presence}  # fmt: skip
+
+    document_schedules, blocks, finals = [], [], []
+    seen_blocks: set[tuple[str, int]] = set()
+    seen_final: set[str] = set()
+    for sigmas in schedules:
+        evaluations = []
+        for index, sigma in enumerate(sigmas):
+            video = _f32(1.0 - _f32(sigma))
+            classes = [
+                modulation("target_video", video, "video", 0, "always"),
+                modulation("text", video, "text", 1, "always"),
+                modulation("target_audio", 1.0, "audio", 2, "always"),
+                modulation("condition_video", max(video, _f32(0.999)), "video", 0, "if_condition_video_rows"),
+                modulation("condition_audio", 1.0, "audio", 2, "if_condition_audio_rows"),
+            ]
+            evaluations.append({"index": index, "video_sigma": hexf(sigma), "audio_sigma": hexf(0.0),
+                                "modulation_classes": classes})  # fmt: skip
+            for item in classes:
+                pair = (item["timestep"], item["modality_tag"])
+                if pair not in seen_blocks:
+                    seen_blocks.add(pair)
+                    blocks.append({"index": len(blocks), "timestep": pair[0],
+                                   "modality": item["modality"], "modality_tag": pair[1]})  # fmt: skip
+                if pair[0] not in seen_final:
+                    seen_final.add(pair[0])
+                    finals.append({"index": len(finals), "timestep": pair[0]})
+        document_schedules.append({
+            "transformer_evaluations": len(sigmas), "sigma_grid_points": len(sigmas) + 1,
+            "evaluations": evaluations,
+            "terminal": {"video_sigma": hexf(0.0), "audio_sigma": hexf(0.0), "transformer_evaluation": False},
+        })  # fmt: skip
+    document = {
+        "task": task, "kind": REFINE, "scalar_encoding": "ieee754-binary32-hex",
+        "scheduler_semantics": "minimax-h3-data-ward-rf-euler/1",
+        "row_timestep_reduction": "unique-sorted-return-inverse",
+        "adaln_row_index": "timestep_index*3+modality_tag", "final_norm_row_index": "timestep_index",
+        "table_order": "first-distinct-evaluation-class-occurrence", "fps": 24,
+        "video_shift": hexf(shift), "audio_shift": hexf(1.0), "schedules": document_schedules,
+        "table_keys": {"block_modulation": blocks, "final_normalization": finals},
+    }  # fmt: skip
+    return parse_plan(_canonical(document), task=task)
 
 
 def parse_declared_plan(raw: bytes) -> TimestepPlan:

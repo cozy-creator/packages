@@ -6,9 +6,10 @@ labelled by the checkpoint before those dynamic modules were pruned. The remaini
 transformer graph, including attention, feed-forward, RoPE, input/output projections,
 and packed-row indexing, stays upstream code.
 
-A turbo overlay (`turbo.py`) attaches beside the DiT and is served per forward: the forward
-that names its bank in `attention_kwargs` reads the overlay's tables, heads and low-rank
-factors through the same modules; every other forward reads the base tables it always did.
+An overlay (`overlay.py`: PDD-8 turbo, the Regenerate refine) attaches beside the DiT and is
+served per forward: the forward that names its bank in `attention_kwargs`, or runs inside a
+denoise loop that engaged it, reads the overlay's tables, heads and low-rank factors through the
+same modules; every other forward reads the base tables it always did.
 """
 
 from __future__ import annotations
@@ -35,13 +36,12 @@ from cozy_runtime import lora
 from cozy_runtime.author import ConformanceError
 
 from .fit import release_if_tight
-from .turbo import (
+from .overlay import (
     ATTENTION_KWARG,
     LORA_FAMILIES,
     OVERLAY_KWARG,
-    TURBO_BANK,
-    TurboArming,
-    TurboOverlay,
+    Overlay,
+    OverlayArming,
     armed,
 )
 
@@ -52,13 +52,15 @@ class StepInvariants:
     unmodified (the same objects at the same in-place version) under the same turbo overlay, so
     a layout change (a clip's rows leaving before the first sparse step) recomputes it.
     `checked`: the denoise checked every step's rows before its loop, so its forwards read no
-    device value on the host (a `denoise_loop` step)."""
+    device value on the host (a `denoise_loop` step). `overlay`: the one overlay that loop's every
+    forward is served under, engaged for each (it has no per-step heads)."""
 
-    __slots__ = ("checked", "held")
+    __slots__ = ("checked", "held", "overlay")
 
-    def __init__(self, checked: bool = False) -> None:
+    def __init__(self, checked: bool = False, overlay: Overlay | None = None) -> None:
         self.held: dict[str, tuple[tuple[tuple[object, int], ...], Any]] = {}
         self.checked = checked
+        self.overlay = overlay
 
     def get(self, name: str, inputs: tuple[object, ...], compute: Callable[[], Any]) -> Any:
         key = tuple((value, getattr(value, "_version", 0)) for value in inputs)
@@ -83,9 +85,16 @@ _STEP_INVARIANTS: ContextVar[StepInvariants | None] = ContextVar(
 
 
 @contextmanager
-def step_invariants(*, checked: bool = False) -> Iterator[StepInvariants]:
+def step_invariants(
+    *, checked: bool = False, overlay: Overlay | None = None
+) -> Iterator[StepInvariants]:
     """One denoise loop's step invariants, dropped when it ends."""
-    memo = StepInvariants(checked)
+    if overlay is not None and (overlay.heads or not checked):
+        raise ConformanceError(
+            "a denoise loop engages only a checked overlay without per-step heads",
+            code="artifact_config",
+        )
+    memo = StepInvariants(checked, overlay)
     token = _STEP_INVARIANTS.set(memo)
     try:
         yield memo
@@ -268,7 +277,7 @@ class AdaLNPrunedMiniMaxH3Transformer(MiniMaxH3Transformer3DModel):  # type: ign
         for name in ("proj_out", "audio_proj_out"):
             head = cast(nn.Linear, getattr(self, name))
             setattr(self, name, _SelectableHead(head.in_features, head.out_features))
-        self._arming: TurboArming | None = None
+        self._arming: OverlayArming | None = None
         self._lora_hooks_installed = False
 
     @apply_lora_scale("attention_kwargs")  # type: ignore[untyped-decorator]
@@ -295,6 +304,8 @@ class AdaLNPrunedMiniMaxH3Transformer(MiniMaxH3Transformer3DModel):  # type: ign
         memo = _STEP_INVARIANTS.get()
         if memo is None or not memo.checked:
             self._arm(timestep, timestep_indices, token_tags, attention_kwargs)
+        elif memo.overlay is not None:
+            self._engage(memo.overlay, 0)
         del attention_kwargs  # `apply_lora_scale` consumed its scale
         try:
             sequence_length = position_ids.shape[0]
@@ -393,17 +404,18 @@ class AdaLNPrunedMiniMaxH3Transformer(MiniMaxH3Transformer3DModel):  # type: ign
             if bank is not None:
                 overlay = selector.get(OVERLAY_KWARG) if isinstance(selector, Mapping) else None
                 if (
-                    bank != TURBO_BANK
-                    or not isinstance(overlay, TurboOverlay)
+                    not isinstance(overlay, Overlay)
+                    or overlay.bank != bank
                     or not self._lora_hooks_installed
                 ):
                     raise ConformanceError(
-                        f"bank {bank!r} requires a turbo-capable base and prepared "
-                        "overlay component",
+                        f"bank {bank!r} requires an overlay-capable base and that bank's "
+                        "prepared overlay component",
                         code="artifact_config",
                         fields=["attention_kwargs", ATTENTION_KWARG],
                     )
-                self._engage(overlay, overlay.schedule.step(timestep))
+                step = overlay.schedule.step(timestep) if overlay.heads else 0
+                self._engage(overlay, step)
                 tables = overlay
             global_rows = self.time_proj.rows(timestep)
             row_timesteps = global_rows.index_select(0, timestep_indices)
@@ -419,13 +431,13 @@ class AdaLNPrunedMiniMaxH3Transformer(MiniMaxH3Transformer3DModel):  # type: ign
             self._release()
             raise
 
-    def _engage(self, overlay: TurboOverlay, step: int) -> None:
-        self._arming = TurboArming(overlay, step)
+    def _engage(self, overlay: Overlay, step: int) -> None:
+        self._arming = OverlayArming(overlay, step)
         self.time_proj._armed = _Armed(overlay)
         for block, source in zip(self.transformer_blocks, overlay.transformer_blocks, strict=True):
             block.adaln_proj._armed = _Armed(source.adaln_proj)
         self.norm_out._armed = _Armed(overlay.norm_out)
-        for name in ("proj_out", "audio_proj_out"):
+        for name in ("proj_out", "audio_proj_out") if overlay.heads else ():
             head = _projection_base(getattr(self, name))
             if not isinstance(head, _SelectableHead):
                 raise ConformanceError(

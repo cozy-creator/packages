@@ -13,12 +13,14 @@ import queue
 from collections.abc import Awaitable, Callable, Iterable, Iterator, Sequence
 from concurrent.futures import Future
 from contextlib import suppress
+from dataclasses import dataclass
 from enum import Enum
 from fractions import Fraction
 from functools import partial
 from typing import Annotated, Any, Literal, cast
 
 import msgspec
+import numpy as np
 import torch
 from cozy_runtime.author import (
     App,
@@ -68,8 +70,11 @@ from minimax_h3.continuation import (
     encode_context,
 )
 from minimax_h3.guide_rows import GuideClip
+from minimax_h3 import regenerate as refine_math
 from minimax_h3.model import (
+    H3LatentUpscaler as H3LatentUpscaler,
     H3Model as H3Model,
+    H3RegenerateLoRA as H3RegenerateLoRA,
     H3TurboBase as H3TurboBase,
     H3TurboLoRA as H3TurboLoRA,
     condition_references,
@@ -80,6 +85,7 @@ from minimax_h3.official import (
     MAX_CONDITIONER_VISION_TOKENS,
     MAX_FRAMES,
     MAX_IMAGE_REFERENCES,
+    MIN_FRAMES,
     MAX_REFERENCES,
     MAX_VIDEO_REFERENCES,
     REFERENCE_IMAGE_SHORT_EDGE,
@@ -310,7 +316,7 @@ class ReferenceStandardClipInput(ReferenceClipInput, kw_only=True):
 
 
 class Resolution(Enum):
-    """Native 768p, or SeedVR2 7B restoration of the 768p original above it."""
+    """The output size: native 768p, or above it through `upscale.method`."""
 
     NATIVE = "768p"
     FULL_HD = "1080p"
@@ -318,9 +324,33 @@ class Resolution(Enum):
     UHD = "2160p"
 
 
-class Upscale(msgspec.Struct, kw_only=True):
-    """SeedVR2's ComfyUI controls (seedvr2 README, Tuning); unset fields keep SeedVR2's defaults."""
+#: The refine starts the Regenerate overlay serves (`open-h3-regenerate-2k@0.1.0`'s plan).
+REGENERATE_STRENGTHS = (0.7, 0.8, 0.909)
+_SEEDVR2_FIELDS = (
+    "color_correction", "input_noise_scale", "latent_noise_scale", "batch_size",
+    "uniform_batch_size", "temporal_overlap", "prepend_frames",
+)  # fmt: skip
 
+
+class Upscale(msgspec.Struct, kw_only=True):
+    """How `resolution` is reached (UPSCALE.md).
+
+    `method`:
+    - `seedvr2` (default): SeedVR2 7B restores the decoded 768p original. The 7:4 frame is
+      letterboxed into 16:9. The other fields are its ComfyUI controls (seedvr2 README, Tuning);
+      unset ones keep SeedVR2's defaults.
+    - `regenerate` (NVIDIA's Open-H3-Regenerate-2K): the render's own 768p latent is upscaled in
+      latent space and re-rendered at `resolution` by H3 in three steps (two at 0.8 and 0.7). It fills
+      16:9: the 7:4 frame is stretched 1.6% horizontally, as NVIDIA trained it, where SeedVR2
+      letterboxes. At `768p` it is a refine-only pass at the native size.
+
+    `strength` (regenerate): how much of the source the refine redraws, as its start noise:
+    0.909 (default, NVIDIA's), 0.8 or 0.7. Lower keeps more of the source (faces, on-screen text)
+    and is faster; higher invents more detail.
+    """
+
+    method: Literal["seedvr2", "regenerate"] = "seedvr2"
+    strength: float | None = None
     color_correction: (
         Literal["lab", "wavelet", "wavelet_adaptive", "hsv", "adain", "none"] | None
     ) = None
@@ -336,10 +366,25 @@ class Upscale(msgspec.Struct, kw_only=True):
             raise ValueError(
                 f"batch_size must be 4n+1 (1, 5, 9, 13, 17, 21, ...), got {self.batch_size}"
             )
+        if self.strength is not None and round(self.strength, 3) not in REGENERATE_STRENGTHS:
+            raise ValueError(
+                f"strength is one of {', '.join(map(str, REGENERATE_STRENGTHS))}, got {self.strength}"
+            )
+
+    def ignored(self) -> list[str]:
+        """Warnings for the fields the chosen method does not read."""
+        if self.method == "regenerate":
+            unused = [name for name in _SEEDVR2_FIELDS if getattr(self, name) is not None]
+            return [f"upscale.{name} applies to seedvr2 only" for name in unused]
+        return ["upscale.strength applies to regenerate only"] if self.strength is not None else []
+
+    @property
+    def start(self) -> float:
+        return REGENERATE_STRENGTHS[-1] if self.strength is None else self.strength
 
 
 class RenderInput(ClipInput, kw_only=True):
-    """`upscale` passes SeedVR2's controls through above 768p (UPSCALE.md: Tuning)."""
+    """`upscale` picks how `resolution` is reached and passes its controls (UPSCALE.md)."""
 
     resolution: Resolution = Resolution.NATIVE
     upscale: Upscale | None = None
@@ -645,25 +690,8 @@ def _finish(
     if completed is not None:
         # The successor's carry: a slice of the denoised latents, before either decode.
         completed(state)
-    with tel.stage("decode_audio", overall_range=(0.85, 0.90)):
-        audio, sample_rate = model.decode_audio(task, state)
-        release_rate = model.pipe.sample_rate
-        if audio.ndim != 3 or int(audio.shape[0]) != 1 or sample_rate != release_rate:
-            raise OutputError(
-                f"official H3 audio decode returned shape {tuple(audio.shape)} at {sample_rate}Hz; "
-                f"the release clock is {release_rate}Hz",
-                code="output_integrity",
-            )
-        waveform = audio[0].to(torch.float32).contiguous().cpu()
-    cancel()
     frames = frames_for(duration_s) if delivered_frames is None else delivered_frames
-    clock = MediaFacts(frames=frames, fps=FPS, sample_rate=sample_rate)
-    refuse_before_encode(
-        waveform=waveform,
-        audio_nonfinite_fraction=_nonfinite_fraction(torch, waveform),
-        requested=clock,
-        tel=tel,
-    )
+    waveform, sample_rate = _soundtrack(model, task, state, frames=frames, tel=tel, cancel=cancel)
 
     # The encoder runs under the decode (h3a-017): each chunk is quantized on its device
     # and landed in the host buffer while a worker feeds the runtime's streaming MP4 sink.
@@ -733,6 +761,160 @@ def _finish(
     return H3VideoOutput(video=saved.video, warnings=[])
 
 
+def _soundtrack(
+    model: H3Model, task: Task, state: Any, *, frames: int, tel: Telemetry, cancel: Any
+) -> tuple[Any, int]:
+    """The render's decoded `(channels, samples)` soundtrack, checked against its clock."""
+    with tel.stage("decode_audio", overall_range=(0.85, 0.90)):
+        audio, sample_rate = model.decode_audio(task, state)
+        release_rate = model.pipe.sample_rate
+        if audio.ndim != 3 or int(audio.shape[0]) != 1 or sample_rate != release_rate:
+            raise OutputError(
+                f"official H3 audio decode returned shape {tuple(audio.shape)} at {sample_rate}Hz; "
+                f"the release clock is {release_rate}Hz",
+                code="output_integrity",
+            )
+        waveform = audio[0].to(torch.float32).contiguous().cpu()
+    cancel()
+    refuse_before_encode(
+        waveform=waveform,
+        audio_nonfinite_fraction=_nonfinite_fraction(torch, waveform),
+        requested=MediaFacts(frames=frames, fps=FPS, sample_rate=sample_rate),
+        tel=tel,
+    )
+    return waveform, sample_rate
+
+
+@dataclass(frozen=True)
+class RegenerateTarget:
+    """What a render call hands its finished latent to: the Regenerate refine at `resolution`."""
+
+    overlay: H3RegenerateLoRA
+    upscaler: H3LatentUpscaler
+    resolution: str
+    strength: float
+    seed: int
+    #: The request's prompt, re-encoded as text alone when the render's conditioning is not.
+    prompt: str
+
+
+def _finish_regenerated(
+    model: H3Model,
+    task: Task,
+    state: Any,
+    schedule: ScheduleFacts,
+    *,
+    target: RegenerateTarget,
+    duration_s: int,
+    out: Outputs,
+    tel: Telemetry,
+    cancel: Any,
+) -> H3VideoOutput:
+    """`_finish` for a render that regenerates: its own denoised latent goes straight to the
+    upscaler and the refine, and is never decoded at 768p. A text-only FL2VA render's
+    conditioning is the refine's; any other is re-encoded as text alone."""
+    cancel()
+    frames = frames_for(duration_s)
+    waveform, sample_rate = _soundtrack(model, task, state, frames=frames, tel=tel, cancel=cancel)
+    tags = state.text_token_tags
+    text = (state.prompt_embeds, tags) if bool((tags == 1).all()) else None
+    tel.log("h3 render schedule", timestep_plan_digest=schedule.timestep_plan_digest,
+            transformer_evaluations=schedule.transformer_evaluations)  # fmt: skip
+    assert isinstance(model, H3TurboBase)
+    return _regenerated(
+        model, target, latents=state.latents, prompt=encoder_prompt("fl2va", target.prompt), text=text,
+        waveform=waveform, sample_rate=sample_rate, frames=frames, span=(0.90, 0.99),
+        out=out, tel=tel, cancel=cancel,
+    )  # fmt: skip
+
+
+def _regenerated(
+    model: H3TurboBase,
+    target: RegenerateTarget,
+    *,
+    latents: Any,
+    prompt: str,
+    text: tuple[Any, Any] | None,
+    waveform: Any | None,
+    sample_rate: int,
+    frames: int,
+    span: tuple[float, float],
+    out: Outputs,
+    tel: Telemetry,
+    cancel: Any,
+) -> H3VideoOutput:
+    """Normalized 768p latents to the delivered `frames` at `target.resolution`: upscale, the
+    windowed refine and the official decode at the target canvas, streamed with `waveform`."""
+    low, high = span
+
+    def at(share: float) -> float:
+        return low + (high - low) * share
+
+    with tel.stage("upscale_latent", overall_range=(at(0.0), at(0.03))):
+        for height, width in refine_math.upscale_passes(target.resolution):
+            latents = target.upscaler.upscale(latents, height=height, width=width)
+    cancel()
+    if text is None:
+        with tel.stage("condition_text", overall_range=(at(0.03), at(0.08))):
+            text = model.encode_prompt(prompt, frames_for(MIN_DURATION_S))
+    spans = refine_math.plan_windows(tuple(int(value) for value in latents.shape))
+    schedule = target.overlay.pipe.plan.refined(target.strength)
+    steps = schedule.transformer_evaluations
+    tel.log(
+        "h3 regenerate",
+        resolution=target.resolution,
+        strength=target.strength,
+        start_sigma=schedule.start,
+        transformer_evaluations=steps,
+        latent="x".join(str(int(value)) for value in latents.shape[2:]),
+        windows=len(spans),
+        window_latent_frames=spans[0][1],
+    )
+    audio = model.silence(refine_math.frames_of(spans[0][1]))
+    with tel.stage("refine", overall_range=(at(0.08), at(0.85))):
+        refined = model.refine(
+            latents,
+            overlay=target.overlay,
+            prompt_embeds=text[0],
+            text_tags=text[1],
+            spans=spans,
+            audio=audio,
+            schedule=schedule,
+            seed=target.seed,
+            on_step=tel.step_callback(steps, stage="refine", overall_range=(at(0.08), at(0.85))),
+        )
+    cancel()
+    height, _, keep = refine_math.TARGETS[target.resolution]
+    top = (height - keep) // 2
+    with tel.stage("decode_video", overall_range=(at(0.85), at(0.97))):
+        stream = _VideoStream(
+            torch, out, frames=frames, waveform=waveform, sample_rate=sample_rate, cancel=cancel,
+            progress=tel.step_callback(frames, stage="decode_video", overall_range=(at(0.85), at(0.97))),
+        )  # fmt: skip
+        delivered = 0
+
+        def push(chunk: Any) -> None:
+            nonlocal delivered
+            take = min(int(chunk.shape[0]), frames - delivered)
+            if take > 0:
+                stream.push(chunk[:take, :, top : top + keep])
+                delivered += take
+
+        try:
+            model.decode_latents(refined, on_chunk=push)
+        except BaseException:
+            stream.abandon()
+            raise
+    try:
+        saved = stream.finish(lambda share: tel.progress(share, stage="encode_video"))
+    except BaseException:
+        stream.abandon()
+        raise
+    tel.log("h3 container facts", video_codec=saved.video_codec, frame_count=saved.frame_count,
+            frame_rate=str(saved.frame_rate), video_bytes=saved.video.size_bytes)  # fmt: skip
+    return H3VideoOutput(video=saved.video, warnings=[])
+
+
 #: Frames per handoff slice: 8 frames of 1344x768 are 100 MB of fp32 source and 25 MB of
 #: RGB8, so a slice's device temporaries stay small and its hash and encode hide under the
 #: decode of the next chunk.
@@ -780,11 +962,12 @@ class _VideoStream:
         out: Outputs,
         *,
         frames: int,
-        waveform: Any,
+        waveform: Any | None,
         sample_rate: int,
         cancel: Any,
         progress: Callable[[int], None],
     ) -> None:
+        """`waveform` is the `(channels, samples)` soundtrack, or None for a silent video."""
         self._torch = torch
         self._out = out
         self._frames = frames
@@ -876,7 +1059,7 @@ class _VideoStream:
 
     def _events(self) -> Iterator[DecodedMediaHeader | DecodedVideoFrame | DecodedAudioChunk]:
         _, height, width, _ = (int(value) for value in self.pixels.shape)
-        channels, samples = (int(value) for value in self._waveform.shape)
+        channels, samples = (0, 0) if self._waveform is None else (int(v) for v in self._waveform.shape)
         yield DecodedMediaHeader(
             video=DecodedVideoFormat(
                 width=width,
@@ -886,7 +1069,9 @@ class _VideoStream:
                 nominal_frame_rate=Fraction(FPS),
                 **_VIDEO_COLOR,
             ),
-            audio=DecodedAudioFormat(
+            audio=None
+            if self._waveform is None
+            else DecodedAudioFormat(
                 channels=channels,
                 sample_rate=self._sample_rate,
                 channel_layout=_AUDIO_LAYOUTS[channels][0],
@@ -955,12 +1140,16 @@ def _nonfinite_fraction(torch: Any, value: Any) -> float:
 #: The releases every H3 callable defaults to; the machine picks each lane from the GPU.
 _MODEL = "minimax-h3@1.0.0-rc.6"
 _TURBO_LORA = "minimax-h3-turbo-lora@1.0.1"
+_REGENERATE_LORA = "open-h3-regenerate-2k@0.1.0"
+_LATENT_UPSCALER = "h3-latent-upscaler@0.1.0"
 
 
 #: The components each task runs. A machine downloads these first and the rest behind the
 #: run, so a pod's first request pays for one DiT, not two.
 _FL2VA = ("text_encoder", "transformer", "vae", "audio_vae")
 _REF2VA = ("text_encoder", "transformer_ref", "vae", "audio_vae")
+#: A Ref2VA render that regenerates also runs the FL2VA DiT, NVIDIA's refine trunk.
+_REF2VA_REGENERATE = ("text_encoder", "transformer_ref", "vae", "audio_vae", "transformer")
 
 app.entrypoint(defaults={"model": _MODEL}, components={"model": ("text_encoder",)})(
     encode_text
@@ -1070,6 +1259,247 @@ app.entrypoint(internal=True)(generate_ref2va)
 app.entrypoint(internal=True)(generate_ref2va_turbo)
 
 
+#: The output canvas the Regenerate route computes: the demand axis beside the frames.
+_REGENERATE_PIXELS = {
+    resolution: (width, height) for resolution, (height, width, _) in (
+        (Resolution(name), size) for name, size in refine_math.TARGETS.items()
+    )
+}  # fmt: skip
+RegenerateResolution = Annotated[Resolution, Shape(pixels=_REGENERATE_PIXELS)]
+
+
+class RegenerateKeyframesInput(StandardClipInput, kw_only=True):
+    """An FL2VA render whose finished latent the Regenerate route takes to `resolution`."""
+
+    task: Literal["fl2va", "fl2va_turbo"]
+    resolution: RegenerateResolution
+    strength: float
+
+
+class RegenerateReferencesInput(ReferenceStandardClipInput, kw_only=True):
+    """A Ref2VA render whose finished latent the Regenerate route takes to `resolution`."""
+
+    task: Literal["ref2va", "ref2va_turbo"]
+    resolution: RegenerateResolution
+    strength: float
+
+
+def _target(payload: RegenerateKeyframesInput | RegenerateReferencesInput, overlay: H3RegenerateLoRA,
+            upscaler: H3LatentUpscaler) -> RegenerateTarget:  # fmt: skip
+    assert payload.seed is not None
+    return RegenerateTarget(overlay, upscaler, payload.resolution.value, payload.strength,
+                            payload.seed, payload.prompt)  # fmt: skip
+
+
+@invocable(
+    defaults={
+        "base_model": _MODEL,
+        "turbo_lora": _TURBO_LORA,
+        "regenerate_lora": _REGENERATE_LORA,
+        "latent_upscaler": _LATENT_UPSCALER,
+    },
+    components={
+        "base_model": _FL2VA,
+        "turbo_lora": ("fl2va_turbo",),
+        "regenerate_lora": ("fl2va_regenerate",),
+        "latent_upscaler": ("upscaler",),
+    },
+    memoize=True,
+)
+async def regenerate_fl2va(
+    ctx: Context,
+    *,
+    payload: RegenerateKeyframesInput,
+    assets: KeyframeAssets,
+    base_model: H3TurboBase,
+    turbo_lora: H3TurboLoRA,
+    regenerate_lora: H3RegenerateLoRA,
+    latent_upscaler: H3LatentUpscaler,
+    out: Outputs,
+    tel: Telemetry,
+) -> H3VideoOutput:
+    """`fl2va` or `fl2va_turbo` whose finished 768p latent goes straight to the Regenerate refine,
+    never decoded at 768p."""
+    turbo = payload.task == "fl2va_turbo"
+    return _keyframes_to_video(
+        ctx, payload.task, payload, assets, base_model, out, tel,
+        steps=None if turbo else payload.steps, turbo_lora=turbo_lora if turbo else None,
+        regenerate=_target(payload, regenerate_lora, latent_upscaler),
+    )  # fmt: skip
+
+
+@invocable(
+    defaults={
+        "base_model": _MODEL,
+        "turbo_lora": _TURBO_LORA,
+        "regenerate_lora": _REGENERATE_LORA,
+        "latent_upscaler": _LATENT_UPSCALER,
+    },
+    components={
+        "base_model": _REF2VA_REGENERATE,
+        "turbo_lora": ("ref2va_turbo",),
+        "regenerate_lora": ("fl2va_regenerate",),
+        "latent_upscaler": ("upscaler",),
+    },
+    memoize=True,
+)
+async def regenerate_ref2va(
+    ctx: Context,
+    *,
+    payload: RegenerateReferencesInput,
+    assets: ReferenceAssets,
+    base_model: H3TurboBase,
+    turbo_lora: H3TurboLoRA,
+    regenerate_lora: H3RegenerateLoRA,
+    latent_upscaler: H3LatentUpscaler,
+    out: Outputs,
+    tel: Telemetry,
+) -> H3VideoOutput:
+    """`ref2va` or `ref2va_turbo` whose finished 768p latent the Regenerate refine takes on the
+    FL2VA DiT (NVIDIA's refine trunk), conditioned on the prompt as text alone."""
+    _reference_policy(assets)
+    turbo = payload.task == "ref2va_turbo"
+    return _references_to_video(
+        ctx, payload.task, payload, assets, base_model, out, tel,
+        steps=None if turbo else payload.steps, turbo_lora=turbo_lora if turbo else None,
+        regenerate=_target(payload, regenerate_lora, latent_upscaler),
+    )  # fmt: skip
+
+
+class RegenerateInput(msgspec.Struct, kw_only=True):
+    """Re-render an existing H3 video at `resolution` with NVIDIA's Open-H3-Regenerate-2K: its
+    768p frames are encoded, upscaled in latent space and refined by H3 at the target, and its
+    soundtrack is kept. `prompt` is the one the video was made from; `strength` as in `upscale`
+    (UPSCALE.md). The 7:4 frame fills 16:9, stretched 1.6% horizontally; `768p` refines only."""
+
+    video: Annotated[VideoAsset, AssetBound(max_bytes=1 << 30, max_decoded_bytes=2 << 30)]
+    prompt: str
+    resolution: RegenerateResolution = Resolution.QHD
+    strength: float = REGENERATE_STRENGTHS[-1]
+    seed: int | None = None
+
+    def __post_init__(self) -> None:
+        if round(self.strength, 3) not in REGENERATE_STRENGTHS:
+            raise ValueError(
+                f"strength is one of {', '.join(map(str, REGENERATE_STRENGTHS))}, got {self.strength}"
+            )
+
+
+class RegenerateOutput(msgspec.Struct):
+    video: Annotated[VideoAsset, AssetBound(max_bytes=1 << 30, media_types=("video/mp4",))]
+    warnings: list[str]
+
+
+def regenerate(
+    ctx: Context,
+    payload: RegenerateInput,
+    base_model: H3TurboBase,
+    regenerate_lora: H3RegenerateLoRA,
+    latent_upscaler: H3LatentUpscaler,
+    out: Outputs,
+    tel: Telemetry,
+) -> RegenerateOutput:
+    """The Regenerate route on a video: the same refine a render's `upscale.method: regenerate`
+    runs, from the latent this video encodes to."""
+    ctx.plan("vae", "text_encoder", "audio_vae", "upscaler", {"transformer", "fl2va_regenerate"}, "vae")
+    with tel.stage("read_video", overall_range=(0.00, 0.03)):
+        pixels, waveform, sample_rate, frames, warnings = _read_draft(payload.video)
+    with tel.stage("encode_video", overall_range=(0.03, 0.08)):
+        latents = base_model.encode_clip(pixels)
+    del pixels
+    seed = payload.seed if payload.seed is not None else int.from_bytes(
+        hashlib.sha256(f"{ctx.request_id}/h3/regenerate".encode()).digest()[:4], "big")  # fmt: skip
+    target = RegenerateTarget(regenerate_lora, latent_upscaler, payload.resolution.value,
+                              payload.strength, seed, payload.prompt)  # fmt: skip
+    result = _regenerated(
+        base_model, target, latents=latents, prompt=encoder_prompt("fl2va", payload.prompt),
+        text=None, waveform=waveform, sample_rate=sample_rate, frames=frames, span=(0.08, 0.99),
+        out=out, tel=tel, cancel=ctx.raise_if_cancelled,
+    )  # fmt: skip
+    ctx.release_gpus()
+    return RegenerateOutput(result.video, warnings)
+
+
+#: The canvas the refine's latent is encoded at: H3's native 1344x768.
+_DRAFT_SIZE = (768, 1344)
+
+
+def _read_draft(video: VideoAsset) -> tuple[Any, Any | None, int, int, list[str]]:
+    """A video's frames as `(frames on the VAE grid, 768, 1344, 3)` uint8 (cover-scaled and
+    centre-cropped, its last frame held up to the grid), its `(channels, samples)` soundtrack or
+    None, the sample rate, and how many frames it delivers."""
+    frames: list[bytes] = []
+    pcm: list[list[Any]] = []
+    width = height = rate = 0
+    warnings: list[str] = []
+    with video.stream() as stream:
+        for event in stream:
+            if isinstance(event, DecodedMediaHeader):
+                if event.video is None:
+                    raise InvalidRequest("regenerate needs a video stream", fields=["video"])
+                width, height = event.video.width, event.video.height
+                fps = event.video.nominal_frame_rate
+                if fps is None or fps != FPS:
+                    raise InvalidRequest(f"regenerate takes 24 fps video, not {fps}", fields=["video"])
+            elif isinstance(event, DecodedVideoFrame):
+                frames.append(event.rgb)
+            else:
+                rate = event.sample_rate
+                channels = [np.frombuffer(data, dtype=np.float32) for data in event.pcm_f32le]
+                pcm.append(channels)
+    count = len(frames)
+    if not MIN_FRAMES <= count <= MAX_FRAMES:
+        raise InvalidRequest(
+            f"regenerate takes {MIN_FRAMES} to {MAX_FRAMES} frames (5 to 15 s at 24 fps), not {count}",
+            fields=["video"],
+        )
+    grid = count + (-(count - 5)) % 17
+    pixels = torch.empty((grid, *_DRAFT_SIZE, 3), dtype=torch.uint8)
+    for index in range(grid):
+        frame = torch.frombuffer(bytearray(frames[min(index, count - 1)]), dtype=torch.uint8)
+        pixels[index] = _cover(frame.reshape(height, width, 3))
+    if (height, width) != _DRAFT_SIZE:
+        warnings.append(f"the {width}x{height} video was cover-scaled to 1344x768 for the refine")
+    waveform = None
+    if pcm:
+        waveform = torch.from_numpy(np.stack([np.concatenate(c) for c in zip(*pcm, strict=True)]))
+        if int(waveform.shape[0]) not in _AUDIO_LAYOUTS:
+            raise InvalidRequest("regenerate keeps mono or stereo soundtracks", fields=["video"])
+    return pixels, waveform, rate, count, warnings
+
+
+def _cover(frame: Any) -> Any:
+    """One `(h, w, 3)` uint8 frame cover-scaled (bilinear) and centre-cropped to 1344x768."""
+    height, width = (int(value) for value in frame.shape[:2])
+    if (height, width) == _DRAFT_SIZE:
+        return frame
+    scale = max(_DRAFT_SIZE[0] / height, _DRAFT_SIZE[1] / width)
+    size = (max(_DRAFT_SIZE[0], round(height * scale)), max(_DRAFT_SIZE[1], round(width * scale)))
+    image = torch.nn.functional.interpolate(
+        frame.permute(2, 0, 1)[None].float(), size=size, mode="bilinear", align_corners=False
+    )[0]
+    top, left = (size[0] - _DRAFT_SIZE[0]) // 2, (size[1] - _DRAFT_SIZE[1]) // 2
+    crop = image[:, top : top + _DRAFT_SIZE[0], left : left + _DRAFT_SIZE[1]]
+    return crop.round().clamp(0, 255).to(torch.uint8).permute(1, 2, 0)
+
+
+app.entrypoint(internal=True)(regenerate_fl2va)
+app.entrypoint(internal=True)(regenerate_ref2va)
+app.entrypoint(
+    defaults={
+        "base_model": _MODEL,
+        "regenerate_lora": _REGENERATE_LORA,
+        "latent_upscaler": _LATENT_UPSCALER,
+    },
+    components={
+        "base_model": _FL2VA,
+        "regenerate_lora": ("fl2va_regenerate",),
+        "latent_upscaler": ("upscaler",),
+    },
+    memoize=True,
+)(regenerate)
+
+
 async def _render_workflow(
     ctx: Context, payload: RenderInput, assets: KeyframeAssets | ReferenceAssets,
     out: Outputs, tel: Telemetry, *, task: Task, steps: int | None,
@@ -1089,6 +1519,18 @@ async def _render_workflow(
         if task.startswith("ref2va")
         else (ClipInput if turbo else StandardClipInput)(**fields)
     )
+    upscale = payload.upscale or Upscale()
+    ignored = upscale.ignored()
+    if upscale.method == "regenerate":
+        # The render's own latent is the refine's input: one call, no 768p decode or re-encode.
+        child = regenerate_ref2va if task.startswith("ref2va") else regenerate_fl2va
+        call = (RegenerateReferencesInput if task.startswith("ref2va") else RegenerateKeyframesInput)(
+            **asdict(request), task=task, resolution=payload.resolution, strength=upscale.start,
+        )  # fmt: skip
+        with tel.scope(f"Regenerate at {payload.resolution.value}"):
+            result = await cast(Callable[..., Awaitable[H3VideoOutput]], child)(payload=call, assets=assets)
+        ctx.release_gpus()
+        return RenderOutput(result.video, [], result.warnings + ignored)
     functions = {"fl2va": generate_fl2va, "fl2va_turbo": generate_fl2va_turbo,
                  "ref2va": generate_ref2va, "ref2va_turbo": generate_ref2va_turbo}
     generate = cast(Callable[..., Awaitable[H3VideoOutput]], functions[task])
@@ -1104,10 +1546,10 @@ async def _render_workflow(
         result = await restore(
             video=source.video, resolution=RestorationResolution(payload.resolution.value),
             seed=seed, aspect_ratio="16:9",
-            **{k: v for k, v in asdict(payload.upscale or Upscale()).items() if v is not None},
+            **{k: getattr(upscale, k) for k in _SEEDVR2_FIELDS if getattr(upscale, k) is not None},
         )
     ctx.release_gpus()
-    return RenderOutput(result.video, [source.video], source.warnings)
+    return RenderOutput(result.video, [source.video], source.warnings + ignored)
 
 
 async def fl2va(ctx: Context, payload: StandardRenderInput, assets: KeyframeAssets,
@@ -1218,6 +1660,7 @@ def _keyframes_to_video(
     *,
     steps: int | None,
     turbo_lora: H3TurboLoRA | None = None,
+    regenerate: RegenerateTarget | None = None,
 ) -> H3VideoOutput:
     ctx.raise_if_cancelled()
     first_index, last_index = _keyframe_roles(assets)
@@ -1234,6 +1677,7 @@ def _keyframes_to_video(
         first=_keyframe_image(assets, first_index, field="first"),
         last=_keyframe_image(assets, last_index, field="last"),
         turbo_lora=turbo_lora,
+        regenerate=regenerate,
     )
 
 
@@ -1256,13 +1700,14 @@ def _render_keyframes(
     first: Image | None,
     last: Image | None,
     turbo_lora: H3TurboLoRA | None = None,
+    regenerate: RegenerateTarget | None = None,
 ) -> H3VideoOutput:
     """Shared FL2VA rendering for direct requests and chained asset handoffs."""
     plan = _plan(model, turbo_lora, "fl2va")
     steps = plan.schedule(steps).transformer_evaluations
     keyframes = ("vae",) if first is not None or last is not None else ()
     dit = "transformer" if turbo_lora is None else {"transformer", "fl2va_turbo"}
-    ctx.plan("text_encoder", *keyframes, dit, "audio_vae", "vae")
+    ctx.plan("text_encoder", *keyframes, dit, *_decode_plan(regenerate))
     ctx.raise_if_cancelled()
     view = model.for_request(ctx, seed=seed)
     log_prompt(tel, "h3 encoder prompt", prompt)
@@ -1293,6 +1738,11 @@ def _render_keyframes(
             on_step=tel.step_callback(steps, stage="denoise", overall_range=(0.15, 0.85)),
             cancel=ctx.raise_if_cancelled,
         )
+    if regenerate is not None:
+        return _finish_regenerated(
+            model, task, state, schedule, target=regenerate, duration_s=duration_s, out=out,
+            tel=tel, cancel=ctx.raise_if_cancelled,
+        )  # fmt: skip
     return _finish(
         model,
         task,
@@ -1303,6 +1753,13 @@ def _render_keyframes(
         tel=tel,
         cancel=ctx.raise_if_cancelled,
     )
+
+
+def _decode_plan(regenerate: RegenerateTarget | None) -> tuple[Any, ...]:
+    """The components a render runs after its denoise: its decodes, or the Regenerate route's."""
+    if regenerate is None:
+        return ("audio_vae", "vae")
+    return ("audio_vae", "upscaler", {"transformer", "fl2va_regenerate"}, "vae")
 
 
 def _references_to_video(
@@ -1320,11 +1777,12 @@ def _references_to_video(
     delivery: ContinuationPlan | None = None,
     expected_context_provenance: str | None = None,
     completed: Callable[[Any], None] | None = None,
+    regenerate: RegenerateTarget | None = None,
 ) -> H3VideoOutput:
     plan = _plan(model, turbo_lora, "ref2va")
     steps = plan.schedule(steps).transformer_evaluations
     dit = "transformer_ref" if turbo_lora is None else {"transformer_ref", "ref2va_turbo"}
-    ctx.plan("text_encoder", {"vae", "audio_vae"}, dit, "audio_vae", "vae")
+    ctx.plan("text_encoder", {"vae", "audio_vae"}, dit, *_decode_plan(regenerate))
     ctx.raise_if_cancelled()
     view = model.for_request(ctx, seed=payload.seed)
     window = ContinuationPlan(payload.duration_s) if delivery is None else delivery
@@ -1389,6 +1847,13 @@ def _references_to_video(
             on_step=tel.step_callback(steps, stage="denoise", overall_range=(0.15, 0.85)),
             cancel=ctx.raise_if_cancelled,
         )
+    if regenerate is not None:
+        if context is not None or delivery is not None or completed is not None:
+            raise InvalidRequest("a continued segment cannot regenerate", fields=["upscale"])
+        return _finish_regenerated(
+            model, task, state, schedule, target=regenerate, duration_s=payload.duration_s,
+            out=out, tel=tel, cancel=ctx.raise_if_cancelled,
+        )  # fmt: skip
     return _finish(
         model,
         task,

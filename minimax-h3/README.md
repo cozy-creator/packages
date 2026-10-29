@@ -1,13 +1,14 @@
 # MiniMax H3
 
-Video with sound from MiniMax H3: 5 to 15 seconds at 768p, optionally upscaled by SeedVR2 to
-1080p, 1440p or 2160p.
+Video with sound from MiniMax H3: 5 to 15 seconds at 768p, optionally taken to 1080p, 1440p
+or 2160p by SeedVR2 or NVIDIA's Regenerate.
 
 | Function | Makes a video from |
 |---|---|
 | `fl2va` | a prompt and up to two keyframes: the first and the last frame |
 | `ref2va` | a prompt and references: characters, backgrounds, audio, action videos |
 | `long_form` | several segments sharing their references, joined into one video ([LONG_FORM.md](LONG_FORM.md)) |
+| `regenerate` | an existing H3 video and its prompt, re-rendered at 768p to 2160p ([UPSCALE.md](UPSCALE.md)) |
 
 The model's timestep plans set the step counts: `fl2va` and `ref2va` take `steps` 30, 40 or 50
 (default 30), and `fl2va_turbo` and `ref2va_turbo` run the turbo LoRA's eight. The functions
