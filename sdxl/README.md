@@ -38,8 +38,9 @@ Its recipes write the model's `fp8`, `int8` and `w4a8` lanes, for model authors
 
 Deterministic Euler runs as one `denoise_loop`: the Runtime runs the steps eagerly or as a native
 program (resident or streamed UNet blocks), by card and free memory, and records which in the run
-record's `loops`. Text encoding, VAE decode and HiDiffusion's DDIM run eagerly. Up to 1 MP the VAE decodes whole;
-above it (HiDiffusion's sizes, up to 16 MP) in 1024 px tiles, 512 or 256 px where those do not fit. Every request holds
+record's `loops`. Text encoding, VAE decode and HiDiffusion's DDIM run eagerly. Up to 4 MP the VAE decodes whole where
+it fits; larger canvases (HiDiffusion's, up to 16 MP), and those that do not fit, in 1024 px tiles
+(512 or 256 px where those do not fit). Every request holds
 the VAE in its decode dtype for good (a cast of the stored bytes on its next fill; no request
 converts VAE weights). CLIP conditioning calls the encoders' layers directly, avoiding
 Transformers' lazy output-collection hooks; its original 5.16.1 forward is the numerical oracle.

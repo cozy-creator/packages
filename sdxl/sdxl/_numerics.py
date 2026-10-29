@@ -62,21 +62,24 @@ def encode_tokens(
     return prompt, second_encoder.text_projection(pooled)
 
 
-#: The largest canvas decoded whole: SDXL's native megapixel. HiDiffusion's larger canvases (up to
-#: 16 MP) decode in tiles: a whole 4096² decode asked for 8 GiB more with 14 GiB allocated on a 24 GB
-#: card.
-WHOLE_PIXELS = 1024 * 1024
-#: Tile sides (px), largest first: the largest canvas decoded whole, smaller where it does not fit.
+#: The largest canvas decoded whole where it fits, about 9.7 GB in bf16. HiDiffusion's larger canvases
+#: (up to 16 MP) decode in tiles: a whole 4096² decode asked for 8 GiB more with 14 GiB allocated on a
+#: 24 GB card. Tiles renormalize per tile (the VAE's GroupNorm), 34 dB against a whole 2048² decode.
+WHOLE_PIXELS = 2048 * 2048
+#: Tile sides (px), largest first: smaller where they do not fit.
 TILES = (1024, 512, 256)
 
 
 def decode_latents(vae: Any, latents: torch.Tensor, scale: float) -> torch.Tensor:
     """Decode with the VAE's already selected representation, never changing its weights: whole
-    up to `WHOLE_PIXELS`, else in the largest `TILES` that fit."""
+    up to `WHOLE_PIXELS` where it fits, else in the largest `TILES` that fit."""
     z = latents / scale
     factor = 2 ** (len(vae.config.block_out_channels) - 1)
     if z.shape[-2] * z.shape[-1] * factor * factor <= WHOLE_PIXELS:
-        return vae.decode(z).sample
+        try:
+            return vae.decode(z).sample
+        except torch.OutOfMemoryError as error:
+            error.__traceback__ = None  # the whole decode's activations go with its frames
     *larger, smallest = TILES
     for side in larger:
         try:
