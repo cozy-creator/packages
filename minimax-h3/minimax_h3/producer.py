@@ -47,7 +47,7 @@ from cozy_runtime.author import (
 from cozy_runtime.author.kernels import ROWWISE_FP8, PreQuantized
 
 from .fit import fits, release
-from .glue import FusedMiniMaxH3AttnProcessor, H3AttnProcessor
+from .glue import KEY_MEAN, FusedMiniMaxH3AttnProcessor, H3AttnProcessor, KeyMean
 
 FAST = "kitchen-sol-producer-fast-shared-qkv"
 FP4_LOWMEM = "kitchen-sol-producer-fp4-lowmem-shared-qkv"
@@ -67,9 +67,12 @@ class RequestState:
     rope: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None
     parallel_rotary: dict[object, tuple[torch.Tensor, torch.Tensor]] = field(default_factory=dict)
     replay_inputs: dict[tuple[object, ...], Statistics] = field(default_factory=dict)
+    # The attention modules whose `Carry` slot a call of the current denoise loop has written.
+    carried: set[int] = field(default_factory=set)
 
     def close(self) -> None:
         self.statistics.clear()
+        self.carried.clear()
         self.parallel_rotary.clear()
         self.replay_inputs.clear()
         backend = sys.modules.get("comfy_kitchen.backends.cuda")
@@ -85,11 +88,14 @@ class RequestState:
 class Carry:
     """One `denoise_loop` step's Kitchen key means: a carried F32 [H, 128] slot per site, by
     attention module. A rolling step's calls read the previous step's mean from their slot; every
-    sparse call leaves its own there. Eager reuse decides on `layout.step` in Python, which a
-    recorded step would freeze; the step's phase decides instead (`rolling`)."""
+    sparse call leaves its own there, and the last dense step's calls seed it (`seeding`), so the
+    first sparse step reads one too instead of measuring its keys in a second producer pass. Eager
+    reuse decides on `layout.step` in Python, which a recorded step would freeze; the step's phase
+    decides instead (`rolling`, `seeding`)."""
 
     slots: Mapping[int, torch.Tensor]
     rolling: bool
+    seeding: bool = False
 
 
 _CARRY: ContextVar[Carry | None] = ContextVar("minimax_h3_kitchen_carry", default=None)
@@ -117,6 +123,8 @@ def present(
     }
     if not states:
         return
+    for state in states.values():
+        state.carried.clear()  # this loop's slots start unwritten
     first, *others = states.values()
     presentation = rope_presentation(rotary, tokens, first)
     for state in others:
@@ -261,12 +269,17 @@ def previous_statistics(
     return inputs
 
 
-def sparse_step(layout: AttentionLayout, path: str) -> bool:
-    """A call this producer serves: a sparse step at a site on neither a dense path nor an exact
-    one. An exact path's dense rows (its protected prefix) are BF16 on the Runtime route only."""
-    return layout.step >= layout.dense_until_step and not any(
+def producing(layout: AttentionLayout, path: str) -> bool:
+    """A site this producer serves on sparse steps: on neither a dense path nor an exact one. An
+    exact path's dense rows (its protected prefix) are BF16 on the Runtime route only."""
+    return not any(
         path == p or path.startswith(p + ".") for p in (*layout.dense_paths, *layout.exact_paths)
     )
+
+
+def sparse_step(layout: AttentionLayout, path: str) -> bool:
+    """A call this producer serves: a sparse step at a site it produces for."""
+    return layout.step >= layout.dense_until_step and producing(layout, path)
 
 
 def produce(
@@ -292,7 +305,17 @@ def produce(
     if not sparse_step(layout, call.path) or (not parallel and not fits(hidden_states, attn)):
         state.statistics.pop(key, None)
         state.replay_inputs.pop(key, None)
-        return call.original(hidden_states, rotary_emb, attention_mask)
+        carry, seed = _CARRY.get(), None
+        if carry is not None and carry.seeding and not parallel and producing(layout, call.path):
+            seed = KeyMean(carry.slots[id(attn)])
+        token = KEY_MEAN.set(seed)
+        try:
+            output = call.original(hidden_states, rotary_emb, attention_mask)
+        finally:
+            KEY_MEAN.reset(token)
+        if seed is not None and seed.heads >= attn.heads:
+            state.carried.add(id(attn))
+        return output
     if rotary_emb is None or hidden_states.shape[0] != 1:
         raise ValueError("H3 producer requires batch1 and rotary tables")
     tokens = layout.live_tokens
@@ -349,8 +372,9 @@ def _produce(
         prior_mean, prior_scale = previous_statistics(
             state, key, layout.step, geometry, replay_safe=PRODUCERS[name].context_parallel
         )
-    else:  # one GPU (H3's `denoise_loop` path)
-        prior_mean, prior_scale = (carry.slots[id(attn)] if carry.rolling else None), None
+    else:  # one GPU (H3's `denoise_loop` path): a slot a call has written
+        rolling = carry.rolling and id(attn) in state.carried
+        prior_mean, prior_scale = (carry.slots[id(attn)] if rolling else None), None
     if prior_mean is not None:  # the key mean carries; the values are this call's own
         prior_scale = value_scale(absmax())
     output, mean, scale = call.kernel.sol_attn_chunked(
@@ -372,6 +396,7 @@ def _produce(
         state.statistics[key] = (layout.step, geometry, mean, scale)
     else:
         carry.slots[id(attn)].copy_(mean)
+        state.carried.add(id(attn))
     return output, prior_mean is not None
 
 

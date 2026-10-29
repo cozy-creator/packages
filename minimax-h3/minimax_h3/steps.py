@@ -4,7 +4,7 @@ The step is the official loop step (`MiniMaxH3LoopDenoiser`, then `MiniMaxH3Loop
 over tensors alone. It reads its timesteps and sigmas from tables at the step index, and takes
 every host decision from its phase: dense or sparse attention, how many distinct timesteps its
 rows hold, and whether the Kitchen producer's sites reuse the previous step's key means, which
-it carries in one slot per site (`producer.Carry`).
+it carries in one slot per site (`producer.Carry`); the last dense step seeds them.
 """
 
 from __future__ import annotations
@@ -25,6 +25,7 @@ class Phase:
     sparse: bool
     rows: int
     rolling: bool
+    seeding: bool
 
 
 def denoise_fl2va(
@@ -52,7 +53,12 @@ def denoise_fl2va(
             timesteps[index, : times.numel()] = times
         indices = torch.stack([rows for _, rows in plan])
         phases = tuple(
-            Phase(index >= sol_dense_steps, times.numel(), bool(sites) and index > sol_dense_steps)
+            Phase(
+                index >= sol_dense_steps,
+                times.numel(),
+                bool(sites) and index >= max(sol_dense_steps, 1),
+                bool(sites) and index == sol_dense_steps - 1,
+            )
             for index, (times, _) in enumerate(plan)
         )
         layouts = {sparse: layout_at(sol_dense_steps if sparse else 0) for sparse in (False, True)}
@@ -62,7 +68,9 @@ def denoise_fl2va(
         video_sigmas, audio_sigmas = schedulers.scheduler.sigmas, schedulers.audio_scheduler.sigmas
 
         def step(i: torch.Tensor, video: Any, audio: Any, *means: Any, phase: Phase) -> None:
-            carry = producer.Carry(dict(zip(keys, means, strict=True)), phase.rolling)
+            carry = producer.Carry(
+                dict(zip(keys, means, strict=True)), phase.rolling, phase.seeding
+            )
             with attention_scope(layouts[phase.sparse]), producer.carrying(carry):
                 velocity, audio_velocity = transformer(
                     hidden_states=video[None],
