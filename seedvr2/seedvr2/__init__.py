@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sys
+from collections import deque
 from collections.abc import Iterator
 from dataclasses import replace
 from enum import StrEnum
@@ -136,9 +137,11 @@ def upscale(
     def events() -> Iterator[DecodedMediaHeader | DecodedVideoFrame | DecodedAudioChunk]:
         nonlocal count
         # Only one batch and the previous batch's restored tail are held; the media writer
-        # streams completed frames. Prepended mirror frames are restored, then dropped.
+        # streams completed frames, each followed by the sound up to its end (the writer
+        # interleaves both tracks within a bounded buffer). Prepended mirror frames are
+        # restored, then dropped.
         pending: list[DecodedVideoFrame] = []
-        audio: list[DecodedAudioChunk] = []
+        audio: deque[DecodedAudioChunk] = deque()
         tail: list[Image.Image] = []
         skip = payload.prepend_frames
         prepended = skip == 0
@@ -176,6 +179,9 @@ def upscale(
                 count += 1
                 image = ImageOps.pad(image, canvas, method=Image.Resampling.LANCZOS, color="black")
                 yield replace(original, width=canvas[0], height=canvas[1], rgb=image.tobytes())
+                end = (original.pts + original.duration) * original.time_base
+                while audio and audio[0].start_time < end:
+                    yield audio.popleft()
             tail = [] if final else restored[emit:]
             pending = [] if final else pending[emit:]
 
@@ -201,8 +207,6 @@ def upscale(
                         )
                     while prepended and len(pending) >= size:
                         yield from flush(False)
-                        yield from audio
-                        audio.clear()
                 else:
                     audio.append(event)
             if not prepended and pending:
