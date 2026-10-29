@@ -18,6 +18,7 @@ from cozy_runtime.author import AttentionLayout, attention_scope, denoise_loop, 
 
 from . import producer
 from .adaln_pruned import step_invariants
+from .overlay import ATTENTION_KWARG, OVERLAY_KWARG
 
 
 @dataclass(frozen=True, slots=True)
@@ -100,6 +101,77 @@ def denoise_fl2va(
             on_step=on_step,
         )
     state.noise_pred = state.audio_noise_pred = None  # the official loop's outputs; none reads them
+
+
+def denoise_refine(
+    transformer: Any,
+    overlay: Any,
+    *,
+    video: torch.Tensor,
+    audio: torch.Tensor,
+    prompt_embeds: torch.Tensor,
+    fields: dict[str, torch.Tensor],
+    plan: list[tuple[torch.Tensor, torch.Tensor]],
+    sigmas: torch.Tensor,
+    windows: list[tuple[int, int]],
+    weights: list[torch.Tensor],
+    layout_at: Callable[[int], AttentionLayout],
+    on_step: Callable[[int], None],
+) -> None:
+    """The Regenerate refine (NVlabs `open_h3/pipeline.py` `refine`) as a `denoise_loop`: Euler on
+    the video rows `video` alone, every step's velocity from the FL2VA DiT under `overlay`.
+
+    `windows` are equal row spans of `video`, each laid out as a clip of its own (`fields`: H3's
+    positions start at every clip's text), so one layout and one rotary table serve them all;
+    `weights` are their per-row blend. One span is the whole canvas. `audio` is the clean conditioning rows one window carries; `plan` each step's
+    `(timesteps, timestep_indices)`.
+    """
+    position_ids, tags = fields["position_ids"], fields["token_tags"]
+    device = video.device
+    selector = {ATTENTION_KWARG: overlay.bank, OVERLAY_KWARG: overlay}
+    with torch.no_grad(), step_invariants(checked=True, overlay=overlay) as memo:
+        for times, rows in plan:  # an uncovered row refuses here, never inside the loop
+            transformer._arm(times, rows, tags, selector)
+        transformer._release()
+        sites = producer_sites(transformer)
+        rotary = memo.get("rope", (position_ids,), lambda: transformer.rope(position_ids))
+        producer.present(sites, rotary, tags.numel())
+        timesteps = torch.stack([times for times, _ in plan]).to(device)
+        indices = torch.stack([rows for _, rows in plan]).to(device)
+        # A key mean carried from a step's last window is no other window's: windows compute
+        # their own statistics. Every step is sparse, so no dense step seeds them.
+        rolling = bool(sites) and len(windows) == 1
+        phases = tuple(
+            Phase(True, int(times.numel()), rolling and index > 0, False)
+            for index, (times, _) in enumerate(plan)
+        )
+        layout = layout_at(0)
+        keys = tuple(id(site.module) for site in sites)
+        slots = tuple(torch.zeros(site.module.heads, 128, device=device) for site in sites)
+
+        def step(i: torch.Tensor, rows: Any, *means: Any, phase: Phase) -> None:
+            carry = producer.Carry(dict(zip(keys, means, strict=True)), phase.rolling)
+            velocity = torch.zeros_like(rows)
+            for (start, count), weight in zip(windows, weights, strict=True):
+                with attention_scope(layout), producer.carrying(carry):
+                    predicted, _ = transformer(
+                        hidden_states=rows[None, start : start + count],
+                        audio_hidden_states=audio[None],
+                        encoder_hidden_states=prompt_embeds,
+                        timestep=timesteps.index_select(0, i)[0, : phase.rows],
+                        timestep_indices=indices.index_select(0, i)[0],
+                        token_tags=tags,
+                        position_ids=position_ids,
+                        video_indices=fields["video_indices"],
+                        audio_indices=fields["audio_indices"],
+                        text_indices=fields["text_indices"],
+                        return_dict=False,
+                    )
+                velocity[start : start + count].addcmul_(predicted[0].float(), weight[:, None])
+            delta = sigmas.index_select(0, i) - sigmas.index_select(0, i + 1)
+            rows.add_(velocity * delta.reshape(1, 1))
+
+        denoise_loop(step, range(len(plan)), state=(video,), carried=slots, phases=phases, on_step=on_step)
 
 
 def euler(

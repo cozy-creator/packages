@@ -1,4 +1,8 @@
-"""PDD-8 turbo overlay over the AdaLN-pruned MiniMax-H3 DiT.
+"""Overlays over the AdaLN-pruned MiniMax-H3 DiT: PDD-8 turbo and the Regenerate refine.
+
+An overlay is LoRA factors on six linear families, AdaLN tables at its plan's exact timesteps and,
+for turbo, a bank of output heads. A forward names the bank it is served under; every other
+forward reads the base.
 
 Parallel Decoding Distillation (arXiv 2607.26004; `alibaba-pai/MiniMax-H3-Acc-LoRAs`) is a
 rank-64 LoRA on seven linear families plus a bank of per-interval output heads, sampled on a
@@ -8,6 +12,9 @@ the fp8 base; the seventh, `adaln_proj.linear`, has no module to attach to and i
 the turbo AdaLN tables by the producer. The head bank collapses offline to one head per
 evaluation because the reference's per-step fusion is linear in the weights and its plan
 depends only on the fixed grid.
+
+Open-H3-Regenerate-2K (NVlabs) is one merged rank-576 LoRA on the same six families and LMS
+Sharp's AdaLN curve, which its producer folds into the tables; it keeps the base heads.
 
 The overlay is one component per task beside the DiT it patches. Nothing here changes the
 DiT's own parameters or its destination names: the base functions see the same construction
@@ -31,6 +38,7 @@ from cozy_runtime.author import ConformanceError
 ATTENTION_KWARG = "cozy_h3_bank"
 OVERLAY_KWARG = "cozy_h3_overlay"
 TURBO_BANK = "turbo"
+REGENERATE_BANK = "regenerate"
 #: The families applied at inference, as the checkpoint names them under a block.
 LORA_FAMILIES = ("to_q", "to_k", "to_v", "to_out.0", "ff.net.0.proj", "ff.net.2")
 #: The family the producer bakes into the turbo tables; refused on the overlay by name.
@@ -69,8 +77,8 @@ class _Site(nn.Module):  # type: ignore[misc]
             self.add_module(name, child)
 
 
-class TurboTables(nn.Module):  # type: ignore[misc]
-    """Exact turbo rows for one family of tables: the same shape the base tables have."""
+class OverlayTables(nn.Module):  # type: ignore[misc]
+    """An overlay's exact rows for one family of tables: the same shape the base tables have."""
 
     def __init__(self, table: torch.Tensor, index: torch.Tensor | None = None) -> None:
         super().__init__()
@@ -135,8 +143,8 @@ class TurboSchedule:
         return steps[0]
 
 
-class TurboOverlay(nn.Module):  # type: ignore[misc]
-    """Everything one task's turbo function adds to its trunk DiT, under the DiT's own paths.
+class Overlay(nn.Module):  # type: ignore[misc]
+    """Everything one overlay adds to its trunk DiT, under the DiT's own paths.
 
     State-dict keys are the checkpoint's: `transformer_blocks.{i}.attn.to_q.lora_down`,
     `token_refiner.refiner_blocks.{i}.ff.net.2.lora_up`, `transformer_blocks.{i}.adaln_proj.table`,
@@ -146,7 +154,7 @@ class TurboOverlay(nn.Module):  # type: ignore[misc]
     present = True
     #: Its pieces: each site's factors, each table and each head is its own block, so a
     #: consumer binds the few MB it reads, never the whole overlay (~620 MB, cr-203 U9 (c)).
-    _no_split_modules: ClassVar[list[str]] = ["LoRAFactors", "TurboTables", "TurboHeads"]
+    _no_split_modules: ClassVar[list[str]] = ["LoRAFactors", "OverlayTables", "TurboHeads"]
 
     def __init__(
         self,
@@ -160,13 +168,17 @@ class TurboOverlay(nn.Module):  # type: ignore[misc]
         audio_out: int,
         rank: int,
         alpha: float,
-        schedule: TurboSchedule,
+        bank: str,
+        schedule: TurboSchedule | None,
         table_timesteps: Sequence[float],
         table_block_keys: Sequence[tuple[int, int]],
         block_table_dtype: torch.dtype,
         final_table_dtype: torch.dtype,
     ) -> None:
+        """`schedule` is the turbo bank's evaluation grid, which selects its heads; an overlay
+        without one keeps the base heads."""
         super().__init__()
+        self.bank = bank
         scale = alpha / rank
 
         def factors(in_features: int, out_features: int) -> LoRAFactors:
@@ -207,7 +219,7 @@ class TurboOverlay(nn.Module):  # type: ignore[misc]
             [
                 _Site(
                     **block_sites(),
-                    adaln_proj=TurboTables(
+                    adaln_proj=OverlayTables(
                         torch.empty(len(table_block_keys), 6, hidden_size, dtype=block_table_dtype),
                         index,
                     ),
@@ -215,11 +227,13 @@ class TurboOverlay(nn.Module):  # type: ignore[misc]
                 for _ in range(num_layers)
             ]
         )
-        self.norm_out = TurboTables(
+        self.norm_out = OverlayTables(
             torch.empty(len(table_timesteps), 2, hidden_size, dtype=final_table_dtype)
         )
-        self.proj_out = TurboHeads(schedule.evaluations, video_out, hidden_size)
-        self.audio_proj_out = TurboHeads(schedule.evaluations, audio_out, hidden_size)
+        self.heads = schedule is not None
+        if schedule is not None:
+            self.proj_out = TurboHeads(schedule.evaluations, video_out, hidden_size)
+            self.audio_proj_out = TurboHeads(schedule.evaluations, audio_out, hidden_size)
 
     @classmethod
     def from_official_config(
@@ -228,12 +242,13 @@ class TurboOverlay(nn.Module):  # type: ignore[misc]
         *,
         rank: int,
         alpha: float,
-        schedule: TurboSchedule,
+        bank: str,
+        schedule: TurboSchedule | None,
         table_timesteps: Sequence[float],
         table_block_keys: Sequence[tuple[int, int]],
         block_table_dtype: torch.dtype,
         final_table_dtype: torch.dtype,
-    ) -> TurboOverlay:
+    ) -> Overlay:
         patch = 1
         for value in config["patch_size"]:
             patch *= int(value)
@@ -247,6 +262,7 @@ class TurboOverlay(nn.Module):  # type: ignore[misc]
             audio_out=int(config["audio_in_channels"]),
             rank=rank,
             alpha=alpha,
+            bank=bank,
             schedule=schedule,
             table_timesteps=table_timesteps,
             table_block_keys=table_block_keys,
@@ -265,20 +281,20 @@ class TurboOverlay(nn.Module):  # type: ignore[misc]
         matches = values == self.timesteps.reshape(1, -1)
         if not bool(torch.all(matches.sum(dim=1) == 1)):
             raise ConformanceError(
-                "timestep rows are not covered exactly by the turbo plan: "
+                f"timestep rows are not covered exactly by the {self.bank} plan: "
                 f"{timestep.detach().float().cpu().tolist()}",
                 code="artifact_config",
             )
         return matches.to(dtype=torch.int64).argmax(dim=1)
 
 
-class TurboArming:
-    """What one DiT forward under the turbo bank reads: set by the DiT's pre-hook from the
-    forward's own `attention_kwargs`, cleared by its forward hook, never request state."""
+class OverlayArming:
+    """What one DiT forward under an overlay's bank reads: set from the forward's own
+    `attention_kwargs` (or its denoise loop), cleared when the forward ends, never request state."""
 
     __slots__ = ("overlay", "step")
 
-    def __init__(self, overlay: TurboOverlay, step: int) -> None:
+    def __init__(self, overlay: Overlay, step: int) -> None:
         self.overlay = overlay
         self.step = step
 

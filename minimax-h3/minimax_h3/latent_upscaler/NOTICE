@@ -1,0 +1,15 @@
+LatentResizer3D architecture by LBH-123-AI, Copyright (c) 2026.
+Source: https://github.com/LBH-123-AI/Comfyui_Minimax_h3_latent_Upscaler
+Revision: 40316cf008b2fd8663263270669eb4da23f89d2c
+File: nodes/minimax_h3_latent_upscaler_3d.py
+Original source SHA-256: 744063b43e0f3eec23e2485cb7c65503069946ca9690906ecb548d7515cb89e2
+Code license: MIT; see LICENSE (retained verbatim).
+Adaptation: retain numerical classes and temporal chunking, excluding ComfyUI UI,
+filesystem/model loading, global caching and device management. Runtime owns those.
+AttnBlock3D's einops rearranges are spelled as torch reshapes (attention is off in v1).
+
+Weights: https://huggingface.co/LBH-123-AI/Minimax_h3_latent_Upscaler
+Revision: 3f941d5d182014dd5c0a5e16330420ee2d4aa0c6
+File: minimax_h3_latent_upscaler_3d_conv_v1/minimax_h3_latent_upscaler_3d_conv_v1_bf16.safetensors
+Weights license: Apache-2.0, as declared by the upstream model card; see WEIGHTS-LICENSE.
+The supplied weight values are retained without modification.

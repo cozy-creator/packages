@@ -85,7 +85,7 @@ from .continuation import (
 from .guide_rows import GUIDE, GUIDE_LATENTS, GuideClip, guide_rows
 from .reference_rows import ClipRows, motion_size, public_video
 from .steps import denoise_fl2va
-from .turbo import ATTENTION_KWARG, TURBO_BANK, TurboOverlay, TurboSchedule
+from .overlay import ATTENTION_KWARG, REGENERATE_BANK, TURBO_BANK, Overlay, TurboSchedule
 from .vae_tiles import TileBatchedVideoVAE, encode_condition
 
 #: A trunk is one DiT and its conditioning workflow; a task is one served function — the
@@ -145,6 +145,9 @@ _WEIGHTED_CONFIG_SECTIONS = {"audio_vae", "text_encoder", "transformer", "transf
 _OVERLAY_CONFIG_SECTIONS = {"fl2va_turbo", "ref2va_turbo"}
 _DIT_COMPONENT: dict[Trunk, str] = {"fl2va": "transformer", "ref2va": "transformer_ref"}
 _OVERLAY_COMPONENT: dict[Trunk, str] = {"fl2va": "fl2va_turbo", "ref2va": "ref2va_turbo"}
+#: The Regenerate refine overlay: one component, over the FL2VA DiT (NVlabs' refine trunk).
+REGENERATE_COMPONENT = "fl2va_regenerate"
+_REGENERATE_RANK = 576
 _DISTILLATION = "pdd"
 #: The timesteps and sigmas a component's modulation tables hold rows for, in its folder.
 PLAN_ASSET = "timestep-plan.json"
@@ -265,11 +268,14 @@ class Schedule:
 
     `linspace(1, 0, sigma_grid_points)` through each modality's exponential shift, float32
     collisions collapsed; the terminal zero is a grid point with no transformer evaluation.
+    A refine schedule (`refine`) starts its video at its first sigma, below one, and holds the
+    audio clean: every audio sigma is zero.
     """
 
     sigma_grid_points: int
     video_sigmas: tuple[float, ...]
     audio_sigmas: tuple[float, ...]
+    refine: bool = False
 
     def __post_init__(self) -> None:
         points = len(self.video_sigmas)
@@ -278,16 +284,26 @@ class Schedule:
                 "a MiniMax-H3 schedule holds equally many video and audio sigmas, "
                 "at most one per grid point"
             )
-        for sigmas in (self.video_sigmas, self.audio_sigmas):
+        descending = (self.video_sigmas,) if self.refine else (self.video_sigmas, self.audio_sigmas)
+        for sigmas in descending:
             if (
-                sigmas[0] != 1.0
+                not 0.0 < sigmas[0] <= 1.0
+                or (sigmas[0] != 1.0 and not self.refine)
                 or sigmas[-1] != 0.0
                 or any(not math.isfinite(value) or value != _as_float32(value) for value in sigmas)
                 or any(left <= right for left, right in pairwise(sigmas))
             ):
                 raise ValueError(
-                    "MiniMax-H3 sigmas must be exact float32 values descending from one to zero"
+                    "MiniMax-H3 sigmas must be exact float32 values descending to zero, "
+                    "from one unless the schedule refines"
                 )
+        if self.refine and any(value != 0.0 for value in self.audio_sigmas):
+            raise ValueError("a refine schedule holds its audio clean: every audio sigma is zero")
+
+    @property
+    def start(self) -> float:
+        """The video's first sigma: one, or where a refine re-noises to."""
+        return self.video_sigmas[0]
 
     @property
     def transformer_evaluations(self) -> int:
@@ -340,6 +356,9 @@ class TimestepPlan:
     video_shift: float
     audio_shift: float
     schedules: tuple[Schedule, ...]
+    #: A refine plan (the Regenerate overlay's): its schedules re-noise a finished latent to
+    #: their start and denoise video alone, listed by strictly ascending start.
+    refine: bool = False
 
     def __post_init__(self) -> None:
         if self.task not in _TRUNKS:
@@ -349,13 +368,35 @@ class TimestepPlan:
             for shift in (self.video_shift, self.audio_shift)
         ):
             raise ValueError("MiniMax-H3 shifts must be finite positive float32 values")
-        if not self.schedules or any(
+        if not self.schedules or any(s.refine != self.refine for s in self.schedules):
+            raise ValueError("a MiniMax-H3 plan's schedules are all of its kind")
+        if self.refine and any(
+            left.start >= right.start for left, right in pairwise(self.schedules)
+        ):
+            raise ValueError("a refine plan lists its schedules by strictly ascending start")
+        if not self.refine and any(
             left.transformer_evaluations >= right.transformer_evaluations
             for left, right in pairwise(self.schedules)
         ):
             raise ValueError(
                 "a MiniMax-H3 plan lists its schedules by strictly ascending evaluation count"
             )
+
+    @property
+    def strengths(self) -> tuple[float, ...]:
+        """A refine plan's starts as a request names them, to three decimals."""
+        return tuple(round(schedule.start, 3) for schedule in self.schedules)
+
+    def refined(self, strength: float) -> Schedule:
+        """The refine schedule starting at `strength` (to three decimals)."""
+        for schedule in self.schedules:
+            if round(schedule.start, 3) == round(strength, 3):
+                return schedule
+        raise InvalidRequest(
+            f"regenerate serves strength {', '.join(map(str, self.strengths))}, not {strength}",
+            code="strength",
+            fields=["upscale", "strength"],
+        )
 
     @property
     def steps(self) -> tuple[int, ...]:
@@ -478,6 +519,7 @@ class TimestepPlan:
             )
         return {
             "task": self.task,
+            **({"kind": "refine"} if self.refine else {}),
             "scalar_encoding": "ieee754-binary32-hex",
             "scheduler_semantics": "minimax-h3-data-ward-rf-euler/1",
             "row_timestep_reduction": "unique-sorted-return-inverse",
@@ -550,11 +592,13 @@ def timestep_plan(raw: bytes, trunk: Trunk) -> TimestepPlan:
         document = canonical_json.decode(raw)
         if not isinstance(document, dict):
             raise TypeError("timestep plan is not an object")
+        refine = document.get("kind") == "refine"
         schedules = []
         for row in document["schedules"]:
             evaluations = row["evaluations"]
             schedules.append(
                 Schedule(
+                    refine=refine,
                     sigma_grid_points=int(row["sigma_grid_points"]),
                     video_sigmas=tuple(
                         [float.fromhex(entry["video_sigma"]) for entry in evaluations]
@@ -571,6 +615,7 @@ def timestep_plan(raw: bytes, trunk: Trunk) -> TimestepPlan:
             video_shift=float.fromhex(document["video_shift"]),
             audio_shift=float.fromhex(document["audio_shift"]),
             schedules=tuple(schedules),
+            refine=refine,
         )
     except (KeyError, TypeError, ValueError, OverflowError) as exc:
         raise ConformanceError(
@@ -596,6 +641,19 @@ def model_plans(assets: ModelAssets, *, turbo: bool = False) -> dict[Trunk, Time
             fields=missing,
         )
     return {trunk: timestep_plan(assets.read(name), trunk) for trunk, name in names.items()}
+
+
+def regenerate_plan(assets: ModelAssets) -> TimestepPlan:
+    """The Regenerate overlay's refine plan, from its component's asset."""
+    name = f"{REGENERATE_COMPONENT}/{PLAN_ASSET}"
+    if name not in assets.names():
+        raise InvalidRequest(
+            f"this model release carries no {name}", code="model_asset_missing", fields=[name]
+        )
+    plan = timestep_plan(assets.read(name), "fl2va")
+    if not plan.refine:
+        raise ConformanceError("the Regenerate overlay's plan is not a refine plan", code="artifact_config")
+    return plan
 
 
 def _validate_plan(plan: TimestepPlan, trunk: Trunk, layout: TableLayout | None) -> None:
@@ -1541,6 +1599,33 @@ class OfficialH3Pipeline:
                 if selected.shape[0]:
                     on_chunk(selected)
 
+    def decode_latents(self, latents: Any, on_chunk: Callable[[Any], None]) -> int:
+        """`decode_video_chunks` of normalized `(1, 24, T, H, W)` latents at any canvas."""
+        state = PipelineState()
+        state.set("latents", latents)
+        return self.decode_video_chunks("fl2va", state, on_chunk)
+
+    def encode_clip(self, pixels: Any, seed: int) -> Any:
+        """A `(T, H, W, 3)` uint8 clip's normalized `(1, 24, T', H/16, W/16)` latents: the
+        official keyframe encode (`encode_condition`) over the whole clip, posterior sampled
+        under `seed`, as `open_h3` encodes a draft video."""
+        components = _ScopedPipeline(self._pipes["t2va"], self.components["vae"])
+        vae = components.vae
+        raw = encode_condition(vae, pixels, components.pixel_mean, components.pixel_std, seed)
+        mean = torch.tensor(vae.config.latents_mean, device=raw.device).view(1, -1, 1, 1, 1)
+        std = torch.tensor(vae.config.latents_std, device=raw.device).view(1, -1, 1, 1, 1)
+        return (raw - mean) / std
+
+    def silence_rows(self, frames: int) -> Any:
+        """Packed `(2 * latents, 32)` rows of stereo silence covering `frames` video frames,
+        at the posterior mean (`open_h3/pipeline.py` encode_silence)."""
+        audio_vae = self.components["audio_vae"]
+        device = next(audio_vae.parameters()).device
+        samples = round(frames / FPS * self.sample_rate)
+        with torch.no_grad():
+            rows = _soundtrack_rows(audio_vae, torch.zeros(AUDIO_CHANNELS, samples, device=device))
+        return rows.reshape(-1, rows.shape[-1])
+
     def export_context(self, state: Any, *, provenance: str) -> AVContext | None:
         """The successor's carry from this request's denoised latents; None if it carries
         nothing."""
@@ -1610,7 +1695,7 @@ class OfficialH3TurboLoRA:
         _validate_dual_topology(overlays, _OVERLAY_COMPONENT)
         self.components = {_OVERLAY_COMPONENT[trunk]: value for trunk, value in overlays.items()}
 
-    def overlay(self, base: OfficialH3Pipeline, trunk: Trunk) -> TurboOverlay:
+    def overlay(self, base: OfficialH3Pipeline, trunk: Trunk) -> Overlay:
         config, structure, _layout = base._dit_specs[trunk]
         if structure != "adaln-pruned" or config != self.specs[trunk][0]:
             raise ConformanceError(
@@ -1633,6 +1718,64 @@ def build_h3_turbo_base(config: Config, plans: Mapping[Trunk, TimestepPlan]) -> 
 
 def build_h3_turbo_lora(config: Config, plans: Mapping[Trunk, TimestepPlan]) -> OfficialH3TurboLoRA:
     return OfficialH3TurboLoRA(config, plans)
+
+
+class OfficialH3RegenerateLoRA:
+    """Open-H3-Regenerate-2K's refine overlay: the merged rank-576 LoRA and its refine plan's
+    AdaLN tables (LMS Sharp's curve folded in by `minimax-h3-tools/regenerate-lora`), served
+    over the FL2VA DiT with its own heads."""
+
+    def __init__(self, config: Config, plan: TimestepPlan) -> None:
+        # The checkpoint holds one component, `fl2va_regenerate`, so its construction config is
+        # that component's own (the Runtime keys a document by component only for several).
+        section = dict(config.mapping())
+        extension = section.pop("cozy_h3", None)
+        if not isinstance(extension, dict):
+            raise ConformanceError("missing Regenerate metadata", code="artifact_config")
+        extension = dict(extension)
+        layout = TableLayout.parse(extension.pop("table_keys", None))
+        expected: dict[str, object] = {
+            "task": "fl2va",
+            "modulation": "adaln-pruned",
+            "distillation": "regenerate",
+            "lora_rank": _REGENERATE_RANK,
+            "lora_alpha": float(_REGENERATE_RANK),
+        }
+        if not section or extension != expected:
+            raise ConformanceError(
+                f"artifact config {REGENERATE_COMPONENT!r} is not the rank-576 Regenerate overlay",
+                code="artifact_config",
+                fields=[REGENERATE_COMPONENT, "cozy_h3"],
+            )
+        for schedule in plan.schedules:
+            layout.require(schedule.video_timesteps, schedule.audio_timesteps)
+        self.plan = plan
+        self.spec = section
+        overlay = Overlay.from_official_config(
+            section,
+            rank=_REGENERATE_RANK,
+            alpha=float(_REGENERATE_RANK),
+            bank=REGENERATE_BANK,
+            schedule=None,
+            table_timesteps=layout.timesteps,
+            table_block_keys=layout.block_keys,
+            block_table_dtype=torch.bfloat16,
+            final_table_dtype=torch.bfloat16,
+        )
+        self.components = {REGENERATE_COMPONENT: overlay.eval()}
+
+    def overlay(self, base: OfficialH3Pipeline) -> Overlay:
+        config, structure, _layout = base._dit_specs["fl2va"]
+        if structure != "adaln-pruned" or config != self.spec:
+            raise ConformanceError(
+                "the Regenerate overlay and the AdaLN-pruned base must have the same DiT configuration",
+                code="artifact_config",
+            )
+        return self.components[REGENERATE_COMPONENT]
+
+
+def build_h3_regenerate_lora(config: Config, plan: TimestepPlan) -> OfficialH3RegenerateLoRA:
+    return OfficialH3RegenerateLoRA(config, plan)
 
 
 def build_h3_pipeline(config: Config, plans: Mapping[Trunk, TimestepPlan]) -> OfficialH3Pipeline:
@@ -1786,13 +1929,14 @@ def _overlay_spec(
 
 def _build_overlay(
     config: Mapping[str, Any], plan: TimestepPlan, layout: TableLayout
-) -> TurboOverlay:
+) -> Overlay:
     (schedule,) = plan.schedules
     timesteps, block_keys = layout.timesteps, layout.block_keys
-    overlay = TurboOverlay.from_official_config(
+    overlay = Overlay.from_official_config(
         config,
         rank=64,
         alpha=64.0,
+        bank=TURBO_BANK,
         schedule=TurboSchedule(schedule.video_timesteps, schedule.audio_timesteps),
         table_timesteps=timesteps,
         table_block_keys=block_keys,

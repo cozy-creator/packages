@@ -11,7 +11,7 @@ import torch
 from cozy_runtime.author import ConformanceError, Context, UnsupportedInput, Weights, canonical_json
 from cozy_runtime.weights_store import Checkpoint, Output, TensorMetadata
 
-from .kernel import H3Topology, LowRankAdapter, precompute_tables, table_shapes
+from .kernel import CurveAdapter, H3Topology, LowRankAdapter, precompute_tables, table_shapes
 from .model_config import DIT_COMPONENT
 from .plans import Task, TimestepPlan, parse_plan
 from .table_layout import TableLayout
@@ -136,6 +136,7 @@ def write_tables(
     progress: Callable[[int, int], None],
     target: str | None = None,
     adapter: LowRankAdapter | None = None,
+    curve: CurveAdapter | None = None,
 ) -> tuple[int, int, int]:
     """One DiT's AdaLN tables from `source`'s `component` modulation weights, into `target`
     (default `component`) of each of `outputs` that lacks them; (bytes read, bytes written,
@@ -161,7 +162,7 @@ def write_tables(
 
     precompute_tables(
         plan=plan, topology=topology, read=reader, write=writer, progress=progress,
-        device=torch.device(str(ctx.device)), completed=completed, adapter=adapter,
+        device=torch.device(str(ctx.device)), completed=completed, adapter=adapter, curve=curve,
     )  # fmt: skip
     return read_bytes, written, len(completed)
 

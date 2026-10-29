@@ -17,6 +17,9 @@ ADALN = (
 TURBO = (
     *ADALN, "h3_tables.turbo",
 )
+REGENERATE = (
+    *ADALN, "h3_tables.regenerate",
+)
 LANES = (
     *STRUCTURE, "h3_tables.job", "h3_tables.lanes", "h3_tables.quantization",
     "cozy_runtime.derive.quantization",

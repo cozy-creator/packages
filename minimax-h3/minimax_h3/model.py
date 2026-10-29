@@ -25,20 +25,26 @@ from cozy_runtime.author import (
 )
 from cozy_runtime.author.kernels import Plan
 
-from . import glue, producer
+from . import glue, producer, regenerate
+from .latent_upscaler import H3LatentUpscaler as H3LatentUpscaler
 from .official import (
+    REGENERATE_COMPONENT,
     OfficialH3Pipeline,
+    OfficialH3RegenerateLoRA,
     OfficialH3TurboLoRA,
     ReferenceMemo,
+    Schedule,
     ScheduleFacts,
     Task,
     _validate_sol_dense_steps,
     build_h3_pipeline,
+    build_h3_regenerate_lora,
     build_h3_turbo_base,
     build_h3_turbo_lora,
     model_plans,
+    regenerate_plan,
 )
-from .turbo import ATTENTION_KWARG, OVERLAY_KWARG, TURBO_BANK
+from .overlay import ATTENTION_KWARG, OVERLAY_KWARG, TURBO_BANK
 
 #: Reference latents one generation keeps (`ReferenceMemo`), least recently used first out; the
 #: Runtime sheds them sooner when memory is short.
@@ -181,6 +187,31 @@ class H3Model(
         reused, encoded = self.pipe.condition_media(task, state, memo=memo)
         tel.log("h3 reference latents", reused=reused, encoded=encoded)
 
+    @uses_components("text_encoder")
+    def encode_prompt(self, prompt: str, frames: int) -> tuple[Any, Any]:
+        """A text-only (T2VA) prompt's `(prompt_embeds, text_token_tags)`: the official FL2VA
+        text block without keyframes."""
+        plan = self.pipe.plans["fl2va"]
+        state = self.pipe.start_fl2va(
+            prompt=prompt, first_frame=None, last_frame=None,
+            generator=torch.Generator().manual_seed(0), steps=plan.steps[0], frames=frames,
+            task="fl2va", plan=plan,
+        )  # fmt: skip
+        self.pipe.condition_text("fl2va", state, self.device)
+        return state.prompt_embeds, state.text_token_tags
+
+    @uses_components("vae")
+    def encode_clip(self, pixels: Any) -> Any:
+        return self.pipe.encode_clip(pixels, regenerate.POSTERIOR_SEED)
+
+    @uses_components("vae")
+    def decode_latents(self, latents: Any, *, on_chunk: Callable[[Any], None]) -> int:
+        return self.pipe.decode_latents(latents, on_chunk)
+
+    @uses_components("audio_vae")
+    def silence(self, frames: int) -> Any:
+        return self.pipe.silence_rows(frames).cpu()
+
     @uses_components("transformer")
     def sample_fl2va(self, state: Any, *, on_step: Any, cancel: Any) -> ScheduleFacts:
         return self.pipe.denoise("fl2va", state, on_step=on_step, cancel=cancel)
@@ -222,6 +253,26 @@ class H3TurboBase(H3Model, encoded_leaves="accept"):
             cancel=cancel,
             sol_dense_steps=sol_dense_steps,
         )
+
+    @uses_components("transformer")
+    def refine(
+        self,
+        latents: Any,
+        *,
+        overlay: H3RegenerateLoRA,
+        prompt_embeds: Any,
+        text_tags: Any,
+        spans: list[tuple[int, int]],
+        audio: Any,
+        schedule: Schedule,
+        seed: int,
+        on_step: Any,
+    ) -> Any:
+        """The Regenerate refine of normalized latents at their canvas, on the FL2VA DiT."""
+        return overlay.refine(
+            self, latents, prompt_embeds=prompt_embeds, text_tags=text_tags, spans=spans,
+            audio=audio, schedule=schedule, seed=seed, on_step=on_step,
+        )  # fmt: skip
 
     @uses_components("transformer_ref")
     def sample_ref2va_turbo(
@@ -321,3 +372,40 @@ class H3TurboLoRA(Model[OfficialH3TurboLoRA], encoded_leaves="accept"):
             )
         finally:
             state.set("attention_kwargs", original)
+
+
+@sequence_parallel(degrees=(2, 4, 7, 8))
+class H3RegenerateLoRA(Model[OfficialH3RegenerateLoRA], encoded_leaves="accept"):
+    """Open-H3-Regenerate-2K's refine overlay, replicated beside the base on every CP rank."""
+
+    pipe: OfficialH3RegenerateLoRA
+
+    def load(self, loader: Loader) -> None:
+        plan = regenerate_plan(loader.assets)
+        self.pipe = loader.construct(
+            OfficialH3RegenerateLoRA, factory=partial(build_h3_regenerate_lora, plan=plan)
+        )
+
+    def unload(self, loader: Loader) -> None:
+        return None
+
+    @uses_components(REGENERATE_COMPONENT)
+    def refine(
+        self,
+        base: H3Model,
+        latents: Any,
+        *,
+        prompt_embeds: Any,
+        text_tags: Any,
+        spans: list[tuple[int, int]],
+        audio: Any,
+        schedule: Schedule,
+        seed: int,
+        on_step: Any,
+    ) -> Any:
+        return regenerate.refine(
+            base.pipe.components["transformer"],
+            self.pipe.overlay(base.pipe),
+            latents=latents, prompt_embeds=prompt_embeds, text_tags=text_tags, spans=spans,
+            audio=audio, schedule=schedule, seed=seed, on_step=on_step,
+        )  # fmt: skip

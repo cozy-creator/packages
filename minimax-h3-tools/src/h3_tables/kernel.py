@@ -33,6 +33,21 @@ class LowRankAdapter:
 
 
 @dataclass(frozen=True, slots=True)
+class CurveAdapter:
+    """A LoRA on ComfyUI's AdaLN curve (`<block>.adaln_curve`: A `[r, 8]`, B `[18·hidden, r]` and
+    its `[1025, 8]` curve `table`): `y += B·A·lerp(table, t)`, a function of the timestep alone.
+
+    Open-H3-Regenerate-2K's `CurveLinear` order: the curve and the update in float32, cast to the
+    projection's bf16 output and added to it.
+    """
+
+    rank: int
+    read: TensorReader
+    #: The curve table's timestep grid points.
+    points: int = 1025
+
+
+@dataclass(frozen=True, slots=True)
 class H3Topology:
     hidden_size: int
     num_layers: int
@@ -148,6 +163,16 @@ def _read(
     return value.to(device=device)
 
 
+def curve_coordinates(table: torch.Tensor, timesteps: torch.Tensor) -> torch.Tensor:
+    """`lerp(table, t)` on the table's uniform grid over [0, 1], as `CurveContext.pre`."""
+    t = timesteps.float()
+    if t.min() < 0 or t.max() > 1:
+        raise ValueError("AdaLN curve timesteps lie in [0, 1]")
+    position = t * (len(table) - 1)
+    low = position.floor().long().clamp(max=len(table) - 2)
+    return torch.lerp(table[low], table[low + 1], (position - low).unsqueeze(-1))
+
+
 def _timestep_features(timesteps: torch.Tensor, channels: int) -> torch.Tensor:
     """Diffusers 0.40 ``Timesteps(channels, True, 0)`` without that package."""
     if timesteps.ndim != 1 or channels <= 0 or channels % 2:
@@ -172,6 +197,7 @@ def precompute_tables(
     device: torch.device,
     completed: frozenset[str] = frozenset(),
     adapter: LowRankAdapter | None = None,
+    curve: CurveAdapter | None = None,
 ) -> None:
     """Precompute one task checkpoint's tables in Diffusers 0.40 operation order.
 
@@ -236,6 +262,15 @@ def precompute_tables(
             up = _read(adapter.read, up_name, *adapted[up_name], device)
             dense = dense + adapter.scale * F.linear(F.linear(activated, down), up)
             del down, up
+        if curve is not None:
+            site = f"transformer_blocks.{index}.adaln_curve"
+            width = 18 * topology.hidden_size
+            down = _read(curve.read, f"{site}.lora_A.weight", torch.float32, (curve.rank, 8), device)
+            up = _read(curve.read, f"{site}.lora_B.weight", torch.float32, (width, curve.rank), device)
+            table = _read(curve.read, f"{site}.table", torch.float32, (curve.points, 8), device)
+            coordinates = curve_coordinates(table, timestep)
+            dense = dense + F.linear(F.linear(coordinates, down), up).to(dense.dtype)
+            del down, up, table
         dense = dense.reshape(-1, 6, topology.hidden_size)
         write(
             f"transformer_blocks.{index}.adaln_proj.table",
