@@ -346,7 +346,8 @@ class Upscale(msgspec.Struct, kw_only=True):
 
     `strength` (regenerate): how much of the source the refine redraws, as its start noise:
     0.909 (default, NVIDIA's), 0.8 or 0.7. Lower keeps more of the source (faces, on-screen text)
-    and is faster; higher invents more detail.
+    and is faster; higher invents more detail. Small text is redrawn at every strength and can
+    become other letters; SeedVR2 keeps it.
     """
 
     method: Literal["seedvr2", "regenerate"] = "seedvr2"

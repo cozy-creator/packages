@@ -41,12 +41,13 @@ upscale:
 | Frame | 7:4 letterboxed into 16:9 | **fills 16:9: the 7:4 frame is stretched 1.6% horizontally**, as NVIDIA trained it |
 | Original 768p video | published (`originals`) before the upscale finishes | not made: the latent is handed on in the same call, never decoded at 768p |
 | Controls | SeedVR2's (Tuning, below) | `strength` |
+| Faces, small text | kept | redrawn: at 0.909 a face can change expression; small text becomes other letters at every strength (large text stays legible) |
 
 `regenerate` at `768p` is a refine-only pass at the native size. `strength` is the refine's
 start noise: lower keeps more of the source (faces, on-screen text) and is faster; 0.909 is
 NVIDIA's setting. The refine conditions on the prompt as text alone, so with references
 (Ref2VA) it may redraw a character's face away from them. Where a size's rows do not fit the
-card (2160p 15 s on 24 GB), the refine runs in overlapping temporal windows: slower, never a
+card (2160p 15 s below 80 GB), the refine runs in overlapping temporal windows: never a
 refusal. `minimax-h3/regenerate` runs the same route on an existing video (`video`, `prompt`,
 `resolution`, `strength`, `seed`); its 768p frames are encoded first.
 
