@@ -139,9 +139,12 @@ def denoise_refine(
         timesteps = torch.stack([times for times, _ in plan]).to(device)
         indices = torch.stack([rows for _, rows in plan]).to(device)
         # A key mean carried from a step's last window is no other window's: windows compute
-        # their own statistics.
+        # their own statistics. Every step is sparse, so no dense step seeds them.
         rolling = bool(sites) and len(windows) == 1
-        phases = tuple(Phase(True, int(times.numel()), rolling and index > 0) for index, (times, _) in enumerate(plan))
+        phases = tuple(
+            Phase(True, int(times.numel()), rolling and index > 0, False)
+            for index, (times, _) in enumerate(plan)
+        )
         layout = layout_at(0)
         keys = tuple(id(site.module) for site in sites)
         slots = tuple(torch.zeros(site.module.heads, 128, device=device) for site in sites)
