@@ -1,6 +1,6 @@
 [project]
 name = "minimax-h3"
-version = "0.1.8"
+version = "0.1.10"
 description = "MiniMax H3 video with sound: from keyframes, references, or several segments"
 requires-python = ">=3.12"
 dependencies = [
@@ -19,7 +19,7 @@ dependencies = [
     "qwen-image-2>=0.1.0",
     "qwen3.5>=0.1.0",
     "safetensors>=0.8.0",
-    "seedvr2>=0.1.0",
+    "seedvr2==0.1.1",
     "shellingham>=1.5.4",
     "tensorfs>=0.17",
     "tokenizers>=0.23.1",

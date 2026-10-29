@@ -641,7 +641,7 @@ wheels = [
 
 [[package]]
 name = "minimax-h3"
-version = "0.1.8"
+version = "0.1.10"
 source = { editable = "." }
 dependencies = [
     { name = "birefnet" },
@@ -683,7 +683,7 @@ requires-dist = [
     { name = "qwen3-5", specifier = ">=0.1.0", index = "https://tensorhub.com/v1/index/_/simple/" },
     { name = "regex", specifier = ">=2026.7.19" },
     { name = "safetensors", specifier = ">=0.8.0" },
-    { name = "seedvr2", specifier = ">=0.1.0", index = "https://tensorhub.com/v1/index/_/simple/" },
+    { name = "seedvr2", specifier = "==0.1.1", index = "https://tensorhub.com/v1/index/_/simple/" },
     { name = "shellingham", specifier = ">=1.5.4" },
     { name = "tensorfs", specifier = ">=0.17" },
     { name = "tokenizers", specifier = ">=0.23.1" },
@@ -1311,7 +1311,7 @@ wheels = [
 
 [[package]]
 name = "seedvr2"
-version = "0.1.0"
+version = "0.1.1"
 source = { registry = "https://tensorhub.com/v1/index/_/simple/" }
 dependencies = [
     { name = "cozy-runtime", extra = ["media"] },
@@ -1329,7 +1329,7 @@ dependencies = [
     { name = "torchvision", version = "0.29.1+cu130", source = { registry = "https://download.pytorch.org/whl/cu130" }, marker = "sys_platform == 'win32'" },
 ]
 wheels = [
-    { url = "https://tensorhub.com/v1/index/_/seedvr2/0.1.0/seedvr2-0.1.0-py3-none-any.whl", hash = "sha256:f776e2a1bdd845a0237258382d904378176a227e86d2c19e593690f130014b18" },
+    { url = "https://tensorhub.com/v1/index/_/seedvr2/0.1.1/seedvr2-0.1.1-py3-none-any.whl", hash = "sha256:c632b4c1ed4daf6b905925f37c570e58ca4e6aa3067ec3dd640a5ba66a9f0457" },
 ]
 
 [[package]]
