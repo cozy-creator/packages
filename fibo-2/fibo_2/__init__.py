@@ -142,7 +142,7 @@ _MODEL = ("transformer", "text_encoder", "vae")
 
 # A VLM is built and fetched on first use: a request that skips upsampling never pulls one. Model
 # parameters are in name order: Runtime refuses a binding set whose paths are not sorted.
-@app.entrypoint(defaults={"model": "fibo-2-dev@0.1.0", "upsampler": "fibo-vlm@0.1.0", "edit_upsampler": "fibo-edit-vlm@0.1.0"},
+@app.entrypoint(defaults={"model": "briaai/fibo-2-dev@0.1.0", "upsampler": "briaai/fibo-vlm@0.1.0", "edit_upsampler": "briaai/fibo-edit-vlm@0.1.0"},
                 components={"model": _MODEL, "upsampler": ("model",), "edit_upsampler": ("model",)},
                 on_demand=("upsampler", "edit_upsampler"), memoize=Memoize(requires=["seed"]))
 def generate(ctx: Context, payload: GenerateInput, edit_upsampler: Captioner, model: Fibo2, upsampler: Captioner,
@@ -151,8 +151,8 @@ def generate(ctx: Context, payload: GenerateInput, edit_upsampler: Captioner, mo
     return _generate(ctx, "generate", payload, model, upsampler, edit_upsampler, out, tel, adj)
 
 
-@app.entrypoint(defaults={"model": "fibo-2-edit-turbo@0.1.0", "upsampler": "fibo-vlm@0.1.0",
-                          "edit_upsampler": "fibo-edit-vlm@0.1.0"},
+@app.entrypoint(defaults={"model": "briaai/fibo-2-edit-turbo@0.1.0", "upsampler": "briaai/fibo-vlm@0.1.0",
+                          "edit_upsampler": "briaai/fibo-edit-vlm@0.1.0"},
                 components={"model": _MODEL, "upsampler": ("model",), "edit_upsampler": ("model",)},
                 on_demand=("upsampler", "edit_upsampler"), memoize=Memoize(requires=["seed"]))
 def generate_turbo(ctx: Context, payload: GenerateInput, edit_upsampler: Captioner, model: Fibo2,

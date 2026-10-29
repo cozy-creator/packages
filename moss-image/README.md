@@ -83,8 +83,8 @@ is upstream's eager composition with each gated residual rounded once.
 ## Prepare the models
 
 ```sh
-cozy model upload hf://OpenMOSS-Team/MOSS-Image-SFT@f972bd4b4b9e3852133cc5da954d87bc32cd8fb9 moss-image --lane bf16 --on <machine>
-cozy model quantize moss-image@sha256:<bf16 commit> --lane int8 --package moss-image --on <machine>
+cozy model upload hf://OpenMOSS-Team/MOSS-Image-SFT@f972bd4b4b9e3852133cc5da954d87bc32cd8fb9 openmoss-team/moss-image --lane bf16 --on <machine>
+cozy model quantize openmoss-team/moss-image@sha256:<bf16 commit> --lane int8 --package moss-image --on <machine>
 ```
 
 The upload is the bf16 lane (the VAE stays f32). The `int8` lane (`int8.convrot`, W8A8 on int8 tensor

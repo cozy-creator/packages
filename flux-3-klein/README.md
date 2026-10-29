@@ -115,8 +115,8 @@ the image and joint blocks declare 8-bit attention (`attention_bits`; Runtime's 
 RTX 30/40); the text and reference early blocks, and `--lane bf16`, keep exact attention.
 
 ```sh
-cozy model quantize flux-3-klein@sha256:<bf16 commit> --lane int8 --package flux-3-klein --on <machine>
-cozy model publish flux-3-klein 0.1.0 sha256:<bf16 commit> sha256:<int8 commit>
+cozy model quantize black-forest-labs/flux-3-klein@sha256:<bf16 commit> --lane int8 --package flux-3-klein --on <machine>
+cozy model publish black-forest-labs/flux-3-klein 0.1.0 sha256:<bf16 commit> sha256:<int8 commit>
 ```
 
 Do the same for `flux-3-klein-base` and `flux-3-klein-upsampler`: each lane is one recipe that reads

@@ -96,7 +96,7 @@ def output_sizes(
 
 
 @app.entrypoint(
-    defaults={"model": "seedvr2-7b@0.1.0"},
+    defaults={"model": "bytedance-seed/seedvr2-7b@0.1.0"},
     memoize=True,
 )
 def upscale(

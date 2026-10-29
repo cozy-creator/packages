@@ -320,7 +320,7 @@ wheels = [
 
 [[package]]
 name = "minimax-h3-tools"
-version = "0.1.0"
+version = "0.1.2"
 source = { editable = "." }
 dependencies = [
     { name = "cozy-runtime" },

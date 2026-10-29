@@ -106,8 +106,8 @@ def _generate(
     return ImageResult(asset, width, height, seed, payload.prompt)
 
 
-_FULL = {"model": "hidream-o1@0.1.0"}
-_DEV = {"model": "hidream-o1-dev@0.1.0"}
+_FULL = {"model": "hidream-ai/hidream-o1@0.1.0"}
+_DEV = {"model": "hidream-ai/hidream-o1-dev@0.1.0"}
 _COMPONENTS = {"model": ("model",)}
 _MEMO = ("hidream_o1", "hidream_o1.model", "hidream_o1.sampling")
 

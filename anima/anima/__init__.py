@@ -87,7 +87,7 @@ def warmup() -> None:
     `import anima` already paid the cost and nothing is left to defer."""
 
 
-@app.entrypoint(defaults={"model": "anima@1.0.0"}, memoize=Memoize(requires=["seed"]))
+@app.entrypoint(defaults={"model": "circlestone-labs/anima@1.0.0"}, memoize=Memoize(requires=["seed"]))
 def generate(
     ctx: Context,
     payload: GenerateInput,

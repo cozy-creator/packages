@@ -92,7 +92,7 @@ def _generate(ctx: Context, payload: HunyuanRequest, steps: int, model: HunyuanI
 _COMPONENTS = {"model": ("model",)}
 
 
-@app.entrypoint(defaults={"model": "hunyuan-image-3-instruct-distil@0.1.0"}, components=_COMPONENTS,
+@app.entrypoint(defaults={"model": "tencent/hunyuan-image-3-instruct-distil@0.1.0"}, components=_COMPONENTS,
                 memoize=Memoize(requires=["seed"]))
 def generate_turbo(ctx: Context, payload: HunyuanRequest, model: HunyuanImage3, out: Outputs, tel: Telemetry,
                    adj: Adjustments) -> ImageResult:
@@ -101,7 +101,7 @@ def generate_turbo(ctx: Context, payload: HunyuanRequest, model: HunyuanImage3, 
     return _generate(ctx, payload, payload.steps or 8, model, out, tel, adj)
 
 
-@app.entrypoint(defaults={"model": "hunyuan-image-3-instruct@0.1.0"}, components=_COMPONENTS,
+@app.entrypoint(defaults={"model": "tencent/hunyuan-image-3-instruct@0.1.0"}, components=_COMPONENTS,
                 memoize=Memoize(requires=["seed"]))
 def generate(ctx: Context, payload: HunyuanRequest, model: HunyuanImage3, out: Outputs, tel: Telemetry,
              adj: Adjustments) -> ImageResult:

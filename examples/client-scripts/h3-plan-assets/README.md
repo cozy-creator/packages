@@ -2,7 +2,7 @@
 
 Each H3 DiT carries its timestep plan as the `timestep-plan.json` asset of its component
 (`transformer`, `transformer_ref`; the turbo LoRA's `fl2va_turbo`, `ref2va_turbo`), first in
-`minimax-h3@1.0.0-rc.4` and `minimax-h3-turbo-lora@1.0.1`. The package reads them from the
+`minimaxai/minimax-h3@1.0.0-rc.4` and `alibaba-pai/minimax-h3-turbo-lora@1.0.1`. The package reads them from the
 selected model and holds no copy.
 
 `scripts/h3_plans.py --output DIR 30 40 50` (Turbo: `--turbo 8`) generates plans from the official

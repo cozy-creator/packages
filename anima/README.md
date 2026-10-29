@@ -36,7 +36,7 @@ steps 8–50, guidance 1–10. Out of range clamps with a `clamp` adjustment. An
 `reference_images`, and ignores `prompt_upsampling` with a warning. The result is `image` (a WebP in
 `~/.cozy/outputs`), `width`, `height`, `seed` and `prompt`.
 
-GPU: any NVIDIA card with 8 GB. The default 8-bit lane is 3.2 GiB (`anima@1.0.0`); the
+GPU: any NVIDIA card with 8 GB. The default 8-bit lane is 3.2 GiB (`circlestone-labs/anima@1.0.0`); the
 bf16 lane is 5.2 GiB. A 1024² image at 30 steps takes about 8.4 s on an RTX 4090 and 70 s on an
 8 GB RTX 4070 Laptop. Without an NVIDIA GPU, add `--on new` to rent one.
 

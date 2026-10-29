@@ -93,8 +93,8 @@ shared and the 64 routed experts: 99% of the parameters) and the LM head as `int
 tower, VAE and image layers keep their source bytes.
 
 ```sh
-cozy model quantize hunyuan-image-3-instruct-distil@sha256:<bf16 commit> --lane int8 --package ./hunyuan-image-3 --on <machine>
-cozy model quantize hunyuan-image-3-instruct-distil@sha256:<bf16 commit> --lane nvfp4 --package ./hunyuan-image-3 --on <machine>
+cozy model quantize tencent/hunyuan-image-3-instruct-distil@sha256:<bf16 commit> --lane int8 --package ./hunyuan-image-3 --on <machine>
+cozy model quantize tencent/hunyuan-image-3-instruct-distil@sha256:<bf16 commit> --lane nvfp4 --package ./hunyuan-image-3 --on <machine>
 ```
 
 ## Licence

@@ -28,7 +28,7 @@ negative prompt, a random seed. Sizes snap to the 64 px stride and stay within 1
 adjustment. SDXL takes no `reference_images`, and ignores `prompt_upsampling` with a warning. The
 result is `image` (a WebP in `~/.cozy/outputs`), `width`, `height`, `seed` and `prompt`.
 
-GPU: any NVIDIA card with 8 GB. The default 8-bit lane is 3.8 GiB (`sdxl@1.0.0`);
+GPU: any NVIDIA card with 8 GB. The default 8-bit lane is 3.8 GiB (`stabilityai/sdxl@1.0.0`);
 `--lane bf16` loads the 6.5 GiB bf16 lane. A 1024² image at 20 steps takes about 2.6 s on an
 RTX 4090 and 17 s on an 8 GB RTX 4070 Laptop. Without an NVIDIA GPU, add `--on new` to rent
 one.

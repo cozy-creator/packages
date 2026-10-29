@@ -179,9 +179,9 @@ def _generate(ctx: Context, function: str, payload: GenerateInput, drafter: Draf
 
 
 # Qwen3.5-9B's MTP head alone (`drafter_head` makes it): BFL's upsampler checkpoint has none.
-_DRAFTER = "qwen3.5-9b-mtp@0.2.0"
-_DISTILLED = {"model": "flux-3-klein@0.1.0", "upsampler": "flux-3-klein-upsampler@0.2.0", "drafter": _DRAFTER}
-_BASE = {"model": "flux-3-klein-base@0.1.0", "upsampler": "flux-3-klein-upsampler@0.2.0", "drafter": _DRAFTER}
+_DRAFTER = "qwen/qwen3.5-9b-mtp@0.2.0"
+_DISTILLED = {"model": "black-forest-labs/flux-3-klein@0.1.0", "upsampler": "black-forest-labs/flux-3-klein-upsampler@0.2.0", "drafter": _DRAFTER}
+_BASE = {"model": "black-forest-labs/flux-3-klein-base@0.1.0", "upsampler": "black-forest-labs/flux-3-klein-upsampler@0.2.0", "drafter": _DRAFTER}
 _COMPONENTS = {
     "model": ("transformer", "text_encoder", "vae"),
     "upsampler": ("model",),

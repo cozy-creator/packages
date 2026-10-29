@@ -1,6 +1,6 @@
 [project]
 name = "hunyuan-image-3"
-version = "0.1.0"
+version = "0.1.1"
 description = "Cozy text-to-image and reference editing with Tencent's HunyuanImage 3.0 Instruct and Instruct-Distil"
 requires-python = ">=3.12"
 dependencies = [

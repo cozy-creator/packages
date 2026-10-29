@@ -66,7 +66,7 @@ def layout_prompt(prompt: str, regions: list[Region] | None, width: int, height:
 _MEMO = ("moss_image", "moss_image.model")
 
 
-@app.entrypoint(defaults={"model": "moss-image@0.1.0"}, components={"model": ("transformer", "text_encoder", "vae")},
+@app.entrypoint(defaults={"model": "openmoss-team/moss-image@0.1.0"}, components={"model": ("transformer", "text_encoder", "vae")},
                 memoize=Memoize(requires=["seed"]), memo_dependencies=_MEMO)
 def generate(ctx: Context, payload: GenerateInput, model: MossImage, out: Outputs, tel: Telemetry,
              adj: Adjustments) -> ImageResult:

@@ -49,7 +49,7 @@ A dense Qwen3.5 checkpoint (0.8B, 2B, 4B, 9B or 27B) loads in the `model` slot a
 sizes (35B-A3B, 122B-A10B, 397B-A17B) store their MTP experts per expert, with gate and up
 projections apart, and need their own converter before they load.
 
-`qwen3.5-9b@0.2.0` is the default and the only published release. Pick another uploaded size with
+`qwen/qwen3.5-9b@0.2.0` is the default and the only published release. Pick another uploaded size with
 `model.model=qwen3.5-27b@<release>`.
 
 ## Model preparation
@@ -60,7 +60,7 @@ their stored dtype; Qwen3.5 keeps `A_log` and its gated norms in f32. Inference 
 anything.
 
 ```sh
-cozy model upload hf://Qwen/Qwen3.5-9B@c202236235762e1c871ad0ccb60c8ee5ba337b9a qwen3.5-9b --lane bf16 --on <name>
+cozy model upload hf://Qwen/Qwen3.5-9B@c202236235762e1c871ad0ccb60c8ee5ba337b9a qwen/qwen3.5-9b --lane bf16 --on <name>
 ```
 
 The `int8` recipe writes every attention, gated-delta-net and MLP projection of a dense checkpoint's
@@ -68,6 +68,6 @@ language layers as `int8.convrot` (W8A8 on the int8 tensor cores). The vision to
 LM head keep their bytes. The 9B drops from 17.5 to 11.1 GiB, so it fits a 16 GB card.
 
 ```sh
-cozy model quantize qwen3.5-9b@sha256:<bf16 commit> --lane int8 --package qwen3.5 --on <name>
-cozy model publish qwen3.5-9b 0.2.0 sha256:<bf16 commit> sha256:<int8 commit>
+cozy model quantize qwen/qwen3.5-9b@sha256:<bf16 commit> --lane int8 --package qwen3.5 --on <name>
+cozy model publish qwen/qwen3.5-9b 0.2.0 sha256:<bf16 commit> sha256:<int8 commit>
 ```

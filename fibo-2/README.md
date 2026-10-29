@@ -79,10 +79,10 @@ Upload each repository as it is, as lane `bf16`, and publish it with its quantiz
 The Fibo repositories are gated: accept Bria's licence on Hugging Face first.
 
 ```sh
-cozy model upload hf://briaai/Fibo-2.0-dev@fb2b781f9e9e5572a6c348a5af7a4d155a2b1ed0 fibo-2-dev --lane bf16 --on <machine>
-cozy model upload hf://briaai/Fibo-2.0-edit-turbo@901c02672d969ed21e44ff58f1a0872c7581ddb0 fibo-2-edit-turbo --lane bf16 --on <machine>
-cozy model upload hf://briaai/FIBO-vlm@bd13da5e0b73c808014d6260963e311c8cdf0d8b fibo-vlm --lane bf16 --on <machine>
-cozy model upload hf://briaai/FIBO-edit-vlm@61d852ebd380ac79e04ec171552f5d7cca1a04cc fibo-edit-vlm --lane bf16 --on <machine>
+cozy model upload hf://briaai/Fibo-2.0-dev@fb2b781f9e9e5572a6c348a5af7a4d155a2b1ed0 briaai/fibo-2-dev --lane bf16 --on <machine>
+cozy model upload hf://briaai/Fibo-2.0-edit-turbo@901c02672d969ed21e44ff58f1a0872c7581ddb0 briaai/fibo-2-edit-turbo --lane bf16 --on <machine>
+cozy model upload hf://briaai/FIBO-vlm@bd13da5e0b73c808014d6260963e311c8cdf0d8b briaai/fibo-vlm --lane bf16 --on <machine>
+cozy model upload hf://briaai/FIBO-edit-vlm@61d852ebd380ac79e04ec171552f5d7cca1a04cc briaai/fibo-edit-vlm --lane bf16 --on <machine>
 ```
 
 ## Quantized lanes
@@ -97,8 +97,8 @@ also pads the FFN to 9,728 to quantize its down projection (xs-070). `nvfp4` put
 included, in NVFP4 (Blackwell), and a VLM's linears in NVFP4 (W4A16 decode).
 
 ```sh
-cozy model quantize fibo-2-dev@sha256:<bf16 commit> --lane int8 --package fibo-2 --on <machine>
-cozy model publish fibo-2-dev 0.1.0 sha256:<bf16 commit> sha256:<int8 commit>
+cozy model quantize briaai/fibo-2-dev@sha256:<bf16 commit> --lane int8 --package fibo-2 --on <machine>
+cozy model publish briaai/fibo-2-dev 0.1.0 sha256:<bf16 commit> sha256:<int8 commit>
 ```
 
 ## Licence
