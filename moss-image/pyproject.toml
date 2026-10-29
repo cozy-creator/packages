@@ -1,17 +1,17 @@
 [project]
 name = "moss-image"
-version = "0.1.0"
+version = "0.1.1"
 description = "Cozy text-to-image with MOSS-Image (OpenMOSS): layout boxes for objects and rendered text"
 requires-python = ">=3.12"
 dependencies = [
-    "cozy-runtime[media]>=0.33",
+    "cozy-runtime[media]>=0.35.0",
     "diffusers>=0.40",
     "msgspec>=0.19",
     "numpy>=1.26",
     "pillow>=12",
-    "tensorfs>=0.16",
+    "tensorfs>=0.17",
     "tokenizers>=0.23.1",
-    "torch>=2.13",
+    "torch>=2.14",
     "transformers>=5.17",
 ]
 

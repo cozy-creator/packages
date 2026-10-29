@@ -65,8 +65,19 @@ Upstream's (`pipeline_moss_image.py`, OpenMOSS-Team/MOSS-Image-SFT `f972bd4b`): 
 5, its sigmas snapped to the nearest of the 1,000 training sigmas, CFG 3 whose negative branch runs
 without block 22, f32 noise from `seed` drawn on the CPU and f32 latents between steps. `guidance=1`
 runs one forward per step. The text encoder reads the prompt through Qwen3.5's chat template with
-thinking open; Qwen3.5's vision tower is never built or read. On tiny real modules the package's image
-equals upstream's pipeline's exactly (max |Δ| = 0, CPU).
+thinking open; Qwen3.5's vision tower is never built or read.
+
+## Execution
+
+The denoise is one `denoise_loop`. Each prompt's text stream and RoPE are built once a request; with
+CFG both branches pass through each DiT block in turn (their text lengths differ, so they are two
+streams, as ComfyUI's two forwards). On a GPU a block runs as ComfyUI's MOSS-Image does: each modulated
+RMSNorm comes out of the int8 leaves' quantization pass, the q/k norms and split-half RoPE are one
+kernel, SiTU is one (this package's, compiled when the executor starts; eager until then) and each
+gated residual one `addcmul`. On the int8 lane the 42 DiT blocks attend at 8 bits (comfy-kitchen INT8 on
+RTX 40-class cards), as Comfy-Org's int8 file declares; the bf16 lane attends exactly. The VAE decodes
+in bf16 where the GPU computes it natively. On the CPU a block is upstream's eager composition with
+each gated residual rounded once.
 
 ## Prepare the models
 

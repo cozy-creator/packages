@@ -63,7 +63,7 @@ def layout_prompt(prompt: str, regions: list[Region] | None, width: int, height:
     return json.dumps(layout, ensure_ascii=False, separators=(",", ":"))
 
 
-_MEMO = ("moss_image", "moss_image.model")
+_MEMO = ("moss_image", "moss_image.model", "moss_image.glue")
 
 
 @app.entrypoint(defaults={"model": "moss-image@0.1.0"}, components={"model": ("transformer", "text_encoder", "vae")},
@@ -72,6 +72,7 @@ def generate(ctx: Context, payload: GenerateInput, model: MossImage, out: Output
              adj: Adjustments) -> ImageResult:
     """MOSS-Image SFT: 50 Euler steps at CFG 3 (the negative branch skips block 22), with `regions` laid
     out as upstream's layout JSON."""
+    model.hold_vae(tel)
     if payload.reference_images:
         adj.warn("reference_images", "ignored: MOSS-Image generates from text alone")
     payload.ignored(adj, "reference_boxes", reason="MOSS-Image takes no references; place elements with regions")
@@ -82,15 +83,15 @@ def generate(ctx: Context, payload: GenerateInput, model: MossImage, out: Output
     seed = payload.drawn_seed()
     width, height = payload.size(adj, None, SIZES, megapixels=1.0)
     prompt = layout_prompt(payload.prompt, payload.regions, width, height)
-    prompts = [prompt] if guidance == 1.0 else [prompt, payload.negative_prompt or ""]
     ctx.raise_if_cancelled()
     with tel.stage("encoding prompt", overall_range=(0.0, 0.05)):
-        encoded = model.encode(prompts)
+        positive = model.encode(prompt)
+        negative = None if guidance == 1.0 else model.encode(payload.negative_prompt or "")
     ctx.raise_if_cancelled()
     with tel.stage("generating image", overall_range=(0.05, 0.97)):
         latents = model.denoise(
-            encoded[0], encoded[1] if len(encoded) > 1 else None, width=width, height=height, steps=steps,
-            guidance=guidance, seed=seed, cancel=ctx.raise_if_cancelled,
+            positive, negative, width=width, height=height, steps=steps,
+            guidance=guidance, seed=seed,
             on_step=tel.step_callback(steps, stage="generating image", overall_range=(0.05, 0.97)),
         )
     with tel.stage("decoding image", overall_range=(0.97, 0.99)):
