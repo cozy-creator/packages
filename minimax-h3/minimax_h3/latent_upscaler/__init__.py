@@ -9,7 +9,7 @@ from importlib.resources import files
 from typing import cast
 
 import torch
-from cozy_runtime.author import Config, Loader, Model, uses_components
+from cozy_runtime.author import Config, Loader, Model, sequence_parallel, uses_components
 
 from .architecture import LatentResizer3D
 
@@ -30,7 +30,10 @@ def build_upscaler(config: Config) -> UpscalerGraph:
     return UpscalerGraph(config)
 
 
+@sequence_parallel(degrees=(2, 4, 7, 8))
 class H3LatentUpscaler(Model[UpscalerGraph]):
+    """Replicated beside H3 on every CP rank; it runs whole on each."""
+
     graph: UpscalerGraph
 
     def load(self, loader: Loader) -> None:
