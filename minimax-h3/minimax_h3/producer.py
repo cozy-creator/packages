@@ -88,8 +88,9 @@ class RequestState:
 class Carry:
     """One `denoise_loop` step's Kitchen key means: a carried F32 [H, 128] slot per site, by
     attention module. A rolling step's calls read the previous step's mean from their slot; every
-    sparse call leaves its own there, and the last dense step's calls seed it (`seeding`), so the
-    first sparse step reads one too instead of measuring its keys in a second producer pass. Eager
+    sparse call leaves its own there, and the last dense step's calls seed it (`seeding`; a step
+    loop seeds `RequestState.statistics` the same way), so the first sparse step reads one too
+    instead of measuring its keys in a second producer pass. Eager
     reuse decides on `layout.step` in Python, which a recorded step would freeze; the step's phase
     decides instead (`rolling`, `seeding`)."""
 
@@ -306,15 +307,24 @@ def produce(
         state.statistics.pop(key, None)
         state.replay_inputs.pop(key, None)
         carry, seed = _CARRY.get(), None
-        if carry is not None and carry.seeding and not parallel and producing(layout, call.path):
-            seed = KeyMean(carry.slots[id(attn)])
+        if not parallel and producing(layout, call.path):
+            if carry is not None:  # `denoise_loop`: the phase says which step seeds
+                seed = KeyMean(carry.slots[id(attn)]) if carry.seeding else None
+            elif layout.step == layout.dense_until_step - 1:  # a step loop: the last dense step
+                device = (hidden_states.payload if isinstance(hidden_states, PreQuantized)
+                          else hidden_states).device  # fmt: skip
+                seed = KeyMean(torch.empty(attn.heads, 128, dtype=torch.float32, device=device))
         token = KEY_MEAN.set(seed)
         try:
             output = call.original(hidden_states, rotary_emb, attention_mask)
         finally:
             KEY_MEAN.reset(token)
         if seed is not None and seed.heads >= attn.heads:
-            state.carried.add(id(attn))
+            if carry is not None:
+                state.carried.add(id(attn))
+            else:  # what `previous_statistics` reads at the first sparse step; its values stay its own
+                geometry = (layout.live_tokens, attn.heads, layout.protected_prefix)
+                state.statistics[key] = (layout.step, geometry, seed.slot, None)
         return output
     if rotary_emb is None or hidden_states.shape[0] != 1:
         raise ValueError("H3 producer requires batch1 and rotary tables")
