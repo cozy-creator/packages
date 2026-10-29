@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Annotated, Any
 
 import msgspec
-import numpy as np
+import torch
 from cozy_runtime.author import (
     Adjustments,
     App,
@@ -49,19 +49,21 @@ _ALPHA_NOISE = 4
 
 
 def decoded_image(decoded: Any) -> Image.Image:
-    """The decoder's pixels: RGBA when its alpha has any transparency, else RGB."""
+    """The decoder's pixels: RGBA when its alpha has any transparency, else RGB. Quantized on the
+    decoder's device, NumPy's arithmetic in Torch: a 4 MP canvas sends 16 MB of bytes to the host,
+    not 67 MB of floats for six host passes."""
     # The model returns B,C,H,W in [-1,1], just as upstream VaeImageProcessor consumes.
-    pixels = decoded[0].detach().float().cpu().permute(1, 2, 0).numpy()
-    if not np.isfinite(pixels).all():
+    pixels = decoded[0].detach().float()
+    if not bool(torch.isfinite(pixels).all()):
         raise ValueError("Qwen Image decoder produced non-finite pixels")
-    pixels = ((pixels / 2 + 0.5).clip(0, 1) * 255).round().astype(np.uint8)
+    pixels = ((pixels / 2 + 0.5).clamp(0, 1) * 255).round().to(torch.uint8).permute(1, 2, 0)
     if pixels.shape[-1] == 4:
         alpha = pixels[..., 3]
         alpha[alpha <= _ALPHA_NOISE] = 0
         alpha[alpha >= 255 - _ALPHA_NOISE] = 255
-        if alpha.min() == 255:
+        if int(alpha.min()) == 255:
             pixels = pixels[..., :3]
-    return Image.fromarray(np.ascontiguousarray(pixels))
+    return Image.fromarray(pixels.contiguous().cpu().numpy())
 
 
 def _generate(

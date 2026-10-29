@@ -78,7 +78,9 @@ With references, what is not given is the FIRST reference's (the image being edi
 package takes the first.
 
 The VAE runs in bf16 on GPUs that compute it natively (Turbo stores it so; the base release
-stores F32), else in its stored dtype.
+stores F32), else in its stored dtype. Up to 1 MP it decodes whole; above, in 1024 px tiles (512
+or 256 px where those do not fit), so the DiT and text encoder stay resident beside it on a 24 GB
+card.
 
 Reference VAE encoding and multimodal prompt encoding each run once before
 denoising, in separate component residency leases. Denoising reuses their tensors

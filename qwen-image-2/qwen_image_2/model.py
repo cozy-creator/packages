@@ -18,7 +18,13 @@ from diffusers import (
     QwenImage21Pipeline,
     QwenImage21Transformer2DModel,
 )
-from diffusers.models.autoencoders.autoencoder_kl_qwenimage21 import QwenImage21ResidualUpBlock
+from diffusers.models.autoencoders.autoencoder_kl_qwenimage21 import (
+    QwenImage21Decoder3d,
+    QwenImage21Encoder3d,
+    QwenImage21ResidualBlock,
+    QwenImage21ResidualUpBlock,
+    QwenImage21RMS_norm,
+)
 from diffusers.models.transformers.transformer_qwenimage21 import (
     QwenImage21KVCache,
     QwenImage21TransformerBlock,
@@ -85,6 +91,16 @@ BLOCK = fusion.DiTBlock(
     mlp=fusion.GatedMLP("img_mlp", gate="gate_layer", up="proj", down="out"),
     rope=fusion.Rope("rotary_emb", interleaved=True),
     gate="tanh",
+)
+#: The VAE's RMS norms in one kernel each, with the SiLU each residual block and each head applies
+#: after them; Diffusers computes them in F32 copies of every activation.
+VAE_NORM = fusion.ChannelNorm(
+    QwenImage21RMS_norm,
+    silu=(
+        (QwenImage21ResidualBlock, ("norm1", "norm2")),
+        (QwenImage21Decoder3d, ("norm_out",)),
+        (QwenImage21Encoder3d, ("norm_out",)),
+    ),
 )
 
 
@@ -220,7 +236,11 @@ class QwenImage21Model(Model[QwenImage21Graph], encoded_leaves="accept"):
         self.processor = vlm.processor(loader.assets, "processor/", self.graph.processor_config)
 
     def execution_plan(self, plan: Plan) -> str:
-        return fusion.install(plan, BLOCK, self.graph.components["transformer"])
+        installed = (
+            fusion.install(plan, BLOCK, self.graph.components["transformer"]),
+            fusion.install_norms(plan, VAE_NORM, self.graph.components["vae"]),
+        )
+        return "+".join(identity for identity in installed if identity)
 
     def hold_vae(self, tel: Telemetry) -> None:
         """Run the VAE in bf16 where the GPU computes it natively, as ComfyUI stages it and as Turbo
@@ -494,16 +514,18 @@ class QwenImage21Model(Model[QwenImage21Graph], encoded_leaves="accept"):
             mean = latents.new_tensor(vae.config.latents_mean).view(1, vae.config.z_dim, 1, 1, 1)
             std = latents.new_tensor(vae.config.latents_std).view(1, vae.config.z_dim, 1, 1, 1)
             z = latents * std + mean
-            decoded = _decoded_whole(vae, z)
+            decoded = _decoded_whole(vae, z) if width * height <= WHOLE_PIXELS else None
             if decoded is None:
                 decoded = _decoded_tiled(vae, z, tel)
             return decoded.clamp(-1.0, 1.0)[:, :, 0]
 
 
-#: Tile sides (px) for a canvas the whole decode cannot fit, largest first. 512 px tiles err 7 dB
-#: less against the whole decode than Diffusers' 256 px default (42.9 vs 35.2 dB at 4 MP), whose
-#: seams show in flat sky, but they do not fit an RTX 3070 with 3 GB free.
-_TILES = (512, 256)
+#: The largest canvas decoded whole, about 3 GB in bf16. A 4 MP whole decode's 12.7 GB evicted the
+#: resident DiT and text encoder on a 24 GB card, and every next request read 13.8 GB again.
+WHOLE_PIXELS = 1024 * 1024
+#: Tile sides (px), largest first: tiles the size of the largest canvas decoded whole, smaller ones
+#: where those do not fit (or where the whole canvas does not: an RTX 3070 with 3 GB free).
+_TILES = (1024, 512, 256)
 
 
 def _decoded_tiled(vae: Any, z: torch.Tensor, tel: Telemetry) -> torch.Tensor:
@@ -518,9 +540,9 @@ def _decoded_tiled(vae: Any, z: torch.Tensor, tel: Telemetry) -> torch.Tensor:
 
 
 def _tiled(vae: Any, z: torch.Tensor, tile: int, tel: Telemetry) -> torch.Tensor:
-    """F32 like the whole decode, `tile` px tiles blended with their neighbours over a quarter of
-    their side: Diffusers' bits, each tile decoded as the whole canvas is (`_decoded`, no feature
-    cache), a few kernels a blend (`cozy_runtime.tiles`)."""
+    """`tile` px tiles blended with their neighbours over a quarter of their side: Diffusers'
+    bits, each tile decoded as the whole canvas is (`_decoded`, no feature cache), a few kernels a
+    blend (`cozy_runtime.tiles`)."""
     decoded = tiles.tiled(
         lambda t: _decoded(vae.decoder, vae.post_quant_conv(t)),
         z,
