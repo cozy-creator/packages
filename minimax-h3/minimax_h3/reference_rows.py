@@ -14,7 +14,8 @@ camera (h3a-094, owner's choice 2026-10-17):
 - The clip's remaining latent rows guide only the dense steps, where staging and motion are
   decided, and leave before the first sparse one, which then runs at no-reference length.
 
-Image references, standalone audio and a continuation's carried rows are untouched.
+Image references, standalone audio and a continuation's carried rows are untouched. A guide
+video is never a reference (`guide_rows`).
 """
 
 from __future__ import annotations
@@ -54,7 +55,7 @@ def public_video(reference: Any) -> bool:
 
 class ClipRows:
     """Each packed video row's latent frame within its public clip (-1 for every other row),
-    followed through each drop."""
+    followed through each drop. The references' rows follow `start` guide rows."""
 
     def __init__(
         self,
@@ -62,10 +63,12 @@ class ClipRows:
         references: Sequence[Any],
         condition_latents: Sequence[Any],
         patch: Sequence[int],
+        *,
+        start: int = 0,
     ) -> None:
         _, patch_h, patch_w = patch
         self.frame = torch.full((block_state.video_indices.numel(),), -1, dtype=torch.int64)
-        offset, latents = 0, iter(condition_latents)
+        offset, latents = start, iter(condition_latents)
         for reference in references:
             if reference.kind not in ("image", "video"):
                 continue

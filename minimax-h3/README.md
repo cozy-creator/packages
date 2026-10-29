@@ -48,6 +48,10 @@ cozy run minimax-h3/long_form --input story.json
 }
 ```
 
+A `kind: video` reference guides motion; with `guide: true` it is the source the output follows
+frame by frame, for edit LoRAs such as head swap and style transfer
+([LONG_FORM.md](LONG_FORM.md#action-videos)).
+
 Supplied character images have their backgrounds removed (BiRefNet) and are described in one
 sentence (Qwen3.5); `clean_references=false` and `describe_references=false` turn
 either off. Write prompts in MiniMax's
