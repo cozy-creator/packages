@@ -53,7 +53,7 @@ class _Phase(NamedTuple):
         return self.start, self.stop
 
 
-#: The render ladder. `cozy run list` renders "<stage> <percent>" verbatim, so these names
+#: The render ladder. `cozy run ls` renders "<stage> <percent>" verbatim, so these names
 #: are read by a person; the spans are contiguous and cover the whole request. Only
 #: `denoise` is measured per step — it is the only phase long enough to need it, and at the
 #: default 1536 class it is 150 of the roughly 160 seconds.
