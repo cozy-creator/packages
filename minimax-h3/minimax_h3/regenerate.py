@@ -52,9 +52,13 @@ OVERLAP = 7
 #: input, residual, norm and attention output are whole; the Runtime cuts only attention and
 #: FFN working sets, and reclaims cached weights only there). And what a card holds beside
 #: them. Measured: 1440p 15 s whole fits 24 GB (run 20382); 2160p 15 s whole needs more than
-#: 48 GB (run 20468), and runs in three windows on 24 GB (run 20470), two on 48 GB.
+#: 48 GB (run 20468), and runs in three windows on 24 GB (run 20470).
 _ROW_BYTES = 11 * 5376
 _BESIDE = 2 << 30
+#: The most video rows one forward has refined at a normal step time (1440p 15 s, run 20382).
+#: A proven bound, not a fix: 465k rows (2160p 15 s in two windows on 48 GB, run 20476) made no
+#: progress in an hour.
+_MOST_ROWS = 107 * 3600
 
 
 def latent_size(resolution: str) -> tuple[int, int]:
@@ -78,8 +82,9 @@ def frames_of(latent_frames: int) -> int:
 
 def windows(latent_frames: int, rows_per_frame: int, capacity: int) -> list[tuple[int, int]]:
     """`(first latent frame, latent frames)` spans: the whole clip when its rows fit `capacity`
-    bytes, else the fewest equal `5n + 2` windows overlapping by at least OVERLAP that do."""
-    fit = max(0, capacity - _BESIDE) // (_ROW_BYTES * rows_per_frame)
+    bytes and `_MOST_ROWS`, else the fewest equal `5n + 2` windows overlapping by at least
+    OVERLAP that do."""
+    fit = min(max(0, capacity - _BESIDE) // _ROW_BYTES, _MOST_ROWS) // rows_per_frame
     if latent_frames <= fit:
         return [(0, latent_frames)]
     if fit < 2 * OVERLAP + 2:
