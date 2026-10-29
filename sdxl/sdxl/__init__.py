@@ -609,7 +609,7 @@ def resolve_generate(payload: GenerateInput) -> GenerateFacts:
 
 
 @app.entrypoint(
-    defaults={"model": "sdxl@1.0.0"},
+    defaults={"model": "stabilityai/sdxl@1.0.0"},
     memoize=Memoize(requires=["seed"]),
     preflight=resolve_generate,
 )

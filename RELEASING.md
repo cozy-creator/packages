@@ -23,8 +23,8 @@ at runtime, so a package never waits on an image.
 ## One source, every Hub
 
 First-party packages publish at the root namespace, with no owner (`sdxl`, `minimax-h3`): `task publish`
-runs `cozy package publish --root` on each Hub, which only Hub admins may do. A model default with no
-org names a first-party model (`minimax-h3@1.0.0-rc.4`). First-party package dependencies name the
+runs `cozy package publish --root` on each Hub, which only Hub admins may do. Model defaults name upstream
+models in their authors' orgs (`minimaxai/minimax-h3@1.0.0-rc.4`); a default with no org names a model we make. First-party package dependencies name the
 `tensorhub` index (`qwen-image-2 = { index = "tensorhub" }`), which is the root's (`/v1/index/_/simple/`).
 
 Commit locks bound to production. After changing dependencies, as a tensorhub.com admin:

@@ -953,8 +953,8 @@ def _nonfinite_fraction(torch: Any, value: Any) -> float:
 
 
 #: The releases every H3 callable defaults to; the machine picks each lane from the GPU.
-_MODEL = "minimax-h3@1.0.0-rc.6"
-_TURBO_LORA = "minimax-h3-turbo-lora@1.0.1"
+_MODEL = "minimaxai/minimax-h3@1.0.0-rc.6"
+_TURBO_LORA = "alibaba-pai/minimax-h3-turbo-lora@1.0.1"
 
 
 #: The components each task runs. A machine downloads these first and the rest behind the

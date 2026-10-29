@@ -106,7 +106,7 @@ cozy model upload \
 cozy model upload \
   hf://Qwen/Qwen-Image-2.1-Turbo@fc13ba1986fcb905854dc8de2f52eee395f49b5b \
   qwen-image-2.1-turbo --lane bf16 --on YOUR_MACHINE
-cozy model publish qwen-image-2.1-turbo 0.1.0 sha256:COMMIT
+cozy model publish qwen/qwen-image-2.1-turbo 0.1.0 sha256:COMMIT
 ```
 
 Replace `YOUR_MACHINE` and `COMMIT` with the selected machine name and
@@ -125,8 +125,8 @@ The 32 DiT blocks also attend at 8 bits (comfy-kitchen INT8 on RTX 40-class card
 `--attention-kernel exact`, attends exactly.
 
 ```sh
-cozy model quantize qwen-image-2.1@sha256:BF16_COMMIT --lane int8 --package qwen-image-2 --on YOUR_MACHINE
-cozy model publish qwen-image-2.1 0.1.0 sha256:BF16_COMMIT sha256:INT8_COMMIT
+cozy model quantize qwen/qwen-image-2.1@sha256:BF16_COMMIT --lane int8 --package qwen-image-2 --on YOUR_MACHINE
+cozy model publish qwen/qwen-image-2.1 0.1.0 sha256:BF16_COMMIT sha256:INT8_COMMIT
 ```
 
 ## Python dependency
@@ -159,7 +159,7 @@ image = await generate(
 ```
 
 The Hub package is the first-party `qwen-image-2` (no owner); its callables are `generate` and
-`generate_turbo`. Their default models are the first-party `qwen-image-2.1@0.1.0` and
-`qwen-image-2.1-turbo@0.1.1`: a model with no org is the root namespace's.
+`generate_turbo`. Their default models are the first-party `qwen/qwen-image-2.1@0.1.0` and
+`qwen/qwen-image-2.1-turbo@0.1.1`: a model with no org is the root namespace's.
 Installing the wheel alone does not turn GPU execution into an in-process call;
 Cozy supplies the managed caller when composing package functions.

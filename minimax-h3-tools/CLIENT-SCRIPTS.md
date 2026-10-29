@@ -14,7 +14,7 @@ async def main(ctx):
 
 Each source DiT must carry `timestep-plan.json`: `transformer` for FL2VA and
 `transformer_ref` for Ref2VA. There is no package plan fallback; the model's plan
-(30, 40 and 50 denoising steps in `minimax-h3@1.0.0-rc.4`) is the authority.
+(30, 40 and 50 denoising steps in `minimaxai/minimax-h3@1.0.0-rc.4`) is the authority.
 `timesteps` selects a step count that plan serves; the retained BF16 bank supports
 all of them. The argument does not silently invent a new scheduler.
 

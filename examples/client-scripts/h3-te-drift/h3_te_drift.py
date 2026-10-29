@@ -1,7 +1,7 @@
 """Weights-only drift of H3 text-encoder encodings, against the served bf16 conditioning.
 
     cozy run minimax-h3/encode_text --input encode-request.json --on NAME --out bf16 \
-      model.model=minimax-h3@1.0.0-rc.2 --lane fp8
+      model.model=minimaxai/minimax-h3@1.0.0-rc.2 --lane fp8
     cozy run ./examples/client-scripts/h3-te-drift/weight_drift --input weight-request.json \
       --asset states=bf16/<run>-states.bin --on NAME --json \
       model.bf16=... model.fp8=...

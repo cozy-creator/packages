@@ -18,8 +18,8 @@ cozy run birefnet/remove_background --input request.yaml
 Inline inputs work too, and override the file's:
 
 ```sh
-cozy model upload hf://ZhengPeng7/BiRefNet@e2bf8e4460fc8fa32bba5ea4d94b3233d367b0e4 birefnet --lane fp16
-cozy model publish birefnet 0.1.0 sha256:<commit-from-upload>
+cozy model upload hf://ZhengPeng7/BiRefNet@e2bf8e4460fc8fa32bba5ea4d94b3233d367b0e4 zhengpeng7/birefnet --lane fp16
+cozy model publish zhengpeng7/birefnet 0.1.0 sha256:<commit-from-upload>
 cozy run birefnet/remove_background --asset image=./character.png
 ```
 

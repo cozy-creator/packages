@@ -77,10 +77,10 @@ ComfyUI's and AI-Toolkit's reference names, musubi-tuner's kohya names).
 ## Prepare the models
 
 ```sh
-cozy model upload hf://krea/Krea-2-Raw@6b0ece7fffb640c5e3bcbe0a7f10f66b8e60a603 krea-2 --lane bf16 --on <machine>
-cozy model upload hf://krea/Krea-2-Turbo@98e0fe118d17c9e3547fbb2e25acdbae2cadf7c7 krea-2-turbo --lane bf16 --on <machine>
-cozy model quantize krea-2@sha256:<bf16 commit> --lane int8 --package krea-2 --on <machine>
-cozy model quantize krea-2-turbo@sha256:<bf16 commit> --lane int8 --package krea-2 --on <machine>
+cozy model upload hf://krea/Krea-2-Raw@6b0ece7fffb640c5e3bcbe0a7f10f66b8e60a603 krea/krea-2 --lane bf16 --on <machine>
+cozy model upload hf://krea/Krea-2-Turbo@98e0fe118d17c9e3547fbb2e25acdbae2cadf7c7 krea/krea-2-turbo --lane bf16 --on <machine>
+cozy model quantize krea/krea-2@sha256:<bf16 commit> --lane int8 --package krea-2 --on <machine>
+cozy model quantize krea/krea-2-turbo@sha256:<bf16 commit> --lane int8 --package krea-2 --on <machine>
 ```
 
 The upload reads the Diffusers folders (`raw.safetensors` and `turbo.safetensors`, the reference

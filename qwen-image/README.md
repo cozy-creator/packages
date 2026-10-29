@@ -7,8 +7,8 @@ DiT changes between requests.
 
 | function | without references | with references | default steps | guidance |
 | --- | --- | --- | --- | --- |
-| `generate` | `qwen-image-2512@0.1.1` | `qwen-image-edit-2511@0.1.0` | 50 / 40 | true CFG 4.0 |
-| `generate_turbo` | the same, with `qwen-image-2512-lightning-lora@0.1.0` | the same, with `qwen-image-edit-2511-lightning-lora@0.1.0` | 8 | none |
+| `generate` | `qwen/qwen-image-2512@0.1.1` | `qwen/qwen-image-edit-2511@0.1.0` | 50 / 40 | true CFG 4.0 |
+| `generate_turbo` | the same, with `lightx2v/qwen-image-2512-lightning-lora@0.1.0` | the same, with `lightx2v/qwen-image-edit-2511-lightning-lora@0.1.0` | 8 | none |
 
 Write the request in a file, `request.yaml`:
 
@@ -97,9 +97,9 @@ cozy model upload hf://Qwen/Qwen-Image-2512@25468b98e3276ca6700de15c6628e51b7de5
   qwen-image-2512 --lane bf16 --on <machine>
 cozy model upload hf://lightx2v/Qwen-Image-2512-Lightning@4609161e308ce82018a42c2a0c9b107e865bb751/Qwen-Image-2512-Lightning-8steps-V1.0-fp32.safetensors \
   qwen-image-2512-lightning-lora --lane f32 --on <machine>
-cozy model quantize qwen-image-2512@sha256:<bf16 commit> --lane int8 --package qwen-image --on <machine>
-cozy model quantize qwen-image-2512@sha256:<bf16 commit> --lane nvfp4 --package qwen-image --on <machine>
-cozy model publish qwen-image-2512 <version> sha256:<bf16 commit> sha256:<int8 commit> sha256:<nvfp4 commit>
+cozy model quantize qwen/qwen-image-2512@sha256:<bf16 commit> --lane int8 --package qwen-image --on <machine>
+cozy model quantize qwen/qwen-image-2512@sha256:<bf16 commit> --lane nvfp4 --package qwen-image --on <machine>
+cozy model publish qwen/qwen-image-2512 <version> sha256:<bf16 commit> sha256:<int8 commit> sha256:<nvfp4 commit>
 ```
 
 The edit checkpoint is `hf://Qwen/Qwen-Image-Edit-2511@6f3ccc0b56e431dc6a0c2b2039706d7d26f22cb9`, its

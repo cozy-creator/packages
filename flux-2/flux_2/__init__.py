@@ -97,7 +97,7 @@ def _generate(ctx: Context, payload: GenerateInput, model: Flux2, turbo: Flux2Tu
     return ImageResult(asset, width, height, seed, prompt)
 
 
-_DEV = "flux-2-dev@0.1.0"
+_DEV = "black-forest-labs/flux-2-dev@0.1.0"
 #: The upsampler is [dev]'s text encoder, built and fetched only when `prompt_upsampling` is on; the
 #: Turbo LoRA only with [dev].
 _COMPONENTS = {"model": ("transformer", "text_encoder", "vae"), "upsampler": ("text_encoder",)}
@@ -113,7 +113,7 @@ def generate(ctx: Context, payload: GenerateInput, model: Flux2, upsampler: Flux
     return _generate(ctx, payload, model, None, upsampler, out, tel, adj)
 
 
-@app.entrypoint(defaults={"model": _DEV, "turbo_lora": "flux-2-dev-turbo@0.1.0", "upsampler": _DEV},
+@app.entrypoint(defaults={"model": _DEV, "turbo_lora": "fal/flux-2-dev-turbo@0.1.0", "upsampler": _DEV},
                 components=_TURBO_COMPONENTS, on_demand=("upsampler", "turbo_lora"), memoize=Memoize(requires=["seed"]))
 def generate_turbo(ctx: Context, payload: GenerateInput, model: Flux2, turbo_lora: Flux2TurboLoRA,
                    upsampler: Flux2Upsampler, out: Outputs, tel: Telemetry, adj: Adjustments) -> ImageResult:
