@@ -23,7 +23,7 @@ aspect_ratio: "3:2"
 ```sh
 cozy run krea-2/generate_turbo --input request.yaml
 cozy run krea-2/generate prompt='a red fox in fresh snow at golden hour' seed=7
-cozy run krea-2/generate_turbo --input request.yaml --lora model:transformer=<org/krea-2-lora>,0.8
+cozy run krea-2/generate_turbo --input request.yaml --lora <org/krea-2-lora>,0.8
 ```
 
 Fields: `prompt`, `aspect_ratio` (any `W:H`, default 1:1), `megapixels` (Raw 1, Turbo 4), `steps` (1–100),
@@ -63,7 +63,7 @@ two branches pass through each block in turn, so a streamed block comes in once 
 
 ## LoRAs
 
-Caller LoRAs adapt the DiT, at any strength: `--lora model:transformer=<ref>[,strength]`, in order. The
+Caller LoRAs adapt the DiT, at any strength: `--lora <ref>[,strength]`, in order. The
 Runtime bakes them into the resident weights. Upload a LoRA file as it is:
 
 ```sh
