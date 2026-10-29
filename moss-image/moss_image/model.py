@@ -9,9 +9,10 @@ one `denoise_loop`.
 On a GPU a DiT block runs as ComfyUI's MOSS-Image does, with the Runtime's prebuilt kernels: each
 modulated RMSNorm and SiTU comes out of the int8 leaves' quantization pass (`int8_rows`, the norm
 weight folded into `1 + scale`), the q/k norms and split-half RoPE are one kernel
-(`rms_rope_split_half`) and each gated residual one in-place `addcmul`. The int8 lane's DiT blocks
-attend at 8 bits, as Comfy-Org's int8 file declares (`comfy_attention.config`); the bf16 lane stays
-exact. Elsewhere (the CPU, the bf16 lane's norms and SiTU) a block runs upstream's eager composition.
+(`rms_rope_split_half`) and each gated residual one in-place `addcmul`. The DiT blocks attend at 8
+bits, as Comfy-Org's int8 file declares (`comfy_attention.config`); `--attention-kernel exact` runs
+them exactly. Elsewhere (the CPU, the bf16 lane's norms and SiTU) a block runs upstream's eager
+composition.
 """
 
 from __future__ import annotations
