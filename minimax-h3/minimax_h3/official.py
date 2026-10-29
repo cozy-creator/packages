@@ -40,6 +40,7 @@ from diffusers.modular_pipelines.minimax_h3 import (
     MiniMaxH3ImageReference,
     MiniMaxH3VideoReference,
 )
+from diffusers.modular_pipelines.minimax_h3.before_denoise import patchify_video_latents
 from diffusers.modular_pipelines.minimax_h3.modular_pipeline import (
     align_num_frames,
     audio_latent_num_frames,
@@ -47,6 +48,7 @@ from diffusers.modular_pipelines.minimax_h3.modular_pipeline import (
     video_latent_num_frames,
 )
 from diffusers.modular_pipelines.modular_pipeline import PipelineState
+from diffusers.utils.torch_utils import randn_tensor
 from torch.nn.utils.weight_norm import WeightNorm
 
 from cozy_runtime import vlm
@@ -80,6 +82,7 @@ from .continuation import (
     align_context_rows,
     export_context,
 )
+from .guide_rows import GUIDE, GUIDE_LATENTS, GuideClip, guide_rows
 from .reference_rows import ClipRows, motion_size, public_video
 from .steps import denoise_fl2va
 from .turbo import ATTENTION_KWARG, TURBO_BANK, TurboOverlay, TurboSchedule
@@ -640,8 +643,7 @@ CANVAS = (32, 768, 768 * 1344)
 
 def reference_video_vision_tokens(width: int, height: int, duration: Fraction) -> int:
     """Exact 2-fps, pair-merged vision demand at the clip's `motion_size` of its canvas."""
-    canvas = (int(value) for value in resolve_canvas_size(width, height, *CANVAS))
-    canvas_height, canvas_width = motion_size(*canvas)
+    canvas_height, canvas_width = clip_size(width, height, guide=False)
     frames_at_24fps = _round_fraction(duration * FPS)
     sampled_frames = (frames_at_24fps + 11) // 12
     temporal_blocks = (sampled_frames + 1) // 2
@@ -664,6 +666,38 @@ def _unreachable() -> Any:
 
 def _returning(value: Any) -> Callable[[], Any]:
     return lambda: value
+
+
+def _encode_identity(view: Any, memo: ReferenceMemo | None) -> tuple[Any, ...]:
+    """What, beside the pixels, decides a condition encode's latents."""
+    return (
+        memo.identity if memo is not None else "",
+        str(view._execution_device.type),
+        str(next(view.vae.parameters()).dtype),
+        tuple(view.pixel_mean),
+        tuple(view.pixel_std),
+        int(view.keyframe_encode_seed),
+    )
+
+
+def _snapped(frames: int) -> int:
+    """A clip's frames snapped down to `17n + 5`, as the official encode step does."""
+    chunks = max(1, (frames - LATENTS_PER_CHUNK) // FRAMES_PER_CHUNK)
+    return chunks * FRAMES_PER_CHUNK + LATENTS_PER_CHUNK
+
+
+def _clip_latent_frames(frames: int) -> int:
+    return video_latent_num_frames(_snapped(frames), FRAMES_PER_CHUNK, LATENTS_PER_CHUNK)
+
+
+def _soundtrack_rows(audio_vae: Any, waveform: torch.Tensor) -> torch.Tensor:
+    """A stereo soundtrack's normalized latents, `(channels, latents, width)`: the channels are
+    batch items of the mono audio VAE, at the posterior mean, never sampled."""
+    posterior = audio_vae.encode(waveform[:, None], return_dict=False)[0]
+    rows = posterior.mode().float().cpu().transpose(1, 2)
+    mean = torch.tensor(audio_vae.config.latents_mean).view(1, 1, -1)
+    std = torch.tensor(audio_vae.config.latents_std).view(1, 1, -1)
+    return (rows - mean) / std
 
 
 def reference_digest(pixels: Any) -> tuple[str, tuple[int, ...], str]:
@@ -900,7 +934,7 @@ class OfficialH3Pipeline:
         return MiniMaxH3AudioReference(audio=waveform, sample_rate=self.sample_rate)
 
     def video_reference(self, clip: ReferenceClip) -> Any:
-        """A clip already at its motion size (`read_reference_video`). The official
+        """A clip already at the size it is used at (`read_reference_video`). The official
         normalization sees a free canvas-sized stand-in it leaves as it is, and `start_ref2va`
         puts the real frames in its place, so nothing is resized twice."""
         soundtrack = clip.soundtrack
@@ -917,6 +951,15 @@ class OfficialH3Pipeline:
             sample_rate=None if soundtrack is None else self.sample_rate,
             motion=clip.frames,
         )
+
+    def guide_clip(self, clip: ReferenceClip) -> GuideClip:
+        """A guide video, read at the render's canvas, with its soundtrack in stereo at the
+        audio VAE's rate, as the official normalization puts a reference's."""
+        audio = clip.soundtrack
+        if audio is not None:
+            audio = _resample(audio, clip.sample_rate, self.sample_rate).to(torch.float32)
+            audio = audio.expand(2, -1).contiguous() if audio.shape[0] == 1 else audio
+        return GuideClip(clip.frames, audio)
 
     def start_fl2va(
         self,
@@ -962,9 +1005,11 @@ class OfficialH3Pipeline:
         context: AVContext | None = None,
         delivery: ContinuationPlan | None = None,
         expected_context_provenance: str | None = None,
+        guide: GuideClip | None = None,
     ) -> Any:
         """``reference_image_short_edges`` is one resolved edge per image reference, in
-        packed order; the official setup step resizes each image to its own."""
+        packed order; the official setup step resizes each image to its own. A `guide` sets
+        the render's canvas (`guide_rows`)."""
         if context is not None:
             context.validate()
             if delivery is None or delivery.carried != context.carry:
@@ -979,6 +1024,11 @@ class OfficialH3Pipeline:
             )
         if delivery is not None and frames != delivery.sample_frames:
             raise InvalidRequest("sample frames differ from delivery plan", code="h3_continuation")
+        canvas = (
+            {}
+            if guide is None
+            else dict(zip(("height", "width"), map(int, guide.frames.shape[1:3]), strict=True))
+        )
         state = self._start(
             _trunk_task(task, "ref2va"),
             prompt=prompt,
@@ -988,12 +1038,14 @@ class OfficialH3Pipeline:
             references=list(references),
             image_short_edges=tuple(reference_image_short_edges),
             plan=plan,
+            **canvas,
         )
         state.set("normalized_references", [
             replace(normalized, frames=source.motion[:frames])
             if isinstance(source, MotionVideo) else normalized
             for source, normalized in zip(references, state.normalized_references, strict=True)
         ])
+        state.set(GUIDE, guide)
         if context is not None and context.canvas not in (None, (state.height, state.width)):
             raise InvalidRequest(
                 "continuation canvas differs from this render", code="h3_continuation"
@@ -1096,11 +1148,7 @@ class OfficialH3Pipeline:
                     frames = 1
                 else:
                     count, height, width = reference.frames.shape[:3]
-                    snapped = (
-                        max(1, (count - LATENTS_PER_CHUNK) // FRAMES_PER_CHUNK) * FRAMES_PER_CHUNK
-                        + LATENTS_PER_CHUNK
-                    )
-                    frames = video_latent_num_frames(snapped, FRAMES_PER_CHUNK, LATENTS_PER_CHUNK)
+                    frames = _clip_latent_frames(count)
                     if public_video(reference):
                         released += (
                             frames
@@ -1129,6 +1177,16 @@ class OfficialH3Pipeline:
             _ScopedPipeline(pipe, shell, overrides={"max_duration": _CEILING_S}), scratch
         )
         tokens = int(scratch.get("token_tags").numel())
+        guide = scratch.get(GUIDE)
+        if guide is not None:
+            if guide.audio is not None:
+                return None
+            count, height, width = guide.frames.shape[:3]
+            tokens += (
+                _clip_latent_frames(count)
+                * (height // VAE_SPATIAL_RATIO // PATCH_SIZE[1])
+                * (width // VAE_SPATIAL_RATIO // PATCH_SIZE[2])
+            )
         return tokens - released if _TRUNK[task] == "ref2va" else tokens
 
     def _expect(self, task: Task, state: Any) -> None:
@@ -1192,6 +1250,9 @@ class OfficialH3Pipeline:
                 counts = self._encode_references(task, state, memo)
         else:
             self._run(task, "vae_encoder", state, component="vae")
+        if state.get(GUIDE) is not None:
+            with _audio_weight_norm_scope(self.components["audio_vae"]):
+                self._encode_guide(task, state, memo)
         context = state.get("continuation_context")
         if context is not None:
             if context.video is not None:
@@ -1231,28 +1292,14 @@ class OfficialH3Pipeline:
             seed = int(view.keyframe_encode_seed)
             latents_mean = torch.tensor(vae.config.latents_mean).view(1, -1, 1, 1, 1)
             latents_std = torch.tensor(vae.config.latents_std).view(1, -1, 1, 1, 1)
-            identity = (
-                memo.identity if memo is not None else "",
-                str(device.type),
-                str(next(vae.parameters()).dtype),
-                pixel_mean,
-                pixel_std,
-                seed,
-            )
+            identity = _encode_identity(view, memo)
             references = state.normalized_references
             visual: dict[int, tuple[Any, tuple[Any, ...]]] = {}
             for index, reference in enumerate(references):
                 if reference.kind == "image":
                     pixels = np.array(reference.image)
                 elif reference.kind == "video":
-                    # Snap down to `17n + 5` frames, as the official step does.
-                    count = reference.frames.shape[0]
-                    count = (
-                        max(1, (count - view.vae_latents_per_chunk) // view.vae_frames_per_chunk)
-                        * view.vae_frames_per_chunk
-                        + view.vae_latents_per_chunk
-                    )
-                    pixels = reference.frames[:count].copy()
+                    pixels = reference.frames[: _snapped(reference.frames.shape[0])].copy()
                 else:
                     continue
                 key = () if memo is None else (*identity, *reference_digest(pixels))
@@ -1289,23 +1336,46 @@ class OfficialH3Pipeline:
                 latents[index].clone() if memo is not None else latents[index] for index in visual
             ]
 
-            audio_mean = torch.tensor(audio_vae.config.latents_mean).view(1, 1, -1)
-            audio_std = torch.tensor(audio_vae.config.latents_std).view(1, 1, -1)
-            audio_condition_latents = []
-            for reference in references:
-                if reference.has_audio:
-                    waveform = reference.audio.to(device)[:, None]
-                    posterior = audio_vae.encode(waveform, return_dict=False)[0]
-                    # Channel-major rows: the two stereo channels are two batch items of the mono
-                    # audio VAE. Soundtracks take the posterior mean and are never sampled.
-                    rows = posterior.mode().float().cpu().transpose(1, 2)
-                    normalized = (rows - audio_mean) / audio_std
-                    audio_condition_latents.append(
-                        normalized.reshape(-1, view.audio_latent_channels)
-                    )
+            audio_condition_latents = [
+                _soundtrack_rows(audio_vae, reference.audio.to(device)).reshape(
+                    -1, view.audio_latent_channels
+                )
+                for reference in references
+                if reference.has_audio
+            ]
             state.set("condition_latents", condition_latents)
             state.set("audio_condition_latents", audio_condition_latents)
             return len(visual) - len(missing), len(missing)
+
+    def _encode_guide(self, task: Task, state: Any, memo: ReferenceMemo | None) -> None:
+        """The guide's latents and soundtrack rows, encoded as a reference video's are."""
+        guide: GuideClip = state.get(GUIDE)
+        with torch.no_grad():
+            view = _ScopedPipeline(self._pipes[self._workflow(task, state)], self.components["vae"])
+            vae = view.vae
+            pixels = guide.frames[: _snapped(guide.frames.shape[0])].copy()
+            key = None
+            if memo is not None:
+                key = (*_encode_identity(view, memo), *reference_digest(pixels))
+            if key is not None and key in memo.cache:
+                latents = memo.cache.get(key, build=_unreachable).clone()
+            else:
+                raw = encode_condition(
+                    vae,
+                    torch.from_numpy(pixels),
+                    tuple(view.pixel_mean),
+                    tuple(view.pixel_std),
+                    int(view.keyframe_encode_seed),
+                )
+                mean = torch.tensor(vae.config.latents_mean).view(1, -1, 1, 1, 1)
+                std = torch.tensor(vae.config.latents_std).view(1, -1, 1, 1, 1)
+                latents = (raw.cpu() - mean) / std
+                if key is not None:
+                    latents = memo.cache.get(key, build=_returning(latents)).clone()
+            audio = None
+            if guide.audio is not None:
+                audio = _soundtrack_rows(view.audio_vae, guide.audio.to(view._execution_device))
+        state.set(GUIDE_LATENTS, (latents, audio))
 
     def denoise(
         self,
@@ -1329,11 +1399,14 @@ class OfficialH3Pipeline:
         )
         # The selected upstream workflow owns the ordered preparation steps.
         # Text-only requests have no keyframe tensors to encode or concatenate.
+        guided = 0
         for name in blocks:
             if name == "denoise.denoise":
                 break
             if not name.startswith("denoise."):
                 continue
+            if name == "denoise.set_timesteps" and state.get(GUIDE_LATENTS) is not None:
+                guided = self._pack_guide(scoped, state)
             self._run_with(task, scoped, name, state)
 
         context = state.get("continuation_context")
@@ -1354,7 +1427,7 @@ class OfficialH3Pipeline:
         clips = None
         if _TRUNK[task] == "ref2va":
             references, latents = state.normalized_references, state.condition_latents
-            clips = ClipRows(block_state, references, latents, scoped.patch_size)
+            clips = ClipRows(block_state, references, latents, scoped.patch_size, start=guided)
             clips.thin(block_state)
         if (
             task == "fl2va"
@@ -1385,6 +1458,22 @@ class OfficialH3Pipeline:
         loop.set_block_state(state, block_state)
         self._run_with(task, scoped, "denoise.after_denoise", state)
         return facts
+
+    @staticmethod
+    def _pack_guide(scoped: Any, state: Any) -> int:
+        """The guide as its rows (`guide_rows`), noised as FL2VA's keyframes are, after every
+        other draw of the request's generator; its video row count."""
+        latents, audio = state.get(GUIDE_LATENTS)
+        device = state.latents.device
+        noise = randn_tensor(
+            latents.shape, generator=state.generator, device=device, dtype=torch.float32
+        )
+        noised = scoped.scheduler.scale_noise(latents.to(device), scoped.keyframe_noise_aug, noise)
+        video = patchify_video_latents(noised, tuple(scoped.patch_size))
+        if audio is not None:
+            audio = audio[:, : state.num_audio_latents]
+        guide_rows(state, video, audio)
+        return int(video.shape[0])
 
     def decode_audio(self, task: Task, state: Any) -> Any:
         # Repeated BigVGAN decodes can differ on the same input even
@@ -1930,15 +2019,15 @@ def _resample(waveform: Any, rate: int, target: int) -> Any:
 
 @dataclass
 class MotionVideo(MiniMaxH3VideoReference):
-    """A reference clip whose real frames, `motion`, are already at their motion size."""
+    """A reference clip whose real frames, `motion`, are already at the size the call uses."""
 
     motion: Any = None
 
 
 @dataclass(frozen=True, slots=True)
 class ReferenceClip:
-    """A clip as the call uses it: `(T, H, W, 3)` uint8 frames at its motion size on the
-    24-fps clock, the source geometry its canvas follows, and its soundtrack if kept."""
+    """A clip as the call uses it: `(T, H, W, 3)` uint8 frames on the 24-fps clock at its
+    `clip_size`, the source geometry its canvas follows, and its soundtrack if kept."""
 
     frames: Any
     width: int
@@ -1948,14 +2037,21 @@ class ReferenceClip:
     sample_rate: int = 0
 
 
+def clip_size(width: int, height: int, *, guide: bool) -> tuple[int, int]:
+    """The (height, width) a clip is read at: the canvas its aspect resolves to, which the
+    target shares, or for a motion clip that canvas's `motion_size`."""
+    canvas = tuple(int(value) for value in resolve_canvas_size(width, height, *CANVAS))
+    return canvas if guide else motion_size(*canvas)
+
+
 def read_reference_video(
-    events: Iterable[Any], *, frames: int, audio: bool
+    events: Iterable[Any], *, frames: int, audio: bool, guide: bool = False
 ) -> ReferenceClip:
     """Decode a reference clip once, straight to the size the call uses.
 
     Each frame shows until the next starts (the last for its own duration) and lands on the
-    whole-frame 24-fps clock, resized once (antialiased bicubic) as it arrives to the motion
-    size of the canvas its aspect ratio resolves to. Only the call's first `frames` are kept
+    whole-frame 24-fps clock, resized once (antialiased bicubic) as it arrives to its
+    `clip_size`. Only the call's first `frames` are kept
     and no source-resolution frame outlives its event. With `audio`, the soundtrack is kept on
     the video's origin, to the nearest sample of its own clock.
     """
@@ -1989,8 +2085,8 @@ def read_reference_video(
         start = event.start_time
         if first is None:
             first, origin = event, start
-            canvas = resolve_canvas_size(event.width, event.height, *CANVAS)
-            out = np.empty((frames, *motion_size(*(int(v) for v in canvas)), 3), dtype=np.uint8)
+            size = clip_size(event.width, event.height, guide=guide)
+            out = np.empty((frames, *size, 3), dtype=np.uint8)
         elif held is not None and start < held[0]:
             raise ConformanceError("reference video presentation time runs backwards",
                                    code="reference_policy")

@@ -96,6 +96,12 @@ class StoryReference(msgspec.Struct):
     ] = None
     #: A video's own sound: dropped unless set, so the clip guides motion alone.
     use_audio: bool = False
+    #: A video the output follows frame by frame, as an edit's source (Alissonerdx's head swap
+    #: and style transfer): every latent frame at the render's own canvas, on every step, and
+    #: the render takes its canvas (`guide_rows`). It costs what a second render does: per
+    #: `reference_rows`, about 5.5x the denoise for a 12 s clip beside a 15 s render, against
+    #: ~1.25x unset.
+    guide: bool = False
     #: A character's voice: a timbre reference wherever the character is named.
     voice: Annotated[
         AudioAsset | None,
@@ -245,6 +251,10 @@ def validate_references(references: Sequence[StoryReference]) -> dict[str, Story
                 f"reference {reference.name} needs {'an image or a nonempty description' if field == 'image' else f'its {field}'}",
                 fields=["references"],
             )
+        if reference.guide and reference.kind != "video":
+            raise InvalidRequest(
+                f"only a video guides, not {reference.kind} {reference.name}", fields=["references"]
+            )
         if reference.retention_analysis is not None and not reference.retention_analysis.strip():
             raise InvalidRequest(
                 f"reference {reference.name} has blank retention_analysis; omit it for the default",
@@ -376,7 +386,16 @@ def _segment_call(
     )
     named = {ref.name for ref in mentioned(text)}
     named |= {voice.name for voice in pool if voice.name in owners and owners[voice.name].name in named}
-    used = [ref for ref in pool if ref.kind == "background" or ref.name in named]
+    # A guide packs after every other reference, so when it leaves the packed references
+    # (`guide_rows`) every other label stays as H3 numbers it.
+    used = sorted(
+        (ref for ref in pool if ref.kind == "background" or ref.name in named),
+        key=lambda ref: ref.guide,
+    )
+    if sum(ref.guide for ref in used) > 1:
+        raise InvalidRequest(
+            f"segment {index + 1} names more than one guide video", fields=["references"]
+        )
     if all(ref.kind == "audio" for ref in used):
         # H3's ref2va needs a picture: with no background and no character named, send every
         # reference but the videos.
@@ -443,7 +462,7 @@ def _segment_call(
         cast = set().union(*(found for _, found in shots if clip.name in found))
         return [ref for ref in characters if ref.name in cast] or characters
 
-    motion = {} if editing else {clip.name: performers(clip) for clip in clips}
+    motion = {} if editing else {clip.name: performers(clip) for clip in clips if not clip.guide}
     voiced = {ref.name: speaker(owners[ref.name], text) for ref in used if ref.name in owners}
     # A subject_definitions line of the text's own that opens with a reference, and cites its
     # picture for an image, defines it: the template adds no second line, and the reference's
@@ -481,7 +500,8 @@ def _segment_call(
             definitions.append(f"{slot} is the supplied audio reference for <{ref.name}>.")
             default = f"partially_copy - {slot} is copied into the target audio, with other sounds around it."
         elif ref.kind == "video":
-            role = "source video" if editing else "motion and camera reference"
+            source = editing or ref.guide
+            role = "source video" if source else "motion and camera reference"
             who = f" for {names(motion[ref.name])}" if motion.get(ref.name) else ""
             definitions.append(f"{slot} is the {role}{who}." if _MEDIA.fullmatch(ref.name)
                                else f"<{ref.name}> is the {role} in {slot}{who}.")
@@ -493,7 +513,7 @@ def _segment_call(
                     retention.append(f"{sound}: partially_copy - the synchronized audio track of {slot} "
                                      "is copied into the target audio, with other sounds around it.")
                     tasks.add("audio reuse")
-            if editing:
+            if source:
                 line_label = f"{slot} (source video editing)"
                 default = ("fully_preserved - its framing, setting and subjects are kept except where "
                            "the description changes them.")
@@ -527,6 +547,7 @@ def _segment_call(
                       else "audio reference")
         if ref.retention_analysis or (ref.name, _SLOT[ref.kind]) not in retained:
             retention.append(f"{line_label}: {line}")
+    clips = [clip for clip in clips if not clip.guide]
     if clips and not editing and words < SHORT_DESCRIPTION:
         warnings.append(
             f"Segment {index + 1}: {names(clips)} guide{'s' * (len(clips) == 1)} a description of "
