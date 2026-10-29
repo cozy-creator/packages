@@ -59,6 +59,21 @@ either off. Write prompts in MiniMax's
 `resolution` and `upscale` are in [UPSCALE.md](UPSCALE.md). The video is an MP4 in
 `~/.cozy/outputs`.
 
+LoRAs: add one `--lora <org/lora>[,strength]` per LoRA (strength 1 by default), in the order they
+stack, or list them in the request file:
+
+```sh
+cozy run minimax-h3/ref2va_turbo --input scene.yaml --lora alissonerdx/minimax-h3-live-wallpaper,1.0
+```
+
+```yaml
+lora:
+  - {ref: alissonerdx/minimax-h3-live-wallpaper, strength: 1.0}
+```
+
+Each function adapts the transformer it runs: `transformer` for `fl2va`, `transformer_ref` for
+`ref2va` and `long_form`. A LoRA trained for the other one still loads, but its effect is untested.
+
 GPU: one NVIDIA card with 80 GB or more (H100, RTX PRO 6000, H200); the 8-bit lane is 70 GiB,
 and `--on new` rents a card that holds it. Measured on one H100 at 30 steps: about 3 minutes
 for 5 s of video and 16 minutes for 14 s; turbo runs 8 steps. Most computers rent: add
