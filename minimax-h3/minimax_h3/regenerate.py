@@ -48,13 +48,13 @@ VIDEO_TAG, TEXT_TAG, AUDIO_TAG = 0, 1, 2
 AUDIO_CHANNELS = 2
 #: Latent frames neighbouring windows share (about one second).
 OVERLAP = 7
-#: What one DiT block holds per packed row at its peak, beside its weights: 4.5 bf16 rows of
-#: hidden 5376. Its input, the new residual and a norm are whole while the attention's
-#: 7168-wide output meets its projection (4.33 rows); the Runtime's cuts split only the
-#: attention and FFN working sets. And what a card holds beside them (context, the two-block
-#: weight window, the head-cut K/V). 2160p 15 s: three windows on 24 GB, whole on 48 GB.
-_ROW_BYTES = 9 * 5376
-_BESIDE = 3 << 30
+#: What a refine holds per packed row at a block's peak: 5.5 bf16 rows of hidden 5376 (its
+#: input, residual, norm and attention output are whole; the Runtime cuts only attention and
+#: FFN working sets, and reclaims cached weights only there). And what a card holds beside
+#: them. Measured: 1440p 15 s whole fits 24 GB (run 20382); 2160p 15 s whole needs more than
+#: 48 GB (run 20468), and runs in three windows on 24 GB (run 20470), two on 48 GB.
+_ROW_BYTES = 11 * 5376
+_BESIDE = 2 << 30
 
 
 def latent_size(resolution: str) -> tuple[int, int]:
