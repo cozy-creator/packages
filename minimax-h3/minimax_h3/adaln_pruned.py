@@ -46,6 +46,13 @@ from .overlay import (
 )
 
 
+#: Rows the packing and the output heads take at a time (0.35 GB of bf16 rows). A full-length
+#: temporary there sits outside the Runtime's managed sites, which alone reclaim cached
+#: weights: the packing's third copy refused the 2160p 15 s refine on 24 and 48 GB (runs 20463
+#: and 20453), the output heads' norm took several more.
+_CHUNK = 1 << 15
+
+
 class StepInvariants:
     """What one denoise computes once rather than every step: the rotary tables of its packed
     positions and its refined text rows. Each is kept while the same input tensors come back
@@ -332,14 +339,19 @@ class AdaLNPrunedMiniMaxH3Transformer(MiniMaxH3Transformer3DModel):  # type: ign
                 rotary_emb = memo.get("rope", (position_ids,), lambda: self.rope(position_ids))
                 overlay = self._arming.overlay if self._arming is not None else None
                 text = memo.get("text", (encoder_hidden_states, overlay), refined)
+            # The packed rows are this forward's one full-length tensor outside the blocks: the
+            # video goes in, and the heads come out, `_CHUNK` rows at a time.
             rows = text.new_zeros((text.shape[0], sequence_length, text.shape[-1]))
-            rows = rows.index_copy(1, text_indices, text)
+            rows.index_copy_(1, text_indices, text)
             del text
-            video = self.proj_in(hidden_states.to(get_parameter_dtype(self.proj_in)))
-            rows = rows.index_copy(1, video_indices, video.to(rows.dtype))
-            del video
+            dtype = get_parameter_dtype(self.proj_in)
+            for start in range(0, int(video_indices.shape[0]), _CHUNK):
+                part = slice(start, start + _CHUNK)
+                video = self.proj_in(hidden_states[:, part].to(dtype)).to(rows.dtype)
+                rows.index_copy_(1, video_indices[part], video)
+                del video
             audio = self.audio_proj_in(audio_hidden_states.to(get_parameter_dtype(self.audio_proj_in)))
-            rows = rows.index_copy(1, audio_indices, audio.to(rows.dtype))
+            rows.index_copy_(1, audio_indices, audio.to(rows.dtype))
             del audio
             # The packing's float32 video rows (2.2 GB at 15 s) leave the cache before the blocks.
             release_if_tight(rows, self.transformer_blocks[0].attn)
@@ -351,9 +363,17 @@ class AdaLNPrunedMiniMaxH3Transformer(MiniMaxH3Transformer3DModel):  # type: ign
                     rows = self._gradient_checkpointing_func(block, rows, temb, adaln_indices, rotary_emb)
                 else:
                     rows = block(rows, temb, adaln_indices, rotary_emb)
-            rows = self.norm_out(rows, temb, timestep_indices).to(get_parameter_dtype(self.proj_out))
-            video_output = self.proj_out(rows).index_select(1, video_indices)
-            audio_output = self.audio_proj_out(rows).index_select(1, audio_indices)
+            dtype = get_parameter_dtype(self.proj_out)
+
+            def head(proj: nn.Module, indices: torch.Tensor) -> torch.Tensor:
+                parts = []
+                for part in indices.split(_CHUNK):
+                    normed = self.norm_out(rows.index_select(1, part), temb, timestep_indices[part])
+                    parts.append(proj(normed.to(dtype)))
+                return parts[0] if len(parts) == 1 else torch.cat(parts, dim=1)
+
+            video_output = head(self.proj_out, video_indices)
+            audio_output = head(self.audio_proj_out, audio_indices)
             if not return_dict:
                 return (video_output, audio_output)
             return MiniMaxH3TransformerOutput(sample=video_output, audio_sample=audio_output)

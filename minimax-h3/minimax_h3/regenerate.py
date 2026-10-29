@@ -48,11 +48,12 @@ VIDEO_TAG, TEXT_TAG, AUDIO_TAG = 0, 1, 2
 AUDIO_CHANNELS = 2
 #: Latent frames neighbouring windows share (about one second).
 OVERLAP = 7
-#: What one DiT block holds per packed row beside its weights: the bf16 residual rows
-#: (hidden 5376) and the attention output before `to_out` (56 x 128), whose full buffers the
-#: Runtime's cuts do not split, with a fifth spare; and what a card holds beside them (context,
-#: the two-block weight window, the head-cut K/V). An approximation the proof bounds.
-_ROW_BYTES = 6 * (5376 + 7168) * 2 // 5
+#: What one DiT block holds per packed row at its peak, beside its weights: 4.5 bf16 rows of
+#: hidden 5376. Its input, the new residual and a norm are whole while the attention's
+#: 7168-wide output meets its projection (4.33 rows); the Runtime's cuts split only the
+#: attention and FFN working sets. And what a card holds beside them (context, the two-block
+#: weight window, the head-cut K/V). 2160p 15 s: three windows on 24 GB, whole on 48 GB.
+_ROW_BYTES = 9 * 5376
 _BESIDE = 3 << 30
 
 
