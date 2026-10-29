@@ -227,7 +227,13 @@ _ENCODER_CODE = (
 )
 
 
-class QwenImage21Model(Model[QwenImage21Graph], encoded_leaves="accept"):
+class QwenImage21Model(
+    Model[QwenImage21Graph],
+    encoded_leaves="accept",
+    # The 32 DiT blocks attend at 8 bits (comfy-kitchen INT8 on RTX 40-class cards): attention is
+    # two thirds of a 4 MP step. A 16-bit request attends exactly.
+    attention_bits={"transformer.transformer_blocks.": 8},
+):
     graph: QwenImage21Graph
     processor: Any
 
