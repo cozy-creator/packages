@@ -28,6 +28,8 @@ from .tencent.system_prompt import get_system_prompt
 from .tencent.tokenization_hunyuan_image_3 import HunyuanImage3TokenizerFast
 
 COMPONENT = "model"
+#: A checkpoint's float dtypes (`Config.tensor_dtype`) as torch builds them.
+_DTYPES = {"bf16": torch.bfloat16, "f16": torch.float16, "f32": torch.float32}
 
 #: The text stage stops after this many tokens.
 MAX_NEW_TOKENS = 2048
@@ -56,12 +58,16 @@ _RECAPTION = re.compile(r"<recaption>(.*?)(?:</recaption>|$)", re.DOTALL)
 
 class Graph:
     def __init__(self, config: Config) -> None:
-        # As Tencent's `from_pretrained(torch_dtype="auto")` builds it: every module in bfloat16 (the
-        # VAE's float32 weights included) but the experts' routers, which are float32.
+        # Every parameter as the checkpoint stores it, which Runtime fills as they are: bfloat16 but
+        # the VAE's float32 (Tencent's own shards). Tencent's float32 expert routers hold bfloat16
+        # values; here they stay bfloat16 and route in float32 (`HunyuanTopKGate.forward`). The VAE
+        # runs under Tencent's float16 autocast either way.
         model = HunyuanImage3ForCausalMM(HunyuanImage3Config(**config.mapping()))
         model = model.to(torch.bfloat16).eval()
-        for layer in model.model.layers:
-            layer.mlp.gate.wg.float()
+        for name, parameter in model.named_parameters():
+            stored = _DTYPES.get(config.tensor_dtype(f"{COMPONENT}.{name}", default="bf16"))
+            if stored is not None and parameter.dtype != stored:
+                parameter.data = parameter.data.to(stored)
         self.components: dict[str, torch.nn.Module] = {COMPONENT: model}
 
 

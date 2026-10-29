@@ -117,11 +117,13 @@ def build(distilled: bool) -> tuple[Any, Any]:
     reference.generation_config = GenerationConfig(**GENERATION)
     port = Port(PortConfig(**tiny(distilled))).eval()
     # The served dtypes, as `from_pretrained(torch_dtype="auto")` and the package's Graph make them:
-    # bfloat16 throughout but the float32 expert routers.
+    # bfloat16 throughout; Tencent's expert routers are float32 modules of bfloat16 values, the
+    # package's stay bfloat16 (as stored) and route in float32.
     for model in (reference, port):
         model.to(torch.bfloat16)
-        for layer in model.model.layers:
-            layer.mlp.gate.wg.float()
+        if model is reference:
+            for layer in model.model.layers:
+                layer.mlp.gate.wg.float()
         # CPU autocast has no float32 rule for group norm, so the VAE keeps float32 weights here (on a GPU it
         # is bfloat16). Tencent's `dtype` is its first parameter's, the VAE's: report the backbone's as served.
         model.vae.float()
