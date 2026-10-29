@@ -36,6 +36,7 @@ import json
 import sys
 import time
 from collections.abc import Callable, Iterator, Mapping
+from contextvars import ContextVar
 from dataclasses import dataclass, replace
 from typing import Any
 
@@ -70,6 +71,19 @@ from .adaln_pruned import AdaLNPrunedMiniMaxH3Transformer
 from .fit import fits, release
 
 CONTRACT = "h3-glue-call-and-topology/2"
+
+
+@dataclass(slots=True)
+class KeyMean:
+    """Where an attention call leaves its post-RoPE key mean, F32 [heads, 128] over its tokens
+    (`producer`: the last dense step seeds the first sparse step's Kitchen statistics), and how
+    many heads it has written."""
+
+    slot: torch.Tensor
+    heads: int = 0
+
+
+KEY_MEAN: ContextVar[KeyMean | None] = ContextVar("minimax_h3_key_mean", default=None)
 #: The widths compiled: a transformer with others is not installable.
 HIDDEN, FFN, HEAD_DIM, ROTARY = 5376, 14336, 128, 96
 _ROW_WARPS = 16
@@ -686,6 +700,7 @@ class H3AttnProcessor(MiniMaxH3AttnProcessor):  # type: ignore[misc]
         attention_mask: Any | None,
     ) -> Any:
         query, key, value = self.qkv(attn, hidden_states, rotary_emb)
+        seed_key_mean(key, slice(None))
         return self.attend(query, key, value, attention_mask)
 
     def attend(self, query: Any, key: Any, value: Any, attention_mask: Any | None = None) -> Any:
@@ -734,6 +749,16 @@ class FusedMiniMaxH3AttnProcessor(H3AttnProcessor):
         query = rmsnorm_rope(self._glue, query, attn.norm_q.weight, cos, sin, attn.norm_q.eps)
         key = rmsnorm_rope(self._glue, key, attn.norm_k.weight, cos, sin, attn.norm_k.eps)
         return query, key
+
+
+def seed_key_mean(key: Any, heads: slice) -> None:
+    """`KEY_MEAN`'s heads from this call's [1, tokens, heads, 128] post-RoPE keys, summed in F32
+    without an F32 copy."""
+    target = KEY_MEAN.get()
+    if target is not None:
+        found = key[0].sum(0, dtype=torch.float32) / key.shape[1]
+        target.slot[heads].copy_(found)
+        target.heads += found.shape[0]
 
 
 class _Heads:
@@ -794,6 +819,7 @@ class _Heads:
             project(self.hidden, start, stop).unflatten(-1, (-1, d)) for project in self.projections
         )
         query, key = self.processor.rope(self.attn, query, key, self.rotary)
+        seed_key_mean(key, window)
         return self.processor.attend(query, key, value)
 
 
