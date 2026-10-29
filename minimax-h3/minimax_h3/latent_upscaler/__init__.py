@@ -21,6 +21,7 @@ STD = torch.tensor(_STATS["latent_normalization"]["std"]).view(1, -1, 1, 1, 1)
 
 class UpscalerGraph:
     def __init__(self, config: Config) -> None:
+        # One component, so the construction config is the TensorFS table's own document.
         if config.mapping().get("architecture") != ARCHITECTURE:
             raise ValueError("the latent upscaler requires LBH-123-AI's 3D-conv v1 checkpoint")
         self.components = {"upscaler": LatentResizer3D().eval().bfloat16()}  # type: ignore[no-untyped-call]

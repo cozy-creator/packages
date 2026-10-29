@@ -1726,12 +1726,9 @@ class OfficialH3RegenerateLoRA:
     over the FL2VA DiT with its own heads."""
 
     def __init__(self, config: Config, plan: TimestepPlan) -> None:
-        if set(config.keys()) != {REGENERATE_COMPONENT}:
-            raise ConformanceError(
-                f"a Regenerate checkpoint contains exactly {REGENERATE_COMPONENT}",
-                code="artifact_config",
-            )
-        section = config.section(REGENERATE_COMPONENT).mapping()
+        # The checkpoint holds one component, `fl2va_regenerate`, so its construction config is
+        # that component's own (the Runtime keys a document by component only for several).
+        section = dict(config.mapping())
         extension = section.pop("cozy_h3", None)
         if not isinstance(extension, dict):
             raise ConformanceError("missing Regenerate metadata", code="artifact_config")
