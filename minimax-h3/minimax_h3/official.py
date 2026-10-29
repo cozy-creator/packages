@@ -152,7 +152,7 @@ _DISTILLATION = "pdd"
 #: The timesteps and sigmas a component's modulation tables hold rows for, in its folder.
 PLAN_ASSET = "timestep-plan.json"
 #: The first release of each model whose components carry their plans.
-PLANS_SINCE = {False: "minimax-h3@1.0.0-rc.4", True: "minimax-h3-turbo-lora@1.0.1"}
+PLANS_SINCE = {False: "minimaxai/minimax-h3@1.0.0-rc.4", True: "alibaba-pai/minimax-h3-turbo-lora@1.0.1"}
 _ASSETS = Path(__file__).resolve().parent
 # NVIDIA's H3 sparse policy protects conditioning and the initial sensitive work.
 # This supplies semantics only; Runtime chooses the kernels.
