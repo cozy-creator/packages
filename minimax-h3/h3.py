@@ -1259,12 +1259,14 @@ app.entrypoint(internal=True)(generate_ref2va)
 app.entrypoint(internal=True)(generate_ref2va_turbo)
 
 
-#: The output canvas the Regenerate route computes: the demand axis beside the frames.
+#: The output canvas the Regenerate route computes (`regenerate.TARGETS`): the demand axis beside
+#: the frames.
 _REGENERATE_PIXELS = {
-    resolution: (width, height) for resolution, (height, width, _) in (
-        (Resolution(name), size) for name, size in refine_math.TARGETS.items()
-    )
-}  # fmt: skip
+    Resolution.NATIVE: (1344, 768),
+    Resolution.FULL_HD: (1920, 1088),
+    Resolution.QHD: (2560, 1440),
+    Resolution.UHD: (3840, 2176),
+}
 RegenerateResolution = Annotated[Resolution, Shape(pixels=_REGENERATE_PIXELS)]
 
 
@@ -1375,7 +1377,7 @@ class RegenerateInput(msgspec.Struct, kw_only=True):
     video: Annotated[VideoAsset, AssetBound(max_bytes=1 << 30, max_decoded_bytes=2 << 30)]
     prompt: str
     resolution: RegenerateResolution = Resolution.QHD
-    strength: float = REGENERATE_STRENGTHS[-1]
+    strength: float = 0.909
     seed: int | None = None
 
     def __post_init__(self) -> None:
