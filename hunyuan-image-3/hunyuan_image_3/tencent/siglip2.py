@@ -488,7 +488,9 @@ class Siglip2VisionTransformer(nn.Module):
         self.use_head = True if not hasattr(config, "vision_use_head") else config.vision_use_head
         if self.use_head:
             self.head = Siglip2MultiheadAttentionPoolingHead(config)
-        self._use_flash_attention_2 = config._attn_implementation == "flash_attention_2"
+        # Tencent's config names sdpa here (`vit._attn_implementation`). Runtime's Config drops `_` keys as
+        # bookkeeping, and this port never brings flash-attn: the 4-D mask path, as Tencent's sdpa runs it.
+        self._use_flash_attention_2 = False
 
     def forward(
         self,
