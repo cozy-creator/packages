@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 import torch
+from cozy_runtime import tiles
 from cozy_runtime.author import Telemetry, hold_dtype
 from transformers.masking_utils import create_causal_mask
 
@@ -61,9 +62,42 @@ def encode_tokens(
     return prompt, second_encoder.text_projection(pooled)
 
 
+#: The largest canvas decoded whole where it fits, about 9.7 GB in bf16. HiDiffusion's larger canvases
+#: (up to 16 MP) decode in tiles: a whole 4096² decode asked for 8 GiB more with 14 GiB allocated on a
+#: 24 GB card. Tiles renormalize per tile (the VAE's GroupNorm), 34 dB against a whole 2048² decode.
+WHOLE_PIXELS = 2048 * 2048
+#: Tile sides (px), largest first: smaller where they do not fit.
+TILES = (1024, 512, 256)
+
+
 def decode_latents(vae: Any, latents: torch.Tensor, scale: float) -> torch.Tensor:
-    """Decode with the VAE's already selected representation; never change its weights."""
-    return vae.decode(latents / scale).sample
+    """Decode with the VAE's already selected representation, never changing its weights: whole
+    up to `WHOLE_PIXELS` where it fits, else in the largest `TILES` that fit."""
+    z = latents / scale
+    factor = 2 ** (len(vae.config.block_out_channels) - 1)
+    if z.shape[-2] * z.shape[-1] * factor * factor <= WHOLE_PIXELS:
+        try:
+            return vae.decode(z).sample
+        except torch.OutOfMemoryError as error:
+            error.__traceback__ = None  # the whole decode's activations go with its frames
+    *larger, smallest = TILES
+    for side in larger:
+        try:
+            return _tiled(vae, z, factor, side)
+        except torch.OutOfMemoryError as error:
+            error.__traceback__ = None  # this attempt's tiles go with its frames
+    return _tiled(vae, z, factor, smallest)
+
+
+def _tiled(vae: Any, z: torch.Tensor, factor: int, side: int) -> torch.Tensor:
+    """Diffusers' tiled decode (`AutoencoderKL.tiled_decode`'s quarter-side blend), its bits, in
+    `side` px tiles (`cozy_runtime.tiles`)."""
+
+    def decoded(tile: torch.Tensor) -> torch.Tensor:
+        quant = vae.post_quant_conv
+        return vae.decoder(quant(tile) if quant is not None else tile)  # type: ignore[no-any-return]
+
+    return tiles.tiled(decoded, z, scale=factor, side=side, stride=side * 3 // 4)
 
 
 def decode_dtype(vae: Any) -> torch.dtype:
