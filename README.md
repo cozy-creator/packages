@@ -12,7 +12,7 @@ dependencies or qualifying a worker image.
 
 | path | responsibility |
 |---|---|
-| `minimax-h3/` | MiniMax H3 dual-task package over AdaLN-pruned weights |
+| `minimax-h3/` | MiniMax H3 video with sound: `shot` (one continuous take of any length) and `upscale` |
 | `sdxl/` | SDXL text-to-image package plus the family's `int8`/`fp8`/`w4a8` recipes (se-008, cr-073, se-023) |
 | `anima/` | Anima text-to-image package for local development and benchmarking (se-009; model license is non-commercial) |
 | `minimax-h3-tools/` | H3 timestep-table and structural precompute functions (cr-071) |
@@ -100,212 +100,34 @@ transformer's; every other component inherits unchanged.
 
 ## MiniMax H3
 
-The H3 package exposes both official actions from one model generation. Its normal
-`model: H3Model` slot contains only the two DiTs, text encoder and VAEs.
+`minimax-h3` exposes two node functions for Cozy Creator's projects, `shot` and `upscale`
+([minimax-h3/README.md](minimax-h3/README.md), [UPSCALE.md](minimax-h3/UPSCALE.md)). A shot renders
+in pieces of at most 15 s, each an internal serving child on one of H3's official trunks: FL2VA
+(text and keyframes) when it attaches no reference, else Ref2VA, which also carries the previous
+piece's latents ([continuation](minimax-h3/docs/continuation.md)).
 
-`long_form` defaults to `mode="turbo"`: each shot uses eight PDD evaluations, the
-base release and the separate PDD-8 adapter. Omit `steps` in turbo mode.
-For standard sampling, select `mode="standard"`; omitted `steps` then means 30,
-with explicit 30/40/50 also supported. In either long-form composer, a segment's
-`turbo` defaults to `true`. Set `turbo: false` for a standard 30-step segment within
-a Turbo story. Global `mode="standard"` takes precedence and keeps every segment
-standard, including segments whose `turbo` is `true`. The CPU parent renders and assembles remotely,
-returning only the joined MP4. Intermediate shot clips stay inside the serving calls. A
-partial delivery includes its playable completed portion.
-Four-GPU placement is chosen when submitting the run, not by the composition function.
+- **Models.** `base_model: H3TurboBase` is the AdaLN-pruned five-root checkpoint
+  (`minimaxai/minimax-h3@1.0.0-rc.6`; pruned lanes bf16, fp8, int8 and nvfp4, and a FULL reference
+  lane), and `turbo_lora: H3TurboLoRA` holds `fl2va_turbo` and `ref2va_turbo`
+  (`alibaba-pai/minimax-h3-turbo-lora@1.0.1`, PDD-8). Both DiTs share one BF16 Qwen3-VL conditioner
+  (layers 0–49, the pre-norm `hidden_states[50]`), one video VAE and one audio VAE; Runtime's
+  component leases keep only the running trunk's DiT resident.
+- **Steps.** Turbo runs 8 evaluations (4 dense, 4 sparse); the full model 30, 40 or 50 (10 dense),
+  from the `timestep-plan.json` each DiT carries (`python scripts/h3_plans.py --output <dir> 30 40 50`,
+  `--turbo 8` for the adapter). A pruned lane carries every served schedule's table rows.
+- **Length.** A piece is 5 to 15 whole seconds, snapped up to the video VAE's 17n+5 frame grid (15 s
+  is 362 frames, 15.083 s). Attention is quadratic in the frames, so length is the largest cost lever.
+- **References.** Per piece at most 9 images, 3 videos, 3 standalone audio clips and 12 in all.
+  Clips are at least 2 s; a video over 15 s is truncated (with a warning), audio over 15 s refuses.
+  Images start at a 1024 px short edge and step down together until the 32,768-token vision budget
+  fits; a world state reads at 512 px.
+- **Attention.** H3's DiTs declare [4-bit attention](minimax-h3/docs/attention-defaults.md); Runtime
+  picks the kernel by the GPU's family.
+- **Construction order** comes only from Runtime's construction contract:
+  `python scripts/h3_order.py model-construction-contract.json > construction-order.json`.
 
-The `fl2va_turbo` and `ref2va_turbo` functions take two independent model slots:
-`base_model: H3TurboBase` holds an AdaLN-pruned five-root checkpoint, and
-`turbo_lora: H3TurboLoRA` holds only `fl2va_turbo` and `ref2va_turbo`. Both
-checkpoints must have matching DiT configurations. They default to `minimaxai/minimax-h3@1.0.0-rc.4` and
-`alibaba-pai/minimax-h3-turbo-lora@1.0.1`; callers can select other releases that carry timestep plans.
-Each sampling scope holds its base DiT and separate overlay together. LoRA hooks
-are installed during construction, before Runtime chooses fusion or Ulysses
-execution. All three model classes declare degrees 2 and 4.
-
-H3's DiTs declare [4-bit attention](minimax-h3/docs/attention-defaults.md); Runtime picks the
-kernel by the GPU's family.
-Turbo preserves four dense plus four sparse evaluations; regular 30-step sampling
-preserves ten dense plus twenty sparse evaluations when a sparse backend is selected.
-Explicit CLI attention pins take precedence.
-
-For source qualification, install the local package from this repository:
-
-```sh
-cozy package install ./minimax-h3
-```
-
-This needs no package publication. A published release can instead be installed
-with `cozy package install minimax-h3`
-once available. With both checkpoint references available, a turbo invocation
-selects their exact releases independently, and `--lane` the base model's lane:
-
-```sh
-cozy run local/minimax-h3/fl2va_turbo \
-  'prompt=<your H3 prompt>' duration_s=5 seed=24680 \
-  'model.base_model=<org/base-model>@<release>' \
-  'model.turbo_lora=<org/turbo-lora>@<release>' \
-  --on <existing-machine-name>
-```
-
-For the published installation, use `minimax-h3/fl2va_turbo` instead.
-Repeat with explicitly selected two-H100 and four-H100 rentals for the GPU proof.
-The rental's device group selects the parallel degree; there is no request field
-for it. Record the installed package release, both checkpoint digests, worker
-Runtime version, actual GPU identities, completed video/audio and measured timings.
-
-The ordinary action syntax is:
-
-- `fl2va` accepts zero, first, last, or first-and-last keyframes.
-- `ref2va` accepts an ordered Runtime `Assets` input containing image, video,
-  and standalone-audio references. Repeated CLI `--file` arguments preserve this order;
-  callers do not construct tagged reference JSON.
-
-For a reference call, the package reads the supplied assets through Runtime's media handles.
-File delivery works the same locally and on a rental:
-
-```sh
-cozy run minimax-h3/ref2va \
-  'prompt=<your H3 prompt>' \
-  --file="$HOME/Pictures/character-1.png" \
-  --file="$HOME/Pictures/character-2.png" \
-  duration_s=14 steps=30 seed=24680 --on any
-```
-
-The published function supplies the default model unless an owner Hub override exists.
-`--model.model=...` overrides either for one call. FL2VA accepts up to two images through the same Assets input. Images
-fill the first and last frame roles in order; labels `first` and `last` select those
-roles explicitly. For example, `--file="last=ending.png"` supplies only a last frame.
-Other labels retain positional meaning. An empty collection generates without
-keyframes. The generated interface declares supported input shapes and bounds;
-the endpoint selects roles.
-
-Assets may have caller-supplied labels, such as `--file="alice=~/Pictures/alice.png"`.
-Labels are unique within the collection and preserve their exact spelling. Package
-code can use `assets["alice"]` or `assets.info("alice")`; unlabelled references remain valid. H3
-preserves the supplied order when building its references. A label does not change
-the model's positional prompt syntax or rewrite the prompt.
-
-Ref2VA declares a conservative preparation cap of 8192 pixels on the longest edge
-and 16,777,216 pixels in total. This preserves room for a high-fidelity 2048px short
-edge at the allowed 4:1 aspect ratio. Creator can fit oversized originals before
-upload; Runtime applies the same preparation when it receives an original. The
-package then performs its normal per-reference sizing below. FL2VA keeps its
-canvas-dependent preprocessing.
-
-Reference-image fidelity is an optional per-occurrence hint:
-
-```sh
-cozy run minimax-h3/ref2va \
-  'prompt=<your H3 prompt>' duration_s=5 \
-  --file="woman=~/Pictures/woman.png" --file-fidelity=woman=high \
-  --file="background=~/Pictures/background.png" --file-fidelity=background=low \
-  --on any
-```
-
-For Ref2VA, `low`, `medium`, and `high` select a 256, 1024, or 2048 pixel short edge,
-respectively; `auto` starts at `reference_image_short_edge` (default 1024) and steps down
-if needed to fit the combined reference budget. These are H3's
-package rules. Runtime preserves source resolution and the original file. The H3
-adapter supplies each resolved size to the official preprocessing step, preserves aspect
-ratio and the upstream grid, and reports actual normalized dimensions through
-telemetry. Keyframes in FL2VA still follow the generated canvas. These input-resolution
-choices do not change reference conditioning strength.
-
-Both actions use the official Diffusers MiniMax H3 implementation and share one exact BF16
-Qwen3-VL conditioner, one video VAE and one audio VAE at their official FP32 destination dtypes,
-and one scheduler contract. The conditioner retains the complete vision stack, token embedding,
-and language layers 0–49; its parameterless final norm exposes the same pre-norm
-`hidden_states[50]` as full Qwen, while layers 50–63 and the language head are absent from both
-fill and execution. The same construction carries task-stamped `transformer` and `transformer_ref`
-components (Diffusers' names); Runtime's component leases make only the selected task DiT
-resident while its action runs. The interim community curve
-architecture was deleted instead of retained as a second graph.
-
-Artifact production takes ordering only from Runtime's exact construction contract. The
-mechanical projection preserves `destination_sets` order and strips only each component prefix:
-
-```sh
-python scripts/h3_order.py model-construction-contract.json > construction-order.json
-```
-
-There is no source-header, lexical, or hand-maintained tensor-order fallback.
-
-The two DiT components are distinct weight instances of the same class and exact topology. They
-cannot be two names for one module: Runtime fills, fences, stages, and evicts by component name, so
-an alias would let the second checkpoint fill overwrite the first and an eviction through either
-name invalidate both. Artifact config equality and the constructed destination topology are both
-checked before fill; only checkpoint contents and the task-specific upstream interface differ.
-
-Two request knobs set the cost. `steps` is the number of transformer evaluations, from the
-committed plans' set (30, 40 or 50; the fastest is the default). Each step count is the official
-grid `MiniMaxH3Scheduler.set_timesteps(steps + 1)` per modality (video shift 12, audio shift 3):
-the terminal zero is a grid point with no evaluation, so `steps` evaluations run and the progress
-callback counts exactly them.
-
-`duration_s` is the clip length in whole seconds, **5 to 15, and required** (15 is the full-length
-ceiling): a call without it fails validation. Length is the larger cost lever of the two: the DiT
-attends over ONE packed sequence whose rows scale with the frame count, and attention is quadratic
-in it. The video VAE encodes `17n + 5` frames per clip, so a request's seconds snap UP to the next
-such count (never down). The served set is 5 to 15 whole seconds; 15 snaps to 362 frames
-(15.083 s), which the package admits under a scoped frame ceiling:
-
-| `duration_s` | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 | 13 | 14 | 15 |
-|---|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|
-| frames | 124 | 158 | 175 | 192 | 226 | 243 | 277 | 294 | 328 | 345 | 362 |
-| delivered s | 5.167 | 6.583 | 7.292 | 8.000 | 9.417 | 10.125 | 11.542 | 12.250 | 13.667 | 14.375 | 15.083 |
-| denoise rows at 1344x768 | 37,710 | 47,902 | 53,000 | 58,096 | 68,290 | 73,386 | 83,580 | 88,676 | 98,870 | 103,966 | 109,062 |
-
-4 and 16 s refuse typed at decode. A timestep plan holds one row per (timestep, modality)
-and no row depends on the frame count, so every length runs on the same AdaLN-pruned tables and no
-lane is re-tabled for one. Every attempt logs its length and resulting packed-sequence rows in the
-`h3 output geometry` row. Task-selector, graph-selector, and AdaLN-mode request fields are absent.
-The artifact config fixes both DiTs to one modulation structure before construction: reference
-artifacts use the official FULL AdaLN path, while production artifacts use exact table rows for the
-TimestepPlan each DiT carries as its `timestep-plan.json` asset, and contain no replaced
-timestep/AdaLN projection destinations. The plans are the one authority for step counts, sigmas
-and scheduler shifts; the package holds no copy. A pruned lane carries the union of every served
-schedule's rows, so one checkpoint serves every `steps` value; a plan its rows do not cover
-refuses at construction. The
-AdaLN-pruned extension inherits Diffusers' forward and changes only those projection modules; it
-does not interpolate a curve or carry a second model port. The machine selects the lane before
-fetch (Model defaults above); model computation and environment variables do not choose one.
-
-`minimaxai/minimax-h3@1.0.0-rc.4` serves AdaLN-pruned lanes `bf16`, `fp8`, `int8` and `nvfp4`, and the
-FULL reference lane `bf16-full`. `adaln-curve` is reserved for approximate community curve
-artifacts and is not a lane.
-
-Ref2VA preserves request order and enforces the official product bounds: at most 9 images, 3 videos,
-3 standalone audio clips, and 12 entries total. Video and audio clips are at least 2 seconds. A video
-longer than 15 seconds is truncated to its first 15 (Runtime records the adjustment and `warnings`
-says so); audio over 15 seconds refuses, and standalone audio totals at most 15 seconds. A video's
-embedded soundtrack belongs to that video and does not consume the standalone-audio count. Standalone audio cannot be the only reference modality.
-The package selects qwen-image-2 sizes automatically. Images with `auto` fidelity
-start at a 1024-pixel short edge; `low`, `medium`, and `high` fidelity select 256, 1024,
-and 2048 pixels respectively. Diffusers rounds both axes to its 32-pixel grid. Explicit
-fidelity hints keep their sizes; automatic images step down together through 1024,
-768, 512 and 256 until the combined
-32,768-token vision budget fits. A set that still exceeds the budget refuses with the
-arithmetic before entering a component scope. Video and audio presentation is unchanged.
-The resolved sizes are request-local and appear in telemetry. Smaller references reduce
-attention work while the generated video retains its resolution; output quality and speed
-still require measurement. Prompts are bounded to 4,096 characters. The token budget is a
-conservative capacity limit, not a measured maximum-size GPU fit guarantee.
-
-The task-stamped canonical plans live in the model components as `timestep-plan.json`:
-`transformer` and `transformer_ref` in the base model, and `fl2va_turbo` and `ref2va_turbo`
-in the turbo adapter. Serving and producer tools read the selected model's assets. To generate
-replacement model assets from the official scheduler, use
-`python scripts/h3_plans.py --output /path/to/model-assets 30 40 50`, or `--turbo 8`
-for the adapter. Each base plan lists one schedule per step count — its exact 31/41/51 video and audio
-sigmas, 30/40/50 timesteps, and all five finite modulation classes (including the 0.999 clean-video
-and 1.0 clean-audio anchors) — plus one deduplicated union order of 315 block-modulation keys and 207
-final-normalization keys. The selected plan must be covered by its component's table layout;
-there is no packaged-plan fallback. Each task has one table bank for the whole plan.
-
-Both actions return exactly one muxed MP4 and its warnings — the customer result carries nothing
-else. Checkpoint, plan, geometry, and digest facts are attempt observations emitted through
-Telemetry, never result fields.
+Results carry only the video, frames and warnings; checkpoint, plan, geometry and digest facts are
+Telemetry.
 
 ### Release closure
 

@@ -1,6 +1,6 @@
 # Higher-resolution H3 video
 
-`upscale` takes one whole shot to `resolution`: `1080p`, `1440p` (default) or `2160p`.
+`upscale` takes one whole shot, of any length, to `resolution`: `1080p`, `1440p` (default) or `2160p`.
 `upscale.model` picks how. Audio and frame timing are kept either way. A project upscales
 each approved shot, whole, before the edit: per-piece upscaling shows a change of detail at
 the joins (run 20682).
@@ -23,7 +23,9 @@ prompt: A street musician plays a violin under a neon sign that reads OPEN LATE.
 
 `regenerate-2k` at `768p` is a refine-only pass at the native size. `strength` is the
 refine's start noise: lower keeps more of the source and is faster. Where a size's rows do not
-fit the card (2160p 15 s below 80 GB), the refine runs in overlapping temporal windows.
+fit the card (2160p 15 s below 80 GB, or a long shot), the refine runs in overlapping temporal
+windows. It holds the shot's frames in host memory: about 3 GB per 40 s of 768p source, plus
+the output (11 GB for 40 s at 1440p).
 
 CPU orchestration runs H3 and SeedVR2 as separate GPU children. Omit `--gpus` so
 single-GPU SeedVR2 and multi-GPU H3 can each use their supported count. An explicit count

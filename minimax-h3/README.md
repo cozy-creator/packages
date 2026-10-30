@@ -1,23 +1,21 @@
 # MiniMax H3
 
-Video with sound from MiniMax H3, as two functions:
+Video with sound from MiniMax H3, as two node functions for Cozy Creator's projects:
 
-- **`shot`** renders one continuous shot of any length (the `video/shot` interface). A shot
-  longer than 15 s is rendered in pieces of at most 15 s, each continuing the last from its
-  carried latents, so it needs `beats`.
-- **`upscale`** takes a shot to 1080p, 1440p or 2160p ([UPSCALE.md](UPSCALE.md)).
+- **`shot`** renders one continuous shot of any length (the `video/shot` interface).
+- **`upscale`** takes a whole shot to 1080p, 1440p or 2160p ([UPSCALE.md](UPSCALE.md)).
 
-A project (Cozy Creator) composes shots into a film: it renders the pictures, keeps world
-states, cuts the edit and calls these per shot. Either runs alone:
+A project composes shots into a film: it renders the pictures, keeps world states, cuts the
+edit and calls these per shot. Either runs alone:
 
 ```yaml
 # shot.yaml — cozy run minimax-h3/shot --input shot.yaml
 prompt: <Theo> and <Juno> spar on <Dock>.     # holds for the whole shot
-duration_s: 40                                # any length; over 15 s needs beats
+duration_s: 40                                # any length; past 15 s it needs beats
 beats:                                        # each holds until the next
   - {at: 0, prompt: They circle each other.}
-  - {at: 12, prompt: <Juno> sweeps <Theo>'s legs.}
-  - {at: 20, prompt: <Theo> rolls and stands.}
+  - {at: 13, prompt: <Juno> sweeps <Theo>'s legs.}
+  - {at: 27, prompt: <Theo> rolls and stands.}
 style: 35 mm film, warm grade
 soundscape: gulls, surf, wind
 music: N/A
@@ -34,17 +32,27 @@ writes: [last, 12.5]                          # frames to return
 turbo: true                                   # false: the full model at steps 30, 40 or 50
 ```
 
-- **Pieces.** Each piece's text is the shot's `prompt`, the beat it is in (repeated as
-  continuing action when a long beat spans two pieces) and the beats it reaches, written as one
-  continuous shot. H3 marks cuts with timed `[Shot N]`, so beats carry no times. Pieces split
-  on beat times where they fit.
-- **Pictures.** Characters, props and the environment (`<Dock>`) are definitions in the text.
-  A world state is a soft picture of the set read at 512 px, with its `layout` in its
-  definition: the shot keeps who stands where without opening on that frame.
+- **Pieces.** A shot renders in the fewest pieces that reach its length: the first up to
+  15 s, each later one up to 14 s (the 22 frames it carries from the last share H3's 15 s
+  window), so 1 + ⌈(d − 15) / 14⌉ for d > 15. Each piece continues the last from its carried
+  latents, never decoded. Within that count, boundaries go on beat times where they fit
+  (within a second; H3's frame grid puts a boundary up to 0.7 s off a whole second). Other
+  beats are ordered action inside a piece. An 8 s shot with beats at 0 and 5 is one
+  generation; the 40 s shot above is three pieces of 13 s, starting at 0, 13.7 and 27.1 s.
+- **Text.** Each piece is one `[Shot 1]` in plain English: the shot's `prompt`, the beat it
+  is in (repeated as continuing action when a beat spans a boundary), each later beat as
+  "Then, …", and "One continuous shot with no cuts." (first piece) or "The same shot
+  continues without a cut…" (the rest). Beats carry no times: H3 marks cuts with timed
+  `[Shot N]`. A prompt with its own `integrated_multimodal_description:`/`audio:`/
+  `non_diegetic_music:` fields keeps them; the lines end its description.
+- **Pictures.** Characters, props and the environment (`<Dock>`) are definitions in every
+  piece's text. A world state is a soft picture of the set read at 512 px, with its `layout`
+  in its definition: the shot keeps who stands where without opening on that frame.
 - **Footage.** `reference_footage` gives motion and camera; a `plate` (`{video}`) is followed
-  frame by frame, for a shot of at most 15 s. `keyframes` anchor the first and last frames.
-- **Result.** `video` (768p mp4), `frames` (one per `writes` entry) and `warnings`. A shot
-  that isn't whole seconds renders the next whole second; the edit trims it.
+  frame by frame, for a shot of one piece. `keyframes` anchor the first and last frames.
+- **Result.** `video` (768p mp4), `frames` (one per `writes` entry) and `warnings`. A piece
+  renders whole seconds on H3's 17n+5 frame grid, so the video can run up to a second past
+  `duration_s`; the edit trims it.
 - **Models.** `minimaxai/minimax-h3@1.0.0-rc.6` and `alibaba-pai/minimax-h3-turbo-lora@1.0.1`.
   `model.base_model=<checkpoint>` and `--lora <org/lora>[,strength]` serve every piece; a
   LoRA trained on the other transformer than a piece runs is applied to it, with a warning.

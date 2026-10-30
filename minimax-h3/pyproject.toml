@@ -1,12 +1,10 @@
 [project]
 name = "minimax-h3"
 version = "0.2.0"
-description = "MiniMax H3 video with sound: from keyframes, references, or several segments"
+description = "MiniMax H3 video with sound: one continuous shot of any length, and its upscale"
 requires-python = ">=3.12"
 dependencies = [
-    "birefnet>=0.1.0",
     "cozy-runtime[adapters,media]>=0.35.6",
-    # MiniMax-H3 and Qwen-Image-2.1 share one Diffusers: the release qwen-image-2 locks.
     "diffusers>=0.41,<0.42",
     "hf-xet>=1.6.0",
     # The AdaLN table producer owns the row-label reader the pruned DiT is built from.
@@ -16,8 +14,6 @@ dependencies = [
     "pydantic-core>=2.46.4",
     "pyyaml>=6.0.3",
     "regex>=2026.7.19",
-    "qwen-image-2>=0.1.0",
-    "qwen3.5>=0.1.0",
     "safetensors>=0.8.0",
     "seedvr2>=0.1.0",
     "shellingham>=1.5.4",
@@ -40,14 +36,11 @@ allow-direct-references = true
 
 [tool.hatch.build.targets.wheel]
 only-include = [
-    "assembly.py",
-    "describe.py",
     "gates.py",
     "h3.py",
-    "long_form_state.py",
+    "join.py",
     "minimax_h3",
     "story.py",
-    "text_states.py",
 ]
 
 [tool.uv]
@@ -64,13 +57,11 @@ name = "pytorch-cu130"
 url = "https://download.pytorch.org/whl/cu130"
 explicit = true
 
-# qwen-image-2 is this account's own package on the target Tensorhub, never PyPI. Creator
-# writes the `tensorhub` index for the command's Hub and account; lock with `cozy package lock`.
+# seedvr2 and minimax-h3-tools are this account's own packages on the target Tensorhub, never
+# PyPI. Creator writes the `tensorhub` index for the command's Hub and account; lock with
+# `cozy package lock`.
 [tool.uv.sources]
 torch = { index = "pytorch-cu130", marker = "sys_platform == 'win32'" }
 torchvision = { index = "pytorch-cu130", marker = "sys_platform == 'win32'" }
-qwen-image-2 = { index = "tensorhub" }
-birefnet = { index = "tensorhub" }
-"qwen3.5" = { index = "tensorhub" }
 seedvr2 = { index = "tensorhub" }
 minimax-h3-tools = { index = "tensorhub" }
