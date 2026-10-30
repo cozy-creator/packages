@@ -1622,7 +1622,10 @@ class OfficialH3Pipeline:
         audio_vae = self.components["audio_vae"]
         device = next(audio_vae.parameters()).device
         samples = round(frames / FPS * self.sample_rate)
-        with torch.no_grad():
+        # The encode's WeightNorm weights go with it, as every other audio VAE pass's do: kept,
+        # 0.3 GB of them pinned 0.77 GB of Torch's cache through the executor's idle offload, and
+        # SeedVR2 2160p found too little room beside it (cr-226).
+        with torch.no_grad(), _audio_weight_norm_scope(audio_vae):
             rows = _soundtrack_rows(audio_vae, torch.zeros(AUDIO_CHANNELS, samples, device=device))
         return rows.reshape(-1, rows.shape[-1])
 
