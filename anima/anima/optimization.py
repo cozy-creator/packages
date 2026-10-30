@@ -91,14 +91,19 @@ _VAE_DIGESTS: dict[str, tuple[Callable[..., object], str]] = {
         "5e714669ba0348fba8b2437d4fd4f32299b976fa64a3bd54b79affc41ae2deb0",
     ),
 }
+#: The VAE's dtype on CUDA. Anima stores Qwen-Image's VAE in bf16, which fp16 holds exactly: against an
+#: F32 decode, fp16 measures 62.9 dB and bf16 53.3 (dtype audit M1).
+VAE_DTYPE = torch.float16
 #: The VAE's RMS norms in one kernel each, with the SiLU each residual block and the decoder's head
 #: apply after them; Diffusers computes them in F32 copies of every activation.
 VAE_NORM = fusion.ChannelNorm(
     QwenImageRMS_norm,
     silu=((QwenImageResidualBlock, ("norm1", "norm2")), (QwenImageDecoder3d, ("norm_out",))),
+    dtype="fp16",
 )
 #: A lone frame's 3x3x3 causal convolutions on their last temporal tap, the only one it meets
-#: (Diffusers pads two zero frames and convolves all 27 taps), and its nearest upsampling in bf16.
+#: (Diffusers pads two zero frames and convolves all 27 taps), and its nearest upsampling in its own
+#: dtype, not F32.
 VAE_FRAME = fusion.LoneFrame(QwenImageCausalConv3d, upsample=QwenImageUpsample)
 #: Anima Base 1.0's transformer, the one the norm and RoPE shapes below are reviewed for: its
 #: constructor arguments. The Runtime's config drops the saving library's `_`-keys (#1786), and
