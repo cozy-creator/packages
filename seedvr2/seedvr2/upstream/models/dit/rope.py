@@ -13,6 +13,7 @@
 # // limitations under the License.
 
 from functools import lru_cache
+from math import pi
 from typing import Tuple
 import torch
 from einops import rearrange
@@ -20,6 +21,20 @@ from rotary_embedding_torch import RotaryEmbedding, apply_rotary_emb
 from torch import nn
 
 from seedvr2.upstream.common.cache import Cache
+
+
+class F32Rotary(RotaryEmbedding):
+    """[Override] F32 rotary frequencies, made where they are first used and held off the
+    module's tensors (a cast never rounds them; the parameters they derive from are meta at
+    construction). They are rotary_embedding_torch's `pixel` ones, `linspace(1, max_freq / 2) * pi`."""
+
+    @property
+    def freqs(self):
+        device = self.dummy.device
+        if self.f32 is None or self.f32.device != device:
+            count, top = self.f32_spec
+            self.f32 = torch.linspace(1.0, top / 2, count, device=device, dtype=torch.float32) * pi
+        return self.f32
 
 
 class RotaryEmbeddingBase(nn.Module):
@@ -39,7 +54,11 @@ class RotaryEmbeddingBase(nn.Module):
         # out of nn.Parameters when `learned_freq=False`
         freqs = self.rope.freqs
         del self.rope.freqs
-        self.rope.register_buffer("freqs", freqs.data)
+        # [Override] F32 and derived, never the checkpoint's `freqs`: the phases reach 128*pi and
+        # rotary_embedding_torch computes them in the frequencies' dtype (the lane's fp16 rounded
+        # the high bands by up to 0.125 rad; upstream's checkpoint is F32).
+        self.rope.__class__ = F32Rotary
+        self.rope.f32, self.rope.f32_spec = None, (freqs.shape[0], 256)
 
     @lru_cache(maxsize=128)
     def get_axial_freqs(self, *dims):
