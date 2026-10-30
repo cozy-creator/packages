@@ -76,6 +76,7 @@ from minimax_h3.continuation import (
 )
 from minimax_h3.guide_rows import GuideClip
 from minimax_h3.model import (
+    H3Decoder as H3Decoder,
     H3LatentUpscaler as H3LatentUpscaler,
     H3Model as H3Model,
     H3RegenerateLoRA as H3RegenerateLoRA,
@@ -1467,10 +1468,9 @@ class DecodeShotOutput(msgspec.Struct):
     video: Annotated[VideoFile, FileBound(max_bytes=1 << 30, media_types=("video/mp4",))]
 
 
-# The text encoder is the model's placeable component (`H3Model`): it is loaded, never staged here.
-@invocable(defaults={"decoder": _MODEL}, components={"decoder": ("text_encoder", "vae")}, memoize=True)
+@invocable(defaults={"decoder": _MODEL}, components={"decoder": ("vae",)}, memoize=True)
 async def decode_shot(
-    ctx: Context, *, payload: DecodeShotInput, decoder: H3TurboBase, out: Outputs, tel: Telemetry
+    ctx: Context, *, payload: DecodeShotInput, decoder: H3Decoder, out: Outputs, tel: Telemetry
 ) -> DecodeShotOutput:
     """The pieces' latents decoded as one: the VAE cross-fades its chunks across every join,
     where decoding piece by piece steps the picture (run 20751: luma +3.7 at a join). The
