@@ -12,8 +12,8 @@ or 2160p by SeedVR2 or NVIDIA's Regenerate.
 
 The model's timestep plans set the step counts: `fl2va` and `ref2va` take `steps` 30, 40 or 50
 (default 30), and `fl2va_turbo` and `ref2va_turbo` run the turbo LoRA's eight. The functions
-default to `minimax-h3@1.0.0-rc.6` and `minimax-h3-turbo-lora@1.0.1`. Releases before
-`minimax-h3@1.0.0-rc.4` carry no plans and refuse with `model_asset_missing`.
+default to `minimaxai/minimax-h3@1.0.0-rc.6` and `alibaba-pai/minimax-h3-turbo-lora@1.0.1`. Releases before
+`minimaxai/minimax-h3@1.0.0-rc.4` carry no plans and refuse with `model_asset_missing`.
 
 Write the request in a file, `request.yaml`:
 
