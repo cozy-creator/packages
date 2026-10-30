@@ -1,56 +1,33 @@
 # Higher-resolution H3 video
 
-`generate` takes `resolution` as a closed enum: `768p` (default, the native 1344×768),
-`1080p`, `1440p`, or `2160p` (4K UHD), for the whole video. `upscale.method` picks how a size
-above 768p is reached. Audio and frame timing are retained either way. A one-segment video
-regenerates in the same call; a longer one is joined at 768p first, then SeedVR2 restores the
-whole video, or Regenerate refines each segment with its own text and joins them again (a seam
-can show a change of detail). The 768p original is returned in `originals`.
+`upscale` takes one whole shot to `resolution`: `1080p`, `1440p` (default) or `2160p`.
+`upscale.model` picks how. Audio and frame timing are kept either way. A project upscales
+each approved shot, whole, before the edit: per-piece upscaling shows a change of detail at
+the joins (run 20682).
 
 ```yaml
-segments:
-  - prompt: A street musician plays a violin under a neon sign that reads OPEN LATE.
-    duration_s: 5
+# cozy run minimax-h3/upscale --input up.yaml --file video=./shot.mp4
 resolution: 1440p
 upscale:
-  method: regenerate   # seedvr2 (default) | regenerate
-  strength: 0.909      # regenerate only: 0.909 (default), 0.8, 0.7
+  model: regenerate-2k   # seedvr2 (default) | regenerate-2k
+  strength: 0.909        # regenerate-2k only: 0.909 (default), 0.8, 0.7
+prompt: A street musician plays a violin under a neon sign that reads OPEN LATE.   # regenerate-2k only
 ```
 
-| | `seedvr2` (default) | `regenerate` |
+| | `seedvr2` (default) | `regenerate-2k` |
 |---|---|---|
-| What runs | SeedVR2 7B restores the decoded 768p original | NVIDIA's [Open-H3-Regenerate-2K](https://nvlabs.github.io/Sana/Open-H3-Regenerate-2K/): the render's own latent is upscaled in latent space and re-rendered by H3 at the target, 3 steps (2 at 0.8 and 0.7) |
-| Frame | 7:4 letterboxed into 16:9 | **fills 16:9: the 7:4 frame is stretched 1.6% horizontally**, as NVIDIA trained it |
-| Original 768p video | published (`originals`) before the upscale finishes | one segment: not made, the latent is handed on in the same call, never decoded at 768p; several: published (`originals`) |
-| Controls | SeedVR2's (Tuning, below) | `strength` |
+| What runs | SeedVR2 7B restores the 768p frames | NVIDIA's [Open-H3-Regenerate-2K](https://nvlabs.github.io/Sana/Open-H3-Regenerate-2K/): the shot's 768p latent is upscaled in latent space and re-rendered by H3 at the target, 3 steps (2 at 0.8 and 0.7) |
+| Frame | H3's 7:4 letterboxed into 16:9; any other video keeps its aspect | **fills 16:9: the 7:4 frame is stretched 1.6% horizontally**, as NVIDIA trained it |
+| Controls | SeedVR2's (Tuning, below) | `strength`, and the shot's `prompt` |
 | Faces, small text | kept | redrawn: at 0.909 a face can change expression; small text becomes other letters at every strength (large text stays legible) |
 
-`regenerate` at `768p` is a refine-only pass at the native size. `strength` is the refine's
-start noise: lower keeps more of the source (faces, on-screen text) and is faster; 0.909 is
-NVIDIA's setting. The refine conditions on the prompt as text alone, so with references
-(Ref2VA) it may redraw a character's face away from them. Where a size's rows do not fit the
-card (2160p 15 s below 80 GB), the refine runs in overlapping temporal windows: never a
-refusal.
-
-`minimax-h3/upscale` takes an existing video the same way, in the same shape: `video`,
-`resolution` (default `1440p`), `upscale` (`method` `seedvr2` by default, or `regenerate` with
-its `strength`), `prompt` (the text the video was made from; regenerate needs it, seedvr2
-ignores it) and `seed`. Regenerate encodes its frames at 768p first; SeedVR2 letterboxes H3's
-7:4 frame into 16:9 and keeps any other video's own aspect.
-
-```sh
-cozy run minimax-h3/upscale --asset video=./clip.mp4 resolution=2160p
-cozy run minimax-h3/upscale --asset video=./clip.mp4 'upscale:={"method": "regenerate"}' \
-  prompt="A street musician plays a violin under a neon sign that reads OPEN LATE."
-```
+`regenerate-2k` at `768p` is a refine-only pass at the native size. `strength` is the
+refine's start noise: lower keeps more of the source and is faster. Where a size's rows do not
+fit the card (2160p 15 s below 80 GB), the refine runs in overlapping temporal windows.
 
 CPU orchestration runs H3 and SeedVR2 as separate GPU children. Omit `--gpus` so
 single-GPU SeedVR2 and multi-GPU H3 can each use their supported count. An explicit count
 applies to every GPU child and is never silently reduced.
-
-```sh
-cozy run minimax-h3/generate --input scene.yaml resolution=1440p
-```
 
 The requested 15 seconds follows H3's native frame grid (362 frames at 24 fps, about
 15.083 seconds). Upscaling can restore or synthesize texture; it cannot correct wrong
@@ -68,16 +45,16 @@ original) for FL2VA / Ref2VA:
 The owner chose SeedVR2 7B on 2026-10-13: it keeps faces closest to the original while adding
 detail. SeedVR2 3B was sharper but over-processed, and the in-house H3 latent upscaler with an
 untrained H3 refine was soft and drifted identity; both were deleted. NVIDIA's trained refiner
-(Open-H3-Regenerate-2K, 2026-10-28) came back beside SeedVR2 as `regenerate` on 2026-10-29.
+(Open-H3-Regenerate-2K, 2026-10-28) came back beside SeedVR2 as `regenerate-2k` on 2026-10-29.
 
 ## Tuning
 
-With `method: seedvr2`, `upscale` passes SeedVR2's ComfyUI controls (seedvr2 README, Tuning) to
+With `model: seedvr2`, `upscale` passes SeedVR2's ComfyUI controls (seedvr2 README, Tuning) to
 the upscale, under the upstream names; they apply only above 768p. Restoration can invent skin texture and fine detail;
 `latent_noise_scale` softens it:
 
 ```sh
-cozy run minimax-h3/generate --input scene.yaml resolution=1080p \
+cozy run minimax-h3/upscale --file video=./shot.mp4 resolution=1080p \
   'upscale:={"latent_noise_scale": 0.1}'
 ```
 

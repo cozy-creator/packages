@@ -1,9 +1,7 @@
 # Fixed subjects for camera-cut stories
 
-`generate` uses a supplied `image` or generates it from the shared `description`
-using `qwen-image-2/generate` before rendering any H3 segment. Generated character images use a
-plain white background. Background images contain the described location. Each segment
-uses the references its prompt names.
+A project renders each picture (Qwen) and `shot` receives it as a supplied `image`. Every
+picture a shot is given goes into every piece of it.
 
 The parent is normal Python composition running in Runtime on the selected
 machine without reserving GPUs. It submits the bounded reference set concurrently,
@@ -44,6 +42,4 @@ interface. The source implementation takes injected execution arguments; its ins
 caller exposes the flat `prompt`, `aspect_ratio`, `megapixels`, `steps` and `seed`
 parameters used here.
 
-`generate` uses this mixed reference resolver and completed AV context, with no
-segment-count cap. See [LONG_FORM.md](../LONG_FORM.md) for JSON filenames,
-free-text segment prompts and the sections the workflow adds.
+`shot` uses this reference compiler for each piece of a shot (README.md).

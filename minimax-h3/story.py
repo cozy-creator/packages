@@ -56,11 +56,11 @@ IMAGE_READ_BYTES = 64 << 20
 AUDIO_READ_BYTES = 64 << 20
 #: Each kind's file field, its H3 reference kind and its `<Picture|Audio|Video N>` label. A
 #: `frame` is a keyframe, never a reference: it has a file and nothing else.
-FILE = {"character": "image", "background": "image", "audio": "audio", "video": "video",
+FILE = {"character": "image", "prop": "image", "background": "image", "audio": "audio", "video": "video",
         "anchor_video": "video", "world_state": "image", "frame": "image"}
-_SLOT = {"character": "picture", "background": "picture", "audio": "audio", "video": "video",
+_SLOT = {"character": "picture", "prop": "picture", "background": "picture", "audio": "audio", "video": "video",
          "anchor_video": "video", "world_state": "picture"}
-_POLICY = {"character": "image", "background": "image", "audio": "audio", "video": "video",
+_POLICY = {"character": "image", "prop": "image", "background": "image", "audio": "audio", "video": "video",
            "anchor_video": "video", "world_state": "image"}
 #: The kinds read from a clip.
 CLIPS = ("video", "anchor_video")
@@ -93,7 +93,7 @@ class StoryReference(msgspec.Struct):
     """
 
     name: str
-    kind: Literal["character", "background", "audio", "video", "anchor_video", "frame"]
+    kind: Literal["character", "prop", "background", "audio", "video", "anchor_video", "frame"]
     description: str = ""
     retention_analysis: Annotated[str, msgspec.Meta(max_length=1024)] | None = None
     image: Annotated[
@@ -582,11 +582,10 @@ def _segment_call(
                      if ref in motion.get(clip.name, ()) and (ref.name, clip.name) not in bound]
             binding = f", whose movements come from {' and '.join(moves)}" if moves else ""
             definitions.append(f"<{ref.name}> is the {ref.kind} shown in {slot}{binding}.")
-            preserved = (
-                "keep the face, hair, and outfit of the referenced character. Ignore the white background"
-                if ref.kind == "character"
-                else "the architecture, materials and defining features of the referenced environment"
-            )
+            preserved = {
+                "character": "keep the face, hair, and outfit of the referenced character. Ignore the white background",
+                "prop": "keep the shape, materials and markings of the referenced object",
+            }.get(ref.kind, "the architecture, materials and defining features of the referenced environment")
             default = f"fully_preserved - {preserved}."
             appears = [f"[Shot {n}]" for n, found in shots if ref.name in found]
             line_label = f"<{ref.name}>" + (f" (appears in {', '.join(appears)})" if appears else "")
