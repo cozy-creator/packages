@@ -33,6 +33,7 @@ from __future__ import annotations
 import hashlib
 import inspect
 import json
+import math
 import sys
 import time
 from collections.abc import Callable, Iterator, Mapping
@@ -68,7 +69,7 @@ from cozy_runtime.author.kernels import (
 from cozy_runtime.rows import Rows, rows
 
 from .adaln_pruned import AdaLNPrunedMiniMaxH3Transformer
-from .fit import fits, release
+from .fit import fits, release, window_heads
 
 CONTRACT = "h3-glue-call-and-topology/2"
 
@@ -661,14 +662,20 @@ class FusedSwiGLU(SwiGLU):  # type: ignore[misc]
 
 
 class H3AttnProcessor(MiniMaxH3AttnProcessor):  # type: ignore[misc]
-    """Diffusers' H3 attention. Where the device holds the whole call (`fits`), it runs as it
-    always did: Q, K and V whole, freed before the out projection. Where it does not (15 s on an
-    8 GB card: the three take 4.8 GB beside 2.4 GB of residual and normed rows), the call goes
-    through `split` by query heads, each window computing its own rows of the projections
-    (`cozy_runtime.rows`), per-head norms and RoPE, then the out projection by tokens; Torch's
-    cache is returned after it, so its odd-sized blocks are not split for the next block's row
-    sets (fragmentation ran step 2 out of memory with 2.14 GiB cached). A projection that does
-    not cut by rows, a mask or a sequence-parallel exchange runs the heads whole."""
+    """Diffusers' H3 attention. Where the device holds the whole call beside the DiT's weights,
+    it runs as it always did: Q, K and V whole, freed before the out projection. Where it holds
+    the call but not beside the weights (15 s on a 24 or 32 GB card), the call runs in fixed
+    windows of query heads (`window_heads`), so the DiT keeps the room resident instead of
+    streaming it every step. Where it does not hold the call (15 s on an 8 GB card: the three
+    take 4.8 GB beside 2.4 GB of residual and normed rows), the windows are the ones the memory
+    picks, and Torch's cache is returned after the call, so its odd-sized blocks are not split
+    for the next block's row sets (fragmentation ran step 2 out of memory with 2.14 GiB cached).
+    Each window computes its own rows of the projections (`cozy_runtime.rows`), per-head norms
+    and RoPE; the out projection runs by tokens. A projection that does not cut by rows, a mask
+    or a sequence-parallel exchange runs the heads whole."""
+
+    #: The DiT's weight bytes, which a whole call must leave room for (`_install_transformer`).
+    _weights = 0
 
     def __call__(
         self,
@@ -677,19 +684,24 @@ class H3AttnProcessor(MiniMaxH3AttnProcessor):  # type: ignore[misc]
         rotary_emb: tuple[Any, Any] | None = None,
         attention_mask: Any | None = None,
     ) -> Any:
+        tight = not fits(hidden_states, attn)
+        window = attn.heads if tight else window_heads(hidden_states, attn, self._weights)
         heads = (
             None
-            if fits(hidden_states, attn)
+            if not tight and window >= attn.heads
             else _Heads.of(self, attn, hidden_states, rotary_emb, attention_mask)
         )
         if heads is None:
             hidden_states = self.whole(attn, hidden_states, rotary_emb, attention_mask)
             return attn.to_out[1](attn.to_out[0](hidden_states.flatten(2, 3)))
+        # Fixed windows follow the shape and the card alone; on a tight card free memory picks.
+        most = None if tight else math.prod(heads.shape) // attn.heads * window
         with quantize_once(hidden_states):
-            attended = split(heads, heads, Cut(2))
+            attended = split(heads, heads, Cut(2), most=most)
         out = attn.to_out[1](split(attn.to_out[0], attended.flatten(2, 3), Cut(1)))
         del attended
-        release()
+        if tight:
+            release()
         return out
 
     def whole(
@@ -1118,6 +1130,7 @@ def _install_transformer(
 ) -> tuple[list[tuple[str, str, str]], int]:
     substitutions: list[tuple[str, str, str]] = []
     fp8_sites = 0
+    weights = _weight_bytes(transformer)
     for index, block in enumerate(transformer.transformer_blocks):
         path = f"{root}.transformer_blocks.{index}"
         attn, ff = block.attn, block.ff
@@ -1130,6 +1143,7 @@ def _install_transformer(
         processor._attention_backend = attn.processor._attention_backend
         processor._parallel_config = attn.processor._parallel_config
         processor._glue = glue
+        processor._weights = weights
         substitutions.append(
             (f"{path}.attn.processor", _type_name(attn.processor), _type_name(processor))
         )
@@ -1148,13 +1162,20 @@ def _install_transformer(
     return substitutions, fp8_sites
 
 
-def _release_qkv(attn: Any) -> None:
+def _release_qkv(attn: Any, weights: int) -> None:
     current = attn.processor
     if type(current) is MiniMaxH3AttnProcessor:
         processor = H3AttnProcessor()
         processor._attention_backend = current._attention_backend
         processor._parallel_config = current._parallel_config
+        processor._weights = weights
         attn.set_processor(processor)
+
+
+def _weight_bytes(transformer: Any) -> int:
+    """The DiT's stored bytes, as its tensors' shapes and dtypes say (resident or not)."""
+    tensors = transformer.state_dict(keep_vars=True).values()
+    return sum(t.numel() * t.element_size() for t in tensors)
 
 
 def _transformers(pipe: Any) -> Iterator[tuple[str, Any]]:
@@ -1176,8 +1197,9 @@ def install(model: object, pipe: Any, plan: Plan) -> str:
     when eager serves (a `NOT_INSTALLABLE` code, reported). Waits for the kernels' build.
     Fused or eager, every block's attention runs `H3AttnProcessor`."""
     for _, transformer in _transformers(pipe):
+        weights = _weight_bytes(transformer)
         for block in transformer.transformer_blocks:
-            _release_qkv(block.attn)
+            _release_qkv(block.attn, weights)
     device = torch.device(plan.device)
     if device.type != "cuda":
         return _eager(
