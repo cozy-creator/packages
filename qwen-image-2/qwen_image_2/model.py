@@ -95,6 +95,10 @@ BLOCK = fusion.DiTBlock(
     rope=fusion.Rope("rotary_emb", interleaved=True),
     gate="tanh",
 )
+#: The VAE's dtype on CUDA with native bf16, never fp16: on a transparent background the decoder's
+#: last up-blocks carry activations up to 3.7e6 (F32, the release gate's RGBA request), far past
+#: fp16's 65504 (0.1.12 decoded NaN); bf16 holds them at 53.8 dB against F32.
+VAE_DTYPE = torch.bfloat16
 #: The VAE's RMS norms in one kernel each, with the SiLU each residual block and each head applies
 #: after them; Diffusers computes them in F32 copies of every activation.
 VAE_NORM = fusion.ChannelNorm(
@@ -267,8 +271,8 @@ class QwenImage21Model(
         device = torch.device(str(self.device))
         if device.type != "cuda" or not torch.cuda.is_bf16_supported(including_emulation=False):
             return
-        if next(vae.parameters()).dtype != torch.bfloat16:
-            hold_dtype(vae, torch.bfloat16)
+        if next(vae.parameters()).dtype != VAE_DTYPE:
+            hold_dtype(vae, VAE_DTYPE)
             tel.log("vae representation", dtype="bfloat16")
 
     def _pipeline(self, sigmas: Sequence[float] | None = None) -> _StagedPipeline:
