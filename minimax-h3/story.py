@@ -306,17 +306,25 @@ def compile_segments(
     """Each child prompt uses its music override, inline score, or overall score."""
     validate_references(references)
     overrides = [None] * len(prompts) if segment_music is None else segment_music
-    calls = []
+    calls, texts = [], []
     for index, (text, override) in enumerate(zip(prompts, overrides, strict=True)):
         music = non_diegetic_music if override is None else override
         text = _fill(
             text, {"non_diegetic_music": music.strip() or "N/A"},
             replace_music=override is not None,
         )
+        texts.append(text)
         calls.append(_segment_call(text, references, style.strip(), overall_soundscape.strip(), index))
     sent = {ref.name for call in calls for ref in call.references}
+    # A guide enters as Add Guide rows, never through the text, so it needs no mention: one no
+    # prompt names guides the first segment (a direct call's only one).
+    unnamed = frozenset(ref.name for ref in references if ref.guide and ref.name not in sent)
+    if calls and unnamed:
+        calls[0] = _segment_call(
+            texts[0], references, style.strip(), overall_soundscape.strip(), 0, guides=unnamed
+        )
     for ref in references:
-        if calls and ref.kind == "video" and ref.name not in sent:
+        if calls and ref.kind == "video" and not ref.guide and ref.name not in sent:
             calls[0].warnings.append(
                 f"<{ref.name}> is never named in a prompt, so H3 never sees it; name the clip "
                 "where its motion applies."
@@ -342,9 +350,10 @@ def _segment_call(
     style: str,
     soundscape: str,
     index: int,
+    guides: frozenset[str] = frozenset(),
 ) -> SegmentCall:
-    """Backgrounds always; characters, audio and videos only where the text names them, all in
-    request order, as H3 packs and labels them.
+    """Backgrounds and `guides` always; characters, audio and videos only where the text names
+    them, all in request order, as H3 packs and labels them.
 
     A token names a reference by its name first (any case, `_`, `-` and space alike), else as
     the global `<Picture N>`/`<Audio N>`/`<Video N>`; these are renumbered for the call. A
@@ -389,7 +398,7 @@ def _segment_call(
     # A guide packs after every other reference, so when it leaves the packed references
     # (`guide_rows`) every other label stays as H3 numbers it.
     used = sorted(
-        (ref for ref in pool if ref.kind == "background" or ref.name in named),
+        (ref for ref in pool if ref.kind == "background" or ref.name in named | guides),
         key=lambda ref: ref.guide,
     )
     if sum(ref.guide for ref in used) > 1:
