@@ -71,7 +71,9 @@ class AdaSingle(nn.Module):
         emb = rearrange(emb, "b (d l g) -> b d l g", l=len(self.layers), g=3)[..., idx, :]
         emb = expand_dims(emb, 1, hid.ndim + 1)
 
-        if hid_len is not None:
+        # [Override] One sample's modulation broadcasts over its tokens (the same values): a
+        # repeated copy was 3x the hidden state for each layer, cached for the whole forward.
+        if hid_len is not None and len(hid_len) > 1:
             emb = cache(
                 f"emb_repeat_{idx}_{branch_tag}",
                 lambda: slice_inputs(

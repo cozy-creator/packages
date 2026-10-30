@@ -14,11 +14,12 @@
 
 from typing import Tuple, Union
 import torch
+from cozy_runtime.author import Cut, split
 from einops import rearrange
 
 # from ..cache import Cache
 from seedvr2.upstream.common.cache import Cache
-from seedvr2.upstream.common.distributed.ops import gather_heads_scatter_seq, gather_seq_scatter_heads_qkv
+from rotary_embedding_torch import apply_rotary_emb
 from .. import na
 from ..attention import WindowAttention
 from ..blocks.mmdit_window_block import MMWindowAttention, MMWindowTransformerBlock
@@ -73,22 +74,14 @@ class NaSwinAttention(MMWindowAttention):
         torch.FloatTensor,
         torch.FloatTensor,
     ]:
-
-        vid_qkv, txt_qkv = self.proj_qkv(vid, txt)
-        vid_qkv = gather_seq_scatter_heads_qkv(
-            vid_qkv,
-            seq_dim=0,
-            qkv_shape=vid_shape,
-            cache=cache.namespace("vid"),
-        )
-        txt_qkv = gather_seq_scatter_heads_qkv(
-            txt_qkv,
-            seq_dim=0,
-            qkv_shape=txt_shape,
-            cache=cache.namespace("txt"),
-        )
-
-        # re-org the input seq for window attn
+        """[Override] Upstream's window attention a group of whole windows at a time (at most
+        `GROUP` video tokens, from the shape alone): each window attends to its own tokens and the
+        text, so a group's projections, norms, rotary and attention are the whole call's for those
+        rows, and the text output is the same mean over every window. No tensor spans all video
+        tokens but the input and the output."""
+        txt_qkv = rearrange(self.proj_qkv.txt(txt), "l (o h d) -> l o h d", o=3, d=self.head_dim)
+        txt_q, txt_k, txt_v = txt_qkv.unbind(1)
+        txt_q, txt_k = self.norm_q.txt(txt_q), self.norm_k.txt(txt_k)
         cache_win = cache.namespace(f"{self.window_method}_{self.window}_sd3")
 
         def make_window(x: torch.Tensor):
@@ -96,52 +89,62 @@ class NaSwinAttention(MMWindowAttention):
             window_slices = self.window_op((t, h, w), self.window)
             return [x[st, sh, sw] for (st, sh, sw) in window_slices]
 
-        window_partition, window_reverse, window_shape, window_count = cache_win(
-            "win_transform",
-            lambda: na.window_idx(vid_shape, make_window),
-        )
-        vid_qkv_win = window_partition(vid_qkv)
+        def layout():
+            rows = torch.arange(int(vid_shape.prod(-1).sum()), device=vid_shape.device)[:, None]
+            rows, shapes, count = na.window(rows, vid_shape, make_window)
+            return rows[:, 0], shapes, count
 
-        vid_qkv_win = rearrange(vid_qkv_win, "l (o h d) -> l o h d", o=3, d=self.head_dim)
-        txt_qkv = rearrange(txt_qkv, "l (o h d) -> l o h d", o=3, d=self.head_dim)
-
-        vid_q, vid_k, vid_v = vid_qkv_win.unbind(1)
-        txt_q, txt_k, txt_v = txt_qkv.unbind(1)
-
-        vid_q, txt_q = self.norm_q(vid_q, txt_q)
-        vid_k, txt_k = self.norm_k(vid_k, txt_k)
-
+        rows, window_shape, window_count = cache_win("win_rows", layout)
+        lengths = cache_win("vid_len", lambda: window_shape.prod(-1)).tolist()
+        freqs = cache_win("rope_freqs_3d", lambda: self.rope.get_freqs(window_shape)) if self.rope else None
         txt_len = cache("txt_len", lambda: txt_shape.prod(-1))
+        out = None
+        txt_sum = None
+        first = 0
+        for group in _groups(lengths, GROUP):
+            last = first + sum(lengths[w] for w in group)
+            at = rows[first:last]
+            qkv = rearrange(self.proj_qkv.vid(vid.index_select(0, at)), "l (o h d) -> l o h d", o=3, d=self.head_dim)
+            q, k, v = qkv.unbind(1)
+            q, k = self.norm_q.vid(q), self.norm_k.vid(k)
+            if freqs is not None:
+                q, k = (_rotary(freqs[first:last], x) for x in (q, k))
+            concat, unconcat, runs = na.repeat_concat_idx(
+                window_shape[group[0]:group[-1] + 1].prod(-1), txt_len, torch.tensor([len(group)], device=txt_len.device)
+            )
+            o = self.attn(concat(q, txt_q), concat(k, txt_k), concat(v, txt_v), runs).type_as(q)
+            o_vid, o_txt = unconcat(o)
+            o_vid = self.proj_out.vid(rearrange(o_vid, "l h d -> l (h d)"))
+            out = o_vid.new_empty((vid.shape[0], o_vid.shape[1])) if out is None else out
+            out.index_copy_(0, at, o_vid)
+            o_txt = o_txt.float() * len(group)
+            txt_sum = o_txt if txt_sum is None else txt_sum + o_txt
+            first = last
+        assert out is not None and txt_sum is not None
+        txt_out = (txt_sum / int(window_count.sum())).type_as(txt_q)
+        return out, self.proj_out.txt(rearrange(txt_out, "l h d -> l (h d)"))
 
-        vid_len_win = cache_win("vid_len", lambda: window_shape.prod(-1))
-        concat_win, unconcat_win, runs = cache_win(
-            "mm_pnp", lambda: na.repeat_concat_idx(vid_len_win, txt_len, window_count)
-        )
 
-        # window rope
-        if self.rope:
-            vid_q, vid_k = self.rope(vid_q, vid_k, window_shape, cache_win)
+#: Video tokens a window group holds at most (whole windows; a longer window is a group alone).
+GROUP = 16384
 
-        out = self.attn(
-            concat_win(vid_q, txt_q),
-            concat_win(vid_k, txt_k),
-            concat_win(vid_v, txt_v),
-            runs,
-        ).type_as(vid_q)
 
-        # text pooling
-        vid_out, txt_out = unconcat_win(out)
+def _groups(lengths, most):
+    """Consecutive windows, as few groups as hold at most `most` tokens each."""
+    group, size = [], 0
+    for w, n in enumerate(lengths):
+        if group and size + n > most:
+            yield group
+            group, size = [], 0
+        group.append(w)
+        size += n
+    if group:
+        yield group
 
-        vid_out = rearrange(vid_out, "l h d -> l (h d)")
-        txt_out = rearrange(txt_out, "l h d -> l (h d)")
-        vid_out = window_reverse(vid_out)
 
-        vid_out = gather_heads_scatter_seq(vid_out, head_dim=1, seq_dim=0)
-        txt_out = gather_heads_scatter_seq(txt_out, head_dim=1, seq_dim=0)
-
-        vid_out, txt_out = self.proj_out(vid_out, txt_out)
-
-        return vid_out, txt_out
+def _rotary(freqs: torch.Tensor, x: torch.Tensor) -> torch.Tensor:
+    """`NaRotaryEmbedding3d`'s rotation of (L, h, d) rows by their frequencies, in F32."""
+    return rearrange(apply_rotary_emb(freqs, rearrange(x, "L h d -> h L d").float()), "h L d -> L h d").to(x.dtype)
 
 
 class NaMMSRTransformerBlock(MMWindowTransformerBlock):
@@ -230,7 +233,9 @@ class NaMMSRTransformerBlock(MMWindowTransformerBlock):
 
         vid_mlp, txt_mlp = self.mlp_norm(vid_attn, txt_attn)
         vid_mlp, txt_mlp = self.ada(vid_mlp, txt_mlp, layer="mlp", mode="in", **ada_kwargs)
-        vid_mlp, txt_mlp = self.mlp(vid_mlp, txt_mlp)
+        # [Override] The video MLP in pieces of `GROUP` tokens: exact, token-local.
+        vid_mlp = split(self.mlp.vid, vid_mlp, Cut(0), most=GROUP * vid_mlp.shape[-1])
+        txt_mlp = self.mlp.txt(txt_mlp)
         vid_mlp, txt_mlp = self.ada(vid_mlp, txt_mlp, layer="mlp", mode="out", **ada_kwargs)
         vid_mlp, txt_mlp = (vid_mlp + vid_attn), (txt_mlp + txt_attn)
 
