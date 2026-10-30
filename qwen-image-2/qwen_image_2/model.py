@@ -19,11 +19,13 @@ from diffusers import (
     QwenImage21Transformer2DModel,
 )
 from diffusers.models.autoencoders.autoencoder_kl_qwenimage21 import (
+    QwenImage21CausalConv3d,
     QwenImage21Decoder3d,
     QwenImage21Encoder3d,
     QwenImage21ResidualBlock,
     QwenImage21ResidualUpBlock,
     QwenImage21RMS_norm,
+    QwenImage21Upsample,
 )
 from diffusers.models.transformers.transformer_qwenimage21 import (
     QwenImage21KVCache,
@@ -102,6 +104,9 @@ VAE_NORM = fusion.ChannelNorm(
         (QwenImage21Encoder3d, ("norm_out",)),
     ),
 )
+#: A lone frame's convolutions without the padded copy before each, and its nearest upsampling in
+#: bf16 (Diffusers upsamples in F32).
+VAE_FRAME = fusion.LoneFrame(QwenImage21CausalConv3d, upsample=QwenImage21Upsample)
 
 
 class _Progress[T]:
@@ -242,9 +247,11 @@ class QwenImage21Model(
         self.processor = vlm.processor(loader.assets, "processor/", self.graph.processor_config)
 
     def execution_plan(self, plan: Plan) -> str:
+        vae = self.graph.components["vae"]
         installed = (
             fusion.install(plan, BLOCK, self.graph.components["transformer"]),
             fusion.install_norms(plan, VAE_NORM, self.graph.components["vae"]),
+            fusion.install_lone_frame(plan, VAE_FRAME, vae.decoder, vae.post_quant_conv),
         )
         return "+".join(identity for identity in installed if identity)
 
@@ -511,7 +518,7 @@ class QwenImage21Model(
             ).images
 
     @uses_components("vae")
-    def decode(self, latents: Any, *, width: int, height: int, tel: Telemetry) -> Any:
+    def decode(self, latents: Any, *, width: int, height: int) -> Any:
         vae = self.graph.components["vae"]
         device = torch.device(str(self.device))
         with torch.inference_mode():
@@ -519,75 +526,35 @@ class QwenImage21Model(
             latents = latents.to(device=device, dtype=vae.dtype)
             mean = latents.new_tensor(vae.config.latents_mean).view(1, vae.config.z_dim, 1, 1, 1)
             std = latents.new_tensor(vae.config.latents_std).view(1, vae.config.z_dim, 1, 1, 1)
-            z = latents * std + mean
-            decoded = _decoded_whole(vae, z) if width * height <= WHOLE_PIXELS else None
-            if decoded is None:
-                decoded = _decoded_tiled(vae, z, tel)
-            return decoded.clamp(-1.0, 1.0)[:, :, 0]
+            return _decoded(vae, latents * std + mean).clamp(-1.0, 1.0)[:, :, 0]
 
 
-#: The largest canvas decoded whole, about 3 GB in bf16. A 4 MP whole decode's 12.7 GB evicted the
-#: resident DiT and text encoder on a 24 GB card, and every next request read 13.8 GB again.
-WHOLE_PIXELS = 1024 * 1024
-#: Tile sides (px), largest first: tiles the size of the largest canvas decoded whole, smaller ones
-#: where those do not fit (or where the whole canvas does not: an RTX 3070 with 3 GB free).
-_TILES = (1024, 512, 256)
-
-
-def _decoded_tiled(vae: Any, z: torch.Tensor, tel: Telemetry) -> torch.Tensor:
-    """Diffusers' tiled decode in the largest tiles that fit."""
-    *larger, smallest = _TILES
-    for tile in larger:
-        try:
-            return _tiled(vae, z, tile, tel)
-        except torch.OutOfMemoryError as error:
-            error.__traceback__ = None  # this attempt's tiles go with its frames
-    return _tiled(vae, z, smallest, tel)
-
-
-def _tiled(vae: Any, z: torch.Tensor, tile: int, tel: Telemetry) -> torch.Tensor:
-    """`tile` px tiles blended with their neighbours over a quarter of their side: Diffusers'
-    bits, each tile decoded as the whole canvas is (`_decoded`, no feature cache), a few kernels a
-    blend (`cozy_runtime.tiles`)."""
-    decoded = tiles.tiled(
-        lambda t: _decoded(vae.decoder, vae.post_quant_conv(t)),
-        z,
-        scale=vae.spatial_compression_ratio,
-        side=tile,
-        stride=tile * 3 // 4,
-    )
-    tel.log("tiled vae decode", tile_px=tile)
-    return decoded
-
-
-def _decoded_whole(vae: Any, z: torch.Tensor) -> torch.Tensor | None:
-    """The pipeline's final decode, with no cast of F32 source weights, as one frame: Diffusers'
-    `decode` keeps every convolution's input for a next frame an image never has (its feature
-    cache, half the decode's memory); the same bits without. None when the whole canvas does
-    not fit the device (Qwen at 1 MP with 3 GB free); the caller then tiles."""
-    try:
-        return _decoded(vae.decoder, vae.post_quant_conv(z))
-    except torch.OutOfMemoryError as error:
-        error.__traceback__ = None  # the whole decode's activations go with its frames
-        return None
-
-
-def _decoded(decoder: Any, x: torch.Tensor) -> torch.Tensor:
-    """`decoder(x, first_chunk=True)` without its residual up-blocks' input copies: each block's
-    shortcut is its input itself (nothing writes it in place), and the last, with no shortcut,
-    keeps none. Diffusers clones it regardless, 4.8 GB at 2048² F32 in the last block alone,
-    which put a 4 MP decode past a 24 GB card (Runtime 0.34, run 6: 24.2 GB live)."""
-    x = decoder.mid_block(decoder.conv_in(x))
+def _decoded(vae: Any, z: torch.Tensor) -> torch.Tensor:
+    """The pipeline's decode of one frame, the whole canvas: Diffusers' `decode` without its
+    feature cache (each convolution's input kept for a next frame an image never has), every
+    residual and resample block over the canvas in strips of rows (`tiles.rows`: exact, a strip's
+    working set). Each residual up-block's shortcut is its input itself (nothing writes it in
+    place), added into the upsampled rows; Diffusers clones it."""
+    decoder = vae.decoder
+    x = decoder.conv_in(vae.post_quant_conv(z))
+    mid = decoder.mid_block
+    x = tiles.rows(mid.resnets[0], x, halo=2)
+    for attention, resnet in zip(mid.attentions, mid.resnets[1:], strict=True):
+        x = tiles.rows(resnet, attention(x), halo=2)
     for block in decoder.up_blocks:
         if not isinstance(block, QwenImage21ResidualUpBlock):
-            x = block(x, first_chunk=True)
-            continue
+            raise TypeError(f"Qwen Image 2.1's decoder has residual up-blocks, not {type(block)}")
         shortcut = x if block.avg_shortcut is not None else None
         for resnet in block.resnets:
-            x = resnet(x)
+            x = tiles.rows(resnet, x, halo=2)
         if block.upsampler is not None:
-            x = block.upsampler(x)
+            x = tiles.rows(block.upsampler, x, halo=1, scale=2)
         if shortcut is not None:
-            x = x + block.avg_shortcut(shortcut, first_chunk=True)
+            duplicate = block.avg_shortcut
+            x = tiles.rows(
+                lambda s, up=duplicate: up(s, first_chunk=True), shortcut, halo=0, scale=2, out=x
+            )
         del shortcut
-    return decoder.conv_out(decoder.nonlinearity(decoder.norm_out(x)))
+    return tiles.rows(
+        lambda s: decoder.conv_out(decoder.nonlinearity(decoder.norm_out(s))), x, halo=1
+    )
