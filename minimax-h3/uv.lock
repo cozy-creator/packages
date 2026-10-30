@@ -641,7 +641,7 @@ wheels = [
 
 [[package]]
 name = "minimax-h3"
-version = "0.1.13"
+version = "0.1.14"
 source = { editable = "." }
 dependencies = [
     { name = "birefnet" },
@@ -1311,7 +1311,7 @@ wheels = [
 
 [[package]]
 name = "seedvr2"
-version = "0.1.2"
+version = "0.1.4"
 source = { registry = "https://tensorhub.com/v1/index/_/simple/" }
 dependencies = [
     { name = "cozy-runtime", extra = ["media"] },
@@ -1329,7 +1329,7 @@ dependencies = [
     { name = "torchvision", version = "0.29.1+cu130", source = { registry = "https://download.pytorch.org/whl/cu130" }, marker = "sys_platform == 'win32'" },
 ]
 wheels = [
-    { url = "https://tensorhub.com/v1/index/_/seedvr2/0.1.2/seedvr2-0.1.2-py3-none-any.whl", hash = "sha256:65f8d237595599e757ba3e07bc46f30efa30fd4ceffbff0585df198f473d3fe4" },
+    { url = "https://tensorhub.com/v1/index/_/seedvr2/0.1.4/seedvr2-0.1.4-py3-none-any.whl", hash = "sha256:693c63f55f0424c4d71318a303369f731dc55d8355dac48818224e26bbd51d85" },
 ]
 
 [[package]]
