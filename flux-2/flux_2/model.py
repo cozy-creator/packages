@@ -18,7 +18,16 @@ from typing import Any
 import numpy as np
 import torch
 from cozy_runtime import lora, rng
-from cozy_runtime.author import Config, Loader, Model, ModelAssets, UnsupportedInput, uses_components
+from cozy_runtime.author import (
+    Config,
+    Loader,
+    Model,
+    ModelAssets,
+    Telemetry,
+    UnsupportedInput,
+    hold_dtype,
+    uses_components,
+)
 from diffusers import AutoencoderKLFlux2, Flux2KleinPipeline, Flux2Pipeline, Flux2Transformer2DModel
 from diffusers.pipelines.flux2.image_processor import Flux2ImageProcessor
 from diffusers.pipelines.flux2.pipeline_flux2 import compute_empirical_mu
@@ -51,6 +60,8 @@ TEXT_LAYERS = {"mistral3": (10, 20, 30), "qwen3": (9, 18, 27)}
 #: runs, time-shifts these by the resolution's mu like any schedule.
 TURBO_SIGMAS = (1.0, 0.6509, 0.4374, 0.2932, 0.1893, 0.1108, 0.0495, 0.00031)
 COMPONENTS = ("transformer", "text_encoder", "vae")
+#: The VAE's dtype on a GPU, as ComfyUI runs FLUX.2's VAE: its activations fit fp16 (dtype audit M1).
+VAE_DTYPE = torch.float16
 
 
 def _read(assets: ModelAssets, name: str) -> bytes:
@@ -123,7 +134,8 @@ class Flux2Graph:
                 if isinstance(module, nn.Linear):
                     module.register_forward_hook(lora.Hook(partial(_armed, transformer, path)))
         self.family = family
-        # The VAE runs in its stored precision: bf16 in Diffusers' repositories, f32 in BFL's `ae`.
+        # The VAE is built as stored (f32 in BFL's `ae`, bf16 in Diffusers' repositories); a GPU
+        # serves it at `VAE_DTYPE` (`Flux2.hold_vae`).
         stored = config.tensor_dtype("vae.encoder.conv_in.weight", default="f32")
         self.components: dict[str, nn.Module] = {
             "transformer": transformer.to(dtype=torch.bfloat16),
@@ -208,6 +220,14 @@ class Flux2(Model[Flux2Graph], encoded_leaves="accept"):
                 )
         return embeds.cpu()
 
+    def hold_vae(self, tel: Telemetry) -> None:
+        """Serve the VAE at `VAE_DTYPE` on a GPU from now on, before any VAE scope opens: the Runtime
+        casts the stored bytes when it next fills them. A CPU keeps the stored dtype."""
+        vae = self.graph.components["vae"]
+        if torch.device(str(self.device)).type == "cuda" and next(vae.parameters()).dtype != VAE_DTYPE:
+            hold_dtype(vae, VAE_DTYPE)
+            tel.log("vae representation", dtype=str(VAE_DTYPE).removeprefix("torch."))
+
     @uses_components("vae", memoize=True)
     def encode_references(self, references: list[Image.Image]) -> tuple[torch.Tensor, torch.Tensor]:
         """Normalized packed latents of the prepared references as one token sequence, with ids."""
@@ -218,7 +238,7 @@ class Flux2(Model[Flux2Graph], encoded_leaves="accept"):
             for index, reference in enumerate(references):
                 pixels = torch.from_numpy(np.array(reference)).permute(2, 0, 1).float() / 127.5 - 1.0
                 latents = vae.encode(pixels[None].to(device=device, dtype=vae.dtype)).latent_dist.mode()
-                latents = Flux2Pipeline._patchify_latents(latents)
+                latents = Flux2Pipeline._patchify_latents(latents.float())
                 mean, std = _bn(vae, latents)
                 latents = (latents - mean) / std
                 tokens.append(latents.flatten(2).transpose(1, 2).to(torch.bfloat16).cpu())
@@ -282,11 +302,11 @@ class Flux2(Model[Flux2Graph], encoded_leaves="accept"):
         device = torch.device(str(self.device))
         rows, columns = height // PATCH, width // PATCH
         with torch.inference_mode():
-            latents = tokens.to(device=device, dtype=vae.dtype).view(1, rows, columns, -1).permute(0, 3, 1, 2)
+            latents = tokens.to(device=device, dtype=torch.float32).view(1, rows, columns, -1).permute(0, 3, 1, 2)
             mean, std = _bn(vae, latents)
             latents = Flux2Pipeline._unpatchify_latents(latents * std + mean)
-            image = vae.decode(latents, return_dict=False)[0][0]
+            image = vae.decode(latents.to(vae.dtype), return_dict=False)[0][0]
             if not torch.isfinite(image).all():
                 raise ValueError("FLUX.2's decoder produced non-finite pixels")
-            pixels = ((image.float().clamp(-1, 1) + 1) * 127.5).to(torch.uint8).permute(1, 2, 0).cpu().numpy()
+            pixels = ((image.float().clamp(-1, 1) + 1) * 127.5).round().to(torch.uint8).permute(1, 2, 0).cpu().numpy()
         return Image.fromarray(pixels)

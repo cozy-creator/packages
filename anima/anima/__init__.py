@@ -97,6 +97,7 @@ def generate(
     adj: Adjustments,
 ) -> ImageResult:
     """Generate one native-resolution Anima image."""
+    model.hold_vae(tel)
     # Both prompt branches are conditioned before the repeated transformer phase.
     ctx.plan("text_encoder", "text_conditioner", "transformer", "vae")
     payload.ignored(adj, "prompt_upsampling", reason="Anima has no prompt upsampler")
@@ -132,7 +133,9 @@ def generate(
         # Still `decoding`: the pipeline left that bracket open and the host copy below is
         # the tail of the same work.
         image = images[0]
-        pixels = (image.clamp(0, 1) * 255).to("cpu", dtype=torch.uint8)
+        # F32 and rounded, as Diffusers' `VaeImageProcessor` makes PIL bytes: bf16 then
+        # truncation darkened every pixel.
+        pixels = (image.float().clamp(0, 1) * 255).round().to("cpu", dtype=torch.uint8)
         if pixels.ndim == 3 and pixels.shape[0] == 3:
             pixels = pixels.permute(1, 2, 0)
         pixels = pixels.contiguous()

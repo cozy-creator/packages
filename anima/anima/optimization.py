@@ -4,8 +4,9 @@ Only Python callables change: parameters, buffers, state-dict names and storage 
 fill left them. One closed plan for the reviewed Diffusers sources, not a patching
 framework: any drift runs eager and says why. The transformer's kernel is the Runtime's public
 fused RMSNorm + split-half RoPE (`cozy_runtime.author.kernels`), compiled into its linux x86
-cp312-abi3 wheel; it maps plane stand-ins for its launch itself. The VAE part is plain torch:
-an image is one frame, decoded as ComfyUI's WanVAE does.
+cp312-abi3 wheel; it maps plane stand-ins for its launch itself. The VAE decodes its one frame
+on the Runtime's VAE helpers (`fusion.ChannelNorm`, `fusion.LoneFrame`, `tiles.rows`), as ComfyUI's
+WanVAE does.
 """
 
 from __future__ import annotations
@@ -19,6 +20,7 @@ from typing import Any
 
 import torch
 import torch.nn.functional as F
+from cozy_runtime import fusion, tiles
 from cozy_runtime.author import device
 from cozy_runtime.author.kernels import int8_rows, native, quantize_once, rms_rope_split_half
 from diffusers.models.activations import GELU
@@ -27,6 +29,10 @@ from diffusers.models.attention_dispatch import dispatch_attention_fn
 from diffusers.models.autoencoders.autoencoder_kl_qwenimage import (
     AutoencoderKLQwenImage,
     QwenImageCausalConv3d,
+    QwenImageDecoder3d,
+    QwenImageResidualBlock,
+    QwenImageRMS_norm,
+    QwenImageUpsample,
 )
 from diffusers.models.autoencoders.vae import DecoderOutput
 from diffusers.models.normalization import RMSNorm
@@ -78,17 +84,27 @@ _SOURCE_DIGESTS: dict[str, tuple[Callable[..., object], str]] = {
         "5f758c69ad2f82a37d707e3ca736b88011b41f04a958dbc657ec397b88c2bef5",
     ),
 }
-#: Diffusers 0.40.0's sources the frame decode replaces or mirrors.
+#: Diffusers 0.40.0's source the frame decode replaces.
 _VAE_DIGESTS: dict[str, tuple[Callable[..., object], str]] = {
-    "QwenImageCausalConv3d.forward": (
-        QwenImageCausalConv3d.forward,
-        "a7700a6340ba271d682ce0b763599b81b8d6820cfec0f53eb08793ceb25ca6ca",
-    ),
     "AutoencoderKLQwenImage._decode": (
         AutoencoderKLQwenImage._decode,
         "5e714669ba0348fba8b2437d4fd4f32299b976fa64a3bd54b79affc41ae2deb0",
     ),
 }
+#: The VAE's dtype on CUDA. Anima stores Qwen-Image's VAE in bf16, which fp16 holds exactly: against an
+#: F32 decode, fp16 measures 62.9 dB and bf16 53.3 (dtype audit M1).
+VAE_DTYPE = torch.float16
+#: The VAE's RMS norms in one kernel each, with the SiLU each residual block and the decoder's head
+#: apply after them; Diffusers computes them in F32 copies of every activation.
+VAE_NORM = fusion.ChannelNorm(
+    QwenImageRMS_norm,
+    silu=((QwenImageResidualBlock, ("norm1", "norm2")), (QwenImageDecoder3d, ("norm_out",))),
+    dtype="fp16",
+)
+#: A lone frame's 3x3x3 causal convolutions on their last temporal tap, the only one it meets
+#: (Diffusers pads two zero frames and convolves all 27 taps), and its nearest upsampling in its own
+#: dtype, not F32.
+VAE_FRAME = fusion.LoneFrame(QwenImageCausalConv3d, upsample=QwenImageUpsample)
 #: Anima Base 1.0's transformer, the one the norm and RoPE shapes below are reviewed for: its
 #: constructor arguments. The Runtime's config drops the saving library's `_`-keys (#1786), and
 #: comparing them refused this plan on every construction since.
@@ -515,32 +531,31 @@ def _install_transformer_plan(transformer: Any) -> None:
 
 def _install_vae_plan(vae: Any) -> None:
     vae._decode = MethodType(_decode_frame, vae)
-    for conv in (vae.post_quant_conv, *vae.decoder.modules()):
-        if (
-            type(conv) is QwenImageCausalConv3d
-            and conv.stride[0] == 1
-            and conv.dilation[0] == 1
-            and conv._padding[4] == conv.kernel_size[0] - 1
-        ):
-            conv.forward = MethodType(_causal_frame_forward, conv)
 
 
 def _decode_frame(vae: Any, z: Any, return_dict: bool = True) -> Any:
-    """`AutoencoderKLQwenImage._decode` for one latent frame, without the feature cache: one
-    frame never reads it, and Diffusers clones every causal conv's input into it."""
+    """`AutoencoderKLQwenImage._decode` for one latent frame (`_decoded`)."""
     if z.shape[2] != 1 or vae.use_tiling:
         return type(vae)._decode(vae, z, return_dict=return_dict)
-    out = vae.decoder(vae.post_quant_conv(z)).clamp(-1.0, 1.0)
+    out = _decoded(vae, z).clamp(-1.0, 1.0)
     return DecoderOutput(sample=out) if return_dict else (out,)
 
 
-def _causal_frame_forward(conv: Any, x: Any, cache_x: Any = None) -> Any:
-    """`QwenImageCausalConv3d.forward` on one frame without a cache: the causal pad is zeros,
-    so only the kernel's last time tap reads data (ComfyUI's WanVAE fast path): a third of the
-    math, and no time padding."""
-    if cache_x is not None or x.shape[2] != 1:
-        return type(conv).forward(conv, x, cache_x)
-    spatial = conv._padding[:4]
-    if any(spatial):
-        x = F.pad(x, spatial)
-    return conv._conv_forward(x, conv.weight[:, :, -1:], conv.bias)
+def _decoded(vae: Any, z: Any) -> Any:
+    """The decode of one frame, the whole canvas: Diffusers' without its feature cache (each
+    convolution's input kept for a next frame an image never has), every residual and resample
+    block over the canvas in strips of rows (`tiles.rows`: exact, a strip's working set)."""
+    decoder = vae.decoder
+    x = decoder.conv_in(vae.post_quant_conv(z))
+    mid = decoder.mid_block
+    x = tiles.rows(mid.resnets[0], x, halo=2)
+    for attention, resnet in zip(mid.attentions, mid.resnets[1:], strict=True):
+        x = tiles.rows(resnet, attention(x), halo=2)
+    for block in decoder.up_blocks:
+        for resnet in block.resnets:
+            x = tiles.rows(resnet, x, halo=2)
+        if block.upsamplers is not None:
+            x = tiles.rows(block.upsamplers[0], x, halo=1, scale=2)
+    return tiles.rows(
+        lambda s: decoder.conv_out(decoder.nonlinearity(decoder.norm_out(s))), x, halo=1
+    )

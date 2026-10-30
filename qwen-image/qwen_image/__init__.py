@@ -70,6 +70,7 @@ def _render(
     negative: str,
 ) -> ImageResult:
     seed = payload.drawn_seed()
+    model.hold_vae(tel)
     payload.ignored(adj, "prompt_upsampling", reason="Qwen-Image has no prompt upsampler")
     payload.unplaced(adj, "Qwen-Image has no layout control")
     prompt = payload.rendered(adj, label)

@@ -81,6 +81,7 @@ def _render(
     negative: str,
     seed: int,
 ) -> ImageResult:
+    model.hold_vae(tel)
     width, height = size
     caption = with_table(prompt, rows) if rows else prompt
     if upsample and (rows or not is_finished(prompt)):

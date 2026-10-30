@@ -12,7 +12,7 @@ from collections.abc import Callable, Sequence
 
 import torch
 from cozy_runtime import rng
-from cozy_runtime.author import Config, Loader, Model, uses_components
+from cozy_runtime.author import Config, Loader, Model, Telemetry, hold_dtype, uses_components
 from diffusers import AutoencoderKLFlux2, FlowMatchEulerDiscreteScheduler, Ideogram4Transformer2DModel
 from diffusers.image_processor import VaeImageProcessor
 from diffusers.pipelines.ideogram4.pipeline_ideogram4 import (
@@ -25,6 +25,8 @@ from PIL import Image
 #: Pixels per latent token: the VAE's 8x, then 2x2 patches.
 PATCH = 16
 COMPONENTS = ("transformer", "unconditional_transformer", "vae")
+#: The VAE's dtype on a GPU, as ComfyUI runs FLUX.2's VAE: its activations fit fp16 (dtype audit M1).
+VAE_DTYPE = torch.float16
 
 
 class IdeogramGraph:
@@ -64,6 +66,14 @@ class Ideogram4(Model[IdeogramGraph], encoded_leaves="accept"):
 
     def load(self, loader: Loader) -> None:
         self.graph = loader.construct(IdeogramGraph, factory=IdeogramGraph)
+
+    def hold_vae(self, tel: Telemetry) -> None:
+        """Serve the VAE at `VAE_DTYPE` on a GPU from now on, before any VAE scope opens: the Runtime
+        casts the stored bfloat16 bytes when it next fills them. A CPU keeps bfloat16."""
+        vae = self.graph.components["vae"]
+        if torch.device(str(self.device)).type == "cuda" and next(vae.parameters()).dtype != VAE_DTYPE:
+            hold_dtype(vae, VAE_DTYPE)
+            tel.log("vae representation", dtype=str(VAE_DTYPE).removeprefix("torch."))
 
     @uses_components("transformer", "unconditional_transformer")
     def denoise(

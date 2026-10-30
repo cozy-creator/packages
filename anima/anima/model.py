@@ -11,8 +11,8 @@ from types import TracebackType
 from typing import Any, NamedTuple
 
 import torch
-from cozy_runtime import rng
-from cozy_runtime.author import Loader, Model, Telemetry, uses_components
+from cozy_runtime import fusion, rng
+from cozy_runtime.author import Loader, Model, Telemetry, hold_dtype, uses_components
 from cozy_runtime.author.kernels import Plan
 from diffusers import (
     AnimaAutoBlocks,
@@ -35,6 +35,7 @@ from diffusers.modular_pipelines import ModularPipelineBlocks
 from diffusers.modular_pipelines.anima.denoise import AnimaLoopDenoiser
 from transformers import AutoModel, PreTrainedTokenizerFast, Qwen3Config
 from transformers import initialization as transformer_init
+from transformers.modeling_utils import local_torch_dtype
 
 from . import optimization
 
@@ -79,13 +80,12 @@ class AnimaPipeline:
             transformer = CosmosTransformer3DModel.from_config(mapping["transformer"]).to(
                 torch.bfloat16
             )
-            # Built in bf16, not cast to it: the rotary inv_freq stays f32, as upstream's.
+            # Built in bf16, not cast to it: each rotary inv_freq stays f32, as upstream's.
             text_encoder: Any = AutoModel.from_config(
                 Qwen3Config(**mapping["text_encoder"]), dtype=torch.bfloat16
             )
-            text_conditioner = AnimaTextConditioner.from_config(
-                mapping["text_conditioner"]
-            ).to(torch.bfloat16)
+            with local_torch_dtype(torch.bfloat16):
+                text_conditioner = AnimaTextConditioner.from_config(mapping["text_conditioner"])
             vae = AutoencoderKLQwenImage.from_config(mapping["vae"]).to(torch.bfloat16)
 
         for component in (transformer, text_encoder, text_conditioner, vae):
@@ -125,7 +125,23 @@ class AnimaModel(Model[AnimaPipeline], encoded_leaves="accept"):
                 outcome["reason"] = refusal
             plan.report(name, outcome)
             print(f"[anima] {name}: {refusal or 'applied'}", file=sys.stderr)
-        return "+".join(name for name, refusal in parts.items() if not refusal)
+        vae = self.pipe.components["vae"]
+        installed = (
+            *(name for name, refusal in parts.items() if not refusal),
+            fusion.install_norms(plan, optimization.VAE_NORM, vae),
+            fusion.install_lone_frame(plan, optimization.VAE_FRAME, vae.decoder, vae.post_quant_conv),
+        )
+        return "+".join(identity for identity in installed if identity)
+
+    def hold_vae(self, tel: Telemetry) -> None:
+        """Decode in `optimization.VAE_DTYPE` on CUDA; the CPU keeps the stored bf16. The Runtime
+        casts the stored bytes when it next fills them; called before any VAE scope opens."""
+        vae = self.pipe.components["vae"]
+        dtype = optimization.VAE_DTYPE
+        if torch.device(str(self.device)).type != "cuda" or next(vae.parameters()).dtype == dtype:
+            return
+        hold_dtype(vae, dtype)
+        tel.log("vae representation", dtype="float16")
 
     @uses_components("text_encoder", "text_conditioner", "transformer", "vae")
     def render(

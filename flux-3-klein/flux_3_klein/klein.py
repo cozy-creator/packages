@@ -22,6 +22,8 @@ from cozy_runtime.author import (
     Config,
     Loader,
     Model,
+    Telemetry,
+    hold_dtype,
     uses_components,
 )
 from cozy_runtime.author.kernels import Plan
@@ -51,6 +53,8 @@ MATCH_MAX_PIXELS = 4 * 1024 * 1024
 MULTI_REFERENCE_MAX_PIXELS = 1024 * 1024
 MIN_SIDE, MAX_SIDE = 64, 4096
 COMPONENTS = ("transformer", "text_encoder", "vae")
+#: The VAE's dtype on a GPU, as ComfyUI runs FLUX.2's VAE: its activations fit fp16 (dtype audit M1).
+VAE_DTYPE = torch.float16
 
 
 def _conditioning_only(encoder: Any) -> None:
@@ -293,6 +297,14 @@ class Klein(
             )
         return embeds.cpu()
 
+    def hold_vae(self, tel: Telemetry) -> None:
+        """Serve the VAE at `VAE_DTYPE` on a GPU from now on, before any VAE scope opens: the Runtime
+        casts the stored float32 bytes when it next fills them. A CPU keeps float32."""
+        vae = self.graph.components["vae"]
+        if torch.device(str(self.device)).type == "cuda" and next(vae.parameters()).dtype != VAE_DTYPE:
+            hold_dtype(vae, VAE_DTYPE)
+            tel.log("vae representation", dtype=str(VAE_DTYPE).removeprefix("torch."))
+
     @uses_components("vae", memoize=True)
     def encode_references(self, references: list[Image.Image]) -> tuple[torch.Tensor, torch.Tensor]:
         """Normalized packed latents of the prepared references as one token sequence, with ids."""
@@ -302,7 +314,7 @@ class Klein(
         with torch.inference_mode():
             for index, reference in enumerate(references):
                 pixels = torch.from_numpy(np.array(reference)).permute(2, 0, 1).float() / 127.5 - 1.0
-                latents = vae.encode(pixels[None].to(device=device, dtype=vae.dtype)).latent_dist.mode()
+                latents = vae.encode(pixels[None].to(device=device, dtype=vae.dtype)).latent_dist.mode().float()
                 b, c, h, w = latents.shape
                 latents = latents.view(b, c, h // 2, 2, w // 2, 2).permute(0, 1, 3, 5, 2, 4)
                 latents = latents.reshape(b, c * 4, h // 2, w // 2)
@@ -391,13 +403,13 @@ class Klein(
         device = torch.device(str(self.device))
         rows, columns = height // PATCH, width // PATCH
         with torch.inference_mode():
-            latents = tokens.to(device=device, dtype=vae.dtype).view(1, rows, columns, -1).permute(0, 3, 1, 2)
+            latents = tokens.to(device=device, dtype=torch.float32).view(1, rows, columns, -1).permute(0, 3, 1, 2)
             mean, std = _bn(vae, latents)
             latents = latents * std + mean
             b, c, h, w = latents.shape
             latents = latents.reshape(b, c // 4, 2, 2, h, w).permute(0, 1, 4, 2, 5, 3).reshape(b, c // 4, h * 2, w * 2)
-            image = vae.decode(latents, return_dict=False)[0][0]
+            image = vae.decode(latents.to(vae.dtype), return_dict=False)[0][0]
             if not torch.isfinite(image).all():
                 raise ValueError("Klein's decoder produced non-finite pixels")
-            pixels = ((image.float().clamp(-1, 1) + 1) * 127.5).to(torch.uint8).permute(1, 2, 0).cpu().numpy()
+            pixels = ((image.float().clamp(-1, 1) + 1) * 127.5).round().to(torch.uint8).permute(1, 2, 0).cpu().numpy()
         return Image.fromarray(pixels)

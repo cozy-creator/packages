@@ -48,6 +48,7 @@ def label(n: int, asset: PictureAsset) -> str:
 
 def _generate(ctx: Context, payload: GenerateInput, model: Flux2, turbo: Flux2TurboLoRA | None,
               upsampler: Flux2Upsampler, out: Outputs, tel: Telemetry, adj: Adjustments) -> ImageResult:
+    model.hold_vae(tel)
     seed = payload.drawn_seed()
     payload.unplaced(adj, "FLUX.2 has no layout control")
     images = [asset.read() for asset in payload.images()]
