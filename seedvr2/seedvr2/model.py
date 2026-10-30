@@ -144,10 +144,10 @@ class RestorationModel(Model[Graph], encoded_leaves="accept"):
     @uses_components("vae")
     def decode(self, latent: torch.Tensor) -> torch.Tensor:
         """A restored latent to pixels, (c, t, h, w) in about [-1, 1] in host memory, one slice
-        of frames at a time."""
+        of frames at a time, in the VAE's own fp16: bf16 autocast ran its norms in F32, 1.26x
+        slower and 10 dB further from the F32 decode."""
         z = (latent / SCALE).movedim(-1, 0)[None].to("cpu", torch.float16)
-        with torch.autocast(latent.device.type, dtype=torch.bfloat16):
-            return _vae(self.graph).decode(z).sample[0]
+        return _vae(self.graph).decode(z).sample[0]
 
 
 def _runner(graph: Graph, device: torch.device) -> Any:
