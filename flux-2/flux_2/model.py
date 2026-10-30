@@ -308,5 +308,5 @@ class Flux2(Model[Flux2Graph], encoded_leaves="accept"):
             image = vae.decode(latents.to(vae.dtype), return_dict=False)[0][0]
             if not torch.isfinite(image).all():
                 raise ValueError("FLUX.2's decoder produced non-finite pixels")
-            pixels = ((image.float().clamp(-1, 1) + 1) * 127.5).to(torch.uint8).permute(1, 2, 0).cpu().numpy()
+            pixels = ((image.float().clamp(-1, 1) + 1) * 127.5).round().to(torch.uint8).permute(1, 2, 0).cpu().numpy()
         return Image.fromarray(pixels)
