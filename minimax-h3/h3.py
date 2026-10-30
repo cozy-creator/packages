@@ -1550,31 +1550,36 @@ def _delivered(seconds: int, first: bool) -> int:
 
 def plan_pieces(duration_s: float, beats: Iterable[float]) -> list[int]:
     """A shot's pieces in whole seconds: the fewest that reach `duration_s` (the first at most
-    15 s, each later one at most 14, none under 5). Within that count: as many boundaries within
-    a second of a beat as fit (H3's frame grid puts a boundary up to 0.7 s from a whole second),
-    then the least timing error (those boundaries' distances plus the overshoot), then lengths
-    as even as they can be (the least compute)."""
+    15 s, each later one at most 14, none under 5). Within that count (Paul, 10-30): as many
+    boundaries within a second of a beat as fit (H3's frame grid puts a boundary up to 0.7 s
+    from a whole second), each as close as it can be; then the least overshoot, in whole
+    seconds; then each piece as long as it can be, since a longer generation is more
+    consistent; then the least overshoot in frames."""
     target = max(1, math.ceil(duration_s * FPS - 1e-6))
     count = 1 + max(0, math.ceil((target - _delivered(MAX_DURATION_S, True)) / _delivered(_MAX_NEXT_S, False)))
     marks = [at * FPS for at in beats]
-    # Each reachable end, in frames: its score (beat boundaries, minus the timing error in
-    # frames, minus the sum of squared lengths) and the lengths that reach it.
-    best: dict[int, tuple[tuple[int, float, int], list[int]]] = {0: ((0, 0, 0), [])}
-    for index in range(count):
-        last, longest = index + 1 == count, MAX_DURATION_S if index == 0 else _MAX_NEXT_S
-        reached: dict[int, tuple[tuple[int, float, int], list[int]]] = {}
-        for start, ((hits, error, cost), lengths) in best.items():
-            for length in range(MIN_DURATION_S, longest + 1):
+    # Each end, in frames, the pieces before the last reach: its score (beat boundaries, minus
+    # their distance in frames, the lengths) and those lengths.
+    best: dict[int, tuple[int, float, list[int]]] = {0: (0, 0, [])}
+    for index in range(count - 1):
+        reached: dict[int, tuple[int, float, list[int]]] = {}
+        for start, (hits, distance, lengths) in best.items():
+            for length in range(MIN_DURATION_S, (MAX_DURATION_S if index == 0 else _MAX_NEXT_S) + 1):
                 end = start + _delivered(length, index == 0)
-                if last != (end >= target):
-                    continue
                 miss = min((abs(end - mark) for mark in marks), default=math.inf)
-                hit = not last and miss <= FPS
-                score = (hits + hit, error - (end - target if last else miss if hit else 0), cost - length * length)
-                if end not in reached or score > reached[end][0]:
-                    reached[end] = (score, [*lengths, length])
+                score = (hits + 1, distance - miss, [*lengths, length]) if miss <= FPS else (hits, distance, [*lengths, length])
+                if end < target and (end not in reached or score > reached[end]):
+                    reached[end] = score
         best = reached
-    return max(best.values())[1]
+    longest = MAX_DURATION_S if count == 1 else _MAX_NEXT_S
+    plans = [
+        (hits, distance, -math.ceil((end - target) / FPS), lengths, -end, [*lengths, length])
+        for start, (hits, distance, lengths) in best.items()
+        for length in range(MIN_DURATION_S, longest + 1)
+        if (end := start + _delivered(length, count == 1)) >= target
+        and all(start + _delivered(shorter, count == 1) < target for shorter in range(MIN_DURATION_S, length))
+    ]
+    return max(plans)[-1]
 
 
 def piece_texts(prompt: str, beats: Sequence[Beat], starts: Sequence[float]) -> list[str]:

@@ -33,12 +33,16 @@ turbo: true                                   # false: the full model at steps 3
 ```
 
 - **Pieces.** A shot renders in the fewest pieces that reach its length: the first up to
-  15 s, each later one up to 14 s (the 22 frames it carries from the last share H3's 15 s
+  15 s, each later one up to 14 s new (the 22 frames it carries from the last share H3's 15 s
   window), so 1 + ⌈(d − 15) / 14⌉ for d > 15. Each piece continues the last from its carried
-  latents, never decoded. Within that count, boundaries go on beat times where they fit
-  (within a second; H3's frame grid puts a boundary up to 0.7 s off a whole second). Other
-  beats are ordered action inside a piece. An 8 s shot with beats at 0 and 5 is one
+  latents, never decoded. Within that count, boundaries go on beats wherever they fit; where
+  none fits, each piece is as long as it can be, since a longer generation is more consistent.
+  Other beats are ordered action inside a piece. An 8 s shot with beats at 0 and 5 is one
   generation; the 40 s shot above is three pieces of 13 s, starting at 0, 13.7 and 27.1 s.
+- **Why 13.7, not 13.** A piece renders whole seconds snapped up to H3's 17n+5 frame grid
+  (13 s is 328 frames, 13.67 s), and a later piece delivers its window less the 22 frames it
+  carries. So a boundary lands on the grid point nearest its beat, within a second, and the
+  beat opens that piece.
 - **Text.** Each piece is one `[Shot 1]` in plain English: the shot's `prompt`, the beat it
   is in (repeated as continuing action when a beat spans a boundary), each later beat as
   "Then, …", and "One continuous shot with no cuts." (first piece) or "The same shot
@@ -46,8 +50,11 @@ turbo: true                                   # false: the full model at steps 3
   `[Shot N]`. A prompt with its own `integrated_multimodal_description:`/`audio:`/
   `non_diegetic_music:` fields keeps them; the lines end its description.
 - **Pictures.** Characters, props and the environment (`<Dock>`) are definitions in every
-  piece's text. A world state is a soft picture of the set read at 512 px, with its `layout`
-  in its definition: the shot keeps who stands where without opening on that frame.
+  piece's text, each with its `description` when given. A project cleans character and prop
+  pictures (background removal) before they reach `shot`, so a direct call should pass clean
+  ones; nothing describes them automatically. A world state is a soft picture of the set
+  read at 512 px, with its `layout` in its definition: the shot keeps who stands where without
+  opening on that frame.
 - **Footage.** `reference_footage` gives motion and camera; a `plate` (`{video}`) is followed
   frame by frame, for a shot of one piece. `keyframes` anchor the first and last frames.
 - **Result.** `video` (768p mp4), `frames` (one per `writes` entry) and `warnings`. A piece
