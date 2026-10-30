@@ -95,8 +95,13 @@ BLOCK = fusion.DiTBlock(
     rope=fusion.Rope("rotary_emb", interleaved=True),
     gate="tanh",
 )
+#: The VAE's dtype on CUDA. Against an F32 decode, fp16 measures 61.9 dB mean (56.7 min) and bf16
+#: 52.4 (41.6), its encoded latents 4-10x closer, with about 160x headroom below fp16's range (dtype
+#: audit M1); it also decodes faster than bf16.
+VAE_DTYPE = torch.float16
 #: The VAE's RMS norms in one kernel each, with the SiLU each residual block and each head applies
-#: after them; Diffusers computes them in F32 copies of every activation.
+#: after them; Diffusers computes them in F32 copies of every activation. Declared in `VAE_DTYPE`, or
+#: the fused kernel is skipped for the eager norm.
 VAE_NORM = fusion.ChannelNorm(
     QwenImage21RMS_norm,
     silu=(
@@ -104,9 +109,10 @@ VAE_NORM = fusion.ChannelNorm(
         (QwenImage21Decoder3d, ("norm_out",)),
         (QwenImage21Encoder3d, ("norm_out",)),
     ),
+    dtype="fp16",
 )
 #: A lone frame's convolutions without the padded copy before each, and its nearest upsampling in
-#: bf16 (Diffusers upsamples in F32).
+#: its own dtype (Diffusers upsamples in F32).
 VAE_FRAME = fusion.LoneFrame(QwenImage21CausalConv3d, upsample=QwenImage21Upsample)
 
 
@@ -259,17 +265,14 @@ class QwenImage21Model(
         return "+".join(identity for identity in installed if identity)
 
     def hold_vae(self, tel: Telemetry) -> None:
-        """Run the VAE in bf16 where the GPU computes it natively, as ComfyUI stages it and as Turbo
-        stores it; the base release stores F32, whose decode took 2.0 s on an 8 GB RTX 3070 against
-        ComfyUI's 0.93 s. The Runtime casts the stored bytes when it next fills them; call this
+        """Run the VAE in `VAE_DTYPE` on CUDA; the CPU keeps what the lane stores (the base release
+        F32, Turbo bf16). The Runtime casts the stored bytes when it next fills them; call this
         before any VAE scope opens."""
         vae = self.graph.components["vae"]
-        device = torch.device(str(self.device))
-        if device.type != "cuda" or not torch.cuda.is_bf16_supported(including_emulation=False):
+        if torch.device(str(self.device)).type != "cuda" or next(vae.parameters()).dtype == VAE_DTYPE:
             return
-        if next(vae.parameters()).dtype != torch.bfloat16:
-            hold_dtype(vae, torch.bfloat16)
-            tel.log("vae representation", dtype="bfloat16")
+        hold_dtype(vae, VAE_DTYPE)
+        tel.log("vae representation", dtype="float16")
 
     def _pipeline(self, sigmas: Sequence[float] | None = None) -> _StagedPipeline:
         pipeline = _StagedPipeline(
