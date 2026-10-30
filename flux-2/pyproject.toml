@@ -1,10 +1,10 @@
 [project]
 name = "flux-2"
-version = "0.1.1"
+version = "0.1.2"
 description = "Cozy text-to-image and reference editing with FLUX.2 [dev], its Turbo LoRA, and FLUX.2 [klein] 9B and 4B"
 requires-python = ">=3.12"
 dependencies = [
-    "cozy-runtime[media]>=0.33",
+    "cozy-runtime[media]>=0.35.8",
     "diffusers @ git+https://github.com/huggingface/diffusers@7ecb1e1b4fe500be7fb7381a7bb79a24d7fa3941",
     "msgspec>=0.19",
     "numpy>=1.26",
