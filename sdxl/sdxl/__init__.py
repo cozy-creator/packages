@@ -48,7 +48,7 @@ from cozy_runtime.author import (
     Context,
     EncodingRule,
     ImageFrame,
-    ImageReference,
+    PictureAsset,
     ImageRequest,
     ImageResult,
     Loader,
@@ -96,7 +96,7 @@ _NATIVE = 1.5
 
 class GenerateInput(ImageRequest):
     #: SDXL makes images from text only.
-    references: Annotated[list[ImageReference], msgspec.Meta(max_length=0)] = msgspec.field(
+    assets: Annotated[list[PictureAsset], msgspec.Meta(max_length=0)] = msgspec.field(
         default_factory=list
     )
     #: None runs HiDiffusion where base SDXL cannot go: above 1 MP. An explicit choice always

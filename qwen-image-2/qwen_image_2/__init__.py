@@ -10,7 +10,7 @@ from cozy_runtime.author import (
     Adjustments,
     App,
     Context,
-    ImageReference,
+    PictureAsset,
     ImageRequest,
     ImageResult,
     Memoize,
@@ -39,13 +39,13 @@ TURBO_SIGMAS = (1.0, 0.978453, 0.95418, 0.926626, 0.89508, 0.845148, 0.704534, 0
 
 
 class GenerateInput(ImageRequest):
-    references: Annotated[list[ImageReference], msgspec.Meta(max_length=10)] = msgspec.field(
+    assets: Annotated[list[PictureAsset], msgspec.Meta(max_length=10)] = msgspec.field(
         default_factory=list
     )
 
 
-def label(n: int, reference: ImageReference) -> str:
-    """Qwen-Image-2.1's word for the Nth reference: its template writes `<imageN>` before each
+def label(n: int, asset: PictureAsset) -> str:
+    """Qwen-Image-2.1's word for the Nth asset: its template writes `<imageN>` before each
     image (Diffusers 0.41 `QwenImage21Pipeline`), and Qwen's rewriter tags only two or more."""
     return f"<image{n}>"
 
@@ -87,7 +87,7 @@ def _generate(
     payload.ignored(adj, "guidance", "negative_prompt", "prompt_upsampling",
                     reason="Qwen-Image-2.1 samples without CFG and has no prompt upsampler")
     payload.unplaced(adj, "Qwen-Image-2.1 has no layout control")
-    prompt = payload.rendered(adj, label if len(payload.references) > 1 else name_label)
+    prompt = payload.rendered(adj, label if len(payload.assets) > 1 else name_label)
     if sigmas:
         steps = len(sigmas)
         if payload.steps not in (None, steps):
@@ -101,12 +101,12 @@ def _generate(
     ctx.raise_if_cancelled()
     # Phase order for residency: references encode on the VAE first, then the text encoder, the
     # transformer denoise (the `denoise_loop`), and the VAE decode.
-    if payload.references:
+    if payload.assets:
         ctx.plan("vae", "text_encoder", "transformer", "vae")
     else:
         ctx.plan("text_encoder", "transformer", "vae")
     reference_images, reference_latents, image_pad_mask = None, None, None
-    if payload.references:
+    if payload.assets:
         with tel.stage("encoding reference images", overall_range=(0.0, 0.08)):
             # Upstream feeds the VAE RGBA; its vision encoder sees alpha composited over white.
             reference_images = [asset.read(mode="RGBA") for asset in payload.images()]

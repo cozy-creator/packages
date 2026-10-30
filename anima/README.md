@@ -28,11 +28,11 @@ Leave the tags out when they fight the look you want ("crayon drawing, childlike
 name, blurry, jpeg artifacts, chromatic aberration`. No rating tag is added, so a neutral prompt
 can return NSFW output; write `safe` in the prompt to ask for it.
 
-Inputs are the shared image request, the same in every image package: `prompt`, `references`, `aspect_ratio` (any W:H), `megapixels` (any size, 1024² pixels each), `steps`, `guidance`, `negative_prompt`, `seed` and `prompt_upsampling`. Anima adds `cfg_interval_start`/`cfg_interval_stop` (the part of the schedule that
+Inputs are the shared image request, the same in every image package: `prompt`, `assets`, `aspect_ratio` (any W:H), `megapixels` (any size, 1024² pixels each), `steps`, `guidance`, `negative_prompt`, `seed` and `prompt_upsampling`. Anima adds `cfg_interval_start`/`cfg_interval_stop` (the part of the schedule that
 uses guidance, default 0.15–0.70) and `first_block_cache` (0 = off). Left out, each is Anima's
 default: 1:1 at its 1536 class (1536², 2.25 MP), 30 steps at guidance 4.5, the card's negative
 prompt, a random seed. Sizes round to 32 px within 1–2.25 MP and the rotary range (2048 px sides);
-steps 8–50, guidance 1–10. Out of range clamps with a `clamp` adjustment. Anima takes no `references` (refused before upload), so a `<Name>` in its prompt stays as written, with a warning ([references](../docs/references.md)),
+steps 8–50, guidance 1–10. Out of range clamps with a `clamp` adjustment. Anima takes no `assets` (refused before upload), so a `<Name>` in its prompt stays as written, with a warning ([assets](../docs/assets.md)),
 and it ignores `prompt_upsampling` with a warning. The result is `image` (a WebP in
 `~/.cozy/outputs`), `width`, `height`, `seed` and `prompt`.
 

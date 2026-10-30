@@ -150,7 +150,7 @@ def prepare_references(images: Sequence[Image.Image]) -> list[Image.Image]:
         try:
             Flux2ImageProcessor.check_image_input(image)
         except ValueError as exc:
-            raise UnsupportedInput(f"references.{index}.image: {exc}") from None
+            raise UnsupportedInput(f"assets.{index}.image: {exc}") from None
         image = Flux2ImageProcessor._resize_if_exceeds_area(image, limit)
         w, h = image.width // PATCH * PATCH, image.height // PATCH * PATCH
         left, top = (image.width - w) // 2, (image.height - h) // 2

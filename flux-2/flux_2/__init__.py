@@ -1,5 +1,5 @@
 """FLUX.2 [dev], its Turbo LoRA, and FLUX.2 [klein] 9B and 4B: text to image, or an edit of up to ten
-ordered references."""
+ordered picture assets."""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ from cozy_runtime.author import (
     Adjustments,
     App,
     Context,
-    ImageReference,
+    PictureAsset,
     ImageRequest,
     ImageResult,
     Memoize,
@@ -35,13 +35,13 @@ SIZES = Sizes((MIN_SIDE**2 / MEGAPIXEL, MAX_PIXELS / MEGAPIXEL), (MIN_SIDE, MAX_
 
 
 class GenerateInput(ImageRequest):
-    references: Annotated[list[ImageReference], msgspec.Meta(max_length=10)] = msgspec.field(
+    assets: Annotated[list[PictureAsset], msgspec.Meta(max_length=10)] = msgspec.field(
         default_factory=list
     )
 
 
-def label(n: int, reference: ImageReference) -> str:
-    """FLUX.2's word for the Nth reference, as BFL's prompting guide writes it ("subject from image 1,
+def label(n: int, asset: PictureAsset) -> str:
+    """FLUX.2's word for the Nth asset, as BFL's prompting guide writes it ("subject from image 1,
     style from image 2"); the text encoder sees no image, so this is convention, not a token."""
     return f"image {n}"
 

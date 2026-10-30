@@ -1,4 +1,4 @@
-"""Tencent's HunyuanImage 3.0: text to image, or an edit or fusion of up to three ordered references, with the
+"""Tencent's HunyuanImage 3.0: text to image, or an edit or fusion of up to three ordered picture assets, with the
 model's own think-and-rewrite stage. `generate_turbo` is Instruct-Distil (8 steps), `generate` Instruct (50)."""
 
 from __future__ import annotations
@@ -10,7 +10,7 @@ from cozy_runtime.author import (
     Adjustments,
     App,
     Context,
-    ImageReference,
+    PictureAsset,
     ImageRequest,
     ImageResult,
     Memoize,
@@ -37,11 +37,11 @@ class HunyuanRequest(ImageRequest, forbid_unknown_fields=True):
     """The shared image request. With no `aspect_ratio` the model picks its size, as Tencent's
     `image_size="auto"`; it makes about 1 MP whatever `megapixels` asks."""
 
-    references: Annotated[list[ImageReference], msgspec.Meta(max_length=3)] = msgspec.field(default_factory=list)
+    assets: Annotated[list[PictureAsset], msgspec.Meta(max_length=3)] = msgspec.field(default_factory=list)
 
 
-def label(n: int, reference: ImageReference) -> str:
-    """HunyuanImage 3.0's word for the Nth reference: every prompt Tencent documents names them 图1, 图2,
+def label(n: int, asset: PictureAsset) -> str:
+    """HunyuanImage 3.0's word for the Nth asset: every prompt Tencent documents names them 图1, 图2,
     图3 (`run_demo_instruct.sh`); the images precede the prompt with no label of their own."""
     return f"图{n}"
 
@@ -104,7 +104,7 @@ _COMPONENTS = {"model": ("model",)}
 def generate_turbo(ctx: Context, payload: HunyuanRequest, model: HunyuanImage3, out: Outputs, tel: Telemetry,
                    adj: Adjustments) -> ImageResult:
     """HunyuanImage 3.0 Instruct-Distil, 8 steps, guidance 2.5 (distilled): text to image, or an edit of up to
-    three references; the model thinks and rewrites the prompt first unless `prompt_upsampling` is false."""
+    three picture assets; the model thinks and rewrites the prompt first unless `prompt_upsampling` is false."""
     return _generate(ctx, payload, payload.steps or 8, model, out, tel, adj)
 
 
@@ -112,6 +112,6 @@ def generate_turbo(ctx: Context, payload: HunyuanRequest, model: HunyuanImage3, 
                 memoize=Memoize(requires=["seed"]))
 def generate(ctx: Context, payload: HunyuanRequest, model: HunyuanImage3, out: Outputs, tel: Telemetry,
              adj: Adjustments) -> ImageResult:
-    """HunyuanImage 3.0 Instruct, 50 steps with CFG 2.5: text to image, or an edit of up to three references;
+    """HunyuanImage 3.0 Instruct, 50 steps with CFG 2.5: text to image, or an edit of up to three picture assets;
     the model thinks and rewrites the prompt first unless `prompt_upsampling` is false."""
     return _generate(ctx, payload, payload.steps or 50, model, out, tel, adj)

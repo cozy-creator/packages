@@ -23,7 +23,7 @@ import time
 import msgspec
 
 from cozy_runtime import moe
-from cozy_runtime.author import App, ImageAsset
+from cozy_runtime.author import App, ImageFile
 from cozy_runtime.vlm import Question, VisionLM
 
 #: Expert caches replayed, in experts: 3.15 MB each at int8, 1.77 MB at 4-bit (35B-A3B); 5,400 int8
@@ -34,7 +34,7 @@ app = App()
 
 
 class Ask(msgspec.Struct):
-    picture: ImageAsset
+    picture: ImageFile
     prompt: str
     thinking: bool = False
     max_tokens: int = 1024

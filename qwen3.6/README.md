@@ -11,14 +11,14 @@ prompt: Describe this character's clothing.
 ```
 
 ```sh
-cozy run qwen3.6/ask --input request.yaml --asset images=./character.png
+cozy run qwen3.6/ask --input request.yaml --file images=./character.png
 ```
 
 Inline inputs work too, and override the file's:
 
 ```sh
-cozy run qwen3.6/ask "Describe this character's clothing." --asset images=./character.png
-cozy run qwen3.6/ask "What happens, and when?" --asset videos=./clip.mp4
+cozy run qwen3.6/ask "Describe this character's clothing." --file images=./character.png
+cozy run qwen3.6/ask "What happens, and when?" --file videos=./clip.mp4
 ```
 
 The request and the model code are Runtime's shared Qwen-VL ones (`cozy_runtime.vlm`), the same

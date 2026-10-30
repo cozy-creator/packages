@@ -12,7 +12,7 @@ from cozy_runtime.author import (
     Adjustments,
     App,
     Context,
-    ImageReference,
+    PictureAsset,
     ImageRequest,
     ImageResult,
     Memoize,
@@ -44,13 +44,13 @@ EDIT_NEGATIVE, GUIDANCE = " ", 4.0
 class GenerateInput(ImageRequest):
     #: Given, Qwen-Image-Edit-2511 edits or composes them, in order; else Qwen-Image-2512 generates
     #: from the prompt.
-    references: Annotated[list[ImageReference], msgspec.Meta(max_length=10)] = msgspec.field(
+    assets: Annotated[list[PictureAsset], msgspec.Meta(max_length=10)] = msgspec.field(
         default_factory=list
     )
 
 
-def label(n: int, reference: ImageReference) -> str:
-    """Qwen-Image-Edit's word for the Nth reference: its template writes `Picture N:` before each
+def label(n: int, asset: PictureAsset) -> str:
+    """Qwen-Image-Edit's word for the Nth asset: its template writes `Picture N:` before each
     image (Diffusers 0.41 `QwenImageEditPlusPipeline`)."""
     return f"Picture {n}"
 
@@ -122,9 +122,9 @@ def generate(
     tel: Telemetry,
     adj: Adjustments,
 ) -> ImageResult:
-    """Qwen-Image-2512 from text (50 steps), Qwen-Image-Edit-2511 with references (40 steps), both
+    """Qwen-Image-2512 from text (50 steps), Qwen-Image-Edit-2511 with picture assets (40 steps), both
     with true CFG 4.0."""
-    edit = bool(payload.references)
+    edit = bool(payload.assets)
     steps = held(adj, "steps", payload.steps or (EDIT_STEPS if edit else TEXT_STEPS), 2, 100,
                  "at least 2 (the schedule stretches its last step to the terminal sigma), at most 100")
     guidance = held(adj, "guidance", GUIDANCE if payload.guidance is None else payload.guidance, 1.0, 20.0)
@@ -161,6 +161,6 @@ def generate_turbo(
     """Each DiT with lightx2v's 8-step Lightning LoRA for it: 8 steps, no CFG."""
     payload.ignored(adj, "guidance", "negative_prompt", reason="the Lightning LoRA samples without CFG")
     steps = held(adj, "steps", payload.steps or TURBO_STEPS, 1, 100)
-    edit = bool(payload.references)
+    edit = bool(payload.assets)
     dit, lora = (edit_model, edit_turbo_lora) if edit else (model, turbo_lora)
     return _render(ctx, model, dit, lora, out, tel, adj, payload, steps=steps, guidance=1.0, negative="")

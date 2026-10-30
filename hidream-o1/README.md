@@ -10,7 +10,7 @@ patches attend to everything (tech report arXiv:2605.11061 §3.3).
 | `generate` | HiDream-O1-Image | 50 | `guidance` 5.0 (CFG) |
 | `generate_turbo` | HiDream-O1-Image-Dev (distilled) | 28 (its only schedule) | none |
 
-One function does both jobs: with `references`, it edits them, or composes several in order.
+One function does both jobs: with `assets`, it edits them, or composes several in order.
 HiDream recommends the full model, `generate`, for editing. A pose is one more reference: upstream's
 try-on example passes a face, a background, an OpenPose skeleton and three garments, in that order.
 
@@ -28,10 +28,10 @@ Inline inputs work too, and override the file's:
 
 ```sh
 cozy run hidream-o1/generate_turbo prompt='A dog holds a sign that says "HiDream-O1-Image release."'
-cozy run hidream-o1/generate prompt='remove the earphones' references:='[{"name": "Photo", "image": "photo.jpg"}]'
+cozy run hidream-o1/generate prompt='remove the earphones' assets:='[{"name": "Photo", "image": "photo.jpg"}]'
 ```
 
-Inputs are the shared image request, the same in every image package: `prompt`, `references`, `aspect_ratio` (any W:H), `megapixels` (any size, 1024² pixels each), `steps`, `guidance`, `negative_prompt`, `seed` and `prompt_upsampling`. `references` are up to 10, and a reference's `box` places it (below). HiDream-O1 has no words of its own for its references (upstream's prompts describe them, "the provided clothing"), so a `<Name>` mention reads as the name itself ([references](../docs/references.md)). HiDream-O1 adds `guidance_interval` (below). Left out, each
+Inputs are the shared image request, the same in every image package: `prompt`, `assets`, `aspect_ratio` (any W:H), `megapixels` (any size, 1024² pixels each), `steps`, `guidance`, `negative_prompt`, `seed` and `prompt_upsampling`. `assets` are up to 10, and an asset's `box` places it (below). HiDream-O1 has no words of its own for its references (upstream's prompts describe them, "the provided clothing"), so a `<Name>` mention reads as the name itself ([assets](../docs/assets.md)). HiDream-O1 adds `guidance_interval` (below). Left out, each
 is the model's default: 50 steps (1–200) at guidance 5.0 (1–20) for `generate`, upstream's unconditional
 caption (a single space) as the negative prompt, and a random seed. `generate_turbo` runs its 28 distilled
 steps and ignores `guidance`, `negative_prompt` and `guidance_interval` with a warning; neither has a prompt
@@ -41,8 +41,8 @@ The result has the image, its `width` and `height`, the `seed`, and `prompt`: th
 
 ## Placing references
 
-A reference's `box` is `[x0, y0, x1, y1]`, corners from 0 to 1 on the output, origin top-left; a
-reference without one is placed by the model itself. This is upstream's layout
+An asset's `box` is `[x0, y0, x1, y1]`, corners from 0 to 1 on the output, origin top-left; an
+asset without one is placed by the model itself. This is upstream's layout
 pipeline (`--layout_bboxes`), exactly: each reference is framed in its box's colour, and a black canvas
 with the coloured boxes follows the references as one more. Only the five largest boxes are drawn.
 Placed references are elements, not the canvas: the output is 1:1 at 4 MP unless `aspect_ratio` or
@@ -57,7 +57,7 @@ Our layout inputs are pixel-identical to upstream's, and a single pass matches i
 
 ```sh
 cozy run hidream-o1/generate prompt='City council members pose on a sunlit terrace' \
-  references:='[{"name": "A", "image": "a.jpg", "box": [0.205, 0.488, 0.439, 0.742]},
+  assets:='[{"name": "A", "image": "a.jpg", "box": [0.205, 0.488, 0.439, 0.742]},
                 {"name": "B", "image": "b.jpg", "box": [0.576, 0.088, 0.801, 0.342]}]'
 ```
 

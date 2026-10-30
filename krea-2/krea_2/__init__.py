@@ -9,7 +9,7 @@ from cozy_runtime.author import (
     Adjustments,
     App,
     Context,
-    ImageReference,
+    PictureAsset,
     ImageRequest,
     ImageResult,
     Memoize,
@@ -33,7 +33,7 @@ RAW, TURBO = (52, 3.5, 1.0), (8, 0.0, 4.0)
 
 class GenerateInput(ImageRequest):
     #: Krea 2 makes images from text only.
-    references: Annotated[list[ImageReference], msgspec.Meta(max_length=0)] = msgspec.field(
+    assets: Annotated[list[PictureAsset], msgspec.Meta(max_length=0)] = msgspec.field(
         default_factory=list
     )
 

@@ -3,7 +3,7 @@
     cozy run minimax-h3/encode_text --input encode-request.json --on NAME --out bf16 \
       model.model=minimaxai/minimax-h3@1.0.0-rc.2 --lane fp8
     cozy run ./examples/client-scripts/h3-te-drift/weight_drift --input weight-request.json \
-      --asset states=bf16/<run>-states.bin --on NAME --json \
+      --file states=bf16/<run>-states.bin --on NAME --json \
       model.bf16=... model.fp8=...
 
 `states` is `encode_text`'s output for the bf16 lane: its token ids and hidden states are the
@@ -27,7 +27,7 @@ from typing import Annotated, Any
 import msgspec
 import numpy as np
 import torch
-from cozy_runtime.author import App, AssetBound, Context, FileAsset, Telemetry, Weights
+from cozy_runtime.author import App, FileBound, Context, File, Telemetry, Weights
 from safetensors.torch import load
 from transformers import Qwen3VLTextConfig
 from transformers.models.qwen3_vl.modeling_qwen3_vl import (
@@ -75,7 +75,7 @@ COMMUNITY: dict[str, tuple[str, str, int]] = {
 }
 
 States = Annotated[
-    FileAsset, AssetBound(max_bytes=1 << 30, media_types=("application/octet-stream",))
+    File, FileBound(max_bytes=1 << 30, media_types=("application/octet-stream",))
 ]
 
 

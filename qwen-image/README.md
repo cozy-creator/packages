@@ -1,7 +1,7 @@
 # Qwen Image
 
 Qwen's 20B dual-stream DiT with a Qwen2.5-VL-7B text encoder. One function generates from text with
-Qwen-Image-2512, or edits and composes `references` with Qwen-Image-Edit-2511. The two
+Qwen-Image-2512, or edits and composes `assets` with Qwen-Image-Edit-2511. The two
 checkpoints store the same text encoder and VAE byte for byte, so one copy serves both, and only the
 DiT changes between requests.
 
@@ -26,19 +26,19 @@ Inline inputs work too, and override the file's:
 ```sh
 cozy run qwen-image/generate prompt='A red vintage bicycle against a pastel wall' aspect_ratio=3:2
 cozy run qwen-image/generate prompt='Make <Guitarist> play a violin instead of the guitar' \
-  references:='[{"name": "Guitarist", "image": "guitarist.png"}]' seed=42
+  assets:='[{"name": "Guitarist", "image": "guitarist.png"}]' seed=42
 cozy run qwen-image/generate_turbo prompt='<Cat> wearing the space suit from <Astronaut>' \
-  references:='[{"name": "Cat", "image": "cat.jpg"}, {"name": "Astronaut", "image": "astronaut.jpg"}]'
+  assets:='[{"name": "Cat", "image": "cat.jpg"}, {"name": "Astronaut", "image": "astronaut.jpg"}]'
 ```
 
-Inputs are the shared image request: `prompt`, `references` (ordered, up to ten; Qwen recommends
+Inputs are the shared image request: `prompt`, `assets` (ordered, up to ten; Qwen recommends
 one to three; each `<Name>` mention reads as Qwen-Image-Edit's own "Picture N", the label its template
-writes before each image, [references](../docs/references.md)), `aspect_ratio`
+writes before each image, [assets](../docs/assets.md)), `aspect_ratio`
 (any `W:H`), `megapixels` (1024² pixels each), `steps`, `seed` (random when omitted, returned).
 `generate` also takes `guidance` and `negative_prompt`; by default each model card's: Qwen-Image-2512's
-Chinese quality negative, and Qwen-Image-Edit-2511's single space. A reference's `box` and
+Chinese quality negative, and Qwen-Image-Edit-2511's single space. An asset's `box` and
 `prompt_upsampling` are accepted and ignored with a warning: the model has no layout control or
-upsampler. With references, a size input you leave out is the first reference's. Unknown fields are ignored with a warning. Outputs: `image` (PNG), `width`, `height`,
+upsampler. With assets, a size input you leave out is the first asset's. Unknown fields are ignored with a warning. Outputs: `image` (PNG), `width`, `height`,
 `seed` and `prompt`.
 
 ## Slots

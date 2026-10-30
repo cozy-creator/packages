@@ -12,7 +12,7 @@ from cozy_runtime.author import (
     Adjustments,
     App,
     Context,
-    ImageReference,
+    PictureAsset,
     ImageRequest,
     ImageResult,
     Memoize,
@@ -39,7 +39,7 @@ STEPS, GUIDANCE = 48, 7.0
 
 class GenerateInput(ImageRequest):
     #: Ideogram 4 is text to image only.
-    references: Annotated[list[ImageReference], msgspec.Meta(max_length=0)] = msgspec.field(default_factory=list)
+    assets: Annotated[list[PictureAsset], msgspec.Meta(max_length=0)] = msgspec.field(default_factory=list)
     #: Elements placed by box, in order: an object (`prompt`), or rendered text (`text`, styled as `prompt` says).
     regions: list[Region] = msgspec.field(default_factory=list)
 

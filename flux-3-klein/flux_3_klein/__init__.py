@@ -11,7 +11,7 @@ from cozy_runtime.author import (
     Adjustments,
     App,
     Context,
-    ImageReference,
+    PictureAsset,
     ImageRequest,
     ImageResult,
     Memoize,
@@ -49,7 +49,7 @@ SIZES = Sizes((MIN_SIDE**2 / MEGAPIXEL, MATCH_MAX_PIXELS / MEGAPIXEL), (MIN_SIDE
 
 
 class GenerateInput(ImageRequest):
-    references: Annotated[list[ImageReference], msgspec.Meta(max_length=10)] = msgspec.field(
+    assets: Annotated[list[PictureAsset], msgspec.Meta(max_length=10)] = msgspec.field(
         default_factory=list
     )
     #: Elements and rendered text placed by box, described in words.
@@ -143,23 +143,23 @@ def _layout(
 _ORDINALS = ("first", "second", "third", "fourth", "fifth", "sixth", "seventh", "eighth", "ninth", "tenth")
 
 
-def ordinal(n: int, reference: ImageReference) -> str:
-    """The Nth reference as BFL's upsampler is told of them: "the first image", "the second image", ..."""
+def ordinal(n: int, asset: PictureAsset) -> str:
+    """The Nth asset as BFL's upsampler is told of them: "the first image", "the second image", ..."""
     return f"the {_ORDINALS[n - 1]} image"
 
 
-def ref_id(n: int, reference: ImageReference) -> str:
-    """The Nth reference as Klein's layout record names it, from 0: `ref_image_0`, ..."""
+def ref_id(n: int, asset: PictureAsset) -> str:
+    """The Nth asset as Klein's layout record names it, from 0: `ref_image_0`, ..."""
     return f"ref_image_{n - 1}"
 
 
-def tagged(n: int, reference: ImageReference) -> str:
-    """The Nth reference in a prompt Klein reads directly, from 0: `<ref_image_0>`, ... (Diffusers' Flux3 docs)."""
+def tagged(n: int, asset: PictureAsset) -> str:
+    """The Nth asset in a prompt Klein reads directly, from 0: `<ref_image_0>`, ... (Diffusers' Flux3 docs)."""
     return f"<ref_image_{n - 1}>"
 
 
 def layout_rows(payload: GenerateInput) -> list[Row]:
-    """Klein's table rows for the request's boxes: a placed reference is `ref_image_<i>` at its box (the
+    """Klein's table rows for the request's boxes: a placed asset is `ref_image_<i>` at its box (the
     upsampler describes it from the image); a region is a new element, its text quoted in the desc."""
     rows: list[Row] = []
     for i, box in enumerate(payload.placements()):
@@ -171,7 +171,7 @@ def layout_rows(payload: GenerateInput) -> list[Row]:
         desc = f'{region.prompt.strip()} "{region.text}"' if region.text else region.prompt.strip()
         row_id = f"obj_{len(rows) + 1}"
         rows.append({"id": row_id, "from": "target", "src_bbox": None, "tgt_bbox": grid, "desc": desc}
-                    if payload.references else {"id": row_id, "bbox": grid, "desc": desc})
+                    if payload.assets else {"id": row_id, "bbox": grid, "desc": desc})
     return rows
 
 
@@ -187,7 +187,7 @@ def _generate(ctx: Context, function: str, payload: GenerateInput, drafter: Draf
         payload.ignored(adj, "guidance", "negative_prompt", reason="the distilled Klein samples without CFG")
     rows = layout_rows(payload)
     images = [asset.read() for asset in payload.images()]
-    placed = any(reference.box is not None for reference in payload.references)
+    placed = any(asset.box is not None for asset in payload.assets)
     prepared, size, crop, canvas = _layout(adj, payload, images, placed)
     upsample = True if payload.prompt_upsampling is None else payload.prompt_upsampling
     # The upsampler is told the references' order in words, or as the layout record's ids; Klein
@@ -217,7 +217,7 @@ _ON_DEMAND = ("upsampler", "drafter")
                 memoize=Memoize(requires=["seed"]))
 def generate(ctx: Context, payload: GenerateInput, drafter: Drafter, model: Klein, upsampler: Upsampler,
              out: Outputs, tel: Telemetry, adj: Adjustments) -> ImageResult:
-    """Klein Base, 50 steps with CFG 4: text to image, or an edit of up to ten ordered references."""
+    """Klein Base, 50 steps with CFG 4: text to image, or an edit of up to ten ordered picture assets."""
     return _generate(ctx, "generate", payload, drafter, model, upsampler, out, tel, adj)
 
 
@@ -225,5 +225,5 @@ def generate(ctx: Context, payload: GenerateInput, drafter: Drafter, model: Klei
                 memoize=Memoize(requires=["seed"]))
 def generate_turbo(ctx: Context, payload: GenerateInput, drafter: Drafter, model: Klein, upsampler: Upsampler,
                    out: Outputs, tel: Telemetry, adj: Adjustments) -> ImageResult:
-    """The distilled Klein, 16 steps, no guidance: text to image, or an edit of up to ten ordered references."""
+    """The distilled Klein, 16 steps, no guidance: text to image, or an edit of up to ten ordered picture assets."""
     return _generate(ctx, "generate_turbo", payload, drafter, model, upsampler, out, tel, adj)

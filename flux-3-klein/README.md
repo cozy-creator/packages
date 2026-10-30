@@ -8,7 +8,7 @@ to ten reference images. Its text encoder is Qwen3-VL-4B.
 | `generate` | Klein Base | 50 | `guidance` 4 (CFG) |
 | `generate_turbo` | Klein (distilled flow map) | 16 | none |
 
-Each makes an image from the prompt, or edits and composes up to ten ordered `references`.
+Each makes an image from the prompt, or edits and composes up to ten ordered `assets`.
 
 Write the request in a file, `request.yaml`:
 
@@ -28,10 +28,10 @@ Inline inputs work too, and override the file's:
 cozy run flux-3-klein/generate_turbo prompt='A lighthouse on a basalt cliff in a winter storm' \
   aspect_ratio=16:9 seed=7
 cozy run flux-3-klein/generate prompt='Make <Lighthouse> night, the lamp lit' \
-  references:='[{"name": "Lighthouse", "image": "lighthouse.png"}]'
+  assets:='[{"name": "Lighthouse", "image": "lighthouse.png"}]'
 ```
 
-Inputs are the shared image request, the same in every image package: `prompt`, `references`, `aspect_ratio` (any W:H), `megapixels` (any size, 1024² pixels each), `steps`, `guidance`, `negative_prompt`, `seed` and `prompt_upsampling`. Klein places references by their `box` and adds `regions` (below) and `prompt_drafting`. Left out, each
+Inputs are the shared image request, the same in every image package: `prompt`, `assets`, `aspect_ratio` (any W:H), `megapixels` (any size, 1024² pixels each), `steps`, `guidance`, `negative_prompt`, `seed` and `prompt_upsampling`. Klein places references by their `box` and adds `regions` (below) and `prompt_drafting`. Left out, each
 is the default in the table, no negative prompt (Base's CFG), upsampling on and a random seed; steps run
 1–200 (Base) or 1–100, guidance 1–20, and `generate_turbo` ignores `guidance` and `negative_prompt` with a
 warning. Without references the default is 1:1 at 1 MP (1024×1024, BFL's `default_size`); the size is
@@ -41,7 +41,7 @@ or its pixel count. Sides stay within BFL's 64–4096 px; a size moved to fit is
 adjustment. The result returns the image, its size, the seed and `prompt`: the caption the image was made
 from.
 
-A `<Name>` mention of a reference ([references](../docs/references.md)) reads as the upsampler is told of
+A `<Name>` mention of an asset ([assets](../docs/assets.md)) reads as the upsampler is told of
 them: "the first image", "the second image", … (BFL's scaffold), or `ref_image_0`, … when boxes or regions
 make a layout table. With `prompt_upsampling=false` Klein reads the prompt itself, and a mention reads as
 `<ref_image_0>`, … (from 0, as Diffusers' Flux3 docs).
@@ -52,8 +52,8 @@ Klein places elements by box natively: it is trained on captions that cite each 
 end with a JSON table of boxes (BFL's `flux3/bbox.py`). A box is `[x0, y0, x1, y1]`, 0–1 of the output,
 origin top-left.
 
-- a reference's `box`: where it goes in the output; none places it nowhere in particular. When any
-  reference is placed, the references are elements, not the canvas: the size defaults to text-to-image's
+- an asset's `box`: where it goes in the output; none places it nowhere in particular. When any
+  asset is placed, the assets are elements, not the canvas: the size defaults to text-to-image's
   (1:1 at 1 MP).
 - `regions`: `[{box, prompt, text?}]`, elements described in words; `text` is the literal string to render
   there.
@@ -63,7 +63,7 @@ cozy run flux-3-klein/generate_turbo prompt='A picnic on a hillside' \
   'regions:=[{"box": [0.05, 0.55, 0.45, 0.95], "prompt": "a wicker basket"},
              {"box": [0.1, 0.05, 0.9, 0.2], "prompt": "a hand-painted banner", "text": "SUMMER FAIR"}]'
 cozy run flux-3-klein/generate_turbo prompt='The mug on a desk by a window' \
-  references:='[{"name": "Mug", "image": "mug.png", "box": [0.55, 0.5, 0.85, 0.9]}]'
+  assets:='[{"name": "Mug", "image": "mug.png", "box": [0.55, 0.5, 0.85, 0.9]}]'
 ```
 
 The boxes become table rows on BFL's 0–1000 canvas (`[y_min, x_min, y_max, x_max]`). The upsampler then
