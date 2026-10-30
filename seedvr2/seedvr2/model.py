@@ -65,6 +65,11 @@ VAE = dict(
 )
 
 ARCHITECTURE = "SeedVR2-7B"
+#: DiT tokens (2x2 latent px a frame) restored together at most: whole frames, 16 at 1080p, 9 at
+#: 1440p, 4 at 2160p. Window attention spans a piece, so the pieces are part of the result and
+#: come from the clip's shape alone (`split`'s `most`), never from free memory. Inside a piece,
+#: attention runs by window groups and the MLP by tokens (both exact), so a piece fits 8 GB.
+PIECE = 131072
 #: SeedVR's configs_7b: the VAE's latent scaling factor (no shift).
 SCALE = 0.9152
 
@@ -139,7 +144,8 @@ class RestorationModel(Model[Graph], encoded_leaves="accept"):
                     [x], [c], [conditioning.positive], [conditioning.negative], decode=False
                 )[0]
 
-        return split(dit, torch.cat([noise, condition], dim=-1), Cut(0))
+        x = torch.cat([noise, condition], dim=-1)
+        return split(dit, x, Cut(0), most=PIECE * 4 * x.shape[-1])
 
     @uses_components("vae")
     def decode(self, latent: torch.Tensor) -> torch.Tensor:
