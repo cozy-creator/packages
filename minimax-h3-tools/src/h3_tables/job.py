@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 from collections.abc import Mapping
 from importlib.resources import files
 from typing import Any, Literal, get_args
@@ -397,7 +398,8 @@ app.entrypoint(
 #: AdaLN-pruned checkpoint. Both DiTs encode through the reviewed plan and the conditioner's 350
 #: decoder-layer linears through the structural selection minus `TEXT_ENCODER_KEEP`. A recipe
 #: component the source still holds plain is encoded; one already carrying this scheme is
-#: inherited; one carrying another refuses. Everything else carries over from the source. nvfp4
+#: inherited; one carrying another refuses. The lane normalisations (`NORMALISED_COMPONENTS`) apply
+#: too, so a lane written before one is cast now. Everything else carries over from the source. nvfp4
 #: takes the DiTs minus `NVFP4_DIT_KEEP` and its conditioner is int8.convrot (the nvfp4 leaf is
 #: W4A4 at prompt length, and the conditioner runs once a request); `NVFP4_DIT_INT8` serve int8.convrot.
 #: w4a8 (xs-062) takes nvfp4's kept keys with every other DiT linear in W4A8 (its per-token
@@ -449,23 +451,36 @@ def quantizer_selections(source: Checkpoint, encoding: _lanes.Encoding) -> list[
                 "lane (bf16 or fp8)",
                 code="h3_quantize_unpruned",
             )
+    recipe = QUANTIZER_RECIPES[encoding]
     selections = []
-    for component, treatment in QUANTIZER_RECIPES[encoding].items():
+    for component in [*recipe, *(c for c in NORMALISED_COMPONENTS if c not in recipe)]:
+        treatment = recipe.get(component)
         schemes = {row.encoding.scheme for row in present[component].values() if row.encoding}
-        if treatment.encode in schemes:
-            continue
-        if schemes:
+        if treatment is not None and treatment.encode in schemes:
+            treatment = None
+        elif treatment is not None and schemes:
             raise UnsupportedInput(
                 f"{component} already carries another encoding ({sorted(schemes)}); quantize "
                 f"a lane whose {component} is plain or already {treatment.encode}",
                 code="h3_quantize_mixed",
             )
-        selections.append(
-            _lanes.select(component, treatment, source, present[component], dit_plan=dit_plan())
-        )
+        # A lane's normalisation applies whatever it encodes: a source written before it casts now.
+        normalised = NORMALISED_COMPONENTS.get(component)
+        if normalised is not None:
+            treatment = normalised if treatment is None else dataclasses.replace(
+                treatment, cast=normalised.cast, cast_scope=normalised.cast_scope
+            )
+        if treatment is None:
+            continue
+        selection = _lanes.select(
+            component, treatment, source, present[component], dit_plan=dit_plan(),
+            allow_inert=normalised is not None,
+        )  # fmt: skip
+        if selection.cast or selection.plan is not None:
+            selections.append(selection)
     if not selections:
         raise UnsupportedInput(
-            f"every component of H3's recipe already carries {encoding}",
+            f"every component of H3's recipe already carries {encoding}, normalised",
             code="h3_quantize_nothing",
         )
     return selections
