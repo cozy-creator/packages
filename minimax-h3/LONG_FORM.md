@@ -142,9 +142,10 @@ as Alissonerdx's head swap and style transfer need. It works as ComfyUI's Add Gu
 as a reference: every latent frame at the render's own canvas (the render takes the clip's
 aspect ratio) sits on the frame it guides, on every denoise step, and Qwen never sees it, so
 the text says what it shows. It is the call's source video whatever the summary says, and it
-costs what a second render does (~5.5x for a 12 s clip beside a 15 s render). A call names at
-most one, beside a picture or another video; a segment that names it follows it from its first
-frame.
+costs what a second render does (~5.5x for a 12 s clip beside a 15 s render). A call takes at
+most one, beside a picture or another video. It needs no mention in the prompt: a segment that
+names it follows it from its first frame, and one no segment names guides the first segment
+(a direct call's only one).
 
 Binding alone does not stop H3 from copying a clip's own people and setting: the
 description must establish each character's look, the background and the beats in order
