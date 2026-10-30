@@ -41,6 +41,7 @@ from transformers import (
     Qwen3VLConfig,
 )
 from transformers import initialization as transformer_init
+from transformers.modeling_utils import local_torch_dtype
 
 from cozy_runtime import fusion, rng, tiles, vlm
 from cozy_runtime.author import (
@@ -152,13 +153,15 @@ class QwenImage21Graph:
     """One native construction census, with source checkpoint precision preserved."""
 
     def __init__(self, config: Config) -> None:
+        # Construction dtype leaves derived buffers F32, as upstream loads them: the DiT's
+        # timestep `freqs` and the text encoder's RoPE. A cast of the built module would round them.
         with transformer_init.no_init_weights():
-            self.components: dict[str, Any] = {
-                "transformer": QwenImage21Transformer2DModel.from_config(
+            with local_torch_dtype(torch.bfloat16):
+                transformer = QwenImage21Transformer2DModel.from_config(
                     config.section("transformer").mapping()
-                ).to(dtype=torch.bfloat16),
-                # Construction dtype leaves derived RoPE buffers in Transformers' F32.
-                # Casting the completed module would round those frequencies to BF16.
+                )
+            self.components: dict[str, Any] = {
+                "transformer": transformer,
                 "text_encoder": AutoModelForImageTextToText.from_config(
                     Qwen3VLConfig(**config.section("text_encoder").mapping()),
                     dtype=torch.bfloat16,
