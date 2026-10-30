@@ -55,7 +55,8 @@ turbo: true                                   # false: the full model at steps 3
   read at 512 px, with its `layout` in its definition: the shot keeps who stands where without
   opening on that frame.
 - **Footage.** `reference_footage` gives motion and camera; a `plate` (`{video}`) is followed
-  frame by frame, for a shot of one piece. `keyframes` anchor the first and last frames.
+  frame by frame, for a shot of one piece: an edit LoRA decides what changes, and without one the
+  shot comes back close to the clip (run 21018). `keyframes` anchor the first and last frames.
 - **Result.** `video` (768p mp4), `frames` (one per `writes` entry) and `warnings`. A piece
   renders whole seconds on H3's 17n+5 frame grid, so the video can run up to a second past
   `duration_s`; the edit trims it.
