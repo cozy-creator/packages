@@ -71,8 +71,9 @@ top-level `utils`, and its requirements pin Gradio). The changes are in its git 
 model/generation/cache classes, the token and denoising loops written out over Tencent's own input preparation
 and logits processors, the next token's logits only, routed experts as their own class (the paging blocks),
 and routing that gathers each expert's rows with one sort instead of a mask per expert. As Tencent's
-`from_pretrained(torch_dtype="auto")` builds it, every module runs in bfloat16, the VAE included, except the
-expert routers (float32). `scripts/hunyuan-image-3-model-proof.py` checks the port against Tencent's code on CPU
+`from_pretrained(torch_dtype="auto")` builds it, every module runs in bfloat16 except the expert routers
+(float32) and the VAE. The VAE computes as Tencent's float16 autocast runs it, without the autocast: its convs
+in float16, the operands the `bf16` lane stores, and its group norms in float32. `scripts/hunyuan-image-3-model-proof.py` checks the port against Tencent's code on CPU
 with a small random-weight model: images bit-identical, the same thought and the same picked size.
 
 ## Prepare the models
@@ -88,7 +89,15 @@ cozy model upload hf://tencent/HunyuanImage-3.0-Instruct@2ec2c78bee7d4b94157341f
 
 ## Lanes
 
-`int8` writes the default lane from the 16-bit checkpoint: every linear of the 32 decoder layers (attention, the
+`bf16` writes the served 16-bit lane from the upload: the VAE's conv weights and biases in float16 (2.5 GB
+instead of 5.0 GB of float32; the decode is bit-identical, since Tencent's autocast computed them in float16),
+everything else the upload's own. The quantized lanes are written from that `bf16` lane.
+
+```sh
+cozy model quantize tencent/hunyuan-image-3-instruct-distil@sha256:<upload> --lane bf16 --package ./hunyuan-image-3 --on <machine>
+```
+
+`int8` writes the default lane from the `bf16` lane: every linear of the 32 decoder layers (attention, the
 shared and the 64 routed experts: 99% of the parameters) and the LM head as `int8.convrot`, about 85 GB in all.
 `nvfp4` puts the routed experts in NVFP4, 43.5 GB of experts instead of 77.3. The routers, embedding, vision
 tower, VAE and image layers keep their source bytes.

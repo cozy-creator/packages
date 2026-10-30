@@ -1,18 +1,76 @@
-"""HunyuanImage 3.0's quantized lanes, written from the original 16-bit checkpoint by `cozy model quantize`:
-which weights each encoding takes is this package's recipe; the encodings and their kernels are Runtime's."""
+"""HunyuanImage 3.0's lanes, written by `cozy model quantize`: `bf16` from the uploaded checkpoint, the
+quantized lanes from that `bf16` lane. Which weights each encoding takes is this package's recipe; the
+encodings and their kernels are Runtime's."""
 
 from __future__ import annotations
 
-from cozy_runtime.author import EncodingRule, QuantizationPlan, Recipe
+import math
+from typing import Any
 
-from .model import HunyuanImage3
+import numpy as np
+from cozy_runtime.author import (
+    Context,
+    DerivationHook,
+    EncodingRule,
+    ModelArtifact,
+    QuantizationPlan,
+    Recipe,
+    Telemetry,
+    UnsupportedInput,
+    Weights,
+)
+from cozy_runtime.derive.safetensors_io import from_f32, to_f32
+from cozy_runtime.weights_store import Derivation
+
+from .model import COMPONENT, HunyuanImage3
 
 _LAYERS = "model.model.layers.*"
 
-#: The int8 lane (`int8.convrot`, W8A8 on int8 tensor cores), the default 8-bit lane: every linear of
-#: the 32 decoder layers (attention, the shared expert and the 64 routed experts: 99% of the 80B
-#: parameters) and the LM head the token loop reads. The routers stay float32, and the embedding,
-#: vision tower, VAE and the image patch/timestep layers keep their source bytes.
+
+def _vae_operands(tensors: Any) -> list[str]:
+    """The VAE's conv operands: each conv's weight (every rank >= 2 `vae.` weight) and its bias."""
+    convs = [key.removesuffix(".weight") for key, info in tensors.items()
+             if key.startswith("vae.") and key.endswith(".weight") and len(info.shape) >= 2]
+    return [key for conv in convs for key in (f"{conv}.weight", f"{conv}.bias") if key in tensors]
+
+
+def vae_operands_f16(ctx: Context, tel: Telemetry, source: Weights[Any], output: str) -> ModelArtifact:
+    """The uploaded checkpoint with its VAE's conv operands in float16, everything else its own: Tencent
+    computes the VAE's convs in float16 (`vae_autocast_dtype`), so the decode and encode give the same bits
+    from half the bytes (5.0 GB of float32 become 2.5 GB) with no cast per call. The norms stay float32."""
+    opened = ctx.tensorfs_source(source)
+    tensors = opened.components[COMPONENT].tensors
+    if any(info.encoding is not None for info in tensors.values()):
+        raise UnsupportedInput("the bf16 lane is written from the uploaded checkpoint, and the quantized lanes "
+                               "from it: this source is already quantized", code="recipe_source")
+    keys = _vae_operands(tensors)
+    order = [(COMPONENT, key) for key in tensors]
+    cast = 0
+    with ctx.output(output, Derivation(base=opened, order=order)) as out:
+        for done, key in enumerate(keys, 1):
+            ctx.raise_if_cancelled()
+            info = tensors[key]
+            if info.dtype != "F16" and not out.has(COMPONENT, key):
+                shape = list(info.shape)
+                raw = bytearray(math.prod(shape) * 4 if info.dtype == "F32" else math.prod(shape) * 2)
+                tensors.read_into(key, raw)
+                half = from_f32(to_f32(raw, info.dtype, shape), "F16")
+                if not np.isfinite(np.frombuffer(half, dtype="<f2")).all():
+                    raise UnsupportedInput(f"{COMPONENT}.{key} overflows float16", code="quantization_tripwire")
+                out.put(COMPONENT, key, "F16", shape, half)
+                cast += 1
+            tel.progress(done / len(keys), stage="vae operands")
+        tel.log("vae operands", operands=len(keys), cast=cast)
+        return ctx.adopt_model(out)
+
+
+#: The served 16-bit lane: the upload with its VAE's conv operands in float16 (`vae_operands_f16`).
+BF16 = Recipe(lane="bf16", model=HunyuanImage3, plan=DerivationHook(vae_operands_f16))
+
+#: The int8 lane (`int8.convrot`, W8A8 on int8 tensor cores), the default 8-bit lane, from the `bf16` lane:
+#: every linear of the 32 decoder layers (attention, the shared expert and the 64 routed experts: 99% of
+#: the 80B parameters) and the LM head the token loop reads. The routers, embedding, vision tower, VAE
+#: and the image patch/timestep layers keep their source bytes.
 INT8 = Recipe(
     lane="int8",
     model=HunyuanImage3,

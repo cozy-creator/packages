@@ -1275,8 +1275,6 @@ class HunyuanImage3ForCausalMM(nn.Module):
 
         # vae and gen_image pipeline
         self.vae = AutoencoderKLConv3D.from_config(config.vae)
-        self.vae_dtype = getattr(torch, config.vae_dtype)
-        self.vae_autocast_dtype = getattr(torch, config.vae_autocast_dtype)
         self.vae = self.vae.eval()
 
         # vit
@@ -1880,19 +1878,15 @@ class HunyuanImage3ForCausalMM(nn.Module):
     def vae_encode(self, image, cfg_factor=1, generator=None):
         config = self.vae.config
 
-        with torch.autocast(
-                device_type="cuda", dtype=self.vae_autocast_dtype,  # noqa
-                enabled=self.vae_autocast_dtype != torch.float32
-        ):
-            vae_encode_result = self.vae.encode(image)
-            if isinstance(vae_encode_result, torch.Tensor):
-                latents = vae_encode_result
-            else:
-                latents = vae_encode_result.latent_dist.sample(generator)
-            if hasattr(config, 'shift_factor') and config.shift_factor:
-                latents.sub_(config.shift_factor)
-            if hasattr(config, 'scaling_factor') and config.scaling_factor:
-                latents.mul_(config.scaling_factor)
+        vae_encode_result = self.vae.encode(image)
+        if isinstance(vae_encode_result, torch.Tensor):
+            latents = vae_encode_result
+        else:
+            latents = vae_encode_result.latent_dist.sample(generator)
+        if hasattr(config, 'shift_factor') and config.shift_factor:
+            latents.sub_(config.shift_factor)
+        if hasattr(config, 'scaling_factor') and config.scaling_factor:
+            latents.mul_(config.scaling_factor)
 
         if hasattr(self.vae, "ffactor_temporal"):
             assert latents.shape[2] == 1, "latents should have shape [B, C, T, H, W] and T should be 1"
@@ -2748,8 +2742,7 @@ class HunyuanImage3ForCausalMM(nn.Module):
             latents = latents + vae_config.shift_factor
         if hasattr(self.vae, "ffactor_temporal"):
             latents = latents.unsqueeze(2)
-        with torch.autocast(device_type="cuda", dtype=torch.float16, enabled=True):
-            image = self.vae.decode(latents, return_dict=False, generator=generator)[0]
+        image = self.vae.decode(latents, return_dict=False, generator=generator)[0]
         if hasattr(self.vae, "ffactor_temporal"):
             assert image.shape[2] == 1, "image should have shape [B, C, T, H, W] and T should be 1"
             image = image.squeeze(2)
