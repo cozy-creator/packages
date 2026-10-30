@@ -4,7 +4,9 @@ Reference code
 [DCAE] https://github.com/mit-han-lab/efficientvit/blob/master/efficientvit/models/efficientvit/dc_ae.py
 
 Modified for Cozy (packages se-079): a plain nn.Module without diffusers' ModelMixin/ConfigMixin;
-no tiling, slicing, distributed decoding or weight loading (Runtime fills the weights).
+no tiling, slicing, distributed decoding or weight loading (Runtime fills the weights). Each op runs in
+the dtype Tencent's float16 autocast gave it, with no autocast: a conv in its operands' stored dtype
+(float16), the group norms and the posterior's exp in float32 (xs-134).
 """
 from dataclasses import dataclass
 from types import SimpleNamespace
@@ -60,8 +62,8 @@ class DiagonalGaussianDistribution(object):
         self.mean, self.logvar = torch.chunk(parameters, 2, dim=dim)
         self.logvar = torch.clamp(self.logvar, -30.0, 20.0)
         self.deterministic = deterministic
-        self.std = torch.exp(0.5 * self.logvar)
-        self.var = torch.exp(self.logvar)
+        self.std = torch.exp((0.5 * self.logvar).float())
+        self.var = torch.exp(self.logvar.float())
         if self.deterministic:
             self.var = self.std = torch.zeros_like(
                 self.mean, device=self.parameters.device, dtype=self.parameters.dtype
@@ -131,10 +133,19 @@ def forward_with_checkpointing(module, *inputs, use_checkpointing=False):
         return module(*inputs)
 
 
-class Conv3d(nn.Conv3d):
-    """Perform Conv3d on patches with numerical differences from nn.Conv3d within 1e-5. Only symmetric padding is supported."""
+class GroupNorm(nn.GroupNorm):
+    """Normalizes in float32 with float32 parameters, as autocast runs a group norm."""
 
     def forward(self, input):
+        return F.group_norm(input.float(), self.num_groups, self.weight, self.bias, self.eps)
+
+
+class Conv3d(nn.Conv3d):
+    """Perform Conv3d on patches with numerical differences from nn.Conv3d within 1e-5. Only symmetric padding is supported.
+    The input is cast to the stored weights' dtype."""
+
+    def forward(self, input):
+        input = input.to(self.weight.dtype)
         B, C, T, H, W = input.shape
         memory_count = (C * T * H * W) * 2 / 1024**3
         if memory_count > 2:
@@ -173,7 +184,7 @@ class AttnBlock(nn.Module):
         super().__init__()
         self.in_channels = in_channels
 
-        self.norm = nn.GroupNorm(num_groups=32, num_channels=in_channels, eps=1e-6, affine=True)
+        self.norm = GroupNorm(num_groups=32, num_channels=in_channels, eps=1e-6, affine=True)
 
         self.q = Conv3d(in_channels, in_channels, kernel_size=1)
         self.k = Conv3d(in_channels, in_channels, kernel_size=1)
@@ -205,9 +216,9 @@ class ResnetBlock(nn.Module):
         out_channels = in_channels if out_channels is None else out_channels
         self.out_channels = out_channels
 
-        self.norm1 = nn.GroupNorm(num_groups=32, num_channels=in_channels, eps=1e-6, affine=True)
+        self.norm1 = GroupNorm(num_groups=32, num_channels=in_channels, eps=1e-6, affine=True)
         self.conv1 = Conv3d(in_channels, out_channels, kernel_size=3, stride=1, padding=1)
-        self.norm2 = nn.GroupNorm(num_groups=32, num_channels=out_channels, eps=1e-6, affine=True)
+        self.norm2 = GroupNorm(num_groups=32, num_channels=out_channels, eps=1e-6, affine=True)
         self.conv2 = Conv3d(out_channels, out_channels, kernel_size=3, stride=1, padding=1)
         if self.in_channels != self.out_channels:
             self.nin_shortcut = Conv3d(in_channels, out_channels, kernel_size=1, stride=1, padding=0)
@@ -346,7 +357,7 @@ class Encoder(nn.Module):
         self.mid.block_2 = ResnetBlock(in_channels=block_in, out_channels=block_in)
 
         # end
-        self.norm_out = nn.GroupNorm(num_groups=32, num_channels=block_in, eps=1e-6, affine=True)
+        self.norm_out = GroupNorm(num_groups=32, num_channels=block_in, eps=1e-6, affine=True)
         self.conv_out = Conv3d(block_in, 2 * z_channels, kernel_size=3, stride=1, padding=1)
 
         self.gradient_checkpointing = False
@@ -427,7 +438,7 @@ class Decoder(nn.Module):
             self.up.append(up)
 
         # end
-        self.norm_out = nn.GroupNorm(num_groups=32, num_channels=block_in, eps=1e-6, affine=True)
+        self.norm_out = GroupNorm(num_groups=32, num_channels=block_in, eps=1e-6, affine=True)
         self.conv_out = Conv3d(block_in, out_channels, kernel_size=3, stride=1, padding=1)
 
         self.gradient_checkpointing = False

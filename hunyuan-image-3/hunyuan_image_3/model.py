@@ -59,9 +59,9 @@ _RECAPTION = re.compile(r"<recaption>(.*?)(?:</recaption>|$)", re.DOTALL)
 class Graph:
     def __init__(self, config: Config) -> None:
         # Every parameter as the checkpoint stores it, which Runtime fills as they are: bfloat16 but
-        # the VAE's float32 (Tencent's own shards). Tencent's float32 expert routers hold bfloat16
-        # values; here they stay bfloat16 and route in float32 (`HunyuanTopKGate.forward`). The VAE
-        # runs under Tencent's float16 autocast either way.
+        # the VAE's, its conv operands float16 and its norms float32 (`quantize.BF16`). Tencent's
+        # float32 expert routers hold bfloat16 values; here they stay bfloat16 and route in float32
+        # (`HunyuanTopKGate.forward`).
         model = HunyuanImage3ForCausalMM(HunyuanImage3Config(**config.mapping()))
         model = model.to(torch.bfloat16).eval()
         for name, parameter in model.named_parameters():
