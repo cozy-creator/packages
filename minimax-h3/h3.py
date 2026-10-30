@@ -1467,7 +1467,8 @@ class DecodeShotOutput(msgspec.Struct):
     video: Annotated[VideoFile, FileBound(max_bytes=1 << 30, media_types=("video/mp4",))]
 
 
-@invocable(defaults={"decoder": _MODEL}, components={"decoder": ("vae",)}, memoize=True)
+# The text encoder is the model's placeable component (`H3Model`): it is loaded, never staged here.
+@invocable(defaults={"decoder": _MODEL}, components={"decoder": ("text_encoder", "vae")}, memoize=True)
 async def decode_shot(
     ctx: Context, *, payload: DecodeShotInput, decoder: H3TurboBase, out: Outputs, tel: Telemetry
 ) -> DecodeShotOutput:

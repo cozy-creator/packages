@@ -35,20 +35,19 @@ turbo: true                                   # false: the full model at steps 3
 - **Pieces.** A shot renders in the fewest pieces that reach its length: the first up to
   15 s, each later one up to 14 s new (the 22 frames it carries from the last share H3's 15 s
   window), so 1 + ⌈(d − 15) / 14⌉ for d > 15. Each piece continues the last from its carried
-  latents, never decoded. Within that count, boundaries go on beats wherever they fit; where
-  none fits, each piece is as long as it can be, since a longer generation is more consistent.
-  Other beats are ordered action inside a piece. An 8 s shot with beats at 0 and 5 is one
-  generation; the 40 s shot above is three pieces of 13 s, starting at 0, 13.7 and 27.1 s.
-- **Why 13.7, not 13.** A piece renders whole seconds snapped up to H3's 17n+5 frame grid
-  (13 s is 328 frames, 13.67 s), and a later piece delivers its window less the 22 frames it
-  carries. So a boundary lands on the grid point nearest its beat, within a second, and the
-  beat opens that piece.
-- **Text.** Each piece is one `[Shot 1]` in plain English: the shot's `prompt`, the beat it
-  is in (repeated as continuing action when a beat spans a boundary), each later beat as
-  "Then, …", and "One continuous shot with no cuts." (first piece) or "The same shot
-  continues without a cut…" (the rest). Beats carry no times: H3 marks cuts with timed
+  latents. Edges go between beats: no beat starts from 2 s before an edge to 2.5 s after it,
+  because a carried head delays a new action (run 20751: beats on an edge started about 6 s
+  late). Where that can't hold, the shot warns. Within that, each piece is as long as it can
+  be, since a longer generation is more consistent. A shot of several pieces decodes their
+  latents as one video, so no join steps the picture. An 8 s shot with beats at 0 and 5 is
+  one generation; the 40 s shot above is pieces of 15, 14 and 11 s.
+- **Text.** Each piece is one `[Shot 1]` paragraph: the shot's `prompt`, the beat it is in
+  ("Continuing: …" when that beat began earlier) and each later beat ("Then …"). The first
+  piece ends "One continuous shot with no cuts."; a later one opens "The same shot continues
+  without a cut; the camera holds its framing." and leaves out sentences that move the
+  camera, which a carried head would repeat. Beats carry no times: H3 marks cuts with timed
   `[Shot N]`. A prompt with its own `integrated_multimodal_description:`/`audio:`/
-  `non_diegetic_music:` fields keeps them; the lines end its description.
+  `non_diegetic_music:` fields keeps them.
 - **Pictures.** Characters, props and the environment (`<Dock>`) are definitions in every
   piece's text, each with its `description` when given. A project cleans character and prop
   pictures (background removal) before they reach `shot`, so a direct call should pass clean
