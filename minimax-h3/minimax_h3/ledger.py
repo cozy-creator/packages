@@ -8,12 +8,14 @@ evaluations a CUPTI trace: memcpy bytes by kind and the kernels' device time by 
 
 from __future__ import annotations
 
+import base64
 import ctypes
 import json
 import os
 import tempfile
 import threading
 import time
+import zlib
 from collections import defaultdict
 from contextlib import contextmanager
 from typing import Any, Iterator
@@ -84,6 +86,22 @@ def _profile_summary(path: str) -> dict[str, Any]:
     }
 
 
+#: A log field's value is clipped at 400 characters and a record holds 8 fields: each record
+#: carries the step, its part, the part count and five 390-character pieces of the JSON.
+_PIECE = 390
+_PIECES = 5
+
+
+def _emit(tel: Any, step: int, raw: str) -> None:
+    # url-safe base64 without padding renders unquoted in the run log's key=value text
+    text = base64.urlsafe_b64encode(zlib.compress(raw.encode(), 9)).decode().rstrip("=")
+    pieces = [text[i : i + _PIECE] for i in range(0, len(text), _PIECE)]
+    parts = [pieces[i : i + _PIECES] for i in range(0, len(pieces), _PIECES)]
+    for index, part in enumerate(parts):
+        fields = {f"p{j}": piece for j, piece in enumerate(part)}
+        tel.log("h3-ledger", step=step, part=index, parts=len(parts), **fields)
+
+
 @contextmanager
 def watch(tel: Any, transformer: Any, evaluations: int, sparse_from: int) -> Iterator[None]:
     device = torch.device("cuda", 0)
@@ -146,7 +164,7 @@ def watch(tel: Any, transformer: Any, evaluations: int, sparse_from: int) -> Ite
             except Exception as exc:  # a diagnostic never fails the request
                 summary["profile_error"] = repr(exc)[:300]
             summary["blocks"] = [[r[0], _gb(r[1]), _gb(r[2]), _gb(r[3]), _gb(r[4]), _gb(r[5]), _gb(r[6])] for r in rows]
-        tel.log("h3-ledger", data=json.dumps(summary, separators=(",", ":")))
+        _emit(tel, state["step"], json.dumps(summary, separators=(",", ":")))
 
     def block_pre(index: int) -> Any:
         def hook(module: Any, args: Any) -> None:
