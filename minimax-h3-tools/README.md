@@ -13,7 +13,7 @@ ingested or already fetched the input, its objects are in the pod Store and noth
 
 | Function | Input (first positional) | Output | Notes |
 |---|---|---|---|
-| `bf16-full` | a full-precision H3 checkpoint: the converted `MiniMaxAI/MiniMax-H3` release or a `bf16-full` lane | `bf16-full` | source-only rows dropped, video VAE decode operands f16 |
+| `bf16-full` | a full-precision H3 checkpoint: the converted `MiniMaxAI/MiniMax-H3` release or a `bf16-full` lane | `bf16-full` | source-only rows dropped, video VAE encoder and decode operands f16 |
 | `bf16-pruned` | same | `bf16` | AdaLN tables replace the 106 modulation rows per DiT; CUDA |
 | `fp8-pruned` | same | `fp8` | tables + both DiTs and the conditioner's 350 decoder linears `fp8.rowwise`; CUDA; every serving rung |
 | `turbo-lora` | the converted `alibaba-pai/MiniMax-H3-Acc-LoRAs` release (one fl2va and one ref2va component) | `pdd8` | `model.base=<full-precision H3>`; reads its modulation weights and heads only |
@@ -23,7 +23,8 @@ ingested or already fetched the input, its objects are in the pod Store and noth
 Its quantized lanes are recipes (`FP8`, `INT8`, `NVFP4`, `W4A8` in `h3_tables.job`): code, as a
 `DerivationHook`, since what a lane encodes depends on what the source still holds plain. Both
 DiTs and the text conditioner's 350 decoder linears, and in int8, nvfp4 and w4a8 the video VAE
-decoder's 216 block linears at int8.convrot, encoding what is still plain; CPU:
+decoder's 216 block linears at int8.convrot, encoding what is still plain. Every recipe also
+applies the video VAE's f16 normalisation, so a lane written before it re-casts only those rows; CPU:
 
 ```sh
 cozy model quantize minimaxai/minimax-h3@sha256:<pruned commit> --lane fp8 --package minimax-h3-tools --on NAME
