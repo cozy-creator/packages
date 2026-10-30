@@ -20,18 +20,45 @@ def _capacity(index: int) -> int:
     return int(torch.cuda.mem_get_info(index)[1])
 
 
-def fits(hidden: Any, attn: Any) -> bool:
-    """Whether one attention call's whole working set fits the device beside what is allocated
-    now: Q, K and V, the RoPE copies of two and the output (bf16), and the input's int8 rows.
-    Off CUDA, always."""
+#: Query heads per window of a dense call beside a DiT that streams, coarsest first: at 15 s the
+#: attention kernel runs a 14-head window as fast as the whole call (RTX 4090).
+_WINDOWS = (28, 14)
+
+
+def _room(hidden: Any) -> int | None:
+    """The device's bytes beyond what is allocated now and `_BESIDE`; None off CUDA."""
     quantized = isinstance(hidden, PreQuantized)
     device = hidden.payload.device if quantized else hidden.device
     if device.type != "cuda":
-        return True
-    tokens, width = math.prod(hidden.shape[:-1]), int(hidden.shape[-1])
-    need = 6 * tokens * attn.heads * attn.head_dim * 2 + tokens * width
+        return None
     index = device.index if device.index is not None else torch.cuda.current_device()
-    return need <= _capacity(index) - torch.cuda.memory_allocated(index) - _BESIDE
+    return _capacity(index) - torch.cuda.memory_allocated(index) - _BESIDE
+
+
+def _need(hidden: Any, attn: Any, heads: int) -> int:
+    """One call's working set over `heads` query heads: Q, K and V, the RoPE copies of two and
+    the output (bf16), and the input's int8 rows."""
+    tokens, width = math.prod(hidden.shape[:-1]), int(hidden.shape[-1])
+    return 6 * tokens * heads * attn.head_dim * 2 + tokens * width
+
+
+def fits(hidden: Any, attn: Any) -> bool:
+    """Whether one attention call's whole working set fits the device beside what is allocated
+    now. Off CUDA, always."""
+    room = _room(hidden)
+    return room is None or _need(hidden, attn, attn.heads) <= room
+
+
+def window_heads(hidden: Any, attn: Any, weights: int) -> int:
+    """Query heads per window of a dense call that `fits`: all of them where the whole call also
+    fits beside the DiT's `weights`, else the coarsest of `_WINDOWS` that does, else the finest.
+    A whole call beside a DiT that streams takes the room its weights would keep resident: H3
+    15 s on an RTX 4090 peaked at 11.3 GB and kept 9.4 of the DiT's 21.1 GB, reading 11.8 GB a
+    step; in 14-head windows it peaks at 8.2 GB and keeps 14.2 GB, reading 6.9 GB."""
+    room = _room(hidden)
+    if room is None or _need(hidden, attn, attn.heads) <= room - weights:
+        return int(attn.heads)
+    return next((h for h in _WINDOWS if _need(hidden, attn, h) <= room - weights), _WINDOWS[-1])
 
 
 def release_if_tight(hidden: Any, attn: Any) -> None:
