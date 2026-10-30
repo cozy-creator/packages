@@ -56,9 +56,13 @@ logger = get_logger(__name__)  # pylint: disable=invalid-name
 
 
 
-#: Latent pixels neighbouring spatial tiles share, cross-faded: the decoder's reach. The
-#: Runtime sizes the tiles (`split`).
+#: Latent pixels neighbouring spatial tiles share, cross-faded: the decoder's reach.
 OVERLAP = 8
+#: Latent pixels a spatial tile holds at most. Tiles blend, and each one's GroupNorms and
+#: mid-block attention see only that tile, so the layout is part of the result: it comes from
+#: the shape alone (`split`'s `most`), never from free memory. A tile's causal caches and
+#: activations fit an 8 GB card; a conv's bands absorb pressure inside it.
+TILE = 4096
 
 class Upsample3D(Upsample2D):
     """A 3D upsampling layer with an optional convolution."""
@@ -1251,11 +1255,13 @@ class VideoAutoencoderKL(diffusers.AutoencoderKL):
 
     def tiled_encode(self, x: torch.Tensor) -> torch.Tensor:
         f = self.spatial_downsample_factor
-        return split(self.slicing_encode, x, *(Cut(d, 1 / f, OVERLAP * f, f) for d in (-2, -1)))
+        most = TILE * f * f * x.numel() // (x.shape[-2] * x.shape[-1])
+        return split(self.slicing_encode, x, *(Cut(d, 1 / f, OVERLAP * f, f) for d in (-2, -1)), most=most)
 
     def tiled_decode(self, z: torch.Tensor) -> torch.Tensor:
         f = self.spatial_downsample_factor
-        return split(self.slicing_decode, z, *(Cut(d, f, OVERLAP) for d in (-2, -1)))
+        most = TILE * z.numel() // (z.shape[-2] * z.shape[-1])
+        return split(self.slicing_decode, z, *(Cut(d, f, OVERLAP) for d in (-2, -1)), most=most)
 
     def forward(
         self, x: torch.FloatTensor, mode: Literal["encode", "decode", "all"] = "all", **kwargs
