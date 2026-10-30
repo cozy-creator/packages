@@ -4,7 +4,7 @@ version = "0.1.1"
 description = "Cozy text-to-image and reference editing with HiDream-O1-Image, full and Dev"
 requires-python = ">=3.12"
 dependencies = [
-    "cozy-runtime[media]>=0.33",
+    "cozy-runtime[media]>=0.36.0",
     "diffusers>=0.40",
     "msgspec>=0.19",
     "numpy>=1.26",

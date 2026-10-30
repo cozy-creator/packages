@@ -26,15 +26,16 @@ Inline inputs work too, and override the file's:
 
 ```sh
 cozy run hunyuan-image-3/generate_turbo prompt='A paper boat sailing down a rain gutter at dusk' seed=7
-cozy run hunyuan-image-3/generate_turbo prompt='Put the cat in a tiny astronaut suit' \
-  --asset reference_images.0=cat.png
+cozy run hunyuan-image-3/generate_turbo prompt='Put <Cat> in a tiny astronaut suit' \
+  assets:='[{"name": "Cat", "image": "cat.png"}]'
 ```
 
 The request and result are the shared image interface (`ImageRequest`, `ImageResult`): `prompt`,
-`reference_images` (0–3, in order), `aspect_ratio` (any `W:H`; unset, the model picks), `megapixels`, `steps`,
+`assets` (0–3, in order), `aspect_ratio` (any `W:H`; unset, the model picks), `megapixels`, `steps`,
 `guidance`, `seed` (random when omitted, returned) and `prompt_upsampling` (unset: on). `negative_prompt` and
-`reference_boxes` warn and are ignored: the model's unconditional branch is the prompt dropped, and it has no
-layout control. The result's `prompt` is the caption the image was made from: the model's rewrite when it thought.
+an asset's `box` warn and are ignored: the model's unconditional branch is the prompt dropped, and it has no
+layout control. A `<Name>` mention of an asset reads as 图1, 图2, 图3, the way every prompt Tencent documents
+names them ([assets](../docs/assets.md)); the images precede the prompt with no label of their own. The result's `prompt` is the caption the image was made from: the model's rewrite when it thought.
 
 ## Sizes
 

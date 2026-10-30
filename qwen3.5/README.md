@@ -12,14 +12,14 @@ prompt: Describe this character's clothing.
 ```
 
 ```sh
-cozy run qwen3.5/ask --input request.yaml --asset images=./character.png
+cozy run qwen3.5/ask --input request.yaml --file images=./character.png
 ```
 
 Inline inputs work too, and override the file's:
 
 ```sh
-cozy run qwen3.5/ask "Describe this character's clothing." --asset images=./character.png
-cozy run qwen3.5/ask "What happens, and when?" --asset videos=./clip.mp4
+cozy run qwen3.5/ask "Describe this character's clothing." --file images=./character.png
+cozy run qwen3.5/ask "What happens, and when?" --file videos=./clip.mp4
 ```
 
 Inputs:

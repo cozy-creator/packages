@@ -10,14 +10,15 @@ from cozy_runtime.author import (
     Adjustments,
     App,
     Context,
+    PictureAsset,
     ImageRequest,
     ImageResult,
     Memoize,
     Outputs,
-    ReferenceImages,
     Sizes,
     Telemetry,
     held,
+    name_label,
 )
 from PIL import Image
 
@@ -38,9 +39,15 @@ TURBO_SIGMAS = (1.0, 0.978453, 0.95418, 0.926626, 0.89508, 0.845148, 0.704534, 0
 
 
 class GenerateInput(ImageRequest):
-    reference_images: Annotated[ReferenceImages, msgspec.Meta(max_length=10)] = msgspec.field(
+    assets: Annotated[list[PictureAsset], msgspec.Meta(max_length=10)] = msgspec.field(
         default_factory=list
     )
+
+
+def label(n: int, asset: PictureAsset) -> str:
+    """Qwen-Image-2.1's word for the Nth asset: its template writes `<imageN>` before each
+    image (Diffusers 0.41 `QwenImage21Pipeline`), and Qwen's rewriter tags only two or more."""
+    return f"<image{n}>"
 
 
 #: The decoder's alpha never quite reaches 0 or 255: a transparent background sits at 1–4 and an
@@ -79,6 +86,8 @@ def _generate(
     model's uniform spacing."""
     payload.ignored(adj, "guidance", "negative_prompt", "prompt_upsampling",
                     reason="Qwen-Image-2.1 samples without CFG and has no prompt upsampler")
+    payload.unplaced(adj, "Qwen-Image-2.1 has no layout control")
+    prompt = payload.rendered(adj, label if len(payload.assets) > 1 else name_label)
     if sigmas:
         steps = len(sigmas)
         if payload.steps not in (None, steps):
@@ -92,15 +101,15 @@ def _generate(
     ctx.raise_if_cancelled()
     # Phase order for residency: references encode on the VAE first, then the text encoder, the
     # transformer denoise (the `denoise_loop`), and the VAE decode.
-    if payload.reference_images:
+    if payload.assets:
         ctx.plan("vae", "text_encoder", "transformer", "vae")
     else:
         ctx.plan("text_encoder", "transformer", "vae")
     reference_images, reference_latents, image_pad_mask = None, None, None
-    if payload.reference_images:
+    if payload.assets:
         with tel.stage("encoding reference images", overall_range=(0.0, 0.08)):
             # Upstream feeds the VAE RGBA; its vision encoder sees alpha composited over white.
-            reference_images = [asset.read(mode="RGBA") for asset in payload.reference_images]
+            reference_images = [asset.read(mode="RGBA") for asset in payload.images()]
             conditioning_images, reference_latents = model.encode_reference_images(reference_images)
         ctx.raise_if_cancelled()
     # What is not given is the first reference's (upstream takes the LAST reference's; every Cozy
@@ -109,11 +118,9 @@ def _generate(
     width, height = payload.size(adj, first, SIZES, megapixels=SIZES.megapixels[1])
     with tel.stage("encoding prompt", overall_range=(0.08 if reference_images else 0.0, 0.1)):
         if reference_images is None:
-            embeds, mask = model.encode(payload.prompt)
+            embeds, mask = model.encode(prompt)
         else:
-            embeds, mask, image_pad_mask = model.encode_image_prompt(
-                payload.prompt, conditioning_images
-            )
+            embeds, mask, image_pad_mask = model.encode_image_prompt(prompt, conditioning_images)
     with tel.stage("generating image", overall_range=(0.1, 0.9)):
         latents = model.denoise(
             embeds,
@@ -137,7 +144,7 @@ def _generate(
         # WebP cannot represent a side of 16384 pixels; retain every supported canvas.
         output_format = "webp" if max(width, height) < 16384 else "png"
         asset = out.save_image(image, format=output_format)
-    return ImageResult(asset, width, height, seed, payload.prompt)
+    return ImageResult(asset, width, height, seed, prompt)
 
 
 _MEMO = ("qwen_image_2", "qwen_image_2.model")

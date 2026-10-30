@@ -7,7 +7,7 @@ from typing import Annotated
 import msgspec
 from PIL import Image
 
-from cozy_runtime.author import App, AssetBound, Context, ImageAsset, Outputs, Telemetry
+from cozy_runtime.author import App, FileBound, Context, ImageFile, Outputs, Telemetry
 
 from .model import BackgroundRemovalModel
 
@@ -16,8 +16,8 @@ app = App()
 
 class RemoveBackgroundInput(msgspec.Struct):
     image: Annotated[
-        ImageAsset,
-        AssetBound(
+        ImageFile,
+        FileBound(
             max_bytes=64 << 20,
             max_decoded_bytes=256 << 20,
             media_types=("image/png", "image/jpeg", "image/webp"),
@@ -27,8 +27,8 @@ class RemoveBackgroundInput(msgspec.Struct):
 
 class RemoveBackgroundOutput(msgspec.Struct):
     image: Annotated[
-        ImageAsset,
-        AssetBound(
+        ImageFile,
+        FileBound(
             max_bytes=64 << 20,
             max_decoded_bytes=256 << 20,
             media_types=("image/webp",),

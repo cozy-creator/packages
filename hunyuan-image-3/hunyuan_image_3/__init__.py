@@ -1,4 +1,4 @@
-"""Tencent's HunyuanImage 3.0: text to image, or an edit or fusion of up to three ordered references, with the
+"""Tencent's HunyuanImage 3.0: text to image, or an edit or fusion of up to three ordered picture assets, with the
 model's own think-and-rewrite stage. `generate_turbo` is Instruct-Distil (8 steps), `generate` Instruct (50)."""
 
 from __future__ import annotations
@@ -10,11 +10,11 @@ from cozy_runtime.author import (
     Adjustments,
     App,
     Context,
+    PictureAsset,
     ImageRequest,
     ImageResult,
     Memoize,
     Outputs,
-    ReferenceImages,
     Telemetry,
 )
 
@@ -37,7 +37,13 @@ class HunyuanRequest(ImageRequest, forbid_unknown_fields=True):
     """The shared image request. With no `aspect_ratio` the model picks its size, as Tencent's
     `image_size="auto"`; it makes about 1 MP whatever `megapixels` asks."""
 
-    reference_images: Annotated[ReferenceImages, msgspec.Meta(max_length=3)] = msgspec.field(default_factory=list)
+    assets: Annotated[list[PictureAsset], msgspec.Meta(max_length=3)] = msgspec.field(default_factory=list)
+
+
+def label(n: int, asset: PictureAsset) -> str:
+    """HunyuanImage 3.0's word for the Nth asset: every prompt Tencent documents names them 图1, 图2,
+    图3 (`run_demo_instruct.sh`); the images precede the prompt with no label of their own."""
+    return f"图{n}"
 
 
 def requested_size(adj: Adjustments, ratio: str) -> tuple[int, int]:
@@ -59,9 +65,10 @@ def check_pixels(adj: Adjustments, megapixels: float | None, size: tuple[int, in
 def _generate(ctx: Context, payload: HunyuanRequest, steps: int, model: HunyuanImage3, out: Outputs,
               tel: Telemetry, adj: Adjustments) -> ImageResult:
     payload.ignored(adj, "negative_prompt", reason="HunyuanImage 3.0's unconditional branch is the prompt dropped")
-    payload.ignored(adj, "reference_boxes", reason="HunyuanImage 3.0 has no layout control")
+    payload.unplaced(adj, "HunyuanImage 3.0 has no layout control")
+    prompt = payload.rendered(adj, label)
     seed = payload.drawn_seed()
-    references = [asset.read() for asset in payload.reference_images]
+    references = [asset.read() for asset in payload.images()]
     guidance = payload.guidance if payload.guidance is not None else GUIDANCE
     # No aspect ratio: the model picks its size, as Tencent's `image_size="auto"`.
     size = requested_size(adj, payload.aspect_ratio) if payload.aspect_ratio else None
@@ -69,24 +76,24 @@ def _generate(ctx: Context, payload: HunyuanRequest, steps: int, model: HunyuanI
     if payload.prompt_upsampling is not False:
         with tel.stage("thinking", overall_range=(0.0, 0.3)):
             cot, picked, routing = model.think(
-                payload.prompt, references, seed=seed, pick_size=size is None, cancel=ctx.raise_if_cancelled,
+                prompt, references, seed=seed, pick_size=size is None, cancel=ctx.raise_if_cancelled,
                 on_token=tel.step_callback(MAX_NEW_TOKENS, stage="thinking", overall_range=(0.0, 0.3)))
         tel.log("thinking routing", **routing)
-        tel.log("rewritten prompt", caption=caption(cot, payload.prompt)[:2000])
+        tel.log("rewritten prompt", caption=caption(cot, prompt)[:2000])
         size = size or picked
     if size is None:
         with tel.stage("picking size", overall_range=(0.0, 0.05)):
-            size = model.pick_size(payload.prompt, references, seed=seed)
+            size = model.pick_size(prompt, references, seed=seed)
     check_pixels(adj, payload.megapixels, size)
     with tel.stage("generating image", overall_range=(0.3, 0.97)):
         image, routing = model.paint(
-            payload.prompt, references, cot, size=size, steps=steps, guidance=guidance, seed=seed,
+            prompt, references, cot, size=size, steps=steps, guidance=guidance, seed=seed,
             cancel=ctx.raise_if_cancelled,
             on_step=tel.step_callback(steps, stage="generating image", overall_range=(0.3, 0.95)))
     tel.log("denoising routing", **routing)
     with tel.stage("saving image", overall_range=(0.97, 1.0)):
         asset = out.save_image(image, format="png")
-    return ImageResult(asset, image.width, image.height, seed, caption(cot, payload.prompt))
+    return ImageResult(asset, image.width, image.height, seed, caption(cot, prompt))
 
 
 _COMPONENTS = {"model": ("model",)}
@@ -97,7 +104,7 @@ _COMPONENTS = {"model": ("model",)}
 def generate_turbo(ctx: Context, payload: HunyuanRequest, model: HunyuanImage3, out: Outputs, tel: Telemetry,
                    adj: Adjustments) -> ImageResult:
     """HunyuanImage 3.0 Instruct-Distil, 8 steps, guidance 2.5 (distilled): text to image, or an edit of up to
-    three references; the model thinks and rewrites the prompt first unless `prompt_upsampling` is false."""
+    three picture assets; the model thinks and rewrites the prompt first unless `prompt_upsampling` is false."""
     return _generate(ctx, payload, payload.steps or 8, model, out, tel, adj)
 
 
@@ -105,6 +112,6 @@ def generate_turbo(ctx: Context, payload: HunyuanRequest, model: HunyuanImage3, 
                 memoize=Memoize(requires=["seed"]))
 def generate(ctx: Context, payload: HunyuanRequest, model: HunyuanImage3, out: Outputs, tel: Telemetry,
              adj: Adjustments) -> ImageResult:
-    """HunyuanImage 3.0 Instruct, 50 steps with CFG 2.5: text to image, or an edit of up to three references;
+    """HunyuanImage 3.0 Instruct, 50 steps with CFG 2.5: text to image, or an edit of up to three picture assets;
     the model thinks and rewrites the prompt first unless `prompt_upsampling` is false."""
     return _generate(ctx, payload, payload.steps or 50, model, out, tel, adj)

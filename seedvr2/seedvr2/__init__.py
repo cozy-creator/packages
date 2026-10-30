@@ -15,7 +15,7 @@ from PIL import Image, ImageOps
 from torchvision.transforms import functional as vision
 from cozy_runtime.author import (
     App,
-    AssetBound,
+    FileBound,
     Context,
     DecodedAudioChunk,
     DecodedMediaHeader,
@@ -23,7 +23,7 @@ from cozy_runtime.author import (
     Outputs,
     Shape,
     Telemetry,
-    VideoAsset,
+    VideoFile,
 )
 from .color import Correction
 from .frames import extend
@@ -66,7 +66,7 @@ class Tuning(msgspec.Struct, kw_only=True):
 
 
 class UpscaleInput(Tuning, kw_only=True):
-    video: Annotated[VideoAsset, AssetBound(max_bytes=1 << 30, max_decoded_bytes=2 << 30)]
+    video: Annotated[VideoFile, FileBound(max_bytes=1 << 30, max_decoded_bytes=2 << 30)]
     resolution: Annotated[Resolution, Shape(pixels=_RESOLUTIONS)] = Resolution.HD
     seed: Annotated[int, msgspec.Meta(ge=0, le=9007199254740991)] = 42
     aspect_ratio: Literal["source", "16:9"] = "source"
@@ -74,8 +74,8 @@ class UpscaleInput(Tuning, kw_only=True):
 
 class UpscaleOutput(msgspec.Struct):
     video: Annotated[
-        VideoAsset,
-        AssetBound(
+        VideoFile,
+        FileBound(
             max_bytes=1 << 30,
             max_decoded_bytes=32 << 30,
             media_types=("video/mp4",),

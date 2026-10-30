@@ -30,7 +30,7 @@ from cozy_runtime import lm, moe, vlm
 FILES = Path(sys.argv[1])
 
 
-class Assets:
+class Files:
     def names(self) -> list[str]:
         return [p.name for p in FILES.iterdir()]
 
@@ -111,7 +111,7 @@ def asker(model: torch.nn.Module, draft: Any) -> vlm.VisionLM:
     asking = vlm.VisionLM.__new__(vlm.VisionLM)
     asking.pipe = vlm.Pipeline.__new__(vlm.Pipeline)
     asking.pipe.components, asking.pipe.draft = {vlm.COMPONENT: model}, draft
-    asking.processor = vlm.processor(Assets())
+    asking.processor = vlm.processor(Files())
     model.generation_config = GenerationConfig(**json.loads((FILES / "generation_config.json").read_text()))
     return asking
 

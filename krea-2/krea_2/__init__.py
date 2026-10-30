@@ -9,11 +9,11 @@ from cozy_runtime.author import (
     Adjustments,
     App,
     Context,
+    PictureAsset,
     ImageRequest,
     ImageResult,
     Memoize,
     Outputs,
-    ReferenceImages,
     Sizes,
     Telemetry,
     held,
@@ -33,7 +33,7 @@ RAW, TURBO = (52, 3.5, 1.0), (8, 0.0, 4.0)
 
 class GenerateInput(ImageRequest):
     #: Krea 2 makes images from text only.
-    reference_images: Annotated[ReferenceImages, msgspec.Meta(max_length=0)] = msgspec.field(
+    assets: Annotated[list[PictureAsset], msgspec.Meta(max_length=0)] = msgspec.field(
         default_factory=list
     )
 
@@ -41,8 +41,8 @@ class GenerateInput(ImageRequest):
 def _generate(ctx: Context, payload: GenerateInput, model: Krea2, out: Outputs, tel: Telemetry,
               adj: Adjustments, *, distilled: bool) -> ImageResult:
     model.hold_vae()
-    payload.ignored(adj, "reference_boxes", reason="Krea 2 takes no references")
     payload.ignored(adj, "prompt_upsampling", reason="Krea 2 has no prompt upsampler")
+    prompt = payload.rendered(adj)
     steps, guidance, megapixels = TURBO if distilled else RAW
     steps = held(adj, "steps", payload.steps or steps, 1, 100, "Krea 2's 1-100 steps")
     guidance = held(adj, "guidance", guidance if payload.guidance is None else payload.guidance, 0.0, 20.0,
@@ -53,7 +53,7 @@ def _generate(ctx: Context, payload: GenerateInput, model: Krea2, out: Outputs, 
     width, height = payload.size(adj, None, SIZES, megapixels=megapixels)
     ctx.raise_if_cancelled()
     with tel.stage("encoding prompt", overall_range=(0.0, 0.05)):
-        positive = model.encode(payload.prompt)
+        positive = model.encode(prompt)
         negative = model.encode(payload.negative_prompt or "") if guidance > 0 else None
     ctx.raise_if_cancelled()
     with tel.stage("generating image", overall_range=(0.05, 0.95)):
@@ -65,7 +65,7 @@ def _generate(ctx: Context, payload: GenerateInput, model: Krea2, out: Outputs, 
         image = model.decode(latents, width=width, height=height)
     with tel.stage("saving image", overall_range=(0.99, 1.0)):
         asset = out.save_image(image, format="png")
-    return ImageResult(asset, width, height, seed, payload.prompt)
+    return ImageResult(asset, width, height, seed, prompt)
 
 
 _COMPONENTS = {"model": ("transformer", "text_encoder", "vae")}

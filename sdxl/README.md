@@ -21,11 +21,11 @@ cozy run sdxl/generate prompt='a lighthouse at dusk, oil painting' seed=7
 cozy run sdxl/generate prompt='a fox in fresh snow' aspect_ratio=16:9 megapixels=2 steps=30
 ```
 
-Inputs are the shared image request, the same in every image package: `prompt`, `reference_images`, `aspect_ratio` (any W:H), `megapixels` (any size, 1024² pixels each), `steps`, `guidance`, `negative_prompt`, `seed` and `prompt_upsampling`. SDXL adds `hidiffusion`. Left out, each is SDXL's default: 1:1 at 1 MP, 20 steps at
+Inputs are the shared image request, the same in every image package: `prompt`, `assets`, `aspect_ratio` (any W:H), `megapixels` (any size, 1024² pixels each), `steps`, `guidance`, `negative_prompt`, `seed` and `prompt_upsampling`. SDXL adds `hidiffusion`. Left out, each is SDXL's default: 1:1 at 1 MP, 20 steps at
 guidance 7 (HiDiffusion's 30 at 7.5 above 1 MP, where it runs unless `hidiffusion=false`), no
 negative prompt, a random seed. Sizes snap to the 64 px stride and stay within 1–8 MP (16 MP at
 1:1), 1:4–4:1 and 4096 px sides; steps 1–50, guidance 0–20. Out of range clamps with a `clamp`
-adjustment. SDXL takes no `reference_images`, and ignores `prompt_upsampling` with a warning. The
+adjustment. SDXL takes no `assets` (refused before upload), so a `<Name>` in its prompt stays as written, with a warning ([assets](../docs/assets.md)), and it ignores `prompt_upsampling` with a warning. The
 result is `image` (a WebP in `~/.cozy/outputs`), `width`, `height`, `seed` and `prompt`.
 
 GPU: any NVIDIA card with 8 GB. The default 8-bit lane is 3.8 GiB (`stabilityai/sdxl@1.0.0`);
