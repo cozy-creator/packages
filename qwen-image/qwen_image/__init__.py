@@ -64,6 +64,7 @@ def _render(
     negative: str,
 ) -> ImageResult:
     seed = payload.drawn_seed()
+    model.hold_vae(tel)
     payload.ignored(adj, "prompt_upsampling", reason="Qwen-Image has no prompt upsampler")
     payload.ignored(adj, "reference_boxes", reason="Qwen-Image has no layout control")
     # Upright, with any transparency over white, as upstream's RGB references.

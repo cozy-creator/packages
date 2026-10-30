@@ -27,7 +27,15 @@ from typing import Any
 import numpy as np
 import torch
 from cozy_runtime import fusion, lora, rng, tiles
-from cozy_runtime.author import Config, Loader, Model, ModelAssets, uses_components
+from cozy_runtime.author import (
+    Config,
+    Loader,
+    Model,
+    ModelAssets,
+    Telemetry,
+    hold_dtype,
+    uses_components,
+)
 from cozy_runtime.author.kernels import Plan
 from diffusers import (
     AutoencoderKLQwenImage,
@@ -84,6 +92,9 @@ LORA_SITES = (
     "txt_mlp.net.0.proj",
     "txt_mlp.net.2",
 )
+#: The VAE's dtype on CUDA. The lane stores bf16, which fp16 holds exactly: against an F32 decode, fp16
+#: measures 62.9 dB and bf16 53.4 (dtype audit M1), with about 427x headroom below fp16's range.
+VAE_DTYPE = torch.float16
 #: The VAE's RMS norms in one kernel each, with the SiLU each residual block, the decoder's head and
 #: the encoder's apply after them; Diffusers computes them in F32 copies of every activation.
 VAE_NORM = fusion.ChannelNorm(
@@ -93,9 +104,10 @@ VAE_NORM = fusion.ChannelNorm(
         (QwenImageDecoder3d, ("norm_out",)),
         (QwenImageEncoder3d, ("norm_out",)),
     ),
+    dtype="fp16",
 )
 #: A lone frame's 3x3x3 causal convolutions on their last temporal tap, the only one it meets (Diffusers
-#: pads two zero frames and convolves all 27 taps), and its nearest upsampling in bf16, not F32.
+#: pads two zero frames and convolves all 27 taps), and its nearest upsampling in its own dtype, not F32.
 VAE_FRAME = fusion.LoneFrame(QwenImageCausalConv3d, upsample=QwenImageUpsample)
 
 
@@ -325,6 +337,15 @@ class QwenImage(Model[QwenImageGraph], encoded_leaves="accept"):
             fusion.install_lone_frame(plan, VAE_FRAME, *frame),
         )
         return "+".join(identity for identity in installed if identity)
+
+    def hold_vae(self, tel: Telemetry) -> None:
+        """Encode and decode in `VAE_DTYPE` on CUDA; the CPU keeps the stored bf16. The Runtime casts
+        the stored bytes when it next fills them; called before any VAE scope opens."""
+        vae = self.graph.components["vae"]
+        if torch.device(str(self.device)).type != "cuda" or next(vae.parameters()).dtype == VAE_DTYPE:
+            return
+        hold_dtype(vae, VAE_DTYPE)
+        tel.log("vae representation", dtype="float16")
 
     def _pipeline(self, edit: bool) -> QwenImagePipeline | QwenImageEditPlusPipeline:
         parts = {
