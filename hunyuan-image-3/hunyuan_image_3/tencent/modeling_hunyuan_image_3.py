@@ -71,6 +71,10 @@ def to_device(data, device):
         return data.to(device)
     elif isinstance(data, list):
         return [to_device(x, device) for x in data]
+    elif isinstance(data, dict):
+        # The SigLIP2 kwargs (`spatial_shapes`, `attention_mask`): upstream's accelerate hooks moved
+        # them; without the hooks a reference's attention mask stayed on the CPU.
+        return {k: to_device(v, device) for k, v in data.items()}
     else:
         return data
 
