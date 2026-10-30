@@ -1,10 +1,10 @@
 [project]
 name = "krea-2"
-version = "0.1.2"
+version = "0.1.4"
 description = "Cozy text-to-image with Krea 2: Raw, the full model, and Turbo, its 8-step distillation"
 requires-python = ">=3.12"
 dependencies = [
-    "cozy-runtime[adapters,media]>=0.35.2",
+    "cozy-runtime[adapters,media]>=0.35.8",
     # Krea2Pipeline and its modules are in Diffusers since 0.39.
     "diffusers>=0.39",
     "msgspec>=0.19",
