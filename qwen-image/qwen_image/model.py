@@ -26,14 +26,24 @@ from typing import Any
 
 import numpy as np
 import torch
-from cozy_runtime import lora, rng
+from cozy_runtime import fusion, lora, rng, tiles
 from cozy_runtime.author import Config, Loader, Model, ModelAssets, uses_components
+from cozy_runtime.author.kernels import Plan
 from diffusers import (
     AutoencoderKLQwenImage,
     FlowMatchEulerDiscreteScheduler,
     QwenImageEditPlusPipeline,
     QwenImagePipeline,
     QwenImageTransformer2DModel,
+)
+from diffusers.models.autoencoders.autoencoder_kl_qwenimage import (
+    QwenImageCausalConv3d,
+    QwenImageDecoder3d,
+    QwenImageEncoder3d,
+    QwenImageResample,
+    QwenImageResidualBlock,
+    QwenImageRMS_norm,
+    QwenImageUpsample,
 )
 from diffusers.pipelines.qwenimage.pipeline_qwenimage_edit_plus import (
     CONDITION_IMAGE_SIZE,
@@ -74,6 +84,19 @@ LORA_SITES = (
     "txt_mlp.net.0.proj",
     "txt_mlp.net.2",
 )
+#: The VAE's RMS norms in one kernel each, with the SiLU each residual block, the decoder's head and
+#: the encoder's apply after them; Diffusers computes them in F32 copies of every activation.
+VAE_NORM = fusion.ChannelNorm(
+    QwenImageRMS_norm,
+    silu=(
+        (QwenImageResidualBlock, ("norm1", "norm2")),
+        (QwenImageDecoder3d, ("norm_out",)),
+        (QwenImageEncoder3d, ("norm_out",)),
+    ),
+)
+#: A lone frame's 3x3x3 causal convolutions on their last temporal tap, the only one it meets (Diffusers
+#: pads two zero frames and convolves all 27 taps), and its nearest upsampling in bf16, not F32.
+VAE_FRAME = fusion.LoneFrame(QwenImageCausalConv3d, upsample=QwenImageUpsample)
 
 
 _DTYPES = {"f32": torch.float32, "bf16": torch.bfloat16, "f16": torch.float16, "i64": torch.int64}
@@ -287,6 +310,22 @@ class QwenImage(Model[QwenImageGraph], encoded_leaves="accept"):
         self.graph = loader.construct(QwenImageGraph, factory=QwenImageGraph)
         self.processor = build_processor(loader.assets, self.graph.text_encoder_config)
 
+    def execution_plan(self, plan: Plan) -> str:
+        vae = self.graph.components["vae"]
+        encoder = vae.encoder
+        # Not the encoder's temporal downsamplers: their `time_conv` (stride 2, no causal padding)
+        # only ever runs on a next frame's cache, never on a lone frame.
+        frame = (
+            *(block for block in encoder.down_blocks if not isinstance(block, QwenImageResample)),
+            encoder.conv_in, encoder.mid_block, encoder.conv_out, vae.quant_conv,
+            vae.decoder, vae.post_quant_conv,
+        )
+        installed = (
+            fusion.install_norms(plan, VAE_NORM, vae),
+            fusion.install_lone_frame(plan, VAE_FRAME, *frame),
+        )
+        return "+".join(identity for identity in installed if identity)
+
     def _pipeline(self, edit: bool) -> QwenImagePipeline | QwenImageEditPlusPipeline:
         parts = {
             "scheduler": FlowMatchEulerDiscreteScheduler.from_config(self.graph.scheduler_config),
@@ -319,18 +358,23 @@ class QwenImage(Model[QwenImageGraph], encoded_leaves="accept"):
 
     @uses_components("vae", memoize=True, memo_dependencies=_ENCODER_CODE)
     def encode_references(self, images: list[Image.Image]) -> References:
-        """Each reference at its 1024² area through the VAE (argmax), normalized and packed."""
+        """Each reference at its 1024² area through the VAE (argmax), normalized and packed: the
+        pipeline's `_encode_vae_image` of one frame without Diffusers' feature cache (each
+        convolution's input kept for a next frame an image never has)."""
         vae = self.graph.components["vae"]
         device = torch.device(str(self.device))
         pipeline = self._pipeline(edit=True)
+        z = vae.config.z_dim
+        mean = torch.tensor(vae.config.latents_mean).view(1, z, 1, 1, 1)
+        std = torch.tensor(vae.config.latents_std).view(1, z, 1, 1, 1)
         packed, grids = [], []
         with torch.inference_mode():
             for image in images:
                 width, height = reference_sizes(image)[1]
                 pixels = pipeline.image_processor.preprocess(image, height, width).unsqueeze(2)
-                latents = pipeline._encode_vae_image(
-                    pixels.to(device=device, dtype=vae.dtype), generator=None
-                )
+                moments = vae.quant_conv(vae.encoder(pixels.to(device=device, dtype=vae.dtype)))
+                latents = moments[:, :z]
+                latents = (latents - mean.to(latents)) / std.to(latents)
                 rows, columns = latents.shape[3:]
                 packed.append(pipeline._pack_latents(latents, 1, latents.shape[1], rows, columns).cpu())
                 grids.append((1, rows // 2, columns // 2))
@@ -349,8 +393,9 @@ class QwenImage(Model[QwenImageGraph], encoded_leaves="accept"):
 
     @uses_components("vae")
     def decode(self, latents: torch.Tensor, *, width: int, height: int) -> Image.Image:
-        """Upstream's decode of the one frame. The decoder runs without Diffusers' feature cache,
-        which only keeps each convolution's input for a next frame an image never has."""
+        """Upstream's decode of the one frame (`_decoded`), its pixels quantized on the device as
+        `VaeImageProcessor` quantizes them: a 4 MP canvas sends 12 MB of bytes to the host, not
+        50 MB of floats for host passes."""
         vae = self.graph.components["vae"]
         device = torch.device(str(self.device))
         with torch.inference_mode():
@@ -359,12 +404,30 @@ class QwenImage(Model[QwenImageGraph], encoded_leaves="accept"):
             z = vae.config.z_dim
             mean = torch.tensor(vae.config.latents_mean).view(1, z, 1, 1, 1).to(latents)
             inverse = 1.0 / torch.tensor(vae.config.latents_std).view(1, z, 1, 1, 1).to(latents)
-            decoded = vae.decoder(vae.post_quant_conv(latents / inverse + mean))
-            image = decoded.clamp(-1.0, 1.0)[0, :, 0].float()
+            image = _decoded(vae, latents / inverse + mean)[0, :, 0].float()
             if not torch.isfinite(image).all():
                 raise ValueError("Qwen-Image's decoder produced non-finite pixels")
-            pixels = ((image / 2 + 0.5).clamp(0, 1).permute(1, 2, 0).cpu().numpy() * 255).round()
-        return Image.fromarray(pixels.astype(np.uint8))
+            pixels = ((image.clamp(-1, 1) * 0.5 + 0.5).clamp(0, 1) * 255).round().to(torch.uint8)
+            return Image.fromarray(pixels.permute(1, 2, 0).contiguous().cpu().numpy())
+
+
+def _decoded(vae: Any, z: torch.Tensor) -> torch.Tensor:
+    """The pipeline's decode of one frame, the whole canvas: Diffusers' `decode` without its
+    feature cache (each convolution's input kept for a next frame an image never has), every
+    residual and resample block over the canvas in strips of rows (`tiles.rows`: exact, a strip's
+    working set)."""
+    decoder = vae.decoder
+    x = decoder.conv_in(vae.post_quant_conv(z))
+    mid = decoder.mid_block
+    x = tiles.rows(mid.resnets[0], x, halo=2)
+    for attention, resnet in zip(mid.attentions, mid.resnets[1:], strict=True):
+        x = tiles.rows(resnet, attention(x), halo=2)
+    for block in decoder.up_blocks:
+        for resnet in block.resnets:
+            x = tiles.rows(resnet, x, halo=2)
+        if block.upsamplers is not None:
+            x = tiles.rows(block.upsamplers[0], x, halo=1, scale=2)
+    return tiles.rows(lambda s: decoder.conv_out(decoder.nonlinearity(decoder.norm_out(s))), x, halo=1)
 
 
 #: lightx2v's Lightning sampling: a constant shift of 3, the one it was distilled at
