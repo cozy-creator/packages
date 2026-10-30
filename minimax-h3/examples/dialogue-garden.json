@@ -1,5 +1,5 @@
 {
-  "mode": "standard",
+  "turbo": false,
   "steps": 30,
   "non_diegetic_music": "N/A",
   "references": [

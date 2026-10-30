@@ -1,7 +1,7 @@
 """One fixed, CPU-only long-video assembler over Runtime media events.
 
-This is not an editor. It accepts a streamed list of completed shots, removes replay frames only
-for continuous joins, chooses segment audio or one exclusive master track, and
+This is not an editor. It accepts a streamed list of completed shots, drops the first frame of
+each one marked as overlapping the previous one, chooses segment audio or one exclusive master track, and
 commits one deterministic MP4 through Runtime's streaming sink. Cuts with segment audio
 copy the shots' H.264 packets unchanged and encode only the joined soundtrack.
 
@@ -62,21 +62,30 @@ PEAK_CEILING = 0.999
 FRAME_RATE = Fraction(24)
 
 
+ShotVideo = Annotated[
+    VideoAsset,
+    AssetBound(max_bytes=MAX_INPUT_BYTES, max_decoded_bytes=MAX_EVENT_BYTES, media_types=("video/mp4",)),
+]
+
+
+class Shot(msgspec.Struct):
+    """A video whose first frame repeats the previous video's last frame
+    (`first_frame_overlaps_previous`): that frame and its stretch of sound are dropped once."""
+
+    video: ShotVideo
+    first_frame_overlaps_previous: bool = False
+
+
 class AssembleVideoRequest(msgspec.Struct):
-    videos: Annotated[
-        list[VideoAsset],
-        AssetBound(
-            max_bytes=MAX_INPUT_BYTES,
-            max_decoded_bytes=MAX_EVENT_BYTES,
-            media_types=("video/mp4",),
-        ),
-        msgspec.Meta(min_length=1),
-    ]
+    """The shots in order. Every frame is kept unless a shot overlaps the previous one; with no
+    overlap and no master track the packets are copied, not re-encoded. (Each is an object: a
+    union of an asset and a struct does not decode, run 20669.)"""
+
+    videos: Annotated[list[Shot], msgspec.Meta(min_length=1)]
     master_audio: Annotated[
         AudioAsset | None,
         AssetBound(max_bytes=MAX_INPUT_BYTES, max_decoded_bytes=MAX_EVENT_BYTES),
     ] = None
-    transition: Literal["continuous", "cut"] = "continuous"
 
 
 class SegmentReceipt(msgspec.Struct):
@@ -381,7 +390,7 @@ class CutJoin:
             else:
                 tolerance = self.out.video_audio_frame_samples
                 selection = _segment_selections(
-                    self.scans, FRAME_RATE, audio, tolerance, trim_replay=False
+                    self.scans, FRAME_RATE, audio, tolerance, [False] * len(self.scans)
                 )[-1]
             gain = _global_gain(self.scans[-1:], [selection], [_Gains()], audio)
             segment = _SegmentAudio(audio, selection, _Gains(), gain, self.output_audio)
@@ -484,8 +493,7 @@ def _segment_selections(
     rate: Fraction,
     audio: DecodedAudioFormat,
     tolerance: int,
-    *,
-    trim_replay: bool = True,
+    overlaps: Sequence[bool],
 ) -> list[_AudioSelection]:
     selections: list[_AudioSelection] = []
     output_frames = 0
@@ -498,7 +506,7 @@ def _segment_selections(
                 f"segment {index + 1} soundtrack differs from its frame clock by {drift} samples",
                 code="invalid_request",
             )
-        selected_frames = scan.frames - int(trim_replay and index > 0)
+        selected_frames = scan.frames - int(overlaps[index])
         if selected_frames <= 0:
             raise InvalidRequest(
                 f"segment {index + 1} has no frame after the fixed replay trim",
@@ -509,7 +517,7 @@ def _segment_selections(
         )
         selected = cumulative - output_audio
         source_start = (
-            _nearest(Fraction(audio.sample_rate, 1) / rate) if trim_replay and index else 0
+            _nearest(Fraction(audio.sample_rate, 1) / rate) if overlaps[index] else 0
         )
         from_source = max(0, min(selected, scan.audio_samples - source_start))
         selections.append(
@@ -527,11 +535,15 @@ def _segment_selections(
 
 
 def _seam_gains(
-    scans: list[_Scan], selections: list[_AudioSelection], audio: DecodedAudioFormat
+    scans: list[_Scan], selections: list[_AudioSelection], audio: DecodedAudioFormat,
+    overlaps: Sequence[bool],
 ) -> list[_Gains]:
+    """Level-matched seams where a shot continues the previous one (it overlaps it)."""
     gains = [_Gains() for _ in scans]
     window = _nearest(LEVEL_WINDOW_SECONDS * audio.sample_rate)
     for index in range(len(scans) - 1):
+        if not overlaps[index + 1]:
+            continue
         left = _rms(scans[index].audio_tail, samples=window)
         right = _rms(
             scans[index + 1].audio_head,
@@ -722,9 +734,9 @@ def _segment_events(
     global_gain: float,
     check: Callable[[], None],
     on_frame: Callable[[int], None],
-    trim_replay: bool = True,
+    overlaps: Sequence[bool],
 ) -> Iterator[DecodedMediaEvent]:
-    """Decoded frames and the selected soundtrack, for the encoder (replay-trimmed joins)."""
+    """Decoded frames and the selected soundtrack, for the encoder."""
     video = scans[0].header.video
     audio = scans[0].header.audio
     assert video is not None and video.nominal_frame_rate is not None and audio is not None
@@ -740,7 +752,7 @@ def _segment_events(
                 if isinstance(event, DecodedMediaHeader):
                     continue
                 if isinstance(event, DecodedVideoFrame):
-                    if trim_replay and index and seen_frames == 0:
+                    if overlaps[index] and seen_frames == 0:
                         seen_frames += 1
                         continue
                     yield DecodedVideoFrame(
@@ -803,7 +815,7 @@ def _master_events(
     padding: int,
     check: Callable[[], None],
     on_frame: Callable[[int], None],
-    trim_replay: bool = True,
+    overlaps: Sequence[bool],
 ) -> Iterator[DecodedMediaEvent]:
     video = scans[0].header.video
     assert video is not None and video.nominal_frame_rate is not None
@@ -823,7 +835,7 @@ def _master_events(
                     check()
                     if not isinstance(event, DecodedVideoFrame):
                         continue
-                    if trim_replay and index and seen_frames == 0:
+                    if overlaps[index] and seen_frames == 0:
                         seen_frames += 1
                         continue
                     frame_time = Fraction(output_frame, 1) / video.nominal_frame_rate
@@ -933,16 +945,20 @@ def assemble(
     """
     if not payload.videos:
         raise InvalidRequest("assembly needs at least one video", code="invalid_request")
+    videos = [item.video for item in payload.videos]
+    overlaps = [item.first_frame_overlaps_previous for item in payload.videos]
+    if overlaps[0]:
+        raise InvalidRequest("the first video overlaps no previous one", code="invalid_request",
+                             fields=["payload.videos[0].first_frame_overlaps_previous"])
     tolerance = out.video_audio_frame_samples
-    trim_replay = payload.transition == "continuous"
-    copy = not trim_replay and payload.master_audio is None
+    copy = not any(overlaps) and payload.master_audio is None
     pictures = scanned.pictures if scanned is not None else not copy
     if not (pictures or copy):
         raise InvalidRequest("this join needs scans of its pictures", code="invalid_request")
     scan_step = tel.step_callback(len(payload.videos), stage="scan", overall_range=(0.00, 0.10))
-    scans = scanned.finish(payload.videos) if scanned is not None else []
+    scans = scanned.finish(videos) if scanned is not None else []
     if scanned is None:
-        for index, item in enumerate(payload.videos):
+        for index, item in enumerate(videos):
             scans.append(_scan_video(item, check, pictures=pictures))
             scan_step(index)
     else:
@@ -975,20 +991,20 @@ def assemble(
             # Runtime proved these frame counts on the packets' own clock.
             scans[:] = [replace(scan, frames=n) for scan, n in zip(scans, frames, strict=True)]
             selections[:] = _segment_selections(
-                scans, FRAME_RATE, joined, tolerance, trim_replay=False
+                scans, FRAME_RATE, joined, tolerance, overlaps
             )
             global_gain = _global_gain(scans, selections, gains, joined)
             return _soundtrack(scans, selections, gains, global_gain=global_gain, check=check)
 
         try:
             with tel.stage("join", overall_range=(0.10, 1.00)):
-                saved = out.save_video_concat(payload.videos, soundtrack)
+                saved = out.save_video_concat(videos, soundtrack)
         except OutputError as refused:
             if refused.code != "video_copy_incompatible":
                 raise
             tel.log("assembly re-encodes unjoinable tracks", reason=str(refused)[:256])
             if not pictures:
-                scans = [_scan_video(item, check) for item in payload.videos]
+                scans = [_scan_video(item, check) for item in videos]
     video_format = scans[0].header.video
     if saved is None:
         assert video_format is not None and video_format.nominal_frame_rate is not None
@@ -1003,16 +1019,16 @@ def assemble(
         ):
             raise InvalidRequest("video formats differ between segments", code="invalid_request")
     source_frames = sum(scan.frames for scan in scans)
-    replay_frames = len(scans) - 1 if trim_replay else 0
+    replay_frames = sum(overlaps)
     output_frames = source_frames - replay_frames
     on_frame = tel.step_callback(output_frames, stage="assemble", overall_range=(0.10, 1.00))
     if saved is None and payload.master_audio is None:
         assert audio_format is not None
         selections = _segment_selections(
-            scans, FRAME_RATE, audio_format, tolerance, trim_replay=trim_replay
+            scans, FRAME_RATE, audio_format, tolerance, overlaps
         )
-        if trim_replay:
-            gains = _seam_gains(scans, selections, audio_format)
+        if any(overlaps):
+            gains = _seam_gains(scans, selections, audio_format, overlaps)
         global_gain = _global_gain(scans, selections, gains, audio_format)
         saved = out.save_video_stream(
             _segment_events(
@@ -1020,7 +1036,7 @@ def assemble(
                 selections,
                 gains,
                 global_gain=global_gain,
-                trim_replay=trim_replay,
+                overlaps=overlaps,
                 check=check,
                 on_frame=on_frame,
             )
@@ -1044,7 +1060,7 @@ def assemble(
                 master_scan,
                 target_audio=target_audio,
                 padding=max(0, -master_drift),
-                trim_replay=trim_replay,
+                overlaps=overlaps,
                 check=check,
                 on_frame=on_frame,
             )
@@ -1084,7 +1100,7 @@ def assemble(
     cumulative_frames = 0
     prior_audio = 0
     for index, (scan, gain) in enumerate(zip(scans, gains, strict=True)):
-        selected_frames = scan.frames - int(trim_replay and index > 0)
+        selected_frames = scan.frames - int(overlaps[index])
         cumulative_frames += selected_frames
         cumulative_audio = _nearest(
             Fraction(cumulative_frames * audio_format.sample_rate, 1) / FRAME_RATE
@@ -1109,7 +1125,7 @@ def assemble(
                 media_type=scan.asset.media_type,
                 source_frames=scan.frames,
                 selected_frames=selected_frames,
-                replay_frame_digest=scan.first_frame_digest if trim_replay and index else None,
+                replay_frame_digest=scan.first_frame_digest if overlaps[index] else None,
                 segment_soundtrack_samples=scan.audio_samples,
                 selected_audio_samples=segment_audio,
                 selected_audio_source_start_sample=source_start,

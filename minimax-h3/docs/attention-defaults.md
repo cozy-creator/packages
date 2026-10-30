@@ -28,7 +28,7 @@ showed visible artifacts and stays an explicit experiment.
 A pin takes precedence over the rules:
 
 ```sh
-cozy run minimax-h3/fl2va_turbo --input clip.json --on my-machine \
+cozy run minimax-h3/generate --input clip.yaml --on my-machine \
   --attention-kernel=transformer=kitchen-sol-producer-fp4-lowmem-shared-qkv
 ```
 

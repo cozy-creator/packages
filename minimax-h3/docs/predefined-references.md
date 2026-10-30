@@ -1,11 +1,9 @@
 # Fixed subjects for camera-cut stories
 
-`long_form_cuts` uses a supplied `image` or generates it from the shared `description`
-using `qwen-image-2/generate` before rendering any H3 shot. Generated character images use a
-plain white background. Background images contain the described location. The whole
-request declares one to nine references; each shot explicitly selects its named
-references. Each shot is an independent Ref2VA generation, with no first/last-frame
-anchor and no references sampled from earlier generated video.
+`generate` uses a supplied `image` or generates it from the shared `description`
+using `qwen-image-2/generate` before rendering any H3 segment. Generated character images use a
+plain white background. Background images contain the described location. Each segment
+uses the references its prompt names.
 
 The parent is normal Python composition running in Runtime on the selected
 machine without reserving GPUs. It submits the bounded reference set concurrently,
@@ -24,10 +22,6 @@ identity and appearance or environment features, while the shot supplies its own
 composition and movement. `{name}` in authored prompt text becomes the associated
 subject label. Names are case-insensitive. Missing, duplicate and unknown names are rejected before generation.
 The still is never described as a starting frame or a target video composition.
-
-The `long_form` continuous-shot API uses fixed references and completed AV-tail
-continuation. This is an explicit input-contract change to
-`long_form_cuts`: generated-shot history is removed, not silently ignored.
 
 The only final output is the assembled MP4. Fixed images and
 individual shot outputs remain retained intermediate child results. Model quality
@@ -50,6 +44,6 @@ interface. The source implementation takes injected execution arguments; its ins
 caller exposes the flat `prompt`, `aspect_ratio`, `megapixels`, `steps` and `seed`
 parameters used here.
 
-The `long_form` API uses this same mixed reference resolver and completed AV context,
-with no shot-count cap. See [LONG_FORM.md](../LONG_FORM.md) for JSON filenames,
+`generate` uses this mixed reference resolver and completed AV context, with no
+segment-count cap. See [LONG_FORM.md](../LONG_FORM.md) for JSON filenames,
 free-text segment prompts and the sections the workflow adds.

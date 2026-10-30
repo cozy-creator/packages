@@ -1,14 +1,23 @@
-# Long-form video
+# Segments
 
-A segment is one H3 call. It takes the same fields as `ref2va_turbo`: free-text `prompt`,
-`duration_s` (5–15, required) and optional `seed`. A `long_form` segment also accepts
-the booleans `context_frames` (carry the previous picture) and `context_audio` (carry the
-previous sound), both defaulting to `true`. The model only ever sees one segment's prompt,
-so the workflow copies the global information into it.
+`generate` renders one or more segments and joins them. A segment is one H3 call: free-text
+`prompt`, `duration_s` (5–15, required) and optional `seed`, the booleans `context_frames`
+(carry the previous picture) and `context_audio` (carry the previous sound), both defaulting to
+`true`, its `first_frame`/`last_frame` (`frame` references by name), and its own `turbo` and
+`steps`. The model only ever sees one segment's prompt, so the workflow copies the global
+information into it.
+
+A segment renders on FL2VA (the `transformer`) from its text and keyframes when it uses no
+reference and continues nothing. It renders on Ref2VA (`transformer_ref`) when it names a
+reference, has a background, or continues the previous segment; a continuation that names no
+reference takes the previous segment's last frame as a soft picture of the set. On Ref2VA a
+segment's first and last frames are anchored as ComfyUI's Add Guide anchors them.
 
 ## Request
 
-- `references`: characters, backgrounds, audio and videos, shared by every segment.
+- `references` (optional): characters, backgrounds, audio, videos, anchor videos and frames,
+  shared by every segment. A character, audio or video goes into the segments whose prompt
+  names it; a background into every segment; frames and anchor videos need no name.
 - `clean_references` (default `true`): BiRefNet removes the background of each supplied
   character image once, and H3 receives it composited onto white. The cleaned image
   appears in the reference outputs and is reused for every segment; `false` sends it as
@@ -31,16 +40,13 @@ so the workflow copies the global information into it.
   Each segment may override it with its own `non_diegetic_music` string. Omitted or
   `null` inherits the shared score; blank or `N/A` requests no score. An explicit
   segment field replaces an inline music section. Without that field, inline music
-  takes precedence over the shared score. This applies to both long-form composers.
+  takes precedence over the shared score.
 - `segments`: the ordered calls.
-- `context_frames`: global picture window for `long_form` (0, 22, 39 or 56; default 22).
-- `mode` (`turbo` or `standard`) and `steps` (standard only).
-
-Both long-form composers default to Turbo: eight PDD evaluations per segment.
-The top-level `mode` applies to every segment. `mode: standard` uses the model plan's
-fewest steps (30) by default; its optional `steps` selects 30, 40 or 50. Omit `steps` with
-`mode: turbo`.
-There is no per-segment sampling override.
+- `context_frames`: the picture window a continuing segment carries (0, 22, 39 or 56; default 22).
+- `turbo` (default `true`) and `steps`: turbo runs the PDD-8 LoRA's eight evaluations; off,
+  the full model runs `steps` 30 (default), 40 or 50. Steps given beside turbo are ignored with
+  a warning. Each segment may set its own `turbo` and `steps`, so turbo and full-model
+  segments mix in one video.
 
 Omit CLI `--gpus` for this workflow: each model then uses its supported GPU count.
 BiRefNet uses one GPU; H3 can still use all eight on a supported eight-GPU machine.
@@ -48,7 +54,7 @@ An explicit `--gpus=N` applies to every GPU child, so a value greater than one
 cannot serve BiRefNet's single-GPU operation.
 
 ```yaml
-mode: turbo
+turbo: true
 segments:
   - duration_s: 6
     prompt: "<Rover> approaches <Bridge>."
@@ -137,15 +143,22 @@ attribute_transfer - its movements, timing and camera work are performed by <...
 `[video continuation]` in the summary, the clip is the source video instead, kept
 `fully_preserved` except where the description changes it.
 
-`guide: true` makes a clip the source the output follows frame by frame, as edit LoRAs such
-as Alissonerdx's head swap and style transfer need. It works as ComfyUI's Add Guide does, not
-as a reference: every latent frame at the render's own canvas (the render takes the clip's
-aspect ratio) sits on the frame it guides, on every denoise step, and Qwen never sees it, so
+A `kind: anchor_video` clip is the source the output follows frame by frame, as edit LoRAs
+such as Alissonerdx's head swap and style transfer need. It works as ComfyUI's Add Guide does,
+not as a reference: every latent frame at the render's own canvas (the render takes the clip's
+aspect ratio) sits on the frame it anchors, on every denoise step, and Qwen never sees it, so
 the text says what it shows. It is the call's source video whatever the summary says, and it
-costs what a second render does (~5.5x for a 12 s clip beside a 15 s render). A call takes at
-most one, beside a picture or another video. It needs no mention in the prompt: a segment that
-names it follows it from its first frame, and one no segment names guides the first segment
-(a direct call's only one).
+costs what a second render does (~5.5x for a 12 s clip beside a 15 s render). A segment takes
+at most one, beside a picture or another video, no longer than the segment, and no `frame` as
+its first frame. It needs no mention in the prompt: a segment that names it follows it from its
+first frame, and one no segment names anchors the first segment.
+
+A `kind: frame` image is a keyframe: `at: first` (default) starts segment 1 on it and `at: last`
+ends the last segment on it; a segment's `first_frame:` or `last_frame:` names one explicitly,
+and then its `at` does not apply. On FL2VA a frame is the official keyframe; on Ref2VA it is
+anchored as Add Guide anchors an image, the last frame at the target's last pixel frame. A
+segment that continues the previous one starts where that one ends, so it takes no first
+frame.
 
 Binding alone does not stop H3 from copying a clip's own people and setting: the
 description must establish each character's look, the background and the beats in order
@@ -153,8 +166,7 @@ description must establish each character's look, the background and the beats i
 segment's text; a segment whose clip still guides a shorter description gets a warning, as
 does a declared clip no prompt names.
 
-`clean_references` leaves videos alone; `describe_references` describes them (above). Direct `ref2va` and
-`ref2va_turbo` take video references the same way.
+`clean_references` leaves videos alone; `describe_references` describes them (above).
 
 Write the role where you name the subject, as MiniMax's guide does. Name clips anything;
 `Video 1`, `Video 2`… read naturally:
@@ -178,20 +190,17 @@ Write the role where you name the subject, as MiniMax's guide does. Name clips a
 Segment 2 sends `throw.mp4` as its `<Video 1>`. Attach files by path in the request, or:
 
 ```sh
-cozy run minimax-h3/long_form --input fight.json \
+cozy run minimax-h3/generate --input fight.json \
   --asset references.3.video=kick.mp4 --asset references.4.video=throw.mp4
 ```
 
-A clip can be a segment of a longer source: `start` and `end` beside `video` (seconds, `m:ss.s`
-or `h:mm:ss.s`; either may be left out). The `cozy` CLI cuts it once, frame-accurately, keeps
-the cut in `~/.cozy/cache/clips` and sends only the cut; the 15 s truncation applies to the cut.
+A clip (`video` or `anchor_video`) can be a segment of a longer source: `#t=<start>,<end>` on
+its path, in whole seconds, `m:ss` or `h:mm:ss`, either end optional (`#t=5`, `#t=,0:12`). The
+`cozy` CLI cuts it once, frame-accurately, keeps the cut in `~/.cozy/cache/clips` and sends only
+the cut; the 15 s truncation applies to the cut.
 
 ```yaml
-  - name: Video 1
-    kind: video
-    video: videos/sentry-program.m4v
-    start: "3:19"
-    end: "3:32.7"
+  - {name: Video 1, kind: video, video: "videos/sentry-program.m4v#t=3:19,3:32"}
 ```
 
 ## Voices and audio
@@ -240,7 +249,7 @@ From community chains ([H3 Motion Context](https://github.com/NikoDemon80/ComfyU
   with context 22 (0.92 s early; 1.63 s at 39, 2.33 s at 56).
 - Keep context 22. A 56-frame window samples 2.33 s of old frames in every segment,
   costing compute and new time.
-- Draft in Turbo; render long final chains with `mode: standard`. Turbo dulls the audio
+- Draft in Turbo; render long final chains with `turbo: false`. Turbo dulls the audio
   and softens the picture, and each segment inherits the previous one's output, so the
   loss compounds down a chain.
 - In very long pieces, restart continuity with `context_frames: false` at a natural
@@ -264,10 +273,10 @@ style is specified, and use anime styling only when explicitly requested.
 
 A reference has:
 
-- `name` and `kind` (`character`, `background`, `audio` or `video`);
-- its file: `image` (a character or background), `audio` or `video`;
+- `name` and `kind` (`character`, `background`, `audio`, `video`, `anchor_video` or `frame`);
+- its file: `image` (a character, background or frame), `audio` or `video`; a frame takes `at`;
 - optional `description`, `retention_analysis` and `seed`; on a character `voice`, on a video
-  `use_audio` and `guide`.
+  or anchor video `use_audio`.
 
 A supplied image skips generation. Otherwise Qwen-Image-2.1 generates the image once
 from the description. Names normalise: whitespace collapses and `<`/`>` are dropped. Two
@@ -278,7 +287,7 @@ three. Allowed: up to nine images and twelve image and audio references in all; 
 per call. An audio-only set is refused.
 
 ```sh
-cozy run minimax-h3/long_form --input story.json
+cozy run minimax-h3/generate --input story.json
 ```
 
 ## Continuation
@@ -305,9 +314,8 @@ to characters the previous segment's last shot does not name.
 A segment delivers at least its `duration_s`: the native grid snaps it up, and nothing
 sampled after the carried frames is discarded. A carried picture of 22/39/56 frames allows
 at most 14/13/12 new seconds, and carried sound alone (a one-second head) 14; longer
-segments are shortened and reported. `long_form_cuts`
-renders independent segments. Turbo uses eight PDD evaluations, and standard allows
-30/40/50 steps.
+segments are shortened and reported. Segments with both carries off are independent cuts.
+Turbo uses eight PDD evaluations, and the full model 30/40/50 steps.
 
 Outputs arrive as they are made. Prepared and generated reference images are published in
 the request's reference order, each once it and every earlier one exist, and the video after

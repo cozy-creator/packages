@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import queue
+import re
 from collections.abc import Awaitable, Callable, Iterable, Iterator, Sequence
 from concurrent.futures import Future
 from contextlib import suppress
@@ -54,13 +55,14 @@ from cozy_runtime.author import (
     invocable,
     prefetch,
 )
-from msgspec.structs import asdict, replace
+from msgspec.structs import replace
+from PIL import Image as PILImage
 
 import describe
-from assembly import CutJoin, ScanAhead, assemble_video
+from assembly import CutJoin, ScanAhead, _scan_video, assemble_video
 from gates import MediaFacts, refuse_before_encode
 from long_form_state import (
-    RenderProvenance, compatible, compatible_base, context_provenance, provenance,
+    RenderProvenance, compatible_base, context_provenance, provenance,
 )
 from minimax_h3.continuation import (
     AVContext,
@@ -126,10 +128,10 @@ from story import (
     compile_segments,
     encoder_prompt,
     image_prompt,
+    name_key,
     opening_cut_warnings,
     reference_seed,
     resolve_reference_images,
-    validate_references,
     writer_request,
 )
 from text_states import encode_text
@@ -164,33 +166,20 @@ ReferenceAssets = Annotated[
     REFERENCE_AUDIO,
     msgspec.Meta(min_length=1),
 ]
-# Direct ref2va takes either attached assets or named `references`; the wire field is required,
-# so a references-only request sends `"assets": []`.
-DirectReferenceAssets = Annotated[
-    Assets[_REFERENCE],
-    AssetLimits(
-        images=MAX_IMAGE_REFERENCES,
-        videos=MAX_VIDEO_REFERENCES,
-        audio=MAX_AUDIO_REFERENCES,
-        total=MAX_REFERENCES,
-    ),
-    ImagePreparation(max_edge=8192, max_pixels=16_777_216),
-    REFERENCE_VIDEO,
-    REFERENCE_AUDIO,
-]
-
-
 class VideoUse(msgspec.Struct, frozen=True):
-    """How a call uses one of its videos: its sound (`use_audio`), and whether the output
-    follows it frame by frame (`guide`)."""
+    """How a call uses one of its videos: its sound (`use_audio`), and whether its frames are
+    anchored in the output (`anchor_video`)."""
 
     audio: bool = False
-    guide: bool = False
+    anchor: bool = False
 
 
 def video_uses(references: Sequence[StoryReference]) -> tuple[VideoUse, ...]:
     """Each of a call's videos, in packed order."""
-    return tuple(VideoUse(ref.use_audio, ref.guide) for ref in references if ref.kind == "video")
+    return tuple(
+        VideoUse(ref.use_audio, ref.kind == "anchor_video")
+        for ref in references if ref.kind in ("video", "anchor_video")
+    )
 
 
 def _call_assets(
@@ -232,10 +221,6 @@ def named_videos(
     ]
 
 
-KeyframeAssets = Annotated[
-    Assets[Annotated[ImageAsset, AssetBound(max_decoded_bytes=256 << 20)]],
-    AssetLimits(images=2),
-]
 DEFAULT_REFERENCE_IMAGE_SHORT_EDGE = 1024
 _SHORT_EDGE_LADDER = (2048, 1536, 1024, 768, 512, 256)
 _REFERENCE_FIDELITY_EDGES = {"low": 256, "medium": 1024, "high": REFERENCE_IMAGE_SHORT_EDGE}
@@ -384,30 +369,6 @@ class Upscale(msgspec.Struct, kw_only=True):
         return REGENERATE_STRENGTHS[-1] if self.strength is None else self.strength
 
 
-class RenderInput(ClipInput, kw_only=True):
-    """`upscale` picks how `resolution` is reached and passes its controls (UPSCALE.md)."""
-
-    resolution: Resolution = Resolution.NATIVE
-    upscale: Upscale | None = None
-
-
-class StandardRenderInput(RenderInput, kw_only=True):
-    steps: Steps | None = None
-
-
-class ReferenceRenderInput(RenderInput, kw_only=True):
-    """Direct ref2va request using the same named references as a ``long_form`` segment."""
-
-    references: list[StoryReference] | None = None
-    style: str = ""
-    clean_references: bool = True
-    describe_references: bool = True
-
-
-class ReferenceStandardRenderInput(ReferenceRenderInput, kw_only=True):
-    steps: Steps | None = None
-
-
 class H3VideoOutput(msgspec.Struct):
     """The catalog wire shape. Checkpoint, plan, geometry, and digest facts remain
     attempt observations (se-012): they ride Telemetry, never the customer result."""
@@ -416,69 +377,12 @@ class H3VideoOutput(msgspec.Struct):
     warnings: list[str]
 
 
-class RenderOutput(msgspec.Struct):
-    video: Annotated[VideoAsset, AssetBound(media_types=("video/mp4",), max_bytes=1 << 30)]
-    originals: Annotated[list[VideoAsset], AssetBound(media_types=("video/mp4",), max_bytes=1 << 30)]
-    warnings: list[str]
-
-
-class ReferenceRenderOutput(RenderOutput):
-    """Direct ref2va also returns the references it prepared or generated, each published as it lands."""
-
-    references: list[ImageAsset] = msgspec.field(default_factory=list)
-
-
-def preflight_reference_media(
-    payload: StandardClipInput, assets: ReferenceAssets
-) -> ReferencePolicyFacts:
-    """Refuse cross-field count errors before Runtime hydrates a single asset."""
-    del payload
-    return _reference_policy(assets)
-
-
-def preflight_reference_media_turbo(
-    payload: ClipInput, assets: ReferenceAssets
-) -> ReferencePolicyFacts:
-    del payload
-    return _reference_policy(assets)
-
-
 def _reference_policy(assets: ReferenceAssets) -> ReferencePolicyFacts:
     kinds = [assets.info(index).kind for index in range(len(assets))]
     try:
         return validate_reference_policy(kinds)
     except ValueError as exc:
         raise UnsupportedInput(str(exc), code="reference_policy", fields=["assets"]) from exc
-
-
-def _keyframe_roles(assets: KeyframeAssets) -> tuple[int | None, int | None]:
-    """Explicit first/last labels choose roles; other images fill remaining roles in order."""
-    named = {
-        assets.info(index).label: index
-        for index in range(len(assets))
-        if assets.info(index).label in {"first", "last"}
-    }
-    remaining = iter(
-        index for index in range(len(assets)) if assets.info(index).label not in {"first", "last"}
-    )
-    first = named["first"] if "first" in named else next(remaining, None)
-    last = named["last"] if "last" in named else next(remaining, None)
-    if next(remaining, None) is not None:
-        raise InvalidRequest("FL2VA accepts at most two images", fields=["assets"])
-    return first, last
-
-
-def _keyframe_image(
-    assets: KeyframeAssets,
-    index: int | None,
-    *,
-    field: str,
-) -> Image | None:
-    if index is None:
-        return None
-    image = assets[index].read()
-    _validate_ratio(image.width, image.height, field)
-    return image
 
 
 class ImageSizing(msgspec.Struct, frozen=True):
@@ -559,7 +463,7 @@ def assets_to_h3_refs(
     length a read returns, so a truncated clip is budgeted at 15 s. A video streams straight to
     the size it is used at on the 24-fps clock (`read_reference_video`), keeping only the
     call's `frames`, which is all the official pipeline keeps of it; its soundtrack is decoded
-    only where its `videos` entry (per video in packed order) says so. A guide video is not a
+    only where its `videos` entry (per video in packed order) says so. An anchor video is not a
     reference (`guide_rows`): Qwen never sees it.
     """
     audio_duration = Fraction(0)
@@ -571,12 +475,12 @@ def assets_to_h3_refs(
         for reference in references
     ]
     keeps = [item.audio for item in uses]
-    if any(item.guide for item in uses) and all(
-        item.guide or isinstance(reference, AudioAsset)
+    if any(item.anchor for item in uses) and all(
+        item.anchor or isinstance(reference, AudioAsset)
         for item, reference in zip(uses, references, strict=True)
     ):
         raise InvalidRequest(
-            "a guide video needs a picture or another video beside it in the call",
+            "an anchor_video needs a picture or another video beside it in the call",
             code="reference_policy",
             fields=["references"],
         )
@@ -594,7 +498,7 @@ def assets_to_h3_refs(
             video = reference.probe()
             keeps[index] = keeps[index] and video.soundtrack is not None
             _validate_video(video, field, sound=keeps[index])
-            if not uses[index].guide:
+            if not uses[index].anchor:
                 video_tokens += reference_video_vision_tokens(
                     video.width, video.height, video.duration
                 )
@@ -615,9 +519,9 @@ def assets_to_h3_refs(
         elif isinstance(reference, VideoAsset):
             with reference.stream(end=window, audio=keeps[index]) as events:
                 clip = read_reference_video(
-                    events, frames=frames, audio=keeps[index], guide=uses[index].guide
+                    events, frames=frames, audio=keeps[index], guide=uses[index].anchor
                 )
-            if uses[index].guide:
+            if uses[index].anchor:
                 guide = pipe.guide_clip(clip)
             else:
                 prepared.append(pipe.video_reference(clip))
@@ -685,6 +589,7 @@ def _finish(
     completed: Callable[[Any], None] | None = None,
     delivered_frames: int | None = None,
     sampled_frames: int | None = None,
+    ended: Callable[[Any], None] | None = None,
 ) -> H3VideoOutput:
 
     cancel()
@@ -717,6 +622,8 @@ def _finish(
         stream.abandon()
         raise
     _, height, width, _ = (int(value) for value in stream.pixels.shape)
+    if ended is not None:
+        ended(stream.pixels[-1].numpy().copy())
 
     tel.log(
         "h3 output geometry",
@@ -1157,107 +1064,6 @@ app.entrypoint(defaults={"model": _MODEL}, components={"model": ("text_encoder",
 )
 
 
-@invocable(
-    defaults={"model": _MODEL},
-    components={"model": _FL2VA},
-    memoize=True,
-)
-async def generate_fl2va(
-    ctx: Context,
-    *,
-    payload: StandardClipInput,
-    assets: KeyframeAssets,
-    model: H3Model,
-    out: Outputs,
-    tel: Telemetry,
-) -> H3VideoOutput:
-    return _keyframes_to_video(ctx, "fl2va", payload, assets, model, out, tel, steps=payload.steps)
-
-
-@invocable(
-    defaults={"base_model": _MODEL, "turbo_lora": _TURBO_LORA},
-    components={"base_model": _FL2VA, "turbo_lora": ("fl2va_turbo",)},
-    memoize=True,
-)
-async def generate_fl2va_turbo(
-    ctx: Context,
-    *,
-    payload: ClipInput,
-    assets: KeyframeAssets,
-    base_model: H3TurboBase,
-    turbo_lora: H3TurboLoRA,
-    out: Outputs,
-    tel: Telemetry,
-) -> H3VideoOutput:
-    """`fl2va` under PDD-8: the same keyframes and prompt, eight transformer evaluations."""
-    return _keyframes_to_video(
-        ctx,
-        "fl2va_turbo",
-        payload,
-        assets,
-        base_model,
-        out,
-        tel,
-        steps=None,
-        turbo_lora=turbo_lora,
-    )
-
-
-@invocable(
-    defaults={"model": _MODEL},
-    components={"model": _REF2VA},
-    memoize=True,
-)
-async def generate_ref2va(
-    ctx: Context,
-    *,
-    payload: ReferenceStandardClipInput,
-    assets: ReferenceAssets,
-    model: H3Model,
-    out: Outputs,
-    tel: Telemetry,
-) -> H3VideoOutput:
-    _reference_policy(assets)
-    return _references_to_video(
-        ctx, "ref2va", payload, assets, model, out, tel, steps=payload.steps
-    )
-
-
-@invocable(
-    defaults={"base_model": _MODEL, "turbo_lora": _TURBO_LORA},
-    components={"base_model": _REF2VA, "turbo_lora": ("ref2va_turbo",)},
-    memoize=True,
-)
-async def generate_ref2va_turbo(
-    ctx: Context,
-    *,
-    payload: ReferenceClipInput,
-    assets: ReferenceAssets,
-    base_model: H3TurboBase,
-    turbo_lora: H3TurboLoRA,
-    out: Outputs,
-    tel: Telemetry,
-) -> H3VideoOutput:
-    """`ref2va` under PDD-8: the same references and prompt, eight transformer evaluations."""
-    _reference_policy(assets)
-    return _references_to_video(
-        ctx,
-        "ref2va_turbo",
-        payload,
-        assets,
-        base_model,
-        out,
-        tel,
-        steps=None,
-        turbo_lora=turbo_lora,
-    )
-
-
-
-app.entrypoint(internal=True)(generate_fl2va)
-app.entrypoint(internal=True)(generate_fl2va_turbo)
-app.entrypoint(internal=True)(generate_ref2va)
-app.entrypoint(internal=True)(generate_ref2va_turbo)
 
 
 #: The output canvas the Regenerate route computes (`regenerate.TARGETS`): the demand axis beside
@@ -1275,6 +1081,8 @@ class RegenerateKeyframesInput(StandardClipInput, kw_only=True):
     """An FL2VA render whose finished latent the Regenerate route takes to `resolution`."""
 
     task: Literal["fl2va", "fl2va_turbo"]
+    first_frame: FrameImage = None
+    last_frame: FrameImage = None
     resolution: RegenerateResolution
     strength: float
 
@@ -1283,6 +1091,8 @@ class RegenerateReferencesInput(ReferenceStandardClipInput, kw_only=True):
     """A Ref2VA render whose finished latent the Regenerate route takes to `resolution`."""
 
     task: Literal["ref2va", "ref2va_turbo"]
+    first_frame: FrameImage = None
+    last_frame: FrameImage = None
     resolution: RegenerateResolution
     strength: float
 
@@ -1313,7 +1123,6 @@ async def regenerate_fl2va(
     ctx: Context,
     *,
     payload: RegenerateKeyframesInput,
-    assets: KeyframeAssets,
     base_model: H3TurboBase,
     turbo_lora: H3TurboLoRA,
     regenerate_lora: H3RegenerateLoRA,
@@ -1324,10 +1133,11 @@ async def regenerate_fl2va(
     """`fl2va` or `fl2va_turbo` whose finished 768p latent goes straight to the Regenerate refine,
     never decoded at 768p."""
     turbo = payload.task == "fl2va_turbo"
-    return _keyframes_to_video(
-        ctx, payload.task, payload, assets, base_model, out, tel,
-        steps=None if turbo else payload.steps, turbo_lora=turbo_lora if turbo else None,
-        regenerate=_target(payload, regenerate_lora, latent_upscaler),
+    return _render_keyframes(
+        ctx, payload.task, base_model, out, tel, prompt=encoder_prompt("fl2va", payload.prompt),
+        seed=payload.seed, duration_s=payload.duration_s, steps=None if turbo else payload.steps,
+        first=_frame(payload.first_frame, "first_frame"), last=_frame(payload.last_frame, "last_frame"),
+        turbo_lora=turbo_lora if turbo else None, regenerate=_target(payload, regenerate_lora, latent_upscaler),
     )  # fmt: skip
 
 
@@ -1366,14 +1176,14 @@ async def regenerate_ref2va(
         ctx, payload.task, payload, assets, base_model, out, tel,
         steps=None if turbo else payload.steps, turbo_lora=turbo_lora if turbo else None,
         regenerate=_target(payload, regenerate_lora, latent_upscaler),
+        anchors=_anchors(payload.first_frame, payload.last_frame),
     )  # fmt: skip
 
 
 class RegenerateInput(msgspec.Struct, kw_only=True):
-    """Re-render an existing H3 video at `resolution` with NVIDIA's Open-H3-Regenerate-2K: its
-    768p frames are encoded, upscaled in latent space and refined by H3 at the target, and its
-    soundtrack is kept. `prompt` is the one the video was made from; `strength` as in `upscale`
-    (UPSCALE.md). The 7:4 frame fills 16:9, stretched 1.6% horizontally; `768p` refines only."""
+    """`upscale`'s Regenerate route (`regenerate_segment`): the video's 768p frames encoded,
+    upscaled in latent space and refined by H3 at `resolution` from `prompt`, its soundtrack
+    kept. The 7:4 frame fills 16:9, stretched 1.6% horizontally; `768p` refines only."""
 
     video: Annotated[VideoAsset, AssetBound(max_bytes=1 << 30, max_decoded_bytes=2 << 30)]
     prompt: str
@@ -1488,200 +1298,6 @@ def _cover(frame: Any) -> Any:
 
 app.entrypoint(internal=True)(regenerate_fl2va)
 app.entrypoint(internal=True)(regenerate_ref2va)
-app.entrypoint(
-    defaults={
-        "base_model": _MODEL,
-        "regenerate_lora": _REGENERATE_LORA,
-        "latent_upscaler": _LATENT_UPSCALER,
-    },
-    components={
-        "base_model": _FL2VA,
-        "regenerate_lora": ("fl2va_regenerate",),
-        "latent_upscaler": ("upscaler",),
-    },
-    memoize=True,
-)(regenerate)
-
-
-async def _render_workflow(
-    ctx: Context, payload: RenderInput, assets: KeyframeAssets | ReferenceAssets,
-    out: Outputs, tel: Telemetry, *, task: Task, steps: int | None,
-    videos: tuple[VideoUse, ...] = (),
-) -> RenderOutput:
-    seed = shot_seed(payload, ctx.request_id, 0)
-    turbo = task.endswith("_turbo")
-    fields: dict[str, Any] = {"prompt": payload.prompt, "seed": seed, "duration_s": payload.duration_s}
-    if not turbo:
-        fields["steps"] = steps
-    request = (
-        (ReferenceClipInput if turbo else ReferenceStandardClipInput)(
-            **fields,
-            frames=held_frames(ContinuationPlan(payload.duration_s), videos),
-            videos=videos,
-        )
-        if task.startswith("ref2va")
-        else (ClipInput if turbo else StandardClipInput)(**fields)
-    )
-    upscale = payload.upscale or Upscale()
-    ignored = upscale.ignored()
-    if upscale.method == "regenerate":
-        # The render's own latent is the refine's input: one call, no 768p decode or re-encode.
-        child = regenerate_ref2va if task.startswith("ref2va") else regenerate_fl2va
-        call = (RegenerateReferencesInput if task.startswith("ref2va") else RegenerateKeyframesInput)(
-            **asdict(request), task=task, resolution=payload.resolution, strength=upscale.start,
-        )  # fmt: skip
-        with tel.scope(f"Regenerate at {payload.resolution.value}"):
-            result = await cast(Callable[..., Awaitable[H3VideoOutput]], child)(payload=call, assets=assets)
-        ctx.release_gpus()
-        return RenderOutput(result.video, [], result.warnings + ignored)
-    functions = {"fl2va": generate_fl2va, "fl2va_turbo": generate_fl2va_turbo,
-                 "ref2va": generate_ref2va, "ref2va_turbo": generate_ref2va_turbo}
-    generate = cast(Callable[..., Awaitable[H3VideoOutput]], functions[task])
-    with tel.scope("Generating original 768p video"):
-        source = await generate(payload=request, assets=assets)
-    if payload.resolution is Resolution.NATIVE:
-        ctx.release_gpus()
-        ignored = ["upscale settings apply only above 768p"] if payload.upscale else []
-        return RenderOutput(source.video, [], source.warnings + ignored)
-    out.publish("originals", source.video, label="Original 768p video")
-    restore = cast(Callable[..., Awaitable[RestorationOutput]], restore_video)
-    with tel.scope(f"SeedVR2 upscale to {payload.resolution.value}"):
-        result = await restore(
-            video=source.video, resolution=RestorationResolution(payload.resolution.value),
-            seed=seed, aspect_ratio="16:9",
-            **{k: getattr(upscale, k) for k in _SEEDVR2_FIELDS if getattr(upscale, k) is not None},
-        )
-    ctx.release_gpus()
-    return RenderOutput(result.video, [source.video], source.warnings + ignored)
-
-
-async def fl2va(ctx: Context, payload: StandardRenderInput, assets: KeyframeAssets,
-                out: Outputs, tel: Telemetry) -> RenderOutput:
-    return await _render_workflow(ctx, payload, assets, out, tel, task="fl2va", steps=payload.steps)
-
-
-async def fl2va_turbo(ctx: Context, payload: RenderInput, assets: KeyframeAssets,
-                      out: Outputs, tel: Telemetry) -> RenderOutput:
-    return await _render_workflow(ctx, payload, assets, out, tel, task="fl2va_turbo", steps=None)
-
-
-async def _direct_reference_assets(
-    ctx: Context,
-    payload: ReferenceRenderInput,
-    assets: DirectReferenceAssets,
-    out: Outputs,
-    tel: Telemetry,
-) -> tuple[ReferenceRenderInput, ReferenceAssets, tuple[VideoUse, ...], list[ImageAsset], list[str]]:
-    """Resolve named references once for a direct call, and how it uses each video.
-
-    ``assets`` is the prepared handoff used by long-form children.  Named references are
-    prepared here, then compiled exactly like one long-form segment.
-    """
-    if payload.references is None:
-        if not assets:
-            raise InvalidRequest("ref2va requires references or assets", fields=["references"])
-        return payload, assets, (), [], []
-    if assets:
-        raise InvalidRequest("send references or assets, not both", fields=["references", "assets"])
-    if not payload.references:
-        raise InvalidRequest("references must contain at least one item", fields=["references"])
-    validate_references(payload.references)
-    shown: list[ImageAsset] = []
-    images, references, warnings, clips = await _create_references(
-        ctx,
-        payload.references,
-        tel,
-        out,
-        shown,
-        style=payload.style,
-        prepare_characters=payload.clean_references,
-        describe_characters=payload.describe_references,
-    )
-    prompts, written = await _write_prompts([payload.prompt], references, clips, payload.style, "", tel)
-    warnings += written
-    call = compile_segments(prompts, references, style=payload.style)[0]
-    for warning in call.warnings:
-        tel.log("h3 reference prompt", level="warning", warning=warning)
-    labeled = _call_assets(images, call.references)
-    return (replace(payload, prompt=call.prompt), labeled, video_uses(call.references), shown,
-            warnings + call.warnings)
-
-
-def _direct_truncations(payload: ReferenceRenderInput, resolved: Assets[Reference]) -> list[str]:
-    """Truncation lines for the videos a direct call attaches: by label (or input id), or by
-    reference name."""
-    attached = [(index, item) for index, item in enumerate(resolved) if isinstance(item, VideoAsset)]
-    if payload.references is None:
-        return truncation_warnings(
-            (resolved.info(index).label or resolved.info(index).id, item) for index, item in attached
-        )
-    sent = {item.ref for _, item in attached}
-    return truncation_warnings(
-        (f"<{ref.name}>", ref.video)
-        for ref in payload.references
-        if ref.video is not None and ref.video.ref in sent
-    )
-
-
-async def ref2va(ctx: Context, payload: ReferenceStandardRenderInput, out: Outputs, tel: Telemetry,
-                 assets: DirectReferenceAssets) -> ReferenceRenderOutput:
-    request, resolved, videos, shown, warnings = await _direct_reference_assets(ctx, payload, assets, out, tel)
-    truncated = _direct_truncations(payload, resolved)
-    result = await _render_workflow(ctx, request, resolved, out, tel, task="ref2va", steps=payload.steps,
-                                    videos=videos)
-    return ReferenceRenderOutput(
-        result.video, result.originals, truncated + warnings + result.warnings, shown
-    )
-
-
-async def ref2va_turbo(ctx: Context, payload: ReferenceRenderInput, out: Outputs, tel: Telemetry,
-                       assets: DirectReferenceAssets) -> ReferenceRenderOutput:
-    request, resolved, videos, shown, warnings = await _direct_reference_assets(ctx, payload, assets, out, tel)
-    truncated = _direct_truncations(payload, resolved)
-    result = await _render_workflow(ctx, request, resolved, out, tel, task="ref2va_turbo", steps=None,
-                                    videos=videos)
-    return ReferenceRenderOutput(
-        result.video, result.originals, truncated + warnings + result.warnings, shown
-    )
-
-
-app.entrypoint(fl2va, emits_media=True, accelerator=False)
-app.entrypoint(fl2va_turbo, emits_media=True, accelerator=False)
-app.entrypoint(ref2va, emits_media=True, accelerator=False)
-app.entrypoint(ref2va_turbo, emits_media=True, accelerator=False)
-
-
-
-def _keyframes_to_video(
-    ctx: Context,
-    task: Task,
-    payload: ClipInput,
-    assets: KeyframeAssets,
-    model: H3Model,
-    out: Outputs,
-    tel: Telemetry,
-    *,
-    steps: int | None,
-    turbo_lora: H3TurboLoRA | None = None,
-    regenerate: RegenerateTarget | None = None,
-) -> H3VideoOutput:
-    ctx.raise_if_cancelled()
-    first_index, last_index = _keyframe_roles(assets)
-    return _render_keyframes(
-        ctx,
-        task,
-        model,
-        out,
-        tel,
-        prompt=encoder_prompt(task, payload.prompt),
-        seed=payload.seed,
-        duration_s=payload.duration_s,
-        steps=steps,
-        first=_keyframe_image(assets, first_index, field="first"),
-        last=_keyframe_image(assets, last_index, field="last"),
-        turbo_lora=turbo_lora,
-        regenerate=regenerate,
-    )
 
 
 def _plan(model: H3Model, turbo_lora: H3TurboLoRA | None, trunk: Trunk) -> TimestepPlan:
@@ -1704,8 +1320,12 @@ def _render_keyframes(
     last: Image | None,
     turbo_lora: H3TurboLoRA | None = None,
     regenerate: RegenerateTarget | None = None,
+    delivery: ContinuationPlan | None = None,
+    completed: Callable[[Any], None] | None = None,
+    ended: Callable[[Any], None] | None = None,
 ) -> H3VideoOutput:
-    """Shared FL2VA rendering for direct requests and chained asset handoffs."""
+    """An FL2VA render: text, and a first and/or last keyframe. `delivery` and `completed`
+    hand a successor its carry, and `ended` its last frame (`keyframe_segment`)."""
     plan = _plan(model, turbo_lora, "fl2va")
     steps = plan.schedule(steps).transformer_evaluations
     keyframes = ("vae",) if first is not None or last is not None else ()
@@ -1713,6 +1333,7 @@ def _render_keyframes(
     ctx.plan("text_encoder", *keyframes, dit, *_decode_plan(regenerate))
     ctx.raise_if_cancelled()
     view = model.for_request(ctx, seed=seed)
+    notes = _retargeted(view.adapters, "transformer")
     log_prompt(tel, "h3 encoder prompt", prompt)
     with tel.stage("prepare", overall_range=(0.00, 0.03)):
         state = model.pipe.start_fl2va(
@@ -1724,6 +1345,7 @@ def _render_keyframes(
             frames=frames_for(duration_s),
             task=task,
             plan=plan,
+            delivery=delivery,
         )
     with tel.stage("condition_text", overall_range=(0.03, 0.08)):
         model.condition_text(task, state)
@@ -1742,20 +1364,18 @@ def _render_keyframes(
             cancel=ctx.raise_if_cancelled,
         )
     if regenerate is not None:
-        return _finish_regenerated(
+        result = _finish_regenerated(
             model, task, state, schedule, target=regenerate, duration_s=duration_s, out=out,
             tel=tel, cancel=ctx.raise_if_cancelled,
         )  # fmt: skip
-    return _finish(
-        model,
-        task,
-        state,
-        schedule,
-        duration_s=duration_s,
-        out=out,
-        tel=tel,
-        cancel=ctx.raise_if_cancelled,
-    )
+    else:
+        result = _finish(
+            model, task, state, schedule, duration_s=duration_s, out=out, tel=tel,
+            cancel=ctx.raise_if_cancelled, completed=completed, ended=ended,
+            delivered_frames=None if delivery is None else delivery.delivered_frames,
+            sampled_frames=None if delivery is None else delivery.sample_frames,
+        )  # fmt: skip
+    return H3VideoOutput(result.video, notes + result.warnings)
 
 
 def _decode_plan(regenerate: RegenerateTarget | None) -> tuple[Any, ...]:
@@ -1781,6 +1401,8 @@ def _references_to_video(
     expected_context_provenance: str | None = None,
     completed: Callable[[Any], None] | None = None,
     regenerate: RegenerateTarget | None = None,
+    anchors: Sequence[tuple[Image, Literal["first", "last"]]] = (),
+    ended: Callable[[Any], None] | None = None,
 ) -> H3VideoOutput:
     plan = _plan(model, turbo_lora, "ref2va")
     steps = plan.schedule(steps).transformer_evaluations
@@ -1788,6 +1410,7 @@ def _references_to_video(
     ctx.plan("text_encoder", {"vae", "audio_vae"}, dit, *_decode_plan(regenerate))
     ctx.raise_if_cancelled()
     view = model.for_request(ctx, seed=payload.seed)
+    notes = _retargeted(view.adapters, "transformer_ref")
     window = ContinuationPlan(payload.duration_s) if delivery is None else delivery
     if payload.frames != held_frames(window, payload.videos):
         raise InvalidRequest(
@@ -1823,6 +1446,7 @@ def _references_to_video(
             task=task,
             plan=plan,
             guide=guide,
+            anchors=anchors,
         )
         for index, reference in enumerate(state.normalized_references):
             if reference.kind == "image":
@@ -1853,30 +1477,29 @@ def _references_to_video(
     if regenerate is not None:
         if context is not None or delivery is not None or completed is not None:
             raise InvalidRequest("a continued segment cannot regenerate", fields=["upscale"])
-        return _finish_regenerated(
+        result = _finish_regenerated(
             model, task, state, schedule, target=regenerate, duration_s=payload.duration_s,
             out=out, tel=tel, cancel=ctx.raise_if_cancelled,
         )  # fmt: skip
-    return _finish(
-        model,
-        task,
-        state,
-        schedule,
-        duration_s=payload.duration_s,
-        out=out,
-        tel=tel,
-        cancel=ctx.raise_if_cancelled,
-        completed=completed,
-        delivered_frames=None if delivery is None else delivery.delivered_frames,
-        sampled_frames=None if delivery is None else delivery.sample_frames,
-    )
+    else:
+        result = _finish(
+            model, task, state, schedule, duration_s=payload.duration_s, out=out, tel=tel,
+            cancel=ctx.raise_if_cancelled, completed=completed, ended=ended,
+            delivered_frames=None if delivery is None else delivery.delivered_frames,
+            sampled_frames=None if delivery is None else delivery.sample_frames,
+        )  # fmt: skip
+    return H3VideoOutput(result.video, notes + result.warnings)
 
 
-# --- long-form composition -------------------------------------------------------------
-# `long_form` is a CPU composition function. Runtime runs an ordinary serving child for each
-# shot and owns its intermediate bytes. A segment is memoized on its full inputs, the previous
-# segment's context included, so a resubmitted long_form skips the segments it already finished.
-# Only encoded asset handles cross the loop. Assembly decodes one bounded event at a time.
+def _anchors(
+    first: ImageAsset | None, last: ImageAsset | None
+) -> list[tuple[Image, Literal["first", "last"]]]:
+    """A Ref2VA call's keyframes, read: anchored as ComfyUI's Add Guide anchors them."""
+    pairs: list[tuple[ImageAsset | None, Literal["first", "last"]]] = [(first, "first"), (last, "last")]
+    return [(image, at) for asset, at in pairs if (image := _frame(asset, f"{at}_frame")) is not None]
+
+
+# --- segments ------------------------------------------------------------------------
 
 class SegmentOutput(msgspec.Struct):
     """`H3VideoOutput` without a default factory, which an invocable result may not carry."""
@@ -1896,148 +1519,12 @@ class SegmentOutput(msgspec.Struct):
 ContextFrames = Literal[0, 22, 39, 56]
 
 
-class StorySegment(ClipInput, kw_only=True):
-    """One story segment with an optional music override."""
-
-    non_diegetic_music: str | None = None
-
-
-class LongFormSegment(StorySegment, kw_only=True):
-    """One segment: whether it continues the previous segment's picture and its sound."""
-
-    context_frames: bool = True
-    context_audio: bool = True
-
-
-class LongFormInput(msgspec.Struct):
-    """Fixed references; each segment may carry the previous one's picture and/or sound."""
-
-    segments: Annotated[list[LongFormSegment], msgspec.Meta(min_length=1)]
-    references: Annotated[list[StoryReference], msgspec.Meta(min_length=1)]
-    style: str = ""
-    overall_soundscape: str = ""
-    non_diegetic_music: str = "N/A"
-    context_frames: ContextFrames = 22
-    mode: Literal["turbo", "standard"] = "turbo"
-    steps: Steps | None = None
-    clean_references: bool = True
-    describe_references: bool = True
-
-
-class LongFormOutput(msgspec.Struct):
-    """The joined video and the reference images made for it. Each is published as it lands:
-    every generated reference, and the video one segment at a time. A failed or canceled run
-    keeps what it published."""
-
-    video: Annotated[VideoAsset, AssetBound(max_bytes=256 << 20, media_types=("video/mp4",))]
-    references: list[ImageAsset]
-    delivered_frames: int
-    fps: int
-    warnings: list[str]
-
-
-def segment_carries(payload: LongFormInput) -> list[Carry]:
-    """What each segment takes from its predecessor: the global picture window unless the
-    segment turns it off (global 0 carries no picture), and one second of sound."""
-    return [
-        Carry(
-            payload.context_frames if index and shot.context_frames else 0,
-            bool(index and shot.context_audio),
-        )
-        for index, shot in enumerate(payload.segments)
-    ]
-
-
-def shot_seed(shot: ClipInput, request_id: str, index: int) -> int:
+def shot_seed(shot: GenerateSegment, request_id: str, index: int) -> int:
     """Choose once per request/shot, without changing seeds when its attempt retries."""
     if shot.seed is not None:
         return shot.seed
     identity = f"{request_id}/h3/shot/{index}".encode()
     return int.from_bytes(hashlib.sha256(identity).digest()[:4], "big")
-
-
-def segment_clock(durations: Sequence[int]) -> tuple[list[int], int]:
-    """Start frame of each shot and the delivered total, in exact integer frames.
-
-    Exactly one replayed frame leaves the chain at every seam. This is integer arithmetic
-    over frame counts and the caller turns it into seconds as `Fraction(frames, FPS)` —
-    never a per-seam `round(sample_rate / fps)`, whose residue accumulated +8.33 ms per clip.
-    """
-    starts: list[int] = []
-    total = 0
-    for index, seconds in enumerate(durations):
-        starts.append(total)
-        total += frames_for(seconds) - (1 if index else 0)
-    return starts, total
-
-
-class CutInput(ReferenceClipInput, kw_only=True):
-    steps: int | None
-    turbo: bool
-    expected_provenance: RenderProvenance | None = None
-    previous_provenance: RenderProvenance | None = None
-
-
-def _sampling(payload: CutInput | MotionInput, turbo_lora: H3TurboLoRA) -> H3TurboLoRA | None:
-    """The segment's sampler over the one shared construction: the PDD adapter, or none."""
-    if payload.turbo and payload.steps is not None:
-        raise InvalidRequest("a turbo segment runs its LoRA's one schedule; it takes no steps")
-    return turbo_lora if payload.turbo else None
-
-
-def _render_cut(
-    ctx: Context,
-    payload: CutInput,
-    assets: ReferenceAssets,
-    model: H3Model,
-    out: Outputs,
-    tel: Telemetry,
-    *,
-    steps: int | None,
-    turbo_lora: H3TurboLoRA | None = None,
-) -> SegmentOutput:
-    observed = provenance(
-        model.checkpoint_ref, "" if turbo_lora is None else turbo_lora.checkpoint_ref
-    )
-    compatible(observed, payload.expected_provenance)
-    compatible_base(observed, payload.previous_provenance)
-    _reference_policy(assets)
-    task: Task = "ref2va" if turbo_lora is None else "ref2va_turbo"
-    shot = _references_to_video(
-        ctx,
-        task,
-        payload,
-        assets,
-        model,
-        out,
-        tel,
-        steps=steps,
-        turbo_lora=turbo_lora,
-    )
-    tel.log("h3 cut rendering", native_path=task, seed=payload.seed, references=len(assets))
-    return SegmentOutput(shot.video, list(shot.warnings), observed)
-
-
-# Both sampling modes use one turbo-capable construction, reused by every segment.
-@invocable(
-    defaults={"base_model": _MODEL, "turbo_lora": _TURBO_LORA},
-    components={"base_model": _REF2VA, "turbo_lora": ("ref2va_turbo",)},
-)
-async def cut_segment(
-    ctx: Context,
-    *,
-    payload: CutInput,
-    assets: ReferenceAssets,
-    base_model: H3TurboBase,
-    turbo_lora: H3TurboLoRA,
-    out: Outputs,
-    tel: Telemetry,
-) -> SegmentOutput:
-    lora = _sampling(payload, turbo_lora)
-    return _render_cut(ctx, payload, assets, base_model, out, tel, steps=payload.steps, turbo_lora=lora)
-
-
-app.entrypoint(internal=True)(cut_segment)
 
 
 MotionContextAsset = Annotated[
@@ -2048,9 +1535,9 @@ MotionContextAsset = Annotated[
 def held_frames(plan: ContinuationPlan, videos: Sequence[VideoUse] = ()) -> int:
     """The frames a call's DiT holds: its sampled window, plus the carried picture again as
     condition rows (the double form; single-copy was tested and rejected, 2026-10-10), plus
-    a guide's frames, at most the window's again."""
-    guided = any(video.guide for video in videos)
-    return plan.sample_frames * (1 + guided) + plan.carried.frames
+    an anchor video's frames, at most the window's again."""
+    anchored = any(video.anchor for video in videos)
+    return plan.sample_frames * (1 + anchored) + plan.carried.frames
 
 
 class MotionInput(msgspec.Struct):
@@ -2070,15 +1557,27 @@ class MotionInput(msgspec.Struct):
     context_audio: bool = False
     next_context_frames: ContextFrames = 0
     next_context_audio: bool = False
-    expected_provenance: RenderProvenance | None = None
     previous_provenance: RenderProvenance | None = None
     context: MotionContextAsset | None = None
+    #: Keyframes, anchored as ComfyUI's Add Guide anchors them (`anchor_rows`).
+    first_frame: FrameImage = None
+    last_frame: FrameImage = None
 
 
 class MotionOutput(SegmentOutput):
     # A fixed output slot: Runtime grants result outputs by field path, never inside a union.
     # A shot with no successor returns it empty instead of exporting any window.
     context: MotionContextAsset
+    #: The segment's last delivered frame. A child's result is a granted input of the parent,
+    #: so it may feed the next segment (a picture the parent saved itself may not, run 20651).
+    last_frame: ImageAsset
+
+
+def _sampling(payload: KeyframeInput | MotionInput, turbo_lora: H3TurboLoRA) -> H3TurboLoRA | None:
+    """The segment's sampler over the one shared construction: the PDD adapter, or none."""
+    if payload.turbo and payload.steps is not None:
+        raise InvalidRequest("a turbo segment runs its LoRA's one schedule; it takes no steps")
+    return turbo_lora if payload.turbo else None
 
 
 def _render_motion(
@@ -2095,7 +1594,6 @@ def _render_motion(
     observed = provenance(
         model.checkpoint_ref, "" if turbo_lora is None else turbo_lora.checkpoint_ref
     )
-    compatible(observed, payload.expected_provenance)
     compatible_base(observed, payload.previous_provenance)
     native_provenance = context_provenance(observed)
     plan = ContinuationPlan(
@@ -2111,6 +1609,7 @@ def _render_motion(
         context = decode_context(payload.context.read_bytes())
     _reference_policy(assets)
     saved_context: list[FileAsset] = []
+    ended: list[ImageAsset] = []
 
     def save_context(state: Any) -> None:
         carried = model.pipe.export_context(state, provenance=native_provenance)
@@ -2135,6 +1634,8 @@ def _render_motion(
         delivery=plan,
         expected_context_provenance=context_provenance(payload.previous_provenance or observed),
         completed=save_context if plan.successor else None,
+        anchors=_anchors(payload.first_frame, payload.last_frame),
+        ended=lambda rgb: ended.append(out.save_image(PILImage.fromarray(rgb))),
     )
     return MotionOutput(
         shot.video,
@@ -2143,6 +1644,7 @@ def _render_motion(
         saved_context[0]
         if saved_context
         else out.save_bytes(b"", media_type="application/octet-stream"),
+        ended[0],
     )
 
 
@@ -2168,31 +1670,6 @@ async def motion_segment(
 app.entrypoint(internal=True)(motion_segment)
 
 
-class LongFormCutsInput(msgspec.Struct):
-    segments: Annotated[list[StorySegment], msgspec.Meta(min_length=1)]
-    references: Annotated[list[StoryReference], msgspec.Meta(min_length=1)]
-    style: str = ""
-    overall_soundscape: str = ""
-    non_diegetic_music: str = "N/A"
-    mode: Literal["turbo", "standard"] = "turbo"
-    steps: Steps | None = None
-    clean_references: bool = True
-    describe_references: bool = True
-
-
-def segment_sampling(
-    payload: LongFormInput | LongFormCutsInput,
-) -> tuple[bool, int | None]:
-    """Whether segments run turbo, and their step count (None: the plan's own)."""
-    turbo = payload.mode == "turbo"
-    if turbo and payload.steps is not None:
-        raise InvalidRequest(
-            "turbo runs its LoRA's one schedule; omit steps or select mode=standard",
-            fields=["mode", "steps"],
-        )
-    return turbo, payload.steps
-
-
 #: Progress weight of one generated reference image, in segment frames.
 _REFERENCE_FRAMES = 5
 
@@ -2201,18 +1678,6 @@ def log_prompt(tel: Telemetry, event: str, prompt: str, **fields: str | int) -> 
     """The text's digest and ends: a log value holds 400 characters, not a whole prompt."""
     digest = hashlib.sha256(prompt.encode()).hexdigest()
     tel.log(event, level="info", digest=digest, chars=len(prompt), head=prompt[:400], tail=prompt[-400:], **fields)
-
-
-def segment_calls(payload: LongFormInput | LongFormCutsInput) -> list[SegmentCall]:
-    """Each segment's child call: its text plus the global sections, and its references."""
-    return compile_segments(
-        [shot.prompt for shot in payload.segments],
-        payload.references,
-        style=payload.style,
-        overall_soundscape=payload.overall_soundscape,
-        non_diegetic_music=payload.non_diegetic_music,
-        segment_music=[shot.non_diegetic_music for shot in payload.segments],
-    )
 
 
 async def _create_references(
@@ -2290,15 +1755,17 @@ async def _create_references(
                     and reference.kind == "character"
                     else "generated" if FILE[reference.kind] == "image" and reference.image is None
                     else "attached"),
-            digest=images[reference.name].digest,
+            digest=images[reference.name].digest if reference.name in images else "",
         )
     return images, described, warnings, clips
+
+
 def _audible(references: list[StoryReference]) -> tuple[list[StoryReference], list[str]]:
     """`use_audio` holds only for a clip with a soundtrack: on a silent one it is ignored, with a
     warning, so H3's `<Audio N>` labels match the prompt's."""
     silent = {
         ref.name for ref in references
-        if ref.kind == "video" and ref.use_audio and ref.video is not None and ref.video.probe().soundtrack is None
+        if ref.kind in ("video", "anchor_video") and ref.use_audio and ref.video is not None and ref.video.probe().soundtrack is None
     }
     return (
         [replace(ref, use_audio=False) if ref.name in silent else ref for ref in references],
@@ -2395,216 +1862,449 @@ async def _write_prompts(
     return written, warnings
 
 
-async def _written[T: (LongFormInput, LongFormCutsInput)](
-    payload: T, references: list[StoryReference], clips: dict[str, str], tel: Telemetry
-) -> tuple[T, list[str]]:
-    """`payload` with the described references and its segments' prompts written (`_write_prompts`)."""
+def segment_calls(payload: GenerateInput) -> list[SegmentCall]:
+    """Each segment's child call: its text plus the global sections, and its references."""
+    return compile_segments(
+        [shot.prompt for shot in payload.segments],
+        payload.references,
+        style=payload.style,
+        overall_soundscape=payload.overall_soundscape,
+        non_diegetic_music=payload.non_diegetic_music,
+        segment_music=[shot.non_diegetic_music for shot in payload.segments],
+    )
+
+
+async def _written(
+    payload: GenerateInput, references: list[StoryReference], clips: dict[str, str], tel: Telemetry
+) -> tuple[GenerateInput, list[str]]:
+    """`payload` with the described references and its segments' prompts written
+    (`_write_prompts`). Frames, never described or written, keep their place."""
     prompts, warnings = await _write_prompts(
         [segment.prompt for segment in payload.segments], references, clips, payload.style,
         payload.overall_soundscape.strip(), tel,
-    )
+    )  # fmt: skip
     segments = [replace(segment, prompt=prompt) for segment, prompt in zip(payload.segments, prompts, strict=True)]
-    return replace(payload, references=references, segments=segments), warnings
+    frames = [ref for ref in payload.references if ref.kind == "frame"]
+    return replace(payload, references=[*references, *frames], segments=segments), warnings
+
+# --- one function: segments, references, keyframes, steps and upscale ------------------
+# `generate` is a CPU composition function. Runtime runs an ordinary serving child for each
+# segment and owns its intermediate bytes. A segment is memoized on its full inputs, the
+# previous segment's context included, so a resubmitted request skips the segments it already
+# finished. Only encoded asset handles cross the loop. Assembly decodes one bounded event at a
+# time.
+
+#: The full model's step counts; turbo always runs its LoRA's 8.
+FullSteps = Literal[30, 40, 50]
+#: A keyframe the request supplies (`StoryReference` `frame`).
+FrameImage = Annotated[
+    ImageAsset | None,
+    AssetBound(
+        max_bytes=64 << 20,
+        max_decoded_bytes=256 << 20,
+        media_types=("image/png", "image/jpeg", "image/webp"),
+    ),
+]
 
 
-async def long_form_cuts(
+class KeyframeInput(msgspec.Struct, kw_only=True):
+    """One FL2VA segment: its text, keyframes and length, and what its successor carries."""
+
+    prompt: str
+    seed: int
+    duration_s: DurationSeconds
+    steps: int | None
+    turbo: bool
+    first_frame: FrameImage = None
+    last_frame: FrameImage = None
+    next_context_frames: ContextFrames = 0
+    next_context_audio: bool = False
+    previous_provenance: RenderProvenance | None = None
+
+
+def _frame(asset: ImageAsset | None, field: str) -> Image | None:
+    if asset is None:
+        return None
+    image = asset.read()
+    _validate_ratio(image.width, image.height, field)
+    return image
+
+
+def _retargeted(adapters: Sequence[Any], dit: str) -> list[str]:
+    """A line for each caller LoRA trained on the other transformer: Runtime applies it to this
+    one (as ComfyUI would load it), and says so once per LoRA (`generate` keeps one)."""
+    other = {"transformer": "FL2VA", "transformer_ref": "Ref2VA"}
+    return [
+        f"LoRA {adapter.ref} was trained on {adapter.source_component} ({other.get(adapter.source_component, '?')}) "
+        f"and is applied to {dit} ({other[dit]})"
+        for adapter in adapters
+        if adapter.source_component in other and adapter.source_component != dit
+    ]
+
+
+@invocable(
+    defaults={"base_model": _MODEL, "turbo_lora": _TURBO_LORA},
+    components={"base_model": _FL2VA, "turbo_lora": ("fl2va_turbo",)},
+    memoize=True,
+)
+async def keyframe_segment(
     ctx: Context,
-    payload: LongFormCutsInput,
+    *,
+    payload: KeyframeInput,
+    base_model: H3TurboBase,
+    turbo_lora: H3TurboLoRA,
     out: Outputs,
     tel: Telemetry,
-) -> LongFormOutput:
-    """Generate reference-conditioned camera cuts. Each reference and the film so far are
-    published as they land; a failed or canceled run keeps them.
+) -> MotionOutput:
+    """A segment on FL2VA: its text and its first and/or last keyframe, or text alone."""
+    lora = _sampling(payload, turbo_lora)
+    observed = provenance(base_model.checkpoint_ref, "" if lora is None else lora.checkpoint_ref)
+    compatible_base(observed, payload.previous_provenance)
+    plan = ContinuationPlan(
+        payload.duration_s, Carry(),
+        Carry(int(payload.next_context_frames), payload.next_context_audio),
+    )  # fmt: skip
+    saved: list[FileAsset] = []
+    ended: list[ImageAsset] = []
 
-    Each segment is free text naming references as `<Name>`; see LONG_FORM.md for what
-    the workflow adds, such as `style` as each segment's `style:` section. H3 fills
-    undescribed audio with invented speech: name the non-voice sounds, and write
-    "silently, lips closed" where no one speaks.
+    def save_context(state: Any) -> None:
+        carried = base_model.pipe.export_context(state, provenance=context_provenance(observed))
+        assert carried is not None
+        saved.append(out.save_bytes(encode_context(carried), media_type="application/octet-stream"))
+
+    shot = _render_keyframes(
+        ctx, "fl2va" if lora is None else "fl2va_turbo", base_model, out, tel,
+        prompt=encoder_prompt("fl2va", payload.prompt), seed=payload.seed,
+        duration_s=payload.duration_s, steps=payload.steps,
+        first=_frame(payload.first_frame, "first_frame"), last=_frame(payload.last_frame, "last_frame"),
+        turbo_lora=lora, delivery=plan if plan.successor else None,
+        completed=save_context if plan.successor else None,
+        ended=lambda rgb: ended.append(out.save_image(PILImage.fromarray(rgb))),
+    )  # fmt: skip
+    context = saved[0] if saved else out.save_bytes(b"", media_type="application/octet-stream")
+    return MotionOutput(shot.video, list(shot.warnings), observed, context, ended[0])
+
+
+app.entrypoint(internal=True)(keyframe_segment)
+
+
+class GenerateSegment(msgspec.Struct, kw_only=True):
+    """One segment: its text, length and seed; whether it continues the previous segment's
+    picture (`context_frames`) and sound (`context_audio`); its music; and the `frame`
+    references it starts or ends on, by name (`first_frame`, `last_frame`). A frame no segment
+    names takes its own `at`: the first segment's first frame, or the last segment's last."""
+
+    prompt: str
+    duration_s: SegmentSeconds
+    seed: int | None = None
+    context_frames: bool = True
+    context_audio: bool = True
+    non_diegetic_music: str | None = None
+    first_frame: str | None = None
+    last_frame: str | None = None
+    #: This segment's sampling, overriding the request's.
+    turbo: bool | None = None
+    steps: FullSteps | None = None
+
+
+class GenerateInput(msgspec.Struct, kw_only=True):
+    """H3: one or more segments, joined into one video (README.md, LONG_FORM.md).
+
+    A segment renders on FL2VA from its text and keyframes, or on Ref2VA (`transformer_ref`)
+    when it uses references or continues the previous segment. `turbo` (each segment may set
+    its own) runs the PDD-8 turbo LoRA's 8 steps; off, the full model runs `steps` (30, 40 or
+    50; absent, 30). `resolution` above 768p upscales the whole video by `upscale.method`
+    (UPSCALE.md).
     """
-    ctx.raise_if_cancelled()
-    turbo, steps = segment_sampling(payload)
-    calls = segment_calls(payload)
-    planned_frames = [frames_for(shot.duration_s) for shot in payload.segments]
-    render_work = planned_frames
-    reference_work = sum(FILE[ref.kind] == "image" and ref.image is None for ref in payload.references) * _REFERENCE_FRAMES
-    total_work = sum(render_work) + reference_work
-    prefetch(cut_segment)
-    references: list[ImageAsset] = []
-    images, described, warnings, clips = await _create_references(
-        ctx, payload.references, tel, out, references, style=payload.style,
-        prepare_characters=payload.clean_references,
-        describe_characters=payload.describe_references,
-    )
-    payload, written = await _written(payload, described, clips, tel)
-    warnings += written
-    calls = segment_calls(payload)
-    completed_work = reference_work
-    expected = None
-    warnings = truncation_warnings(named_videos(payload.references, calls)) + warnings
-    warnings += [warning for call in calls for warning in call.warnings]
-    count = len(payload.segments)
-    cut = CutJoin(out, ctx.raise_if_cancelled)
-    joining: asyncio.Future[None] | None = None
-    with ScanAhead(ctx.raise_if_cancelled, pictures=False) as scanning:
 
-        def show(index: int, last: bool) -> None:
-            """Join shot `index` and publish the film so far, off the GPU path."""
-            revision = cut.append(scanning.result(index), planned_frames[index], last=last)
-            span = "shot 1" if index == 0 else f"shots 1-{index + 1}"
-            out.publish("video", revision, label=f"Video ({span} of {count})")
-
-        try:
-            for index, shot in enumerate(payload.segments):
-                ctx.raise_if_cancelled()
-                selected = calls[index].references
-                prompt = calls[index].prompt
-                seed = shot_seed(shot, ctx.request_id, index)
-                assets = _call_assets(images, selected)
-                log_prompt(tel, "h3 segment prompt", prompt, segment=index + 1,
-                           references=", ".join(ref.name for ref in selected))
-                try:
-                    with tel.scope(
-                        f"Segment {index + 1} of {count}",
-                        overall_range=(
-                            completed_work / total_work,
-                            (completed_work + render_work[index]) / total_work,
-                        ),
-                    ):
-                        result = await cut_segment(  # type: ignore[call-arg]
-                            payload=CutInput(
-                                prompt=prompt,
-                                seed=seed,
-                                steps=steps,
-                                turbo=turbo,
-                                duration_s=shot.duration_s,
-                                frames=held_frames(
-                                    ContinuationPlan(shot.duration_s), video_uses(selected)
-                                ),
-                                videos=video_uses(selected),
-                                expected_provenance=expected,
-                                previous_provenance=expected,
-                            ),
-                            assets=assets,
-                        )
-                except ChildCallError as failure:
-                    ctx.raise_if_cancelled()
-                    raise OutputError(
-                        f"shot {index + 1} of {count} failed ({failure.code}): {str(failure)[:512]}",
-                        code="segment_failed",
-                    ) from failure
-                compatible(result.provenance, expected)
-                expected = result.provenance
-                scanning.add(result.video)
-                warnings.extend(result.warnings)
-                completed_work += render_work[index]
-                if joining is not None:
-                    await joining
-                joining = asyncio.ensure_future(asyncio.to_thread(show, index, index + 1 == count))
-            # Every GPU call has returned: the rest is CPU work, so the next request's shots
-            # start now.
-            ctx.release_gpus()
-        finally:
-            if joining is not None:
-                # However the loop ends, the film through the last joined segment is published.
-                await asyncio.gather(joining, return_exceptions=True)
-        assert joining is not None
-        joining.result()
-        joined = cut.finish()
-    delivered_frames = sum(planned_frames)
-    if joined.frame_count != delivered_frames:
-        raise OutputError("the joined cuts differ from the declared frame clock", code="shot_frames")
-    return LongFormOutput(
-        video=joined.video,
-        references=references,
-        delivered_frames=delivered_frames,
-        fps=FPS,
-        warnings=warnings,
-    )
+    segments: Annotated[list[GenerateSegment], msgspec.Meta(min_length=1)]
+    references: list[StoryReference] = []
+    style: str = ""
+    overall_soundscape: str = ""
+    non_diegetic_music: str = "N/A"
+    context_frames: ContextFrames = 22
+    turbo: bool = True
+    steps: FullSteps | None = None
+    resolution: Resolution = Resolution.NATIVE
+    upscale: Upscale | None = None
+    clean_references: bool = True
+    describe_references: bool = True
 
 
-async def long_form(
+class GenerateOutput(msgspec.Struct):
+    """The video and what was made for it, each published as it lands: every generated or
+    taken reference, the 768p originals when upscaled, and the video one segment at a time. A
+    failed or canceled run keeps what it published."""
+
+    video: Annotated[VideoAsset, AssetBound(max_bytes=1 << 30, media_types=("video/mp4",))]
+    originals: Annotated[list[VideoAsset], AssetBound(media_types=("video/mp4",), max_bytes=1 << 30)]
+    references: list[ImageAsset]
+    delivered_frames: int
+    fps: int
+    warnings: list[str]
+
+
+def bind_frames(payload: GenerateInput) -> list[tuple[StoryReference | None, StoryReference | None]]:
+    """Each segment's first and last keyframe: the ones its `first_frame`/`last_frame` name,
+    then each frame no segment names on its `at` (the first segment's first frame, or the last
+    segment's last)."""
+    frames = {name_key(ref.name): ref for ref in payload.references if ref.kind == "frame"}
+    bound: list[list[StoryReference | None]] = [[None, None] for _ in payload.segments]
+    named = set()
+    for index, segment in enumerate(payload.segments):
+        for slot, name in enumerate((segment.first_frame, segment.last_frame)):
+            if name is None:
+                continue
+            reference = frames.get(name_key(name))
+            if reference is None:
+                field = ("first_frame", "last_frame")[slot]
+                raise InvalidRequest(f"segment {index + 1}: {name} is no frame reference",
+                                     fields=[f"segments[{index}].{field}"])
+            bound[index][slot] = reference
+            named.add(reference.name)
+    for reference in frames.values():
+        if reference.name in named:
+            continue
+        index, slot = (0, 0) if reference.at == "first" else (len(bound) - 1, 1)
+        if (taken := bound[index][slot]) is not None:
+            raise InvalidRequest(
+                f"segment {index + 1}'s {reference.at} frame is {taken.name}; name {reference.name} "
+                "on the segment it belongs to", fields=["references"],
+            )  # fmt: skip
+        bound[index][slot] = reference
+    return [(first, last) for first, last in bound]
+
+
+def segment_sampling(payload: GenerateInput) -> list[tuple[bool, int | None, str]]:
+    """Each segment's turbo, full-model steps (None: the plan's 30) and any warning: turbo runs
+    its LoRA's 8 steps, so steps given beside it are ignored."""
+    sampling = []
+    for index, segment in enumerate(payload.segments):
+        turbo = payload.turbo if segment.turbo is None else segment.turbo
+        steps = segment.steps if segment.steps is not None else payload.steps
+        warning = ""
+        if turbo and steps is not None:
+            warning = f"Segment {index + 1}: turbo runs its LoRA's 8 steps; steps {steps} ignored"
+        sampling.append((turbo, None if turbo else steps, warning))
+    return sampling
+
+
+def segment_carries(payload: GenerateInput) -> list[Carry]:
+    """What each segment takes from its predecessor: the global picture window unless the
+    segment turns it off (global 0 carries no picture), and one second of sound."""
+    return [
+        Carry(
+            payload.context_frames if index and shot.context_frames else 0,
+            bool(index and shot.context_audio),
+        )
+        for index, shot in enumerate(payload.segments)
+    ]
+
+
+def _fl2va_prompt(payload: GenerateInput, index: int) -> str:
+    """An FL2VA segment's text: its own, opening with the style, with the overall soundscape
+    as its `audio` line and its music as its `non_diegetic_music` line where it has none.
+    Text that needs none of them reaches the encoder verbatim, as ComfyUI sends it."""
+    segment = payload.segments[index]
+    text, style = segment.prompt, payload.style.strip()
+    if style and not text.strip().casefold().startswith(style.casefold()):
+        text = f"{style.rstrip('.')}. {text.strip()}"
+    lines = []
+    if payload.overall_soundscape.strip() and not re.search(r"^\s*audio\s*:", text, re.I | re.M):
+        lines.append(f"audio: {payload.overall_soundscape.strip()}")
+    music = segment.non_diegetic_music if segment.non_diegetic_music is not None else payload.non_diegetic_music
+    if "non_diegetic_music" not in text.casefold():
+        lines.append(f"non_diegetic_music: {music.strip() or 'N/A'}")
+    return "\n\n".join([text.rstrip(), *lines]) if lines else text
+
+
+def _continuation_pictures(
+    payload: GenerateInput, calls: list[SegmentCall], carries: list[Carry]
+) -> tuple[list[SegmentCall], dict[int, str]]:
+    """A continuing segment that uses no references renders on Ref2VA, which needs a picture:
+    it takes its predecessor's last frame as a soft picture of the set (`<Segment N end>`).
+    Also each such predecessor's number and its picture's name."""
+    out, taken = list(calls), {}
+    for index, (call, carry) in enumerate(zip(calls, carries, strict=True)):
+        if call.references or not carry:
+            continue
+        end = StoryReference(f"Segment {index} end", "world_state")
+        taken[index] = end.name
+        out[index] = compile_segments(
+            [payload.segments[index].prompt], [end], style=payload.style,
+            overall_soundscape=payload.overall_soundscape, non_diegetic_music=payload.non_diegetic_music,
+            segment_music=[payload.segments[index].non_diegetic_music], forced=[frozenset({end.name})],
+        )[0]  # fmt: skip
+    return out, taken
+
+
+async def _upscale_segments(
+    ctx: Context, payload: GenerateInput, videos: list[VideoAsset], calls: list[SegmentCall],
+    plans: list[ContinuationPlan], seeds: list[int], out: Outputs, tel: Telemetry,
+) -> tuple[VideoAsset, list[str]]:
+    """Each segment's 768p video taken to `resolution` by `upscale.method` (Regenerate with the
+    segment's own text, or SeedVR2), joined again and published as it grows. Each is a child's
+    result, which a child may take; the parent's own joined video is not (run 20651)."""
+    upscale = payload.upscale or Upscale()
+    restore = cast(Callable[..., Awaitable[RestorationOutput]], restore_video)
+    cut = CutJoin(out, ctx.raise_if_cancelled, continuous=True)
+    warnings: list[str] = []
+    size, count = payload.resolution.value, len(videos)
+    for index, video in enumerate(videos):
+        if upscale.method == "regenerate":
+            call = RegenerateInput(
+                video=video, prompt=calls[index].prompt, resolution=payload.resolution,
+                strength=upscale.start, seed=seeds[index],
+            )  # fmt: skip
+            with tel.scope(f"Regenerate segment {index + 1} of {count} at {size}"):
+                result = await cast(Callable[..., Awaitable[RegenerateOutput]], regenerate_segment)(payload=call)
+            warnings += result.warnings
+            upscaled = result.video
+        else:
+            with tel.scope(f"SeedVR2 segment {index + 1} of {count} to {size}"):
+                upscaled = (await restore(
+                    video=video, resolution=RestorationResolution(size), seed=seeds[index], aspect_ratio="16:9",
+                    **{k: getattr(upscale, k) for k in _SEEDVR2_FIELDS if getattr(upscale, k) is not None},
+                )).video  # fmt: skip
+        scan = _scan_video(upscaled, ctx.raise_if_cancelled, pictures=False)
+        revision = cut.append(scan, plans[index].delivered_frames, last=index + 1 == count)
+        out.publish("video", revision, label=f"Video ({size}, segments 1-{index + 1} of {count})")
+    return cut.finish().video, warnings
+
+
+@invocable(
+    defaults={
+        "base_model": _MODEL,
+        "regenerate_lora": _REGENERATE_LORA,
+        "latent_upscaler": _LATENT_UPSCALER,
+    },
+    components={
+        "base_model": _FL2VA,
+        "regenerate_lora": ("fl2va_regenerate",),
+        "latent_upscaler": ("upscaler",),
+    },
+    memoize=True,
+)
+async def regenerate_segment(
     ctx: Context,
-    payload: LongFormInput,
+    *,
+    payload: RegenerateInput,
+    base_model: H3TurboBase,
+    regenerate_lora: H3RegenerateLoRA,
+    latent_upscaler: H3LatentUpscaler,
     out: Outputs,
     tel: Telemetry,
-) -> LongFormOutput:
-    """Render segments with their selected motion context and join them. Each reference and the video so far are
-    published as they land; a failed or canceled run keeps them.
+) -> RegenerateOutput:
+    """`regenerate` as a child: one segment of a longer video."""
+    return regenerate(ctx, payload, base_model, regenerate_lora, latent_upscaler, out, tel)
 
-    Each segment is free text naming references as `<Name>`; see LONG_FORM.md for what
-    the workflow adds, such as `style` as each segment's `style:` section. H3 fills
-    undescribed audio with invented speech: name the non-voice sounds, and write
-    "silently, lips closed" where no one speaks.
+
+app.entrypoint(internal=True)(regenerate_segment)
+
+
+async def generate(
+    ctx: Context,
+    payload: GenerateInput,
+    out: Outputs,
+    tel: Telemetry,
+) -> GenerateOutput:
+    """Render the segments and join them. Each reference and the video so far are published as
+    they land; a failed or canceled run keeps them.
+
+    Each segment is free text naming references as `<Name>`; see LONG_FORM.md for what the
+    workflow adds, such as `style` as each segment's `style:` section. Frames and anchor videos
+    need no mention. H3 fills undescribed audio with invented speech: name the non-voice
+    sounds, and write "silently, lips closed" where no one speaks.
     """
     ctx.raise_if_cancelled()
-    turbo, steps = segment_sampling(payload)
-    calls = segment_calls(payload)
+    sampling = segment_sampling(payload)
+    upscale = payload.upscale or Upscale()
+    regenerating = upscale.method == "regenerate"
+    upscaling = payload.resolution is not Resolution.NATIVE or regenerating
+    warnings = upscale.ignored() if payload.upscale else []
+    warnings += [warning for _, _, warning in sampling if warning]
+    if payload.upscale and not upscaling:
+        warnings.append("upscale settings apply only above 768p")
+    frames = bind_frames(payload)
     carries = segment_carries(payload)
+    count = len(payload.segments)
+    for index, ((first, _), carry) in enumerate(zip(frames, carries, strict=True)):
+        if first is not None and carry:
+            raise InvalidRequest(
+                f"segment {index + 1} continues segment {index}, so it starts where that one ends; "
+                f"set its context_frames and context_audio to false to start it on {first.name}",
+                fields=[f"segments[{index}]"],
+            )  # fmt: skip
     # A carry's regenerated head shares the native window with new frames. Shorten requested
     # segments to its whole-second budget instead of refusing a valid 5-15s request.
     durations = [
         min(shot.duration_s, (MAX_FRAMES - carry.head_frames) // FPS)
         for shot, carry in zip(payload.segments, carries, strict=True)
     ]
-    warnings = [warning for call in calls for warning in call.warnings]
-    warnings.extend(opening_cut_warnings(
-        [shot.prompt for shot in payload.segments], payload.references,
-        [carry.frames > 0 for carry in carries],
-    ))
     for index, (shot, duration) in enumerate(zip(payload.segments, durations, strict=True)):
         if duration != shot.duration_s:
-            warning = (
-                f"Segment {index + 1}: shortened from {shot.duration_s}s to {duration}s "
-                f"to fit {carries[index].head_frames} carried frames."
-            )
-            warnings.append(warning)
-            tel.log(
-                "Adjusted segment duration", shot=index + 1,
-                requested_seconds=shot.duration_s, delivered_seconds=duration,
-                context_frames=carries[index].head_frames,
-            )
-    # Validate every adjusted generation window before creating reference images.
+            warnings.append(f"Segment {index + 1}: shortened from {shot.duration_s}s to {duration}s "
+                            f"to fit {carries[index].head_frames} carried frames.")  # fmt: skip
     plans = [
         ContinuationPlan(duration, carried, successor)
         for duration, carried, successor in zip(
             durations, carries, [*carries[1:], Carry()], strict=True
         )
     ]
+    calls, _ = _continuation_pictures(payload, segment_calls(payload), carries)
+    warnings.extend(opening_cut_warnings(
+        [shot.prompt for shot in payload.segments], payload.references, [carry.frames > 0 for carry in carries],
+    ))  # fmt: skip
+    for index, call in enumerate(calls):
+        anchored = [ref.name for ref in call.references if ref.kind == "anchor_video"]
+        if anchored and frames[index][0] is not None:
+            raise InvalidRequest(
+                f"segment {index + 1} follows {anchored[0]} from its first frame; it takes no first "
+                f"frame ({frames[index][0].name})", fields=[f"segments[{index}]"],
+            )  # fmt: skip
     render_work = [plan.sample_frames for plan in plans]
-    reference_work = sum(FILE[ref.kind] == "image" and ref.image is None for ref in payload.references) * _REFERENCE_FRAMES
+    reference_work = sum(
+        ref.kind in ("character", "background") and ref.image is None for ref in payload.references
+    ) * _REFERENCE_FRAMES
     total_work = sum(render_work) + reference_work
     prefetch(motion_segment)
-    references: list[ImageAsset] = []
+    shown: list[ImageAsset] = []
     images, described, described_warnings, clips = await _create_references(
-        ctx, payload.references, tel, out, references, style=payload.style,
-        prepare_characters=payload.clean_references,
+        ctx, [ref for ref in payload.references if ref.kind != "frame"], tel, out, shown,
+        style=payload.style, prepare_characters=payload.clean_references,
         describe_characters=payload.describe_references,
-    )
+    )  # fmt: skip
     payload, written = await _written(payload, described, clips, tel)
-    described_warnings += written
-    calls = segment_calls(payload)
+    calls, taken = _continuation_pictures(payload, segment_calls(payload), carries)
     warnings = (
-        truncation_warnings(named_videos(payload.references, calls)) + described_warnings + warnings
-    )
+        truncation_warnings(named_videos(payload.references, calls)) + described_warnings + written
+        + warnings + [warning for call in calls for warning in call.warnings]
+    )  # fmt: skip
+    seeds = [shot_seed(shot, ctx.request_id, index) for index, shot in enumerate(payload.segments)]
     completed_work = reference_work
     context = None
     expected: RenderProvenance | None = None
-    count = len(payload.segments)
+    rendered: list[VideoAsset] = []
     cut = CutJoin(out, ctx.raise_if_cancelled, continuous=True)
     joining: asyncio.Future[None] | None = None
+    single_regenerate = count == 1 and regenerating
+    shown_as = "originals" if upscaling and not single_regenerate else "video"
     with ScanAhead(ctx.raise_if_cancelled, pictures=False) as scanning:
 
         def show(index: int, last: bool) -> None:
             """Join segment `index` and publish the video so far, off the GPU path."""
             revision = cut.append(scanning.result(index), plans[index].delivered_frames, last=last)
             span = "segment 1" if index == 0 else f"segments 1-{index + 1}"
-            out.publish("video", revision, label=f"Video ({span} of {count})")
+            label = f"Original 768p video ({span} of {count})" if shown_as == "originals" else f"Video ({span} of {count})"
+            out.publish(shown_as, revision, label=label)
 
         try:
             for index, shot in enumerate(payload.segments):
                 ctx.raise_if_cancelled()
-                seed = shot_seed(shot, ctx.request_id, index)
-                carried, successor = plans[index].carried, plans[index].successor
+                call, plan, (first, last) = calls[index], plans[index], frames[index]
+                turbo, steps, _ = sampling[index]
+                first_asset = None if first is None else first.image
+                last_asset = None if last is None else last.image
                 try:
                     with tel.scope(
                         f"Segment {index + 1} of {count}",
@@ -2613,31 +2313,55 @@ async def long_form(
                             (completed_work + render_work[index]) / total_work,
                         ),
                     ):
-                        assets = _call_assets(images, calls[index].references)
-                        log_prompt(tel, "h3 segment prompt", calls[index].prompt, segment=index + 1,
-                                   references=", ".join(ref.name for ref in calls[index].references))
-                        child_payload = MotionInput(
-                            prompt=calls[index].prompt,
-                            seed=seed,
-                            duration_s=durations[index],
-                            steps=steps,
-                            videos=video_uses(calls[index].references),
-                            turbo=turbo,
-                            frames=held_frames(
-                                plans[index], video_uses(calls[index].references)
-                            ),
-                            expected_provenance=expected,
-                            previous_provenance=expected,
-                            context=context if carried else None,
-                            context_frames=cast(ContextFrames, carried.frames),
-                            context_audio=carried.audio,
-                            next_context_frames=cast(ContextFrames, successor.frames),
-                            next_context_audio=successor.audio,
-                        )
-                        # The previous segment joins in a thread while this one renders.
-                        shot_result = await motion_segment(  # type: ignore[call-arg]
-                            payload=child_payload, assets=assets
-                        )
+                        log_prompt(tel, "h3 segment prompt", call.prompt, segment=index + 1,
+                                   references=", ".join(ref.name for ref in call.references))
+                        if call.references:
+                            assets = _call_assets(images, call.references)
+                            fields = dict(
+                                prompt=call.prompt, seed=seeds[index], duration_s=durations[index],
+                                videos=video_uses(call.references),
+                                frames=held_frames(plan, video_uses(call.references)),
+                                first_frame=first_asset, last_frame=last_asset,
+                            )  # fmt: skip
+                            if single_regenerate:
+                                result = await cast(Callable[..., Awaitable[H3VideoOutput]], regenerate_ref2va)(
+                                    payload=RegenerateReferencesInput(
+                                        **fields, steps=steps, task="ref2va_turbo" if turbo else "ref2va",
+                                        resolution=payload.resolution, strength=upscale.start,
+                                    ), assets=assets,
+                                )  # fmt: skip
+                            else:
+                                result = await motion_segment(  # type: ignore[call-arg]
+                                    payload=MotionInput(
+                                        **fields, steps=steps, turbo=turbo, previous_provenance=expected,
+                                        context=context if plan.carried else None,
+                                        context_frames=cast(ContextFrames, plan.carried.frames),
+                                        context_audio=plan.carried.audio,
+                                        next_context_frames=cast(ContextFrames, plan.successor.frames),
+                                        next_context_audio=plan.successor.audio,
+                                    ), assets=assets,
+                                )  # fmt: skip
+                        else:
+                            prompt = _fl2va_prompt(payload, index)
+                            if single_regenerate:
+                                result = await cast(Callable[..., Awaitable[H3VideoOutput]], regenerate_fl2va)(
+                                    payload=RegenerateKeyframesInput(
+                                        prompt=prompt, seed=seeds[index], duration_s=durations[index],
+                                        steps=steps, task="fl2va_turbo" if turbo else "fl2va",
+                                        resolution=payload.resolution, strength=upscale.start,
+                                        first_frame=first_asset, last_frame=last_asset,
+                                    ),
+                                )  # fmt: skip
+                            else:
+                                result = await keyframe_segment(  # type: ignore[call-arg]
+                                    payload=KeyframeInput(
+                                        prompt=prompt, seed=seeds[index], duration_s=durations[index],
+                                        steps=steps, turbo=turbo, first_frame=first_asset,
+                                        last_frame=last_asset, previous_provenance=expected,
+                                        next_context_frames=cast(ContextFrames, plan.successor.frames),
+                                        next_context_audio=plan.successor.audio,
+                                    ),
+                                )  # fmt: skip
                 except ChildCallError as failure:
                     # Concurrent caller cancellation must not become a successful partial result.
                     ctx.raise_if_cancelled()
@@ -2645,45 +2369,95 @@ async def long_form(
                         f"segment {index + 1} of {count} failed ({failure.code}): {str(failure)[:512]}",
                         code="segment_failed",
                     ) from failure
-                compatible(shot_result.provenance, expected)
-                expected = shot_result.provenance
-                scanning.add(shot_result.video)
-                warnings.extend(shot_result.warnings)
-                context = shot_result.context if successor else None
+                if isinstance(result, MotionOutput):
+                    compatible_base(result.provenance, expected)
+                    expected = result.provenance
+                    context = result.context if plan.successor else None
+                rendered.append(result.video)
+                scanning.add(result.video)
+                warnings.extend(result.warnings)
+                if isinstance(result, MotionOutput) and (name := taken.get(index + 1)) is not None:
+                    images[name] = result.last_frame
+                    out.publish("references", images[name], label=f"{name}: segment {index + 2}'s picture")
+                    shown.append(images[name])
                 completed_work += render_work[index]
                 if joining is not None:
                     await joining
                 joining = asyncio.ensure_future(asyncio.to_thread(show, index, index + 1 == count))
-            # Every GPU call has returned: the rest is CPU work, so the next request's shots
-            # start now.
-            ctx.release_gpus()
         finally:
             if joining is not None:
-                # However the loop ends, the film through the last joined segment is published.
+                # However the loop ends, the video through the last joined segment is published.
                 await asyncio.gather(joining, return_exceptions=True)
         assert joining is not None
         joining.result()
         joined = cut.finish()
     delivered_frames = sum(plan.delivered_frames for plan in plans)
     if joined.frame_count != delivered_frames:
-        raise OutputError("the joined video differs from the long-form clock", code="shot_frames")
-    tel.log(
-        "h3 long-form delivery",
-        mode=payload.mode,
-        steps=steps or "plan",
-        segments=count,
-        delivered_frames=delivered_frames,
-    )
-    return LongFormOutput(
-        video=joined.video,
-        references=references,
-        delivered_frames=delivered_frames,
-        fps=FPS,
-        warnings=warnings,
-    )
+        raise OutputError("the joined video differs from the segments' clock", code="shot_frames")
+    video, originals = joined.video, []
+    if upscaling and not single_regenerate:
+        originals = [joined.video]
+        video, more = await _upscale_segments(ctx, payload, rendered, calls, plans, seeds, out, tel)
+        warnings += more
+    # Every GPU call has returned: the rest is CPU work, so the next request's segments start now.
+    ctx.release_gpus()
+    tel.log("h3 delivery", turbo=sum(turbo for turbo, _, _ in sampling), segments=count,
+            delivered_frames=delivered_frames, resolution=payload.resolution.value)  # fmt: skip
+    return GenerateOutput(
+        video=video, originals=originals, references=shown, delivered_frames=delivered_frames,
+        fps=FPS, warnings=list(dict.fromkeys(warnings)),
+    )  # fmt: skip
 
 
-app.entrypoint(long_form, emits_media=True, accelerator=False)
-app.entrypoint(long_form_cuts, emits_media=True, accelerator=False)
+class UpscaleInput(msgspec.Struct, kw_only=True):
+    """An existing video taken to `resolution` as `generate` takes its own render (UPSCALE.md):
+    `upscale.method` `seedvr2` (default) restores its frames; `regenerate` re-renders it with H3
+    from `prompt`, the text it was made from. Its soundtrack is kept."""
+
+    video: Annotated[VideoAsset, AssetBound(max_bytes=1 << 30, max_decoded_bytes=2 << 30)]
+    resolution: RegenerateResolution = Resolution.QHD
+    upscale: Upscale | None = None
+    prompt: str = ""
+    seed: int | None = None
+
+
+class UpscaleOutput(msgspec.Struct):
+    video: Annotated[VideoAsset, AssetBound(max_bytes=1 << 30, media_types=("video/mp4",))]
+    warnings: list[str]
+
+
+async def upscale(ctx: Context, payload: UpscaleInput, out: Outputs, tel: Telemetry) -> UpscaleOutput:
+    """`generate`'s upscale on a video it did not render."""
+    method = payload.upscale or Upscale()
+    warnings = method.ignored()
+    seed = payload.seed if payload.seed is not None else int.from_bytes(
+        hashlib.sha256(f"{ctx.request_id}/h3/upscale".encode()).digest()[:4], "big")  # fmt: skip
+    if method.method == "regenerate":
+        if not payload.prompt.strip():
+            raise InvalidRequest("regenerate re-renders the video from the prompt it was made from",
+                                 fields=["prompt"])  # fmt: skip
+        call = RegenerateInput(video=payload.video, prompt=payload.prompt, resolution=payload.resolution,
+                               strength=method.start, seed=seed)  # fmt: skip
+        with tel.scope(f"Regenerate at {payload.resolution.value}"):
+            result = await cast(Callable[..., Awaitable[RegenerateOutput]], regenerate_segment)(payload=call)
+        return UpscaleOutput(result.video, warnings + result.warnings)
+    if payload.resolution is Resolution.NATIVE:
+        raise InvalidRequest("seedvr2 restores above 768p; 768p is regenerate's refine-only pass",
+                             fields=["resolution"])  # fmt: skip
+    if payload.prompt.strip():
+        warnings.append("prompt applies to regenerate only")
+    probe = payload.video.probe()
+    restore = cast(Callable[..., Awaitable[RestorationOutput]], restore_video)
+    with tel.scope(f"SeedVR2 upscale to {payload.resolution.value}"):
+        restored = await restore(
+            video=payload.video, resolution=RestorationResolution(payload.resolution.value), seed=seed,
+            aspect_ratio="16:9" if (probe.width, probe.height) == (1344, 768) else "source",
+            **{k: getattr(method, k) for k in _SEEDVR2_FIELDS if getattr(method, k) is not None},
+        )  # fmt: skip
+    return UpscaleOutput(restored.video, warnings)
+
+
+app.entrypoint(generate, emits_media=True, accelerator=False)
+app.entrypoint(upscale, emits_media=True, accelerator=False)
 app.entrypoint(assemble_video, emits_media=True, accelerator=False)
 app.entrypoint(internal=True, accelerator=False)(describe.find_cuts)

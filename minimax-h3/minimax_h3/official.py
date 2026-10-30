@@ -82,7 +82,7 @@ from .continuation import (
     align_context_rows,
     export_context,
 )
-from .guide_rows import GUIDE, GUIDE_LATENTS, GuideClip, guide_rows
+from .guide_rows import ANCHOR_LATENTS, ANCHORS, GUIDE, GUIDE_LATENTS, GuideClip, anchor_rows, guide_rows
 from .reference_rows import ClipRows, motion_size, public_video
 from .steps import denoise_fl2va
 from .overlay import ATTENTION_KWARG, REGENERATE_BANK, TURBO_BANK, Overlay, TurboSchedule
@@ -738,6 +738,16 @@ def _encode_identity(view: Any, memo: ReferenceMemo | None) -> tuple[Any, ...]:
     )
 
 
+def _fitted(image: Any, height: int, width: int) -> np.ndarray:
+    """An image center-cropped to the canvas's aspect and resized to it, as uint8 `(H, W, 3)`."""
+    image = image.convert("RGB")
+    scale = max(width / image.width, height / image.height)
+    resized = image.resize((max(width, round(image.width * scale)), max(height, round(image.height * scale))),
+                           resample=3)
+    left, top = (resized.width - width) // 2, (resized.height - height) // 2
+    return np.asarray(resized.crop((left, top, left + width, top + height)), dtype=np.uint8).copy()
+
+
 def _snapped(frames: int) -> int:
     """A clip's frames snapped down to `17n + 5`, as the official encode step does."""
     chunks = max(1, (frames - LATENTS_PER_CHUNK) // FRAMES_PER_CHUNK)
@@ -1030,7 +1040,13 @@ class OfficialH3Pipeline:
         frames: int,
         task: Task = "fl2va",
         plan: TimestepPlan | None = None,
+        delivery: ContinuationPlan | None = None,
     ) -> Any:
+        """`delivery` is the segment's clock when its successor carries a picture or sound
+        (`export_context`); an FL2VA segment carries nothing in itself."""
+        if delivery is not None and (delivery.carried or frames != delivery.sample_frames):
+            raise InvalidRequest("an FL2VA segment carries nothing in and samples its own window",
+                                 code="h3_continuation")
         # With no anchor, state the official default canvas. With an anchor, leaving the
         # dimensions absent makes the first supplied keyframe the geometry authority.
         height, width = (768, 1344) if first_frame is None and last_frame is None else (None, None)
@@ -1046,6 +1062,7 @@ class OfficialH3Pipeline:
             width=width,
             plan=plan,
         )
+        state.set("continuation_delivery", delivery)
         self._expect(task, state)
         return state
 
@@ -1064,10 +1081,13 @@ class OfficialH3Pipeline:
         delivery: ContinuationPlan | None = None,
         expected_context_provenance: str | None = None,
         guide: GuideClip | None = None,
+        anchors: Sequence[tuple[Any, Literal["first", "last"]]] = (),
     ) -> Any:
         """``reference_image_short_edges`` is one resolved edge per image reference, in
         packed order; the official setup step resizes each image to its own. A `guide` sets
-        the render's canvas (`guide_rows`)."""
+        the render's canvas (`guide_rows`), else the carried picture does, else the first
+        keyframe `anchor`, as FL2VA's first keyframe does; each anchor is fitted to it
+        (`anchor_rows`)."""
         if context is not None:
             context.validate()
             if delivery is None or delivery.carried != context.carry:
@@ -1082,11 +1102,16 @@ class OfficialH3Pipeline:
             )
         if delivery is not None and frames != delivery.sample_frames:
             raise InvalidRequest("sample frames differ from delivery plan", code="h3_continuation")
-        canvas = (
-            {}
-            if guide is None
-            else dict(zip(("height", "width"), map(int, guide.frames.shape[1:3]), strict=True))
-        )
+        if guide is not None:
+            canvas = dict(zip(("height", "width"), map(int, guide.frames.shape[1:3]), strict=True))
+        elif context is not None and context.canvas is not None:
+            canvas = dict(zip(("height", "width"), context.canvas, strict=True))
+        elif anchors:
+            width, height = anchors[0][0].size
+            canvas = dict(zip(("height", "width"),
+                              (int(v) for v in resolve_canvas_size(width, height, *CANVAS)), strict=True))
+        else:
+            canvas = {}
         state = self._start(
             _trunk_task(task, "ref2va"),
             prompt=prompt,
@@ -1104,6 +1129,7 @@ class OfficialH3Pipeline:
             for source, normalized in zip(references, state.normalized_references, strict=True)
         ])
         state.set(GUIDE, guide)
+        state.set(ANCHORS, [(_fitted(image, state.height, state.width), at) for image, at in anchors])
         if context is not None and context.canvas not in (None, (state.height, state.width)):
             raise InvalidRequest(
                 "continuation canvas differs from this render", code="h3_continuation"
@@ -1235,6 +1261,10 @@ class OfficialH3Pipeline:
             _ScopedPipeline(pipe, shell, overrides={"max_duration": _CEILING_S}), scratch
         )
         tokens = int(scratch.get("token_tags").numel())
+        for pixels, _ in scratch.get(ANCHORS) or ():
+            tokens += (pixels.shape[0] // VAE_SPATIAL_RATIO // PATCH_SIZE[1]) * (
+                pixels.shape[1] // VAE_SPATIAL_RATIO // PATCH_SIZE[2]
+            )
         guide = scratch.get(GUIDE)
         if guide is not None:
             if guide.audio is not None:
@@ -1311,6 +1341,8 @@ class OfficialH3Pipeline:
         if state.get(GUIDE) is not None:
             with _audio_weight_norm_scope(self.components["audio_vae"]):
                 self._encode_guide(task, state, memo)
+        if state.get(ANCHORS):
+            self._encode_anchors(task, state)
         context = state.get("continuation_context")
         if context is not None:
             if context.video is not None:
@@ -1435,6 +1467,22 @@ class OfficialH3Pipeline:
                 audio = _soundtrack_rows(view.audio_vae, guide.audio.to(view._execution_device))
         state.set(GUIDE_LATENTS, (latents, audio))
 
+    def _encode_anchors(self, task: Task, state: Any) -> None:
+        """Each keyframe anchor as one latent frame, encoded as FL2VA's keyframes are."""
+        with torch.no_grad():
+            view = _ScopedPipeline(self._pipes[self._workflow(task, state)], self.components["vae"])
+            vae = view.vae
+            mean = torch.tensor(vae.config.latents_mean).view(1, -1, 1, 1, 1)
+            std = torch.tensor(vae.config.latents_std).view(1, -1, 1, 1, 1)
+            encoded = []
+            for pixels, at in state.get(ANCHORS):
+                raw = encode_condition(
+                    vae, torch.from_numpy(pixels), tuple(view.pixel_mean), tuple(view.pixel_std),
+                    int(view.keyframe_encode_seed),
+                )
+                encoded.append(((raw.cpu() - mean) / std, at))
+        state.set(ANCHOR_LATENTS, encoded)
+
     def denoise(
         self,
         task: Task,
@@ -1465,6 +1513,8 @@ class OfficialH3Pipeline:
                 continue
             if name == "denoise.set_timesteps" and state.get(GUIDE_LATENTS) is not None:
                 guided = self._pack_guide(scoped, state)
+            if name == "denoise.set_timesteps" and state.get(ANCHOR_LATENTS):
+                guided += self._pack_anchors(scoped, state)
             self._run_with(task, scoped, name, state)
 
         context = state.get("continuation_context")
@@ -1532,6 +1582,22 @@ class OfficialH3Pipeline:
             audio = audio[:, : state.num_audio_latents]
         guide_rows(state, video, audio)
         return int(video.shape[0])
+
+    @staticmethod
+    def _pack_anchors(scoped: Any, state: Any) -> int:
+        """Each keyframe anchor as its rows (`anchor_rows`), noised as FL2VA's keyframes are,
+        after the guide's draws; their video row count."""
+        count = 0
+        device = state.latents.device
+        for latents, at in state.get(ANCHOR_LATENTS):
+            noise = randn_tensor(
+                latents.shape, generator=state.generator, device=device, dtype=torch.float32
+            )
+            noised = scoped.scheduler.scale_noise(latents.to(device), scoped.keyframe_noise_aug, noise)
+            video = patchify_video_latents(noised, tuple(scoped.patch_size))
+            anchor_rows(state, video, last=at == "last")
+            count += int(video.shape[0])
+        return count
 
     def decode_audio(self, task: Task, state: Any) -> Any:
         # Repeated BigVGAN decodes can differ on the same input even

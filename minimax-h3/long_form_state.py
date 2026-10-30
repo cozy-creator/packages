@@ -21,14 +21,6 @@ def provenance(model_manifest: str, turbo_lora_manifest: str = "") -> RenderProv
     return RenderProvenance(model_manifest, turbo_lora_manifest)
 
 
-def compatible(actual: RenderProvenance, expected: RenderProvenance | None) -> None:
-    if expected is not None and actual != expected:
-        raise InvalidRequest(
-            "shots in one rendering must use the same base model and adapter",
-            code="render_provenance",
-        )
-
-
 def compatible_base(actual: RenderProvenance, previous: RenderProvenance | None) -> None:
     if previous is not None and actual.model_manifest != previous.model_manifest:
         raise InvalidRequest(

@@ -17,7 +17,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+import numpy as np
 import torch
+from diffusers.modular_pipelines.minimax_h3.before_denoise import (
+    _ROPE_FRAME_RESCALE,
+    _ROPE_FRAMES_PER_LATENT,
+)
 
 #: The `PipelineState` keys of a call's guide: its clip, then its encoded rows.
 GUIDE = "exact_guide"
@@ -79,3 +84,44 @@ def guide_rows(state: Any, video: torch.Tensor, audio: torch.Tensor | None) -> N
         packed = audio.reshape(count_audio, width).to(state.audio_latents)
         state.set("audio_latents", torch.cat([packed, state.audio_latents]))
         state.set("num_condition_audio_rows", state.num_condition_audio_rows + count_audio)
+
+
+#: The `PipelineState` keys of a Ref2VA call's keyframe anchors: `(image, "first" | "last")`
+#: pairs at the render's canvas, then their encoded latents. Not Diffusers' FL2VA
+#: `keyframe_anchors`, which FL2VA's own keyframes fill (run 20657).
+ANCHORS = "cozy_ref2va_keyframes"
+ANCHOR_LATENTS = "cozy_ref2va_keyframe_latents"
+
+
+def anchor_rows(state: Any, video: torch.Tensor, *, last: bool) -> None:
+    """One keyframe's rows (one latent frame, noised and patchified) in front of every other
+    condition row, held on every step, as `guide_rows` packs a guide: Ref2VA's first and last
+    frames (`StoryReference` `frame`). They take the target's frame grid at the rotary time
+    the official FL2VA layout gives that keyframe: the target's start, or its last pixel frame
+    (ComfyUI's Add Guide at frame -1 alike)."""
+    positions, tags = state.position_ids, state.token_tags
+    video_rows = state.video_indices
+    text = int(state.text_indices.numel())
+    target = video_rows[state.num_condition_video_rows :]
+    count = int(video.shape[0])
+    if count > target.numel() or target.numel() % count:
+        raise ValueError("a keyframe's rows are not one of the render's latent frames")
+    grid = positions[target[:count]].clone()
+    if last:
+        spans = np.ones(target.numel() // count, dtype=np.float64) * _ROPE_FRAME_RESCALE
+        for offset, frames in enumerate(_ROPE_FRAMES_PER_LATENT):
+            spans[offset :: len(_ROPE_FRAMES_PER_LATENT)] *= frames
+        grid[:, 0] += float(spans.sum()) - _ROPE_FRAME_RESCALE
+
+    def moved(indices: torch.Tensor) -> torch.Tensor:
+        return indices + count * (indices >= text)
+
+    state.set("position_ids", torch.cat([positions[:text], grid, positions[text:]]))
+    state.set("token_tags", torch.cat([tags[:text], tags[target[:count]], tags[text:]]))
+    device = video_rows.device
+    state.set("video_indices", torch.cat([
+        torch.arange(text, text + count, device=device), moved(video_rows)
+    ]))
+    state.set("audio_indices", moved(state.audio_indices))
+    state.set("num_condition_video_rows", state.num_condition_video_rows + count)
+    state.set("latents", torch.cat([video.to(state.latents), state.latents]))

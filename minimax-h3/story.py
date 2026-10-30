@@ -54,10 +54,16 @@ VIDEO_MAX_BYTES = 1 << 30
 VIDEO_READ_BYTES = 16 << 30
 IMAGE_READ_BYTES = 64 << 20
 AUDIO_READ_BYTES = 64 << 20
-#: Each kind's file field, its H3 reference kind and its `<Picture|Audio|Video N>` label.
-FILE = {"character": "image", "background": "image", "audio": "audio", "video": "video"}
-_SLOT = {"character": "picture", "background": "picture", "audio": "audio", "video": "video"}
-_POLICY = {"character": "image", "background": "image", "audio": "audio", "video": "video"}
+#: Each kind's file field, its H3 reference kind and its `<Picture|Audio|Video N>` label. A
+#: `frame` is a keyframe, never a reference: it has a file and nothing else.
+FILE = {"character": "image", "background": "image", "audio": "audio", "video": "video",
+        "anchor_video": "video", "world_state": "image", "frame": "image"}
+_SLOT = {"character": "picture", "background": "picture", "audio": "audio", "video": "video",
+         "anchor_video": "video", "world_state": "picture"}
+_POLICY = {"character": "image", "background": "image", "audio": "audio", "video": "video",
+           "anchor_video": "video", "world_state": "image"}
+#: The kinds read from a clip.
+CLIPS = ("video", "anchor_video")
 _SPEAKER = re.compile(r"\s*\((S\d+)\)")
 _PREFIX = re.compile(r"\s*\[([^\]\n]*)\]")
 #: The summary's task types (ref guide 3); a summary without one opens with the first.
@@ -70,10 +76,24 @@ SHORT_DESCRIPTION = 150
 
 class StoryReference(msgspec.Struct):
     """A supplied file (`FILE[kind]`), or a character or background image generated from its
-    description."""
+    description.
+
+    - `video`: a reference clip, its motion and camera (or the source of a `[video editing]`).
+    - `anchor_video`: a clip whose frames are anchored in the output, which follows it frame by
+      frame, as an edit's source (Alissonerdx's head swap and style transfer; ComfyUI's Add
+      Guide): every latent frame at the render's own canvas, on every step, and the render takes
+      its canvas (`guide_rows`). Never named in a prompt, one per call, no longer than the
+      render. It costs what a second render does: per `reference_rows`, about 5.5x the denoise
+      for a 12 s clip beside a 15 s render.
+    - `frame`: a keyframe, the first or last frame of a segment (`at`; a segment's `first_frame`
+      or `last_frame` names one explicitly). Never named in a prompt, never a reference.
+
+    `world_state` is internal: the picture a continuing segment without references takes from
+    its predecessor's last frame (`h3._continuation_pictures`), as a soft picture of the set.
+    """
 
     name: str
-    kind: Literal["character", "background", "audio", "video"]
+    kind: Literal["character", "background", "audio", "video", "anchor_video", "frame"]
     description: str = ""
     retention_analysis: Annotated[str, msgspec.Meta(max_length=1024)] | None = None
     image: Annotated[
@@ -96,12 +116,6 @@ class StoryReference(msgspec.Struct):
     ] = None
     #: A video's own sound: dropped unless set, so the clip guides motion alone.
     use_audio: bool = False
-    #: A video the output follows frame by frame, as an edit's source (Alissonerdx's head swap
-    #: and style transfer): every latent frame at the render's own canvas, on every step, and
-    #: the render takes its canvas (`guide_rows`). It costs what a second render does: per
-    #: `reference_rows`, about 5.5x the denoise for a 12 s clip beside a 15 s render, against
-    #: ~1.25x unset.
-    guide: bool = False
     #: A character's voice: a timbre reference wherever the character is named.
     voice: Annotated[
         AudioAsset | None,
@@ -109,6 +123,8 @@ class StoryReference(msgspec.Struct):
         REFERENCE_AUDIO,
     ] = None
     seed: Annotated[int, msgspec.Meta(ge=0, le=9007199254740991)] | None = None
+    #: A `frame`'s default segment: the first segment's first frame, or the last one's last.
+    at: Literal["first", "last"] = "first"
 
     def __post_init__(self) -> None:
         # Prompts quote the name as <name>: any text reads as a name once its brackets and
@@ -155,7 +171,7 @@ async def resolve_reference_images(
             images[ref.name] = supplied
     pending = [
         ref for ref in references
-        if FILE[ref.kind] == "image" and (
+        if ref.kind in ("character", "background") and (
             ref.image is None or ref.kind == "character" and prepare_character is not None
         )
     ]
@@ -222,11 +238,13 @@ def validate_references(references: Sequence[StoryReference]) -> dict[str, Story
     # The render children enforce this same policy after model preparation; refuse here first.
     # Videos attach only where named, so the H3 limit on them is per call (`_segment_call`).
     pool = voices(references)[0]
-    videos = sum(ref.kind == "video" for ref in pool)
-    _policy(
-        [_POLICY[ref.kind] for ref in pool if ref.kind != "video"]
-        + ["video"] * min(videos, MAX_VIDEO_REFERENCES)
-    )
+    story = [ref for ref in pool if ref.kind != "frame"]
+    videos = sum(ref.kind in CLIPS for ref in story)
+    if story:
+        _policy(
+            [_POLICY[ref.kind] for ref in story if ref.kind not in CLIPS]
+            + ["video"] * min(videos, MAX_VIDEO_REFERENCES)
+        )
     by_name: dict[str, StoryReference] = {}
     for reference in pool:
         key = name_key(reference.name)
@@ -246,15 +264,19 @@ def validate_references(references: Sequence[StoryReference]) -> dict[str, Story
                     f"{reference.kind} reference {reference.name} takes {field}, not {other}",
                     fields=["references"],
                 )
-        if getattr(reference, field) is None and (field != "image" or not reference.description.strip()):
+        if reference.kind == "frame":
+            if reference.image is None:
+                raise InvalidRequest(f"frame {reference.name} needs an image", fields=["references"])
+        elif reference.kind == "world_state":
+            pass  # internal: a predecessor's last frame, taken when it lands (`h3._continuation_pictures`)
+        elif getattr(reference, field) is None and (field != "image" or not reference.description.strip()):
             raise InvalidRequest(
                 f"reference {reference.name} needs {'an image or a nonempty description' if field == 'image' else f'its {field}'}",
                 fields=["references"],
             )
-        if reference.guide and reference.kind != "video":
-            raise InvalidRequest(
-                f"only a video guides, not {reference.kind} {reference.name}", fields=["references"]
-            )
+        if reference.use_audio and reference.kind not in CLIPS:
+            raise InvalidRequest(f"only a clip has audio to use, not {reference.kind} {reference.name}",
+                                 fields=["references"])
         if reference.retention_analysis is not None and not reference.retention_analysis.strip():
             raise InvalidRequest(
                 f"reference {reference.name} has blank retention_analysis; omit it for the default",
@@ -302,9 +324,14 @@ def compile_segments(
     overall_soundscape: str = "",
     non_diegetic_music: str = "N/A",
     segment_music: Sequence[str | None] | None = None,
+    forced: Sequence[frozenset[str]] | None = None,
 ) -> list[SegmentCall]:
-    """Each child prompt uses its music override, inline score, or overall score."""
+    """Each child prompt uses its music override, inline score, or overall score. A segment
+    also attaches its `forced` references unnamed (a continuation's picture). Frames are
+    keyframes, never references: they are left out."""
     validate_references(references)
+    references = [ref for ref in references if ref.kind != "frame"]
+    forced = forced or [frozenset()] * len(prompts)
     overrides = [None] * len(prompts) if segment_music is None else segment_music
     calls, texts = [], []
     for index, (text, override) in enumerate(zip(prompts, overrides, strict=True)):
@@ -314,17 +341,21 @@ def compile_segments(
             replace_music=override is not None,
         )
         texts.append(text)
-        calls.append(_segment_call(text, references, style.strip(), overall_soundscape.strip(), index))
+        calls.append(_segment_call(
+            text, references, style.strip(), overall_soundscape.strip(), index, forced[index]
+        ))
     sent = {ref.name for call in calls for ref in call.references}
-    # A guide enters as Add Guide rows, never through the text, so it needs no mention: one no
-    # prompt names guides the first segment (a direct call's only one).
-    unnamed = frozenset(ref.name for ref in references if ref.guide and ref.name not in sent)
+    # Anchored frames enter as Add Guide rows, never through the text, so they need no mention:
+    # a clip no prompt names anchors the first segment (a one-segment call's only one).
+    unnamed = frozenset(ref.name for ref in references if ref.kind == "anchor_video" and ref.name not in sent)
     if calls and unnamed:
         calls[0] = _segment_call(
-            texts[0], references, style.strip(), overall_soundscape.strip(), 0, guides=unnamed
+            texts[0], references, style.strip(), overall_soundscape.strip(), 0, forced[0] | unnamed
         )
     for ref in references:
-        if calls and ref.kind == "video" and not ref.guide and ref.name not in sent:
+        if not calls or ref.name in sent or ref.kind == "anchor_video":
+            continue
+        if ref.kind == "video":
             calls[0].warnings.append(
                 f"<{ref.name}> is never named in a prompt, so H3 never sees it; name the clip "
                 "where its motion applies."
@@ -334,11 +365,14 @@ def compile_segments(
 
 def _numbering(references: Sequence[StoryReference]) -> dict[tuple[str, int], StoryReference]:
     """`<Picture N>`, `<Audio N>` and `<Video N>`: each kind counted in the given order, as H3
-    labels them. A `use_audio` clip's soundtrack takes an `<Audio N>` just before its video."""
+    labels them. A `use_audio` clip's soundtrack takes an `<Audio N>` just before its video. A
+    `frame` is no reference and takes none."""
     counts = dict.fromkeys(("picture", "audio", "video"), 0)
     slots: dict[tuple[str, int], StoryReference] = {}
     for ref in references:
-        for slot in ("audio", "video") if ref.kind == "video" and ref.use_audio else (_SLOT[ref.kind],):
+        if ref.kind == "frame":
+            continue
+        for slot in ("audio", "video") if ref.kind in CLIPS and ref.use_audio else (_SLOT[ref.kind],):
             counts[slot] += 1
             slots[slot, counts[slot]] = ref
     return slots
@@ -350,10 +384,11 @@ def _segment_call(
     style: str,
     soundscape: str,
     index: int,
-    guides: frozenset[str] = frozenset(),
+    forced: frozenset[str] = frozenset(),
 ) -> SegmentCall:
-    """Backgrounds and `guides` always; characters, audio and videos only where the text names
-    them, all in request order, as H3 packs and labels them.
+    """Backgrounds and `forced` always; characters, world states, audio and videos only where
+    the text names them, all in request order, as H3 packs and labels them. With no references
+    at all, none: the segment renders from its text and keyframes (FL2VA).
 
     A token names a reference by its name first (any case, `_`, `-` and space alike), else as
     the global `<Picture N>`/`<Audio N>`/`<Video N>`; these are renumbered for the call. A
@@ -362,6 +397,8 @@ def _segment_call(
     `style` as the description's opening sentence.
     """
     pool, owners = voices(references)
+    if not pool:
+        return SegmentCall(text, [], [])
     by_key = {name_key(ref.name): ref for ref in pool}
     by_slot = _numbering(pool)
     text, style = _open_with_style(text, style)
@@ -395,24 +432,23 @@ def _segment_call(
     )
     named = {ref.name for ref in mentioned(text)}
     named |= {voice.name for voice in pool if voice.name in owners and owners[voice.name].name in named}
-    # A guide packs after every other reference, so when it leaves the packed references
-    # (`guide_rows`) every other label stays as H3 numbers it.
+    # An anchored clip packs after every other reference, so when it leaves the packed
+    # references (`guide_rows`) every other label stays as H3 numbers it.
     used = sorted(
-        (ref for ref in pool if ref.kind == "background" or ref.name in named | guides),
-        key=lambda ref: ref.guide,
+        (ref for ref in pool if ref.kind == "background" or ref.name in named | forced),
+        key=lambda ref: ref.kind == "anchor_video",
     )
-    if sum(ref.guide for ref in used) > 1:
+    if sum(ref.kind == "anchor_video" for ref in used) > 1:
         raise InvalidRequest(
-            f"segment {index + 1} names more than one guide video", fields=["references"]
+            f"segment {index + 1} anchors more than one video's frames", fields=["references"]
         )
     if all(ref.kind == "audio" for ref in used):
-        # H3's ref2va needs a picture: with no background and no character named, send every
-        # reference but the videos.
-        used = [ref for ref in pool if ref.kind != "video"]
-        warnings.append(
-            f"Segment {index + 1} names no character and there is no background, so it receives "
-            f"all {len(used)} of its image and audio references."
-        )
+        # H3's Ref2VA needs a picture: a segment that names none renders from its text and
+        # keyframes (FL2VA), which takes no audio reference.
+        if used:
+            warnings.append(f"Segment {index + 1} names only audio and no picture, so it renders "
+                            "without references.")
+        return SegmentCall(text, [], warnings)
     _policy([_POLICY[ref.kind] for ref in used], f"segment {index + 1}: ")
     sections = _sections(text)
     _, start, end = sections.get("detailed_description", (0, 0, 0))
@@ -471,7 +507,7 @@ def _segment_call(
         cast = set().union(*(found for _, found in shots if clip.name in found))
         return [ref for ref in characters if ref.name in cast] or characters
 
-    motion = {} if editing else {clip.name: performers(clip) for clip in clips if not clip.guide}
+    motion = {} if editing else {clip.name: performers(clip) for clip in clips}
     voiced = {ref.name: speaker(owners[ref.name], text) for ref in used if ref.name in owners}
     # A subject_definitions line of the text's own that opens with a reference, and cites its
     # picture for an image, defines it: the template adds no second line, and the reference's
@@ -508,8 +544,8 @@ def _segment_call(
         elif ref.kind == "audio":
             definitions.append(f"{slot} is the supplied audio reference for <{ref.name}>.")
             default = f"partially_copy - {slot} is copied into the target audio, with other sounds around it."
-        elif ref.kind == "video":
-            source = editing or ref.guide
+        elif ref.kind in CLIPS:
+            source = editing or ref.kind == "anchor_video"
             role = "source video" if source else "motion and camera reference"
             who = f" for {names(motion[ref.name])}" if motion.get(ref.name) else ""
             definitions.append(f"{slot} is the {role}{who}." if _MEDIA.fullmatch(ref.name)
@@ -532,6 +568,14 @@ def _segment_call(
                 where = f" in {names(places)}" if places else ""
                 default = (f"attribute_transfer - its movements, timing and camera work are performed "
                            f"by {cast}{where}.")
+        elif ref.kind == "world_state":
+            definitions.append(
+                f"<{ref.name}> is the world state shown in {slot}: how the set is arranged and "
+                "where each person and object stands."
+            )
+            default = (f"attribute_transfer - keep the set's arrangement and each person's and "
+                       f"object's position from {slot}, not its exact frame, framing or moment.")
+            line_label = f"<{ref.name}>"
         else:
             moves = [f"<{clip.name}>" if not _MEDIA.fullmatch(clip.name) else label(clip)
                      for clip in clips
@@ -556,7 +600,6 @@ def _segment_call(
                       else "audio reference")
         if ref.retention_analysis or (ref.name, _SLOT[ref.kind]) not in retained:
             retention.append(f"{line_label}: {line}")
-    clips = [clip for clip in clips if not clip.guide]
     if clips and not editing and words < SHORT_DESCRIPTION:
         warnings.append(
             f"Segment {index + 1}: {names(clips)} guide{'s' * (len(clips) == 1)} a description of "
