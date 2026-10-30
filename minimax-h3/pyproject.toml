@@ -38,7 +38,6 @@ allow-direct-references = true
 only-include = [
     "gates.py",
     "h3.py",
-    "join.py",
     "minimax_h3",
     "story.py",
 ]
