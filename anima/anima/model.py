@@ -12,7 +12,7 @@ from typing import Any, NamedTuple
 
 import torch
 from cozy_runtime import fusion, rng
-from cozy_runtime.author import Loader, Model, Telemetry, uses_components
+from cozy_runtime.author import Loader, Model, Telemetry, hold_dtype, uses_components
 from cozy_runtime.author.kernels import Plan
 from diffusers import (
     AnimaAutoBlocks,
@@ -132,6 +132,16 @@ class AnimaModel(Model[AnimaPipeline], encoded_leaves="accept"):
             fusion.install_lone_frame(plan, optimization.VAE_FRAME, vae.decoder, vae.post_quant_conv),
         )
         return "+".join(identity for identity in installed if identity)
+
+    def hold_vae(self, tel: Telemetry) -> None:
+        """Decode in `optimization.VAE_DTYPE` on CUDA; the CPU keeps the stored bf16. The Runtime
+        casts the stored bytes when it next fills them; called before any VAE scope opens."""
+        vae = self.pipe.components["vae"]
+        dtype = optimization.VAE_DTYPE
+        if torch.device(str(self.device)).type != "cuda" or next(vae.parameters()).dtype == dtype:
+            return
+        hold_dtype(vae, dtype)
+        tel.log("vae representation", dtype="float16")
 
     @uses_components("text_encoder", "text_conditioner", "transformer", "vae")
     def render(
