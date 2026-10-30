@@ -100,6 +100,7 @@ def _generate(
     tel: Telemetry,
     adj: Adjustments,
 ) -> ImageResult:
+    model.hold_vae(tel)
     default, most = _STEPS[function]
     steps = held(adj, "steps", payload.steps or default, 1, most)
     images = [asset.read() for asset in payload.reference_images]

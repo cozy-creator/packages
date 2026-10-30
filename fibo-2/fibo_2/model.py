@@ -15,7 +15,7 @@ from typing import Any
 
 import torch
 from cozy_runtime import rng, vlm
-from cozy_runtime.author import Config, Loader, MemoDistribution, Model, uses_components
+from cozy_runtime.author import Config, Loader, MemoDistribution, Model, Telemetry, hold_dtype, uses_components
 from diffusers import (
     AutoencoderKLFlux2,
     BriaFibo2Pipeline,
@@ -33,6 +33,8 @@ from transformers import initialization as transformer_init
 #: The fonts Bria's training drew the caption's text images with, after Pillow's built-in font
 #: (`fonts/` of `briaai/Fibo-2.0-dev`).
 FONTS = tuple(str(files(__package__).joinpath("fonts", name)) for name in ("Aileron-Regular.otf", "DejaVuSans.ttf"))
+#: The VAE's dtype on a GPU, as ComfyUI runs FLUX.2's VAE: its activations fit fp16 (dtype audit M1).
+VAE_DTYPE = torch.float16
 
 
 class _Progress[T]:
@@ -156,6 +158,14 @@ class Fibo2(Model[FiboGraph], encoded_leaves="accept"):
         pipe.encoded = {}
         return pipe
 
+    def hold_vae(self, tel: Telemetry) -> None:
+        """Serve the VAE at `VAE_DTYPE` on a GPU from now on, before any VAE scope opens: the Runtime
+        casts the stored float32 bytes when it next fills them. A CPU keeps float32."""
+        vae = self.graph.components["vae"]
+        if torch.device(str(self.device)).type == "cuda" and next(vae.parameters()).dtype != VAE_DTYPE:
+            hold_dtype(vae, VAE_DTYPE)
+            tel.log("vae representation", dtype=str(VAE_DTYPE).removeprefix("torch."))
+
     @uses_components("text_encoder", memoize=True, memo_dependencies=_CODE)
     def encode(
         self, prompt: str, images: list[Image.Image], *, width: int, height: int, guidance: float, negative: str | None
@@ -234,5 +244,5 @@ class Fibo2(Model[FiboGraph], encoded_leaves="accept"):
             image = vae.decode(latents.to(vae.dtype), return_dict=False)[0]
             if not torch.isfinite(image).all():
                 raise ValueError("Fibo 2.0's decoder produced non-finite pixels")
-            (picture,) = pipe.image_processor.postprocess(image, output_type="pil")
+            (picture,) = pipe.image_processor.postprocess(image.float(), output_type="pil")
         return picture  # type: ignore[no-any-return]

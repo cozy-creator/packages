@@ -42,6 +42,7 @@ class GenerateInput(ImageRequest):
 
 def _generate(ctx: Context, payload: GenerateInput, model: Flux2, turbo: Flux2TurboLoRA | None,
               upsampler: Flux2Upsampler, out: Outputs, tel: Telemetry, adj: Adjustments) -> ImageResult:
+    model.hold_vae(tel)
     seed = payload.drawn_seed()
     images = [asset.read() for asset in payload.reference_images]
     width, height = payload.size(adj, images[0].size if images else None, SIZES, megapixels=1.0)

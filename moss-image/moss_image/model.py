@@ -47,6 +47,8 @@ from transformers.models.qwen3_5.modeling_qwen3_5 import Qwen3_5TextModel
 
 #: The DiT's activations and the dtype upstream casts each linear's input to (its weights' in bf16).
 DTYPE = torch.bfloat16
+#: The VAE's dtype on a GPU, as ComfyUI runs FLUX.2's VAE: its activations fit fp16 (dtype audit M1).
+VAE_DTYPE = torch.float16
 EPS = 1e-6
 MAX_TOKENS = 4096
 #: Pixels per DiT token: the VAE's 8x, then 2x2 patches.
@@ -324,16 +326,12 @@ class MossImage(Model[MossGraph], encoded_leaves="accept", attention_bits={"tran
         self.tokenizer = build_tokenizer(loader.assets)
 
     def hold_vae(self, tel: Telemetry) -> None:
-        """Decode in bf16 where the GPU computes it natively, as ComfyUI stages FLUX.2's VAE; the
-        checkpoint stores F32, which the CPU and other GPUs keep. The Runtime casts the stored bytes
-        when it next fills them; called before any VAE scope opens."""
+        """Serve the VAE at `VAE_DTYPE` on a GPU from now on, before any VAE scope opens: the Runtime
+        casts the stored float32 bytes when it next fills them. A CPU keeps float32."""
         vae = self.graph.components["vae"]
-        device = torch.device(str(self.device))
-        if device.type != "cuda" or not torch.cuda.is_bf16_supported(including_emulation=False):
-            return
-        if next(vae.parameters()).dtype != DTYPE:
-            hold_dtype(vae, DTYPE)
-            tel.log("vae representation", dtype="bfloat16")
+        if torch.device(str(self.device)).type == "cuda" and next(vae.parameters()).dtype != VAE_DTYPE:
+            hold_dtype(vae, VAE_DTYPE)
+            tel.log("vae representation", dtype=str(VAE_DTYPE).removeprefix("torch."))
 
     @uses_components("text_encoder", memoize=True, memo_dependencies=_CODE)
     def encode(self, prompt: str) -> torch.Tensor:
