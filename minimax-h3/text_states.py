@@ -13,7 +13,7 @@ from typing import Annotated, Any
 
 import msgspec
 import torch
-from cozy_runtime.author import AssetBound, Context, FileAsset, Outputs, Telemetry
+from cozy_runtime.author import FileBound, Context, File, Outputs, Telemetry
 from safetensors.torch import save
 
 from minimax_h3.model import H3Model
@@ -37,7 +37,7 @@ class EncodeTextOutput(msgspec.Struct):
     `{i}.token_ids` int64 per prompt `i`."""
 
     states: Annotated[
-        FileAsset, AssetBound(max_bytes=1 << 30, media_types=("application/octet-stream",))
+        File, FileBound(max_bytes=1 << 30, media_types=("application/octet-stream",))
     ]
     tokens: list[int]
 

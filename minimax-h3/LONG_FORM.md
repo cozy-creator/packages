@@ -179,7 +179,7 @@ Segment 2 sends `throw.mp4` as its `<Video 1>`. Attach files by path in the requ
 
 ```sh
 cozy run minimax-h3/long_form --input fight.json \
-  --asset references.3.video=kick.mp4 --asset references.4.video=throw.mp4
+  --file references.3.video=kick.mp4 --file references.4.video=throw.mp4
 ```
 
 A clip can be a segment of a longer source: `start` and `end` beside `video` (seconds, `m:ss.s`
@@ -272,8 +272,8 @@ A reference has:
 A supplied image skips generation. Otherwise Qwen-Image-2.1 generates the image once
 from the description. Names normalise: whitespace collapses and `<`/`>` are dropped. Two
 names that match the same token are refused. Attach files with a JSON path, or with
-`--asset references.0.image=...`, `--asset references.0.voice=...`,
-`--asset references.3.audio=...` or `--asset references.4.video=...`. Audio and voices are WAV, FLAC, Ogg or MP3. Audio references are 2–15 s each, 15 s in total, at most
+`--file references.0.image=...`, `--file references.0.voice=...`,
+`--file references.3.audio=...` or `--file references.4.video=...`. Audio and voices are WAV, FLAC, Ogg or MP3. Audio references are 2–15 s each, 15 s in total, at most
 three. Allowed: up to nine images and twelve image and audio references in all; videos count
 per call. An audio-only set is refused.
 

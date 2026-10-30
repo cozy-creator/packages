@@ -24,10 +24,10 @@ import numpy as np
 import torch
 from cozy_runtime.author import (
     App,
-    AssetBound,
-    AssetLimits,
-    Assets,
-    AudioAsset,
+    FileBound,
+    FileLimits,
+    Files,
+    AudioFile,
     AudioProbe,
     ChildCallError,
     Context,
@@ -36,9 +36,9 @@ from cozy_runtime.author import (
     DecodedMediaHeader,
     DecodedVideoFormat,
     DecodedVideoFrame,
-    FileAsset,
+    File,
     Image,
-    ImageAsset,
+    ImageFile,
     ImagePreparation,
     ImageResult,
     InvalidRequest,
@@ -49,7 +49,7 @@ from cozy_runtime.author import (
     Telemetry,
     ThreadPoolExecutor,
     UnsupportedInput,
-    VideoAsset,
+    VideoFile,
     VideoProbe,
     invocable,
     prefetch,
@@ -140,20 +140,20 @@ _MIB = 1 << 20
 #: Standalone audio references share one 15-second budget; each is 2-15 s (`REFERENCE_AUDIO`).
 _MAX_AUDIO_SECONDS = Fraction(15, 1)
 
-Reference = ImageAsset | VideoAsset | AudioAsset
+Reference = ImageFile | VideoFile | AudioFile
 #: One reference of each kind, with its retained-read bound. Every input carrying references
 #: (the render children's and direct ref2va's `assets`, and `StoryReference`) declares the same
 #: preparations, so Runtime records the truncation on the call the client made.
 _REFERENCE = (
-    Annotated[ImageAsset, AssetBound(max_decoded_bytes=IMAGE_READ_BYTES)]
+    Annotated[ImageFile, FileBound(max_decoded_bytes=IMAGE_READ_BYTES)]
     | Annotated[
-        VideoAsset, AssetBound(max_bytes=VIDEO_MAX_BYTES, max_decoded_bytes=VIDEO_READ_BYTES)
+        VideoFile, FileBound(max_bytes=VIDEO_MAX_BYTES, max_decoded_bytes=VIDEO_READ_BYTES)
     ]
-    | Annotated[AudioAsset, AssetBound(max_decoded_bytes=AUDIO_READ_BYTES)]
+    | Annotated[AudioFile, FileBound(max_decoded_bytes=AUDIO_READ_BYTES)]
 )
 ReferenceAssets = Annotated[
-    Assets[_REFERENCE],
-    AssetLimits(
+    Files[_REFERENCE],
+    FileLimits(
         images=MAX_IMAGE_REFERENCES,
         videos=MAX_VIDEO_REFERENCES,
         audio=MAX_AUDIO_REFERENCES,
@@ -167,8 +167,8 @@ ReferenceAssets = Annotated[
 # Direct ref2va takes either attached assets or named `references`; the wire field is required,
 # so a references-only request sends `"assets": []`.
 DirectReferenceAssets = Annotated[
-    Assets[_REFERENCE],
-    AssetLimits(
+    Files[_REFERENCE],
+    FileLimits(
         images=MAX_IMAGE_REFERENCES,
         videos=MAX_VIDEO_REFERENCES,
         audio=MAX_AUDIO_REFERENCES,
@@ -195,7 +195,7 @@ def video_uses(references: Sequence[StoryReference]) -> tuple[VideoUse, ...]:
 
 def _call_assets(
     files: dict[str, Reference], references: Sequence[StoryReference]
-) -> Assets[Reference]:
+) -> Files[Reference]:
     """One H3 call's references in packed order, labeled `Picture|Audio|Video N` per kind."""
     counts = {"image": 0, "audio": 0, "video": 0}
     labeled: list[Reference] = []
@@ -204,10 +204,10 @@ def _call_assets(
         counts[file.kind] += 1
         label = {"image": "Picture", "audio": "Audio", "video": "Video"}[file.kind]
         labeled.append(file.with_label(f"{label} {counts[file.kind]}"))
-    return Assets(labeled)
+    return Files(labeled)
 
 
-def truncation_warnings(videos: Iterable[tuple[str, VideoAsset]]) -> list[str]:
+def truncation_warnings(videos: Iterable[tuple[str, VideoFile]]) -> list[str]:
     """A line for each reference video Runtime cut to the first 15 s `REFERENCE_VIDEO` keeps."""
     lines = []
     for name, video in videos:
@@ -222,7 +222,7 @@ def truncation_warnings(videos: Iterable[tuple[str, VideoAsset]]) -> list[str]:
 
 def named_videos(
     references: Iterable[StoryReference], calls: Iterable[SegmentCall]
-) -> list[tuple[str, VideoAsset]]:
+) -> list[tuple[str, VideoFile]]:
     """The video references some call attaches, by name."""
     used = {ref.name for call in calls for ref in call.references}
     return [
@@ -233,8 +233,8 @@ def named_videos(
 
 
 KeyframeAssets = Annotated[
-    Assets[Annotated[ImageAsset, AssetBound(max_decoded_bytes=256 << 20)]],
-    AssetLimits(images=2),
+    Files[Annotated[ImageFile, FileBound(max_decoded_bytes=256 << 20)]],
+    FileLimits(images=2),
 ]
 DEFAULT_REFERENCE_IMAGE_SHORT_EDGE = 1024
 _SHORT_EDGE_LADDER = (2048, 1536, 1024, 768, 512, 256)
@@ -412,20 +412,20 @@ class H3VideoOutput(msgspec.Struct):
     """The catalog wire shape. Checkpoint, plan, geometry, and digest facts remain
     attempt observations (se-012): they ride Telemetry, never the customer result."""
 
-    video: Annotated[VideoAsset, AssetBound(max_bytes=1 << 30, media_types=("video/mp4",))]
+    video: Annotated[VideoFile, FileBound(max_bytes=1 << 30, media_types=("video/mp4",))]
     warnings: list[str]
 
 
 class RenderOutput(msgspec.Struct):
-    video: Annotated[VideoAsset, AssetBound(media_types=("video/mp4",), max_bytes=1 << 30)]
-    originals: Annotated[list[VideoAsset], AssetBound(media_types=("video/mp4",), max_bytes=1 << 30)]
+    video: Annotated[VideoFile, FileBound(media_types=("video/mp4",), max_bytes=1 << 30)]
+    originals: Annotated[list[VideoFile], FileBound(media_types=("video/mp4",), max_bytes=1 << 30)]
     warnings: list[str]
 
 
 class ReferenceRenderOutput(RenderOutput):
     """Direct ref2va also returns the references it prepared or generated, each published as it lands."""
 
-    references: list[ImageAsset] = msgspec.field(default_factory=list)
+    references: list[ImageFile] = msgspec.field(default_factory=list)
 
 
 def preflight_reference_media(
@@ -547,7 +547,7 @@ def resolve_reference_sizing(
 
 
 def assets_to_h3_refs(
-    references: Assets[Reference],
+    references: Files[Reference],
     *,
     pipe: OfficialH3Pipeline,
     frames: int,
@@ -567,12 +567,12 @@ def assets_to_h3_refs(
     images: list[ImageSizing] = []
     use = iter(videos)
     uses = [
-        next(use, VideoUse()) if isinstance(reference, VideoAsset) else VideoUse()
+        next(use, VideoUse()) if isinstance(reference, VideoFile) else VideoUse()
         for reference in references
     ]
     keeps = [item.audio for item in uses]
     if any(item.guide for item in uses) and all(
-        item.guide or isinstance(reference, AudioAsset)
+        item.guide or isinstance(reference, AudioFile)
         for item, reference in zip(uses, references, strict=True)
     ):
         raise InvalidRequest(
@@ -583,14 +583,14 @@ def assets_to_h3_refs(
     for index, reference in enumerate(references):
         info = references.info(index)
         field = info.id
-        if isinstance(reference, ImageAsset):
+        if isinstance(reference, ImageFile):
             image = reference.probe()
             _validate_ratio(image.width, image.height, field)
             requested = (
                 None if info.fidelity == "auto" else _REFERENCE_FIDELITY_EDGES[info.fidelity]
             )
             images.append(ImageSizing(field, image.width, image.height, requested))
-        elif isinstance(reference, VideoAsset):
+        elif isinstance(reference, VideoFile):
             video = reference.probe()
             keeps[index] = keeps[index] and video.soundtrack is not None
             _validate_video(video, field, sound=keeps[index])
@@ -610,9 +610,9 @@ def assets_to_h3_refs(
     prepared = []
     guide = None
     for index, reference in enumerate(references):
-        if isinstance(reference, ImageAsset):
+        if isinstance(reference, ImageFile):
             prepared.append(pipe.image_reference(reference.read()))
-        elif isinstance(reference, VideoAsset):
+        elif isinstance(reference, VideoFile):
             with reference.stream(end=window, audio=keeps[index]) as events:
                 clip = read_reference_video(
                     events, frames=frames, audio=keeps[index], guide=uses[index].guide
@@ -1375,7 +1375,7 @@ class RegenerateInput(msgspec.Struct, kw_only=True):
     soundtrack is kept. `prompt` is the one the video was made from; `strength` as in `upscale`
     (UPSCALE.md). The 7:4 frame fills 16:9, stretched 1.6% horizontally; `768p` refines only."""
 
-    video: Annotated[VideoAsset, AssetBound(max_bytes=1 << 30, max_decoded_bytes=2 << 30)]
+    video: Annotated[VideoFile, FileBound(max_bytes=1 << 30, max_decoded_bytes=2 << 30)]
     prompt: str
     resolution: RegenerateResolution = Resolution.QHD
     strength: float = 0.909
@@ -1389,7 +1389,7 @@ class RegenerateInput(msgspec.Struct, kw_only=True):
 
 
 class RegenerateOutput(msgspec.Struct):
-    video: Annotated[VideoAsset, AssetBound(max_bytes=1 << 30, media_types=("video/mp4",))]
+    video: Annotated[VideoFile, FileBound(max_bytes=1 << 30, media_types=("video/mp4",))]
     warnings: list[str]
 
 
@@ -1427,7 +1427,7 @@ def regenerate(
 _DRAFT_SIZE = (768, 1344)
 
 
-def _read_draft(video: VideoAsset) -> tuple[Any, Any | None, int, int, list[str]]:
+def _read_draft(video: VideoFile) -> tuple[Any, Any | None, int, int, list[str]]:
     """A video's frames as `(frames on the VAE grid, 768, 1344, 3)` uint8 (cover-scaled and
     centre-cropped, its last frame held up to the grid), its `(channels, samples)` soundtrack or
     None, the sample rate, and how many frames it delivers."""
@@ -1571,7 +1571,7 @@ async def _direct_reference_assets(
     assets: DirectReferenceAssets,
     out: Outputs,
     tel: Telemetry,
-) -> tuple[ReferenceRenderInput, ReferenceAssets, tuple[VideoUse, ...], list[ImageAsset], list[str]]:
+) -> tuple[ReferenceRenderInput, ReferenceAssets, tuple[VideoUse, ...], list[ImageFile], list[str]]:
     """Resolve named references once for a direct call, and how it uses each video.
 
     ``assets`` is the prepared handoff used by long-form children.  Named references are
@@ -1586,7 +1586,7 @@ async def _direct_reference_assets(
     if not payload.references:
         raise InvalidRequest("references must contain at least one item", fields=["references"])
     validate_references(payload.references)
-    shown: list[ImageAsset] = []
+    shown: list[ImageFile] = []
     images, references, warnings, clips = await _create_references(
         ctx,
         payload.references,
@@ -1607,10 +1607,10 @@ async def _direct_reference_assets(
             warnings + call.warnings)
 
 
-def _direct_truncations(payload: ReferenceRenderInput, resolved: Assets[Reference]) -> list[str]:
+def _direct_truncations(payload: ReferenceRenderInput, resolved: Files[Reference]) -> list[str]:
     """Truncation lines for the videos a direct call attaches: by label (or input id), or by
     reference name."""
-    attached = [(index, item) for index, item in enumerate(resolved) if isinstance(item, VideoAsset)]
+    attached = [(index, item) for index, item in enumerate(resolved) if isinstance(item, VideoFile)]
     if payload.references is None:
         return truncation_warnings(
             (resolved.info(index).label or resolved.info(index).id, item) for index, item in attached
@@ -1882,8 +1882,8 @@ class SegmentOutput(msgspec.Struct):
     """`H3VideoOutput` without a default factory, which an invocable result may not carry."""
 
     video: Annotated[
-        VideoAsset,
-        AssetBound(
+        VideoFile,
+        FileBound(
             max_bytes=256 << 20,
             max_decoded_bytes=32 << 20,
             media_types=("video/mp4",),
@@ -1929,8 +1929,8 @@ class LongFormOutput(msgspec.Struct):
     every generated reference, and the video one segment at a time. A failed or canceled run
     keeps what it published."""
 
-    video: Annotated[VideoAsset, AssetBound(max_bytes=256 << 20, media_types=("video/mp4",))]
-    references: list[ImageAsset]
+    video: Annotated[VideoFile, FileBound(max_bytes=256 << 20, media_types=("video/mp4",))]
+    references: list[ImageFile]
     delivered_frames: int
     fps: int
     warnings: list[str]
@@ -2041,7 +2041,7 @@ app.entrypoint(internal=True)(cut_segment)
 
 
 MotionContextAsset = Annotated[
-    FileAsset, AssetBound(max_bytes=16 << 20, media_types=("application/octet-stream",))
+    File, FileBound(max_bytes=16 << 20, media_types=("application/octet-stream",))
 ]
 
 
@@ -2110,7 +2110,7 @@ def _render_motion(
                                  fields=["payload.context"])
         context = decode_context(payload.context.read_bytes())
     _reference_policy(assets)
-    saved_context: list[FileAsset] = []
+    saved_context: list[File] = []
 
     def save_context(state: Any) -> None:
         carried = model.pipe.export_context(state, provenance=native_provenance)
@@ -2220,7 +2220,7 @@ async def _create_references(
     references: list[StoryReference],
     tel: Telemetry,
     out: Outputs,
-    shown: list[ImageAsset],
+    shown: list[ImageFile],
     *,
     style: str,
     prepare_characters: bool = True,
@@ -2235,14 +2235,14 @@ async def _create_references(
     reference_generator = cast(Callable[..., Awaitable[ImageResult]], generate_reference)
     background_remover = cast(Callable[..., Awaitable[RemoveBackgroundOutput]], remove_background)
 
-    async def prepare_character(reference: StoryReference) -> ImageAsset:
+    async def prepare_character(reference: StoryReference) -> ImageFile:
         ctx.raise_if_cancelled()
         assert reference.image is not None
         with tel.scope(f"Removing background from {reference.name}"):
             result = await background_remover(image=reference.image)
         return result.image
 
-    async def create_reference(reference: StoryReference) -> ImageAsset:
+    async def create_reference(reference: StoryReference) -> ImageFile:
         ctx.raise_if_cancelled()
         # Concurrent child progress has no ordered overall range. Runtime owns
         # GPU admission; this CPU composer submits at most nine independent calls.
@@ -2259,7 +2259,7 @@ async def _create_references(
             )
         return result.image
 
-    def show(reference: StoryReference, image: ImageAsset) -> None:
+    def show(reference: StoryReference, image: ImageFile) -> None:
         # In request order, each as soon as it and every earlier one exist.
         out.publish("references", image, label=f"Reference: {reference.name}")
         shown.append(image)
@@ -2429,7 +2429,7 @@ async def long_form_cuts(
     reference_work = sum(FILE[ref.kind] == "image" and ref.image is None for ref in payload.references) * _REFERENCE_FRAMES
     total_work = sum(render_work) + reference_work
     prefetch(cut_segment)
-    references: list[ImageAsset] = []
+    references: list[ImageFile] = []
     images, described, warnings, clips = await _create_references(
         ctx, payload.references, tel, out, references, style=payload.style,
         prepare_characters=payload.clean_references,
@@ -2574,7 +2574,7 @@ async def long_form(
     reference_work = sum(FILE[ref.kind] == "image" and ref.image is None for ref in payload.references) * _REFERENCE_FRAMES
     total_work = sum(render_work) + reference_work
     prefetch(motion_segment)
-    references: list[ImageAsset] = []
+    references: list[ImageFile] = []
     images, described, described_warnings, clips = await _create_references(
         ctx, payload.references, tel, out, references, style=payload.style,
         prepare_characters=payload.clean_references,

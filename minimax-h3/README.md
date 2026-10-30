@@ -23,14 +23,14 @@ duration_s: 6
 ```
 
 ```sh
-cozy run minimax-h3/fl2va_turbo --input request.yaml --asset first=./first.png --asset last=./last.png
+cozy run minimax-h3/fl2va_turbo --input request.yaml --file first=./first.png --file last=./last.png
 ```
 
 Inline inputs work too, and override the file's:
 
 ```sh
 cozy run minimax-h3/fl2va_turbo prompt='The camera pulls back from a lighthouse as a storm rolls in.' \
-  duration_s=6 --asset first=./first.png --asset last=./last.png
+  duration_s=6 --file first=./first.png --file last=./last.png
 cozy run minimax-h3/ref2va_turbo --input scene.json
 cozy run minimax-h3/long_form --input story.json
 ```

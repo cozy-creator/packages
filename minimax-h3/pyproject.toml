@@ -1,11 +1,11 @@
 [project]
 name = "minimax-h3"
-version = "0.1.15"
+version = "0.1.16"
 description = "MiniMax H3 video with sound: from keyframes, references, or several segments"
 requires-python = ">=3.12"
 dependencies = [
     "birefnet>=0.1.0",
-    "cozy-runtime[adapters,media]>=0.35.6",
+    "cozy-runtime[adapters,media]>=0.36.0",
     # MiniMax-H3 and Qwen-Image-2.1 share one Diffusers: the release qwen-image-2 locks.
     "diffusers>=0.41,<0.42",
     "hf-xet>=1.6.0",

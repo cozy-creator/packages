@@ -11,12 +11,12 @@ from typing import Annotated, Literal, NamedTuple
 
 import msgspec
 from cozy_runtime.author import (
-    AssetBound,
-    AudioAsset,
+    FileBound,
+    AudioFile,
     AudioPreparation,
-    ImageAsset,
+    ImageFile,
     InvalidRequest,
-    VideoAsset,
+    VideoFile,
     VideoPreparation,
 )
 
@@ -77,21 +77,21 @@ class StoryReference(msgspec.Struct):
     description: str = ""
     retention_analysis: Annotated[str, msgspec.Meta(max_length=1024)] | None = None
     image: Annotated[
-        ImageAsset | None,
-        AssetBound(
+        ImageFile | None,
+        FileBound(
             max_bytes=64 << 20,
             max_decoded_bytes=256 << 20,
             media_types=("image/png", "image/jpeg", "image/webp"),
         ),
     ] = None
     audio: Annotated[
-        AudioAsset | None,
-        AssetBound(max_bytes=256 << 20, max_decoded_bytes=AUDIO_READ_BYTES),
+        AudioFile | None,
+        FileBound(max_bytes=256 << 20, max_decoded_bytes=AUDIO_READ_BYTES),
         REFERENCE_AUDIO,
     ] = None
     video: Annotated[
-        VideoAsset | None,
-        AssetBound(max_bytes=VIDEO_MAX_BYTES, max_decoded_bytes=VIDEO_READ_BYTES),
+        VideoFile | None,
+        FileBound(max_bytes=VIDEO_MAX_BYTES, max_decoded_bytes=VIDEO_READ_BYTES),
         REFERENCE_VIDEO,
     ] = None
     #: A video's own sound: dropped unless set, so the clip guides motion alone.
@@ -104,8 +104,8 @@ class StoryReference(msgspec.Struct):
     guide: bool = False
     #: A character's voice: a timbre reference wherever the character is named.
     voice: Annotated[
-        AudioAsset | None,
-        AssetBound(max_bytes=256 << 20, max_decoded_bytes=AUDIO_READ_BYTES),
+        AudioFile | None,
+        FileBound(max_bytes=256 << 20, max_decoded_bytes=AUDIO_READ_BYTES),
         REFERENCE_AUDIO,
     ] = None
     seed: Annotated[int, msgspec.Meta(ge=0, le=9007199254740991)] | None = None
@@ -141,14 +141,14 @@ def reference_seed(reference: StoryReference, request_id: str) -> int:
 
 async def resolve_reference_images(
     references: Sequence[StoryReference],
-    generate: Callable[[StoryReference], Awaitable[ImageAsset]],
-    prepare_character: Callable[[StoryReference], Awaitable[ImageAsset]] | None = None,
-    show: Callable[[StoryReference, ImageAsset], None] | None = None,
-) -> dict[str, ImageAsset | AudioAsset | VideoAsset]:
+    generate: Callable[[StoryReference], Awaitable[ImageFile]],
+    prepare_character: Callable[[StoryReference], Awaitable[ImageFile]] | None = None,
+    show: Callable[[StoryReference, ImageFile], None] | None = None,
+) -> dict[str, ImageFile | AudioFile | VideoFile]:
     """Prepare supplied characters, reuse other supplied files, and generate missing images
     once, concurrently. `show` gets each made image in request order, as soon as it and every
     earlier one exist."""
-    images: dict[str, ImageAsset | AudioAsset | VideoAsset] = {}
+    images: dict[str, ImageFile | AudioFile | VideoFile] = {}
     for ref in voices(references)[0]:
         supplied = getattr(ref, FILE[ref.kind])
         if supplied is not None:
@@ -160,7 +160,7 @@ async def resolve_reference_images(
         )
     ]
 
-    async def one(reference: StoryReference) -> ImageAsset:
+    async def one(reference: StoryReference) -> ImageFile:
         if reference.image is not None:
             assert prepare_character is not None
             return await prepare_character(reference)

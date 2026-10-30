@@ -33,8 +33,8 @@ from typing import Annotated, Literal
 
 import msgspec
 from cozy_runtime.author import (
-    AssetBound,
-    AudioAsset,
+    FileBound,
+    AudioFile,
     Context,
     DecodedAudioChunk,
     DecodedAudioFormat,
@@ -48,7 +48,7 @@ from cozy_runtime.author import (
     SavedVideo,
     Telemetry,
     ThreadPoolExecutor,
-    VideoAsset,
+    VideoFile,
     VideoJoin,
     invocable,
 )
@@ -64,8 +64,8 @@ FRAME_RATE = Fraction(24)
 
 class AssembleVideoRequest(msgspec.Struct):
     videos: Annotated[
-        list[VideoAsset],
-        AssetBound(
+        list[VideoFile],
+        FileBound(
             max_bytes=MAX_INPUT_BYTES,
             max_decoded_bytes=MAX_EVENT_BYTES,
             media_types=("video/mp4",),
@@ -73,8 +73,8 @@ class AssembleVideoRequest(msgspec.Struct):
         msgspec.Meta(min_length=1),
     ]
     master_audio: Annotated[
-        AudioAsset | None,
-        AssetBound(max_bytes=MAX_INPUT_BYTES, max_decoded_bytes=MAX_EVENT_BYTES),
+        AudioFile | None,
+        FileBound(max_bytes=MAX_INPUT_BYTES, max_decoded_bytes=MAX_EVENT_BYTES),
     ] = None
     transition: Literal["continuous", "cut"] = "continuous"
 
@@ -99,7 +99,7 @@ class SegmentReceipt(msgspec.Struct):
 
 
 class AssembleVideoResponse(msgspec.Struct):
-    video: Annotated[VideoAsset, AssetBound(media_types=("video/mp4",), max_bytes=MAX_INPUT_BYTES)]
+    video: Annotated[VideoFile, FileBound(media_types=("video/mp4",), max_bytes=MAX_INPUT_BYTES)]
     segments: list[SegmentReceipt]
     audio_mode: Literal["segments", "master"]
     master_audio_digest: str | None
@@ -133,7 +133,7 @@ class AssembleVideoResponse(msgspec.Struct):
 
 @dataclass(frozen=True, slots=True)
 class _Scan:
-    asset: VideoAsset
+    asset: VideoFile
     header: DecodedMediaHeader
     frames: int
     audio_samples: int
@@ -189,7 +189,7 @@ def _rms(channels: tuple[bytes, ...], *, start: int = 0, samples: int | None = N
     return math.sqrt(total / count) if count else 0.0
 
 
-def _scan_video(asset: VideoAsset, check: Callable[[], None], *, pictures: bool = True) -> _Scan:
+def _scan_video(asset: VideoFile, check: Callable[[], None], *, pictures: bool = True) -> _Scan:
     """Clocks and bounded audio windows; without `pictures` only the soundtrack is decoded
     (a packet copy's Runtime join checks the frame clock itself)."""
     header: DecodedMediaHeader | None = None
@@ -283,7 +283,7 @@ def _scan_video(asset: VideoAsset, check: Callable[[], None], *, pictures: bool 
 class ScanAhead:
     """Validate completed shots on one worker while the caller awaits later children.
 
-    Futures retain only bounded audio windows and clocks, never decoded videos. Assets
+    Futures retain only bounded audio windows and clocks, never decoded videos. Files
     remain attempt-owned and are read again by the final encoder, including its normal
     byte-grant checks. Leaving the scope always joins the worker before attempt cleanup.
     """
@@ -312,7 +312,7 @@ class ScanAhead:
         if self._stopped.is_set():
             raise RuntimeError("assembly scan was abandoned")
 
-    def add(self, asset: VideoAsset) -> None:
+    def add(self, asset: VideoFile) -> None:
         self._check_active()
         # Surface an earlier validation failure before accepting more work.
         for pending in self._pending:
@@ -327,7 +327,7 @@ class ScanAhead:
         self._check_active()
         return self._pending[index].result()
 
-    def finish(self, videos: Sequence[VideoAsset]) -> list[_Scan]:
+    def finish(self, videos: Sequence[VideoFile]) -> list[_Scan]:
         self._check_active()
         scans = [pending.result() for pending in self._pending]
         if len(scans) != len(videos) or any(
@@ -358,7 +358,7 @@ class CutJoin:
         self.scans: list[_Scan] = []
         self.output_audio = 0
 
-    def append(self, scan: _Scan, frames: int, *, last: bool) -> VideoAsset:
+    def append(self, scan: _Scan, frames: int, *, last: bool) -> VideoFile:
         """Join one segment of `frames` planned frames; the video joined so far."""
         audio = scan.header.audio
         if audio is None or (self.audio is not None and not _same_audio(self.audio, audio)):
@@ -415,7 +415,7 @@ class CutJoin:
         return self.join.finish()
 
 
-def _scan_audio(asset: AudioAsset, check: Callable[[], None]) -> _AudioScan:
+def _scan_audio(asset: AudioFile, check: Callable[[], None]) -> _AudioScan:
     header: DecodedAudioFormat | None = None
     samples = 0
     with asset.stream() as stream:
@@ -796,7 +796,7 @@ def _soundtrack(
 
 def _master_events(
     scans: list[_Scan],
-    master: AudioAsset,
+    master: AudioFile,
     master_scan: _AudioScan,
     *,
     target_audio: int,

@@ -14,12 +14,12 @@ from typing import Annotated, cast
 
 import msgspec
 from cozy_runtime.author import (
-    AssetBound,
+    FileBound,
     Context,
-    ImageAsset,
+    ImageFile,
     Telemetry,
     UnsupportedInput,
-    VideoAsset,
+    VideoFile,
     invocable,
 )
 from cozy_runtime.vlm import AskPrompt, AskResult
@@ -74,7 +74,7 @@ SECTION = re.compile(r"^\s*(PEOPLE|BEATS|CAMERA|CUTS)\s*:\s*", re.IGNORECASE | r
 
 
 class CutsInput(msgspec.Struct):
-    video: Annotated[VideoAsset, AssetBound(max_bytes=1 << 30, max_decoded_bytes=16 << 30)]
+    video: Annotated[VideoFile, FileBound(max_bytes=1 << 30, max_decoded_bytes=16 << 30)]
     #: The clip as H3 reads it ends here (its 15 s trim does not travel with the asset).
     seconds: Annotated[float, msgspec.Meta(gt=0)]
 
@@ -89,7 +89,7 @@ def _ask() -> Callable[..., Awaitable[AskResult]]:
     return cast(Callable[..., Awaitable[AskResult]], ask)
 
 
-async def characters(images: list[ImageAsset], tel: Telemetry) -> list[str]:
+async def characters(images: list[ImageFile], tel: Telemetry) -> list[str]:
     """One sentence on each character's appearance, all in one call; empty where the image shows
     none. A sentence naming a setting or pose word is asked again once with those words pointed
     out, and any clause still naming one is dropped."""
@@ -117,7 +117,7 @@ async def characters(images: list[ImageAsset], tel: Telemetry) -> list[str]:
     return texts
 
 
-async def places(images: list[ImageAsset]) -> list[str]:
+async def places(images: list[ImageFile]) -> list[str]:
     """One sentence on each place's look, people left out, all in one call."""
     asked = await _ask()(
         prompts=[AskPrompt(PLACE_PROMPT, images=[image]) for image in images], max_tokens=SENTENCE_TOKENS
@@ -125,7 +125,7 @@ async def places(images: list[ImageAsset]) -> list[str]:
     return [" ".join(text.split()) for text in asked.texts]
 
 
-async def clip(video: VideoAsset, tel: Telemetry) -> str:
+async def clip(video: VideoFile, tel: Telemetry) -> str:
     """A motion clip's people, beats, camera and cuts, watched as timestamped video in one pass.
     ffmpeg finds the cuts (`find_cuts`): they fill `CUTS` and the model is told where the shot
     changes; without ffmpeg the model judges them itself."""

@@ -56,7 +56,7 @@ single-GPU SeedVR2 and multi-GPU H3 can each use their supported count. An expli
 applies to every GPU child and is never silently reduced.
 
 ```sh
-cozy run minimax-h3/ref2va_turbo --asset character.png \
+cozy run minimax-h3/ref2va_turbo --file character.png \
   prompt='<Picture 1> waves in a bright studio.' duration_s=15 seed=581203 \
   resolution=1440p
 ```
