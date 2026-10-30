@@ -21,14 +21,6 @@ def provenance(model_manifest: str, turbo_lora_manifest: str = "") -> RenderProv
     return RenderProvenance(model_manifest, turbo_lora_manifest)
 
 
-def compatible_base(actual: RenderProvenance, previous: RenderProvenance | None) -> None:
-    if previous is not None and actual.model_manifest != previous.model_manifest:
-        raise InvalidRequest(
-            "shots in one rendering must use the same base model",
-            code="render_provenance",
-        )
-
-
 def context_provenance(renderer: RenderProvenance) -> str:
     """Record model selections for native context compatibility without code hashes."""
     return msgspec.json.encode(renderer).decode("utf-8")

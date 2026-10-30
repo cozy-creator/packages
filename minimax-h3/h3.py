@@ -62,7 +62,7 @@ import describe
 from assembly import CutJoin, ScanAhead, _scan_video, assemble_video
 from gates import MediaFacts, refuse_before_encode
 from long_form_state import (
-    RenderProvenance, compatible_base, context_provenance, provenance,
+    RenderProvenance, context_provenance, provenance,
 )
 from minimax_h3.continuation import (
     AVContext,
@@ -1594,7 +1594,6 @@ def _render_motion(
     observed = provenance(
         model.checkpoint_ref, "" if turbo_lora is None else turbo_lora.checkpoint_ref
     )
-    compatible_base(observed, payload.previous_provenance)
     native_provenance = context_provenance(observed)
     plan = ContinuationPlan(
         payload.duration_s,
@@ -1919,7 +1918,6 @@ class KeyframeInput(msgspec.Struct, kw_only=True):
     last_frame: FrameImage = None
     next_context_frames: ContextFrames = 0
     next_context_audio: bool = False
-    previous_provenance: RenderProvenance | None = None
 
 
 def _frame(asset: ImageAsset | None, field: str) -> Image | None:
@@ -1959,7 +1957,6 @@ async def keyframe_segment(
     """A segment on FL2VA: its text and its first and/or last keyframe, or text alone."""
     lora = _sampling(payload, turbo_lora)
     observed = provenance(base_model.checkpoint_ref, "" if lora is None else lora.checkpoint_ref)
-    compatible_base(observed, payload.previous_provenance)
     plan = ContinuationPlan(
         payload.duration_s, Carry(),
         Carry(int(payload.next_context_frames), payload.next_context_audio),
@@ -2357,7 +2354,7 @@ async def generate(
                                     payload=KeyframeInput(
                                         prompt=prompt, seed=seeds[index], duration_s=durations[index],
                                         steps=steps, turbo=turbo, first_frame=first_asset,
-                                        last_frame=last_asset, previous_provenance=expected,
+                                        last_frame=last_asset,
                                         next_context_frames=cast(ContextFrames, plan.successor.frames),
                                         next_context_audio=plan.successor.audio,
                                     ),
@@ -2370,7 +2367,6 @@ async def generate(
                         code="segment_failed",
                     ) from failure
                 if isinstance(result, MotionOutput):
-                    compatible_base(result.provenance, expected)
                     expected = result.provenance
                     context = result.context if plan.successor else None
                 rendered.append(result.video)
