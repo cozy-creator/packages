@@ -77,7 +77,7 @@ wheels = [
 
 [[package]]
 name = "birefnet"
-version = "0.1.0"
+version = "0.1.1"
 source = { registry = "https://tensorhub.com/v1/index/_/simple/" }
 dependencies = [
     { name = "cozy-runtime", extra = ["media"] },
@@ -94,7 +94,7 @@ dependencies = [
     { name = "transformers" },
 ]
 wheels = [
-    { url = "https://tensorhub.com/v1/index/_/birefnet/0.1.0/birefnet-0.1.0-py3-none-any.whl", hash = "sha256:5ebdb119f90fceea2a3b59682808015819ea85433c090f6505a1417d34e62454" },
+    { url = "https://tensorhub.com/v1/index/_/birefnet/0.1.1/birefnet-0.1.1-py3-none-any.whl", hash = "sha256:bb1b2d83d7962076c978a6e2254e8ce0608363b7a7c7063fbb59c85ffd2b6286" },
 ]
 
 [[package]]
@@ -641,7 +641,7 @@ wheels = [
 
 [[package]]
 name = "minimax-h3"
-version = "0.1.14"
+version = "0.1.15"
 source = { editable = "." }
 dependencies = [
     { name = "birefnet" },
@@ -1191,7 +1191,7 @@ wheels = [
 
 [[package]]
 name = "qwen3-5"
-version = "0.1.0"
+version = "0.1.1"
 source = { registry = "https://tensorhub.com/v1/index/_/simple/" }
 dependencies = [
     { name = "cozy-runtime", extra = ["media"] },
@@ -1207,7 +1207,7 @@ dependencies = [
     { name = "transformers" },
 ]
 wheels = [
-    { url = "https://tensorhub.com/v1/index/_/qwen3.5/0.1.0/qwen3_5-0.1.0-py3-none-any.whl", hash = "sha256:ff3c21359ea54889ecc113e8b5c10437430eec897d6eaef7b4beefe3c81c42c4" },
+    { url = "https://tensorhub.com/v1/index/_/qwen3.5/0.1.1/qwen3_5-0.1.1-py3-none-any.whl", hash = "sha256:38d818eb58ab21cc69f75f8ade5571d4cb7374e09de8731ada35445c43de29ef" },
 ]
 
 [[package]]
