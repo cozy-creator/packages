@@ -54,6 +54,9 @@ turbo: true                                   # false: the full model at steps 3
   ones; nothing describes them automatically. A world state is a soft picture of the set
   read at 512 px, with its `layout` in its definition: the shot keeps who stands where without
   opening on that frame.
+  A later piece's environment is the previous piece's last frame, with the environment picture
+  beside it as a soft world state: the place holds without the picture's framing pulling the
+  shot back with a cut (runs 20996, 21955, 21957).
 - **Footage.** `reference_footage` gives motion and camera; a `plate` (`{video}`) is followed
   frame by frame, for a shot of one piece: an edit LoRA decides what changes, and without one the
   shot comes back close to the clip (run 21018). `keyframes` anchor the first and last frames.

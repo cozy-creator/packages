@@ -1787,14 +1787,19 @@ async def shot(ctx: Context, payload: ShotRequest, out: Outputs, tel: Telemetry)
         order.append((piece, len(exports.setdefault(piece, []))))
         exports[piece].append(at - starts[piece])
     style, sound, music = payload.style, payload.soundscape, payload.music
-    forced = frozenset(ref.name for ref in references)
-    files: dict[str, File | None] = {ref.name: getattr(ref, FILE[ref.kind]) for ref in voices(references)[0]}
-    #: A continued piece's place is the previous piece's last frame: the setup plate's own framing pulls a
-    #: shot that has moved away from it back with a cut (run 20996, 16.2 s).
+    # A continued piece's place is the previous piece's last frame, with the setup plate beside it as an
+    # attribute_transfer world state: the plate as the place pulls a shot that has moved from its framing back
+    # with a cut (run 20996), and the last frame alone lets the place drift (run 21955).
     places = [ref.name for ref in references if ref.kind == "background"]
+    plates = [StoryReference(name=f"{ref.name} plate", kind="world_state", image=ref.image,
+                             description=f"It is <{ref.name}>'s setup plate: its architecture and materials, not its framing.")
+              for ref in references if ref.kind == "background"]  # fmt: skip
+    forced = frozenset(ref.name for ref in [*references, *plates])
+    files: dict[str, File | None] = {ref.name: getattr(ref, FILE[ref.kind]) for ref in voices([*references, *plates])[0]}
     calls: list[PieceCall] = []
     for index, text in enumerate(piece_texts(payload.prompt, payload.beats, [start / FPS for start in starts])):
-        call = piece_call(text, references, style=style, soundscape=sound, music=music, index=index, forced=forced)
+        call = piece_call(text, [*references, *plates] if index else references, style=style, soundscape=sound,
+                          music=music, index=index, forced=forced)  # fmt: skip
         if not call.references and index:
             # Ref2VA carries the picture and needs a picture: the previous piece's last frame.
             end = StoryReference(name=f"Piece {index} end", kind="world_state")
