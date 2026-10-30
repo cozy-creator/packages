@@ -125,14 +125,18 @@ BLOCK = fusion.DiTBlock(
     centered=True,
     rms_rounding="once",
 )
+#: The VAE's dtype on CUDA. Its F32 lane holds exactly Qwen-Image's bf16 values, which fp16 holds exactly
+#: too: against an F32 decode, fp16 measures 62.9 dB and bf16 53.4 (dtype audit M1).
+VAE_DTYPE = torch.float16
 #: The VAE's RMS norms in one kernel each, with the SiLU each residual block and the decoder's head apply
 #: after them; Diffusers computes them in F32 copies of every activation.
 VAE_NORM = fusion.ChannelNorm(
     QwenImageRMS_norm,
     silu=((QwenImageResidualBlock, ("norm1", "norm2")), (QwenImageDecoder3d, ("norm_out",))),
+    dtype="fp16",
 )
 #: A lone frame's 3x3x3 causal convolutions on their last temporal tap, the only one it meets (Diffusers
-#: pads two zero frames and convolves all 27 taps), and its nearest upsampling in bf16, not F32.
+#: pads two zero frames and convolves all 27 taps), and its nearest upsampling in its own dtype, not F32.
 VAE_FRAME = fusion.LoneFrame(QwenImageCausalConv3d, upsample=QwenImageUpsample)
 
 
@@ -232,9 +236,10 @@ class Krea2(Model[Krea2Graph], encoded_leaves="accept"):
         return "+".join(identity for identity in installed if identity)
 
     def hold_vae(self) -> None:
-        """Decode in bf16, as Diffusers' and Krea's pipelines do: the Runtime casts the VAE's stored
-        F32 when it next fills it. Called before any VAE scope opens."""
-        hold_dtype(self.graph.components["vae"], DTYPE)
+        """Decode in `VAE_DTYPE` on CUDA; the CPU keeps the stored F32. The Runtime casts the VAE's
+        stored F32 when it next fills it. Called before any VAE scope opens."""
+        if torch.device(str(self.device)).type == "cuda":
+            hold_dtype(self.graph.components["vae"], VAE_DTYPE)
 
     @uses_components("text_encoder", memoize=True, memo_dependencies=_CODE)
     def encode(self, prompt: str) -> torch.Tensor:
