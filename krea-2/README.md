@@ -39,8 +39,8 @@ ComfyUI's cfg 1.
 
 Each checkpoint defaults to the most Krea gives it: Raw is trained up to 1 MP, Turbo makes 1–4 MP and Krea
 runs it at 2048². `megapixels` is held to 0.25–4, sides to 256–4096 px on the 16 px grid, and each clamp is
-reported as an adjustment. Up to 1 MP the VAE decodes whole; above it, in 1024 px tiles (512 or 256 px
-where those do not fit), which keeps the decode under 3 GB, so the DiT stays resident beside it on a 24 GB card.
+reported as an adjustment. The VAE decodes the whole canvas, each block in strips of rows (exact, as
+ComfyUI does), which keeps the decode to a few GB, so the DiT stays resident beside it on a 24 GB card.
 
 ## Pipeline
 

@@ -62,7 +62,7 @@ def _generate(ctx: Context, payload: GenerateInput, model: Krea2, out: Outputs, 
             distilled=distilled, on_step=tel.step_callback(steps, stage="generating image", overall_range=(0.05, 0.95)),
         )
     with tel.stage("decoding image", overall_range=(0.95, 0.99)):
-        image = model.decode(latents, width=width, height=height, tel=tel)
+        image = model.decode(latents, width=width, height=height)
     with tel.stage("saving image", overall_range=(0.99, 1.0)):
         asset = out.save_image(image, format="png")
     return ImageResult(asset, width, height, seed, payload.prompt)

@@ -23,14 +23,19 @@ from cozy_runtime.author import (
     MemoDistribution,
     Model,
     ModelAssets,
-    Telemetry,
     denoise_loop,
     hold_dtype,
     uses_components,
 )
 from cozy_runtime.author.kernels import Plan
 from diffusers import AutoencoderKLQwenImage, FlowMatchEulerDiscreteScheduler, Krea2Transformer2DModel
-from diffusers.image_processor import VaeImageProcessor
+from diffusers.models.autoencoders.autoencoder_kl_qwenimage import (
+    QwenImageCausalConv3d,
+    QwenImageDecoder3d,
+    QwenImageResidualBlock,
+    QwenImageRMS_norm,
+    QwenImageUpsample,
+)
 from diffusers.models.transformers.transformer_krea2 import Krea2TransformerBlock
 from diffusers.pipelines.krea2.pipeline_krea2 import Krea2Pipeline, calculate_shift, retrieve_timesteps
 from PIL import Image
@@ -43,7 +48,6 @@ from transformers.models.qwen3_vl.modeling_qwen3_vl import Qwen3VLTextModel
 
 #: Pixels per DiT token: the VAE's 8x, then 2x2 patches.
 PATCH = 16
-VAE_SCALE = 8
 #: The DiT's activations; its RMSNorm scales stay F32 (Diffusers' `_keep_in_fp32_modules`).
 DTYPE = torch.bfloat16
 #: The text encoder's hidden states the DiT reads (`Krea2Pipeline`'s `text_encoder_select_layers`).
@@ -121,6 +125,15 @@ BLOCK = fusion.DiTBlock(
     centered=True,
     rms_rounding="once",
 )
+#: The VAE's RMS norms in one kernel each, with the SiLU each residual block and the decoder's head apply
+#: after them; Diffusers computes them in F32 copies of every activation.
+VAE_NORM = fusion.ChannelNorm(
+    QwenImageRMS_norm,
+    silu=((QwenImageResidualBlock, ("norm1", "norm2")), (QwenImageDecoder3d, ("norm_out",))),
+)
+#: A lone frame's 3x3x3 causal convolutions on their last temporal tap, the only one it meets (Diffusers
+#: pads two zero frames and convolves all 27 taps), and its nearest upsampling in bf16, not F32.
+VAE_FRAME = fusion.LoneFrame(QwenImageCausalConv3d, upsample=QwenImageUpsample)
 
 
 def as_stored(config: Config, component: str, root: nn.Module) -> None:
@@ -210,7 +223,13 @@ class Krea2(Model[Krea2Graph], encoded_leaves="accept"):
         self.tokenizer = build_tokenizer(loader.assets)
 
     def execution_plan(self, plan: Plan) -> str:
-        return fusion.install(plan, BLOCK, self.graph.components["transformer"])
+        vae = self.graph.components["vae"]
+        installed = (
+            fusion.install(plan, BLOCK, self.graph.components["transformer"]),
+            fusion.install_norms(plan, VAE_NORM, vae),
+            fusion.install_lone_frame(plan, VAE_FRAME, vae.decoder, vae.post_quant_conv),
+        )
+        return "+".join(identity for identity in installed if identity)
 
     def hold_vae(self) -> None:
         """Decode in bf16, as Diffusers' and Krea's pipelines do: the Runtime casts the VAE's stored
@@ -310,65 +329,36 @@ class Krea2(Model[Krea2Graph], encoded_leaves="accept"):
         return latents.cpu()
 
     @uses_components("vae")
-    def decode(self, latents: torch.Tensor, *, width: int, height: int, tel: Telemetry) -> Image.Image:
-        """Diffusers' decode of the one frame: whole up to 1 MP, else in tiles (`WHOLE_PIXELS`). Every decode
-        runs without Diffusers' feature cache, which only keeps each convolution's input for a next frame an
-        image never has."""
+    def decode(self, latents: torch.Tensor, *, width: int, height: int) -> Image.Image:
+        """Diffusers' decode of the one frame (`_decoded`), its pixels quantized on the device as
+        `VaeImageProcessor` quantizes them: a 4 MP canvas sends 12 MB of bytes to the host, not 50 MB of
+        floats for host passes."""
         vae = self.graph.components["vae"]
         device = torch.device(str(self.device))
         with torch.inference_mode():
             z = unpack(latents, height, width).to(device=device, dtype=vae.dtype)
             mean = z.new_tensor(vae.config.latents_mean).view(1, -1, 1, 1, 1)
             inverse = 1.0 / z.new_tensor(vae.config.latents_std).view(1, -1, 1, 1, 1)
-            z = z / inverse + mean
-            image = _decoded_whole(vae, z) if width * height <= WHOLE_PIXELS else None
-            if image is None:
-                image = _decoded_tiled(vae, z, tel)
-            image = image.clamp(-1, 1)[:, :, 0]
+            image = _decoded(vae, z / inverse + mean)[0, :, 0].float()
             if not torch.isfinite(image).all():
                 raise ValueError("Krea 2's decoder produced non-finite pixels")
-            (picture,) = VaeImageProcessor(vae_scale_factor=PATCH).postprocess(image.float(), output_type="pil")
-        return picture  # type: ignore[no-any-return]
-
-
-#: The largest canvas decoded whole. The whole decode's working set grows with the canvas, about 2.4 GB a
-#: megapixel in bf16 (9.8 GB at 2048²): above 1 MP it no longer fits beside the resident DiT and text
-#: encoder on a 24 GB card, as ComfyUI's 21.2 GB peak at 2048² does. Larger canvases decode in tiles.
-WHOLE_PIXELS = 1024 * 1024
-#: Tile sides (px), largest first: tiles the size of the largest canvas decoded whole, smaller ones where
-#: those do not fit. At 2048² that is 9 tiles of 1024 px, not 36 of 512: a quarter of the launches, which
-#: a slow host pays for, and fewer seams.
-_TILES = (1024, 512, 256)
-
-
-def _decoded_whole(vae: Any, z: torch.Tensor) -> torch.Tensor | None:
-    """The whole canvas; None when it does not fit the device."""
-    try:
-        return _decoded(vae, z)
-    except torch.OutOfMemoryError as error:
-        error.__traceback__ = None  # the whole decode's activations go with its frames
-        return None
+            pixels = ((image.clamp(-1, 1) * 0.5 + 0.5).clamp(0, 1) * 255).round().to(torch.uint8)
+            return Image.fromarray(pixels.permute(1, 2, 0).contiguous().cpu().numpy())
 
 
 def _decoded(vae: Any, z: torch.Tensor) -> torch.Tensor:
-    """The pipeline's decode without its feature cache."""
-    return vae.decoder(vae.post_quant_conv(z))  # type: ignore[no-any-return]
-
-
-def _decoded_tiled(vae: Any, z: torch.Tensor, tel: Telemetry) -> torch.Tensor:
-    """Diffusers' tiled decode in the largest tiles that fit."""
-    *larger, smallest = _TILES
-    for tile in larger:
-        try:
-            return _tiled(vae, z, tile, tel)
-        except torch.OutOfMemoryError as error:
-            error.__traceback__ = None  # this attempt's tiles go with its frames
-    return _tiled(vae, z, smallest, tel)
-
-
-def _tiled(vae: Any, z: torch.Tensor, tile: int, tel: Telemetry) -> torch.Tensor:
-    """`tile` px tiles blended with their neighbours over a quarter of their side, Diffusers' bits in a few
-    kernels a blend (`cozy_runtime.tiles`)."""
-    decoded = tiles.tiled(lambda t: _decoded(vae, t), z, scale=VAE_SCALE, side=tile, stride=tile * 3 // 4)
-    tel.log("tiled vae decode", tile_px=tile)
-    return decoded
+    """The pipeline's decode of one frame, the whole canvas: Diffusers' `decode` without its feature cache
+    (each convolution's input kept for a next frame an image never has), every residual and resample block
+    over the canvas in strips of rows (`tiles.rows`: exact, a strip's working set)."""
+    decoder = vae.decoder
+    x = decoder.conv_in(vae.post_quant_conv(z))
+    mid = decoder.mid_block
+    x = tiles.rows(mid.resnets[0], x, halo=2)
+    for attention, resnet in zip(mid.attentions, mid.resnets[1:], strict=True):
+        x = tiles.rows(resnet, attention(x), halo=2)
+    for block in decoder.up_blocks:
+        for resnet in block.resnets:
+            x = tiles.rows(resnet, x, halo=2)
+        if block.upsamplers is not None:
+            x = tiles.rows(block.upsamplers[0], x, halo=1, scale=2)
+    return tiles.rows(lambda s: decoder.conv_out(decoder.nonlinearity(decoder.norm_out(s))), x, halo=1)
