@@ -221,27 +221,6 @@ class H3Model(
         return self.pipe.denoise("ref2va", state, on_step=on_step, cancel=cancel)
 
 
-class H3Decoder(Model[OfficialH3Pipeline], encoded_leaves="accept", attention_bits={"vae": 8}):
-    """H3's video VAE alone (`decode_shot`): a shot's pieces decoded as one latent. Its own
-    class, since H3Model declares the text encoder placeable and so must load it."""
-
-    pipe: OfficialH3Pipeline
-
-    def load(self, loader: Loader) -> None:
-        self.pipe = loader.construct(OfficialH3Pipeline, factory=partial(build_h3_pipeline, plans=model_plans(loader.assets)))
-
-    def unload(self, loader: Loader) -> None:
-        return None
-
-    def execution_plan(self, plan: Plan) -> str:
-        """The fused video VAE decoder blocks."""
-        return fusion.install(plan, VAE_BLOCK, self.pipe.components["vae"]) or ""
-
-    @uses_components("vae")
-    def decode_latents(self, latents: Any, *, on_chunk: Callable[[Any], None]) -> int:
-        return self.pipe.decode_latents(latents, on_chunk)
-
-
 class H3TurboBase(H3Model, encoded_leaves="accept"):
     """The five-root base checkpoint with construction-time turbo consumers.
 

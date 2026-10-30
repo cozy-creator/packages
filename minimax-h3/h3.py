@@ -15,6 +15,7 @@ import re
 from collections.abc import Awaitable, Callable, Iterable, Iterator, Sequence
 from concurrent.futures import Future
 from contextlib import suppress
+from dataclasses import dataclass
 from enum import Enum
 from fractions import Fraction
 from functools import partial
@@ -55,7 +56,6 @@ from cozy_runtime.author import (
     invocable,
     prefetch,
 )
-from cozy_runtime.author import device as placed_device
 from msgspec.structs import replace
 from PIL import Image as PILImage
 from safetensors.torch import load as load_tensors
@@ -76,7 +76,6 @@ from minimax_h3.continuation import (
 )
 from minimax_h3.guide_rows import GuideClip
 from minimax_h3.model import (
-    H3Decoder as H3Decoder,
     H3LatentUpscaler as H3LatentUpscaler,
     H3Model as H3Model,
     H3RegenerateLoRA as H3RegenerateLoRA,
@@ -516,14 +515,23 @@ def _finish(
     delivered_frames: int | None = None,
     sampled_frames: int | None = None,
     ended: Callable[[Any], None] | None = None,
+    earlier: _Earlier | None = None,
 ) -> H3VideoOutput:
-
+    """Decode and encode the render, with `earlier` pieces before it as one video."""
     cancel()
     if completed is not None:
         # The successor's carry: a slice of the denoised latents, before either decode.
         completed(state)
     frames = frames_for(duration_s) if delivered_frames is None else delivered_frames
     waveform, sample_rate = _soundtrack(model, task, state, frames=frames, tel=tel, cancel=cancel)
+    decode = partial(model.decode_video, task, state)
+    if earlier is not None:
+        # The whole shot as one latent: the VAE cross-fades its chunks across every join,
+        # where decoding piece by piece steps the picture (run 20751: luma +3.7 at a join).
+        latents = torch.cat([earlier.latents.to(state.latents.device), state.latents[:, :, earlier.head :]], dim=2)
+        decode = partial(model.decode_latents, latents)
+        frames += earlier.frames
+        waveform = torch.cat([earlier.waveform, waveform], dim=1)
 
     # The encoder runs under the decode (h3a-017): each chunk is quantized on its device
     # and landed in the host buffer while a worker feeds the runtime's streaming MP4 sink.
@@ -538,7 +546,7 @@ def _finish(
             progress=tel.step_callback(frames, stage="decode_video", overall_range=(0.90, 0.97)),
         )
         try:
-            model.decode_video(task, state, on_chunk=stream.push)
+            decode(on_chunk=stream.push)
         except BaseException:
             stream.abandon()
             raise
@@ -1026,6 +1034,7 @@ def _references_to_video(
     completed: Callable[[Any], None] | None,
     anchors: Sequence[tuple[Image, Literal["first", "last"]]],
     ended: Callable[[Any], None],
+    earlier: _Earlier | None = None,
 ) -> H3VideoOutput:
     plan = _plan(model, turbo_lora, "ref2va")
     steps = plan.schedule(payload.steps).transformer_evaluations
@@ -1099,7 +1108,7 @@ def _references_to_video(
     result = _finish(
         model, task, state, schedule, duration_s=payload.duration_s, out=out, tel=tel,
         cancel=ctx.raise_if_cancelled, completed=completed, ended=ended,
-        delivered_frames=delivery.delivered_frames, sampled_frames=delivery.sample_frames,
+        delivered_frames=delivery.delivered_frames, sampled_frames=delivery.sample_frames, earlier=earlier,
     )  # fmt: skip
     return H3VideoOutput(result.video, notes + result.warnings)
 
@@ -1128,8 +1137,9 @@ ContextFrames = Literal[0, 22, 39, 56]
 ContextFile = Annotated[
     File, FileBound(max_bytes=16 << 20, media_types=("application/octet-stream",))
 ]
-#: A piece's delivered video latents (`_Pieces.save`), about 3 MB a second at 768p.
+#: A piece's delivered video latents (`_Pieces`), about 3 MB a second at 768p.
 LatentFile = Annotated[File, FileBound(max_bytes=256 << 20, media_types=("application/octet-stream",))]
+PieceVideo = Annotated[VideoFile, FileBound(max_bytes=1 << 30, max_decoded_bytes=32 << 20, media_types=("video/mp4",))]
 
 
 def held_frames(plan: ContinuationPlan, videos: Sequence[VideoUse] = ()) -> int:
@@ -1168,10 +1178,14 @@ class Ref2VAInput(msgspec.Struct):
     picture_edges: tuple[int, ...] = ()
     #: Return the delivered latents (`PieceOutput.latents`).
     latents: bool = False
+    #: A shot's last piece: the earlier pieces' latents and videos, decoded with it as one.
+    earlier_latents: tuple[LatentFile, ...] = ()
+    earlier_videos: tuple[PieceVideo, ...] = ()
 
 
 class PieceOutput(msgspec.Struct):
-    video: Annotated[VideoFile, FileBound(max_bytes=256 << 20, max_decoded_bytes=32 << 20, media_types=("video/mp4",))]
+    #: The piece's video; a shot's last piece returns the whole shot.
+    video: PieceVideo
     warnings: list[str]
     provenance: RenderProvenance
     # A fixed output slot: Runtime grants result outputs by field path, never inside a union.
@@ -1182,9 +1196,34 @@ class PieceOutput(msgspec.Struct):
     last_frame: ImageFile
     #: The delivered frames the call's `exports` asks for, in order.
     frames: list[ImageFile]
-    #: Its delivered video latents when the call asks (`latents`), else empty: a shot of
-    #: several pieces decodes them as one (`decode_shot`).
+    #: Its delivered video latents when the call asks (`latents`), else empty: a shot's last
+    #: piece decodes them with its own as one.
     latents: LatentFile
+
+
+@dataclass(frozen=True)
+class _Earlier:
+    """A shot's pieces before its last: their delivered latents end to end, their sound end to
+    end (each starts where the last ended, as continuation cut it), and their frames; and the
+    last piece's head to leave out, whole VAE cycles, so its latents follow in phase."""
+
+    latents: Any
+    waveform: Any
+    frames: int
+    head: int
+
+    @classmethod
+    def read(cls, latents: Sequence[File], videos: Sequence[VideoFile], head: int) -> _Earlier:
+        parts = []
+        for video in videos:
+            with video.stream(pictures=False) as stream:
+                for event in stream:
+                    if isinstance(event, DecodedAudioChunk):
+                        parts.append(np.stack([np.frombuffer(pcm, dtype=np.float32) for pcm in event.pcm_f32le]))
+        joined = torch.cat([load_tensors(file.read_bytes())["latents"] for file in latents], dim=2)
+        # 5k + 2 latents decode to 17k + 5 frames (`continuation.video_tokens`).
+        frames = (int(joined.shape[2]) - 2) // 5 * 17 + 5
+        return cls(joined, torch.from_numpy(np.concatenate(parts, axis=1)), frames, head)
 
 
 class _Pieces:
@@ -1254,15 +1293,21 @@ async def ref2va_piece(
         context = decode_context(payload.context.read_bytes())
     _reference_policy(assets)
     handed = _Pieces(out, base_model, plan, observed, payload.latents)
+    earlier = None
+    if payload.earlier_latents:
+        head = video_tokens(plan.carried.frames) if plan.carried.frames else 0
+        earlier = _Earlier.read(payload.earlier_latents, payload.earlier_videos, head)
     ended: list[ImageFile] = []
     exported: list[ImageFile] = []
+    skip = 0 if earlier is None else earlier.frames
     piece = _references_to_video(
         ctx, "ref2va" if lora is None else "ref2va_turbo", payload, assets, base_model, out, tel,
         turbo_lora=lora, context=context, delivery=plan,
         expected_context_provenance=context_provenance(payload.previous_provenance or observed),
         completed=handed if handed.wanted else None,
         anchors=_anchors(payload.first_frame, payload.last_frame),
-        ended=partial(_keep_frames, out, payload.exports, ended, exported),
+        ended=partial(_keep_frames, out, tuple(skip + index for index in payload.exports), ended, exported),
+        earlier=earlier,
     )  # fmt: skip
     return PieceOutput(piece.video, list(piece.warnings), observed, handed.file("context"), ended[0], exported,
                        handed.file("latents"))  # fmt: skip
@@ -1450,61 +1495,6 @@ async def regenerate_shot(
 
 
 app.entrypoint(internal=True)(regenerate_shot)
-
-
-PieceVideo = Annotated[VideoFile, FileBound(max_bytes=256 << 20, max_decoded_bytes=32 << 20, media_types=("video/mp4",))]
-
-
-class DecodeShotInput(msgspec.Struct, kw_only=True):
-    """A shot of several pieces: each one's delivered latents and its video (for its sound), in
-    order, and the frames they make."""
-
-    latents: list[LatentFile]
-    pieces: list[PieceVideo]
-    frames: int
-
-
-class DecodeShotOutput(msgspec.Struct):
-    video: Annotated[VideoFile, FileBound(max_bytes=1 << 30, media_types=("video/mp4",))]
-
-
-@invocable(defaults={"decoder": _MODEL}, components={"decoder": ("vae",)}, memoize=True)
-async def decode_shot(
-    ctx: Context, *, payload: DecodeShotInput, decoder: H3Decoder, out: Outputs, tel: Telemetry
-) -> DecodeShotOutput:
-    """The pieces' latents decoded as one: the VAE cross-fades its chunks across every join,
-    where decoding piece by piece steps the picture (run 20751: luma +3.7 at a join). The
-    sound is each piece's, end to end, as continuation cut it."""
-    ctx.plan("vae")
-    with tel.stage("read", overall_range=(0.00, 0.05)):
-        latents = torch.cat([load_tensors(file.read_bytes())["latents"] for file in payload.latents], dim=2)
-        parts, rate = [], 0
-        for video in payload.pieces:
-            with video.stream(pictures=False) as stream:
-                for event in stream:
-                    if isinstance(event, DecodedAudioChunk):
-                        rate = event.sample_rate
-                        parts.append(np.stack([np.frombuffer(pcm, dtype=np.float32) for pcm in event.pcm_f32le]))
-        waveform = torch.from_numpy(np.concatenate(parts, axis=1))
-    if abs(int(waveform.shape[1]) * FPS - payload.frames * rate) > rate:
-        raise OutputError(f"the pieces' sound is {int(waveform.shape[1]) / rate:.3f} s against "
-                          f"{payload.frames / FPS:.3f} s of picture", code="shot_frames")  # fmt: skip
-    with tel.stage("decode_video", overall_range=(0.05, 0.97)):
-        stream = _VideoStream(
-            torch, out, frames=payload.frames, waveform=waveform, sample_rate=rate, cancel=ctx.raise_if_cancelled,
-            progress=tel.step_callback(payload.frames, stage="decode_video", overall_range=(0.05, 0.97)),
-        )  # fmt: skip
-        try:
-            decoder.decode_latents(latents.to(torch.device(str(placed_device()))), on_chunk=stream.push)
-        except BaseException:
-            stream.abandon()
-            raise
-    saved = stream.finish(lambda share: tel.progress(share, stage="encode_video"))
-    ctx.release_gpus()
-    return DecodeShotOutput(saved.video)
-
-
-app.entrypoint(internal=True)(decode_shot)
 
 
 # --- shot: one continuous take of any length (`video/shot`) ------------------------------
@@ -1842,7 +1832,9 @@ async def shot(ctx: Context, payload: ShotRequest, out: Outputs, tel: Telemetry)
                             context_audio=plan.carried.audio,
                             next_context_frames=cast(ContextFrames, plan.successor.frames),
                             next_context_audio=plan.successor.audio, first_frame=first, last_frame=last,
-                            exports=tuple(exports.get(index, ())), latents=several,
+                            exports=tuple(exports.get(index, ())), latents=several and index + 1 < count,
+                            earlier_latents=tuple(r.latents for r in returned) if several and index + 1 == count else (),
+                            earlier_videos=tuple(r.video for r in returned) if several and index + 1 == count else (),
                             picture_edges=tuple(_WORLD_STATE_EDGE if ref.kind == "world_state" else 0
                                                 for ref in call.references if FILE[ref.kind] == "image"),
                         ), assets=_call_assets(files, call.references),
@@ -1867,19 +1859,10 @@ async def shot(ctx: Context, payload: ShotRequest, out: Outputs, tel: Telemetry)
         returned.append(result)
         warnings += result.warnings
         files[f"Piece {index + 1} end"] = result.last_frame
-        out.publish("video", result.video, label=f"Piece {index + 1} of {count}")
-    video = returned[0].video
-    if several:
-        with tel.scope("Decoding the pieces as one", overall_range=(0.97, 1.0)):
-            decoded = await cast(Callable[..., Awaitable[DecodeShotOutput]], decode_shot)(
-                payload=DecodeShotInput(latents=[piece.latents for piece in returned],
-                                        pieces=[piece.video for piece in returned], frames=total),
-            )  # fmt: skip
-        video = decoded.video
-        out.publish("video", video, label="Video")
+        out.publish("video", result.video, label="Video" if index + 1 == count else f"Piece {index + 1} of {count}")
     ctx.release_gpus()
     tel.log("h3 shot", pieces=count, delivered_frames=total, turbo=payload.turbo)
-    return ShotResult(video=video, frames=[returned[piece].frames[slot] for piece, slot in order],
+    return ShotResult(video=returned[-1].video, frames=[returned[piece].frames[slot] for piece, slot in order],
                       warnings=list(dict.fromkeys(warnings)))  # fmt: skip
 
 
