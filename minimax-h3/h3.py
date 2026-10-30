@@ -70,6 +70,7 @@ from minimax_h3.continuation import (
     encode_context,
 )
 from minimax_h3.guide_rows import GuideClip
+from minimax_h3 import ledger
 from minimax_h3 import regenerate as refine_math
 from minimax_h3.model import (
     H3LatentUpscaler as H3LatentUpscaler,
@@ -1735,7 +1736,9 @@ def _render_keyframes(
     else:
         assert isinstance(model, H3TurboBase)
         sample = partial(model.sample_fl2va_turbo, turbo_lora=turbo_lora)
-    with tel.stage("denoise", overall_range=(0.15, 0.85)):
+    with tel.stage("denoise", overall_range=(0.15, 0.85)), ledger.watch(
+        tel, model.pipe.components["transformer"], steps, 10 if turbo_lora is None else 4
+    ):
         schedule = sample(
             state,
             on_step=tel.step_callback(steps, stage="denoise", overall_range=(0.15, 0.85)),
