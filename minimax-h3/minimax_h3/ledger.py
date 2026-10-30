@@ -21,7 +21,7 @@ from contextlib import contextmanager
 from typing import Any, Iterator
 
 import torch
-from cozy_runtime.internal import residency
+from cozy_runtime.internal import accel, residency
 
 from . import fit
 
@@ -114,8 +114,12 @@ def watch(tel: Any, transformer: Any, evaluations: int, sparse_from: int) -> Ite
     state: dict[str, Any] = {"step": -1, "rows": [], "t0": 0.0, "prof": None, "base": {}}
     handles = []
 
+    def released() -> dict[str, list[int]]:
+        return {k: list(v) for k, v in getattr(accel, "RELEASED", {}).items()}
+
     def counters() -> dict[str, float]:
         r = _request()
+        state["released"] = released()
         return {
             "store": float(getattr(r, "moved", 0)),
             "baked": float(getattr(r, "baked_bytes", 0)),
@@ -136,7 +140,9 @@ def watch(tel: Any, transformer: Any, evaluations: int, sparse_from: int) -> Ite
 
     def step_end(module: Any, args: Any, kwargs: Any, out: Any) -> None:
         torch.cuda.synchronize(device)
+        before = state.get("released", {})
         now, base, c = time.monotonic(), state["base"], counters()
+        after = state["released"]
         rows = state["rows"]
         native = _native()
         summary: dict[str, Any] = {
@@ -147,6 +153,8 @@ def watch(tel: Any, transformer: Any, evaluations: int, sparse_from: int) -> Ite
             "baked_gb": _gb(c["baked"] - base["baked"]),
             "wait_s": round((c["wait"] - base["wait"]) / 1e9, 2),
             "nvml_rx_gb": _gb(c["rx"] - base["rx"]),
+            "released": {k: [v[0] - before.get(k, [0, 0])[0], _gb(v[1] - before.get(k, [0, 0])[1])] for k, v in after.items() if v != before.get(k)},
+            "alloc_retries": torch.cuda.memory_stats(device).get("num_alloc_retries"),
             "native": {k: _gb(native[k]) for k in ("resident_bytes", "preferred_bytes", "ready_bytes", "reclaimable_bytes", "streaming_limit_bytes") if k in native},
         }
         if rows:
