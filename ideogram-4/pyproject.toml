@@ -1,6 +1,6 @@
 [project]
 name = "ideogram-4"
-version = "0.1.2"
+version = "0.1.4"
 description = "Cozy text-to-image with Ideogram 4: JSON captions, layout boxes and rendered text"
 requires-python = ">=3.12"
 dependencies = [
