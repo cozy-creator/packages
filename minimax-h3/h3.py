@@ -1789,6 +1789,9 @@ async def shot(ctx: Context, payload: ShotRequest, out: Outputs, tel: Telemetry)
     style, sound, music = payload.style, payload.soundscape, payload.music
     forced = frozenset(ref.name for ref in references)
     files: dict[str, File | None] = {ref.name: getattr(ref, FILE[ref.kind]) for ref in voices(references)[0]}
+    #: A continued piece's place is the previous piece's last frame: the setup plate's own framing pulls a
+    #: shot that has moved away from it back with a cut (run 20996, 16.2 s).
+    places = [ref.name for ref in references if ref.kind == "background"]
     calls: list[PieceCall] = []
     for index, text in enumerate(piece_texts(payload.prompt, payload.beats, [start / FPS for start in starts])):
         call = piece_call(text, references, style=style, soundscape=sound, music=music, index=index, forced=forced)
@@ -1837,7 +1840,8 @@ async def shot(ctx: Context, payload: ShotRequest, out: Outputs, tel: Telemetry)
                             earlier_videos=tuple(r.video for r in returned) if several and index + 1 == count else (),
                             picture_edges=tuple(_WORLD_STATE_EDGE if ref.kind == "world_state" else 0
                                                 for ref in call.references if FILE[ref.kind] == "image"),
-                        ), assets=_call_assets(files, call.references),
+                        ), assets=_call_assets(files | ({place: returned[-1].last_frame for place in places} if index else {}),
+                                               call.references),
                     )  # fmt: skip
                 else:
                     result = await fl2va_piece(  # type: ignore[call-arg]
