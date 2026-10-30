@@ -136,6 +136,22 @@ def source_shapes(
     return shapes
 
 
+def curve_shapes(topology: H3Topology, grid: int, k: int) -> dict[str, tuple[int, ...]]:
+    """A ComfyUI curve-form DiT's modulation rows (TensorFS `h3.curve`): the `[grid, k]`
+    time-embedding curve and every AdaLN linear over its `k` coordinates."""
+    hidden = topology.hidden_size
+    shapes: dict[str, tuple[int, ...]] = {
+        "adaln_t_table": (grid, k),
+        "norm_out.linear.weight": (2 * hidden, k),
+        "norm_out.linear.bias": (2 * hidden,),
+    }
+    for index in range(topology.num_layers):
+        prefix = f"transformer_blocks.{index}.adaln_proj.linear"
+        shapes[f"{prefix}.weight"] = (18 * hidden, k)
+        shapes[f"{prefix}.bias"] = (18 * hidden,)
+    return shapes
+
+
 def adapter_shapes(
     topology: H3Topology, rank: int
 ) -> dict[str, tuple[torch.dtype, tuple[int, ...]]]:
@@ -286,4 +302,58 @@ def precompute_tables(
     bias = _read(read, "norm_out.linear.bias", *shapes["norm_out.linear.bias"], device)
     final = F.linear(activated, weight, bias).reshape(len(plan.timesteps), 2, topology.hidden_size)
     write("norm_out.table", final)
+    progress(topology.num_layers + 1, topology.num_layers + 1)
+
+
+CurveReader = Callable[[str], torch.Tensor]
+
+
+@torch.inference_mode()
+def precompute_curve_tables(
+    *,
+    plan: TimestepPlan,
+    topology: H3Topology,
+    read: CurveReader,
+    write: TableWriter,
+    progress: Progress,
+    device: torch.device,
+    completed: frozenset[str] = frozenset(),
+) -> None:
+    """One task's tables from a curve-form DiT, as ComfyUI evaluates it
+    (`comfy/ldm/minimax/model.py`, `use_adaln_curves`): t in [0, 1] indexes the curve at
+    `clamp(t, 0, 1) * (grid - 1)`, the two rows around it lerp, and each AdaLN linear reads the
+    result with no SiLU, in float32. `read` answers a row as stored; tables are BF16, the dtype
+    ComfyUI casts modulations to."""
+    expected = table_shapes(topology, plan)
+    if not completed <= expected.keys():
+        raise ValueError("completed table set contains undeclared keys")
+    if completed == expected.keys():
+        progress(len(expected), len(expected))
+        return
+    curve = read("adaln_t_table").to(device=device, dtype=torch.float32)
+    t = torch.tensor(plan.timesteps, dtype=torch.float32, device=device)
+    position = t.clamp(0.0, 1.0) * (curve.shape[0] - 1)
+    low = position.floor().long().clamp(max=curve.shape[0] - 2)
+    coordinates = torch.lerp(curve[low], curve[low + 1], (position - low).unsqueeze(1))
+
+    def linear(prefix: str) -> torch.Tensor:
+        weight = read(f"{prefix}.weight").to(device=device, dtype=torch.float32)
+        bias = read(f"{prefix}.bias").to(device=device, dtype=torch.float32)
+        return F.linear(coordinates, weight, bias)
+
+    sparse_rows = torch.tensor(
+        [row * 3 + modality for row, modality in plan.block_rows],
+        dtype=torch.int64,
+        device=device,
+    )
+    for index in range(topology.num_layers):
+        name = f"transformer_blocks.{index}.adaln_proj.table"
+        if name not in completed:
+            dense = linear(f"transformer_blocks.{index}.adaln_proj.linear")
+            dense = dense.reshape(-1, 6, topology.hidden_size)
+            write(name, dense.index_select(0, sparse_rows).to(torch.bfloat16))
+        progress(index + 1, topology.num_layers + 1)
+    if "norm_out.table" not in completed:
+        final = linear("norm_out.linear").reshape(len(plan.timesteps), 2, topology.hidden_size)
+        write("norm_out.table", final.to(torch.bfloat16))
     progress(topology.num_layers + 1, topology.num_layers + 1)

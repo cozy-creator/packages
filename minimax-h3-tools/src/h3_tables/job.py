@@ -31,7 +31,7 @@ from cozy_runtime.weights_store import Checkpoint, Derivation, Output
 from . import adaln_operations as _adaln_operations
 from . import lanes as _lanes
 from ._memo import LANES as LANES_MEMO
-from .kernel import H3Topology, removed_keys, source_shapes, table_bytes, table_shapes
+from .kernel import H3Topology, curve_shapes, removed_keys, source_shapes, table_bytes, table_shapes
 from .lanes import (
     COMPONENT_MAX_NEW_BYTES,
     LANES,
@@ -57,12 +57,16 @@ from .source import (
     TIMESTEP_PLAN,
     copy_assets,
     Rows,
+    dtype,
     official_full_specs,
     open_source,
     plain,
+    put,
+    read,
     rows,
     timestep_plan,
     write_config,
+    write_curve_tables,
     write_tables,
 )
 
@@ -175,8 +179,9 @@ def _tables(
     tel: Telemetry,
     source: Checkpoint,
     outputs: tuple[Output, ...],
+    curve: bool = False,
 ) -> tuple[int, int, int]:
-    """Both DiTs' tables from `source`'s modulation weights into `outputs`."""
+    """Both DiTs' tables from `source`'s modulation weights, or its curve form, into `outputs`."""
     sections = parse_full_config(_asset("model-config.json"))
     read = written = reused = 0
     for task, component in DIT_COMPONENT.items():
@@ -186,7 +191,7 @@ def _tables(
             tel.progress(done / total, stage=stage)
 
         with tel.stage(stage):
-            got = write_tables(
+            got = (write_curve_tables if curve else write_tables)(
                 ctx,
                 plan=_production_plan(source, task),
                 topology=H3Topology.from_config(sections[component]),
@@ -251,25 +256,71 @@ def _log_treatment(tel: Telemetry, slot: str, selection: Selection, stats: Treat
     )
 
 
+def _widened(row: Any, expected: str, shape: tuple[int, ...]) -> bool:
+    """A plain 16-bit row where the spec stores float32: cast up exactly."""
+    return (
+        row.encoding is None
+        and expected == "f32"
+        and dtype(row) in ("bf16", "f16")
+        and tuple(row.shape) == shape
+    )
+
+
+def _check_curve(component: str, held: Mapping[str, Any], topology: H3Topology) -> None:
+    """`held` carries a curve-form DiT's modulation rows (TensorFS `h3.curve`), plain floats."""
+    curve = held.get("adaln_t_table")
+    if curve is None or len(curve.shape) != 2 or curve.shape[0] < 2:
+        raise UnsupportedInput(f"{component} has no [grid, k] adaln_t_table", code="h3_lane_source")
+    for key, shape in curve_shapes(topology, *curve.shape).items():
+        row = held.get(key)
+        if (
+            row is None
+            or row.encoding is not None
+            or dtype(row) not in DTYPE
+            or tuple(row.shape) != shape
+        ):
+            raise UnsupportedInput(
+                f"{component}.{key} is not a plain float {list(shape)} curve row",
+                code="h3_lane_source",
+            )
+
+
 def lane_rows(
-    name: str, present: Rows, plans: Mapping[Task, TimestepPlan]
-) -> tuple[tuple[tuple[str, str], ...], dict[str, dict[str, Any]], frozenset[tuple[str, str]]]:
-    """A lane's output order, the source rows it carries per component, and the rows it
-    computes (tables). Refuses a source that is not one full-precision H3 checkpoint."""
+    name: str, present: Rows, plans: Mapping[Task, TimestepPlan], curve: bool = False
+) -> tuple[
+    tuple[tuple[str, str], ...],
+    dict[str, dict[str, Any]],
+    frozenset[tuple[str, str]],
+    frozenset[tuple[str, str]],
+]:
+    """A lane's output order, the source rows it carries per component, the rows it computes
+    (tables) and the rows it casts up to float32. Refuses a source that is not one
+    full-precision H3 checkpoint, or with `curve` one whose DiTs are ComfyUI's curve form (their
+    16-bit rows where the spec stores float32 are widened)."""
     if set(present) != set(COMPONENTS):
         raise UnsupportedInput(
             f"source components are {sorted(present)}, not H3's five", code="h3_lane_source"
         )
     sections = parse_full_config(_asset("model-config.json"))
+    widened: set[tuple[str, str]] = set()
     for component in DIT_COMPONENT.values():
-        for key, (dtype, shape) in official_full_specs(sections[component]).items():
+        topology = H3Topology.from_config(sections[component])
+        modulation = set(source_shapes(topology)) if curve else set()
+        for key, (expected, shape) in official_full_specs(sections[component]).items():
             row = present[component].get(key)
-            if row is None or not plain(row, dtype, shape):
+            if key in modulation:
+                continue
+            if row is not None and curve and _widened(row, expected, shape):
+                widened.add((component, key))
+                continue
+            if row is None or not plain(row, expected, shape):
                 raise UnsupportedInput(
-                    f"{component}.{key} is not the full-precision plain {dtype} {list(shape)} "
+                    f"{component}.{key} is not the full-precision plain {expected} {list(shape)} "
                     "row; produce lanes from the converted release or a bf16-full lane",
                     code="h3_lane_source",
                 )
+        if curve:
+            _check_curve(component, present[component], topology)
     current = current_order(_asset("whole-order.json")).rows
     pruned = LANES[name].modulation == "adaln-pruned"
     order = current if pruned else full_order(sections, current)
@@ -286,7 +337,7 @@ def lane_rows(
         if row is None:
             raise UnsupportedInput(f"source lacks {component}.{key}", code="h3_lane_source")
         carried[component][key] = row
-    return order, carried, computed
+    return order, carried, computed, frozenset(widened)
 
 
 def _produce_lane(
@@ -295,14 +346,16 @@ def _produce_lane(
     weights: Weights[Any],
     name: LaneName,
     max_relative_frobenius: float | None = None,
+    curve: bool = False,
 ) -> ModelArtifact:
     """One reviewed lane from a full-precision H3 checkpoint (the converted release or a
-    `bf16-full` lane). Every row it does not rewrite is copied, keeping the source's objects;
-    an interrupted attempt resumes what it wrote, a committed one replays."""
+    `bf16-full` lane), or with `curve` a ComfyUI curve-form one. Every row it does not rewrite
+    is copied, keeping the source's objects; an interrupted attempt resumes what it wrote, a
+    committed one replays."""
     source = open_source(ctx, weights)
     plans = {task: _production_plan(source, task) for task in DIT_COMPONENT}
     _check_table_budget(plans, MAX_TABLE_BYTES)
-    order, carried, computed = lane_rows(name, rows(source), plans)
+    order, carried, computed, widened = lane_rows(name, rows(source), plans, curve)
     lane = LANES[name]
     selections = [
         _lanes.select(
@@ -321,29 +374,34 @@ def _produce_lane(
         if computed
         else dual_full_config(sections)
     )
-    if computed:
+    if computed and not curve:
         _require_cuda(ctx)
     replaced = {(s.component, key) for s in selections for key in s.replaced}
     request = ArtifactQuantizationRequest(max_relative_frobenius=max_relative_frobenius)
-    reused = written = read = 0
+    reused = written = read_bytes = 0
     with ctx.output(name, Derivation(base=None, sources=(source,), order=order)) as out:
         write_config(out, config)
         out.inherit(source)
         with tel.stage(f"{name}-copy"):
             for done, row in enumerate(order, 1):
-                if row not in computed and row not in replaced and not out.has(*row):
+                if row in widened and not out.has(*row):
+                    held = carried[row[0]][row[1]]
+                    value = read(source, *row, DTYPE[dtype(held)], tuple(held.shape))
+                    put(out, *row, value.to(torch.float32))
+                elif row not in computed and row not in replaced and not out.has(*row):
                     out.copy(*row, source)
                 tel.progress(done / len(order), stage=f"{name}-copy")
         if computed:
-            read, written, reused = _tables(ctx, tel, source, (out,))
+            read_bytes, written, reused = _tables(ctx, tel, source, (out,), curve)
         for selection in selections:
             with tel.stage(f"{name}-{selection.component}"):
                 stats = _treat(source, out, ctx, tel, request, selection)
             _log_treatment(tel, name, selection, stats)
-            read, written = read + stats.source_bytes_read, written + stats.new_bytes_written
+            read_bytes += stats.source_bytes_read
+            written += stats.new_bytes_written
             reused += stats.reused_keys
         artifact = ctx.adopt_model(out)
-    tel.metric("h3.source_bytes", float(read), unit="bytes")
+    tel.metric("h3.source_bytes", float(read_bytes), unit="bytes")
     tel.metric("h3.new_bytes", float(written), unit="bytes")
     tel.metric("h3.reused_tensors", float(reused))
     return artifact
@@ -360,6 +418,13 @@ async def bf16_full(ctx: Context, *, source: Weights[Any], tel: Telemetry) -> Mo
 async def bf16_pruned(ctx: Context, *, source: Weights[Any], tel: Telemetry) -> ModelArtifact:
     """AdaLN-pruned BF16: 106 modulation rows per DiT replaced by timestep tables."""
     return _produce_lane(ctx, tel, source, "bf16")
+
+
+@invocable(memo_version="h3-lane/1", memo_dependencies=LANES_MEMO)
+async def curve_pruned(ctx: Context, *, source: Weights[Any], tel: Telemetry) -> ModelArtifact:
+    """AdaLN-pruned BF16 from ComfyUI's curve-form DiTs (TensorFS `h3.curve`: PinkCherry, Eros
+    Max): each table row is the modulation ComfyUI computes at that timestep."""
+    return _produce_lane(ctx, tel, source, "bf16", curve=True)
 
 
 @invocable(memo_version="h3-lane/1", memo_dependencies=LANES_MEMO)
@@ -385,6 +450,13 @@ app.entrypoint(
     bf16_pruned,
     name="bf16-pruned",
     weights=(WeightsOutput("bf16", max_new_bytes=MAX_PRUNED_BYTES + MAX_VIDEO_VAE_BYTES),),
+)
+# A curve's tables are k-wide GEMMs: CPU.
+app.entrypoint(
+    curve_pruned,
+    name="curve-pruned",
+    weights=(WeightsOutput("bf16", max_new_bytes=MAX_PRUNED_BYTES + MAX_VIDEO_VAE_BYTES),),
+    accelerator=False,
 )
 app.entrypoint(
     fp8_pruned,
@@ -561,9 +633,9 @@ def retable_rows(
                 f"{component} is not an AdaLN-pruned source carrying table rows only",
                 code="h3_retable_source",
             )
-        for key, (dtype, shape) in source_shapes(topology).items():
+        for key, (expected, shape) in source_shapes(topology).items():
             row = full.get(component, {}).get(key)
-            if row is None or tuple(row.shape) != shape or DTYPE.get(row.dtype.lower()) != dtype:
+            if row is None or tuple(row.shape) != shape or DTYPE.get(row.dtype.lower()) != expected:
                 raise UnsupportedInput(
                     f"full source lacks modulation weight {component}/{key}",
                     code="h3_retable_source",

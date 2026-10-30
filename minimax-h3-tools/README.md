@@ -15,6 +15,7 @@ ingested or already fetched the input, its objects are in the pod Store and noth
 |---|---|---|---|
 | `bf16-full` | a full-precision H3 checkpoint: the converted `MiniMaxAI/MiniMax-H3` release or a `bf16-full` lane | `bf16-full` | source-only rows dropped, video VAE decode operands f16 |
 | `bf16-pruned` | same | `bf16` | AdaLN tables replace the 106 modulation rows per DiT; CUDA |
+| `curve-pruned` | a checkpoint whose DiTs are ComfyUI's curve form (TensorFS `h3.curve`) | `bf16` | the same tables, from the curve; CPU |
 | `fp8-pruned` | same | `fp8` | tables + both DiTs and the conditioner's 350 decoder linears `fp8.rowwise`; CUDA; every serving rung |
 | `turbo-lora` | the converted `alibaba-pai/MiniMax-H3-Acc-LoRAs` release (one fl2va and one ref2va component) | `pdd8` | `model.base=<full-precision H3>`; reads its modulation weights and heads only |
 | `regenerate-lora` | the release's `lora/` folder of `Efficient-Large-Model/Open-H3-Regenerate-2K`, converted with `--source-format h3.lora` (one component) | `bf16` | `model.base=<full-precision H3>`; the merged rank-576 factors in bf16, and refine-plan tables with LMS Sharp's AdaLN curve added |
@@ -60,6 +61,13 @@ projections and table banks retain the plan asset, and full-model derivations
 preserve other component assets. The source checkpoint identity binds plan bytes
 to resumable computation. See [client preparation](CLIENT-SCRIPTS.md) for the
 migration boundary of older projection/bank bindings.
+
+Community DiTs in ComfyUI's curve form (PinkCherry, Eros Max) have no time embedder: each AdaLN
+linear reads `k` coordinates that `adaln_t_table` `[grid, k]` interpolates at `t`, with no SiLU.
+`curve-pruned` writes each table row as ComfyUI computes it (`comfy/ldm/minimax/model.py`): the
+two curve rows around `clamp(t, 0, 1) · (grid − 1)` lerp, the linear runs in float32, and the row
+is stored BF16. Their 16-bit rows where the spec stores float32 widen exactly. Compose one first
+(`cozy model upload <dit> <org/name> --lane bf16-curve --base minimax-h3@sha256:<bf16-full>:transformer,transformer_ref`).
 
 Pruned checkpoint configs describe the ordered AdaLN rows as `cozy_h3.table_keys`:
 each final-normalization row names an exact float32 timestep, and each block-modulation
