@@ -12,11 +12,11 @@ from cozy_runtime.author import (
     Adjustments,
     App,
     Context,
+    ImageReference,
     ImageRequest,
     ImageResult,
     Memoize,
     Outputs,
-    ReferenceImages,
     Sizes,
     Telemetry,
     held,
@@ -42,11 +42,17 @@ EDIT_NEGATIVE, GUIDANCE = " ", 4.0
 
 
 class GenerateInput(ImageRequest):
-    #: Given, Qwen-Image-Edit-2511 edits or composes them, in order ("Picture 1", "Picture 2", ...);
-    #: else Qwen-Image-2512 generates from the prompt.
-    reference_images: Annotated[ReferenceImages, msgspec.Meta(max_length=10)] = msgspec.field(
+    #: Given, Qwen-Image-Edit-2511 edits or composes them, in order; else Qwen-Image-2512 generates
+    #: from the prompt.
+    references: Annotated[list[ImageReference], msgspec.Meta(max_length=10)] = msgspec.field(
         default_factory=list
     )
+
+
+def label(n: int, reference: ImageReference) -> str:
+    """Qwen-Image-Edit's word for the Nth reference: its template writes `Picture N:` before each
+    image (Diffusers 0.41 `QwenImageEditPlusPipeline`)."""
+    return f"Picture {n}"
 
 
 def _render(
@@ -65,9 +71,10 @@ def _render(
 ) -> ImageResult:
     seed = payload.drawn_seed()
     payload.ignored(adj, "prompt_upsampling", reason="Qwen-Image has no prompt upsampler")
-    payload.ignored(adj, "reference_boxes", reason="Qwen-Image has no layout control")
+    payload.unplaced(adj, "Qwen-Image has no layout control")
+    prompt = payload.rendered(adj, label)
     # Upright, with any transparency over white, as upstream's RGB references.
-    images = [asset.read() for asset in payload.reference_images]
+    images = [asset.read() for asset in payload.images()]
     first = images[0].size if images else None
     width, height = payload.size(adj, first, SIZES, megapixels=TEXT_MEGAPIXELS)
     ctx.raise_if_cancelled()
@@ -76,7 +83,7 @@ def _render(
         with tel.stage("encoding reference images", overall_range=(0.0, 0.05)):
             references = model.encode_references(images)
     with tel.stage("encoding prompt", overall_range=(0.05, 0.1)):
-        embeds, mask = model.encode(payload.prompt, images)
+        embeds, mask = model.encode(prompt, images)
         unconditional = model.encode(negative, images) if guidance > 1 else None
     ctx.raise_if_cancelled()
     with tel.stage("generating image", overall_range=(0.1, 0.95)):
@@ -91,7 +98,7 @@ def _render(
         image = model.decode(latents, width=width, height=height)
     with tel.stage("saving image", overall_range=(0.99, 1.0)):
         asset = out.save_image(image, format="png")
-    return ImageResult(asset, width, height, seed, payload.prompt)
+    return ImageResult(asset, width, height, seed, prompt)
 
 
 _MEMO = ("qwen_image", "qwen_image.model")
@@ -117,7 +124,7 @@ def generate(
 ) -> ImageResult:
     """Qwen-Image-2512 from text (50 steps), Qwen-Image-Edit-2511 with references (40 steps), both
     with true CFG 4.0."""
-    edit = bool(payload.reference_images)
+    edit = bool(payload.references)
     steps = held(adj, "steps", payload.steps or (EDIT_STEPS if edit else TEXT_STEPS), 2, 100,
                  "at least 2 (the schedule stretches its last step to the terminal sigma), at most 100")
     guidance = held(adj, "guidance", GUIDANCE if payload.guidance is None else payload.guidance, 1.0, 20.0)
@@ -154,6 +161,6 @@ def generate_turbo(
     """Each DiT with lightx2v's 8-step Lightning LoRA for it: 8 steps, no CFG."""
     payload.ignored(adj, "guidance", "negative_prompt", reason="the Lightning LoRA samples without CFG")
     steps = held(adj, "steps", payload.steps or TURBO_STEPS, 1, 100)
-    edit = bool(payload.reference_images)
+    edit = bool(payload.references)
     dit, lora = (edit_model, edit_turbo_lora) if edit else (model, turbo_lora)
     return _render(ctx, model, dit, lora, out, tel, adj, payload, steps=steps, guidance=1.0, negative="")

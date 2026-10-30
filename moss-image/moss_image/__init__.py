@@ -11,6 +11,7 @@ from cozy_runtime.author import (
     Adjustments,
     App,
     Context,
+    ImageReference,
     ImageRequest,
     ImageResult,
     Memoize,
@@ -33,6 +34,10 @@ STEPS, MOST_STEPS = 50, 200
 GUIDANCE = 3.0
 
 class GenerateInput(ImageRequest):
+    #: MOSS-Image makes images from text only; place elements with `regions`.
+    references: Annotated[list[ImageReference], msgspec.Meta(max_length=0)] = msgspec.field(
+        default_factory=list
+    )
     #: Elements and rendered text placed by box, described in words (`\n` in `text` breaks a line); the
     #: prompt describes the whole image.
     regions: Annotated[list[Region], msgspec.Meta(max_length=64)] | None = None
@@ -73,16 +78,13 @@ def generate(ctx: Context, payload: GenerateInput, model: MossImage, out: Output
     """MOSS-Image SFT: 50 Euler steps at CFG 3 (the negative branch skips block 22), with `regions` laid
     out as upstream's layout JSON."""
     model.hold_vae(tel)
-    if payload.reference_images:
-        adj.warn("reference_images", "ignored: MOSS-Image generates from text alone")
-    payload.ignored(adj, "reference_boxes", reason="MOSS-Image takes no references; place elements with regions")
     payload.ignored(adj, "prompt_upsampling", reason="MOSS-Image has no prompt upsampler")
     steps = held(adj, "steps", payload.steps or STEPS, 1, MOST_STEPS, "MOSS-Image's 1-200 steps")
     guidance = held(adj, "guidance", GUIDANCE if payload.guidance is None else payload.guidance, 1.0, 20.0,
                     "MOSS-Image's CFG 1-20")
     seed = payload.drawn_seed()
     width, height = payload.size(adj, None, SIZES, megapixels=1.0)
-    prompt = layout_prompt(payload.prompt, payload.regions, width, height)
+    prompt = layout_prompt(payload.rendered(adj), payload.regions, width, height)
     ctx.raise_if_cancelled()
     with tel.stage("encoding prompt", overall_range=(0.0, 0.05)):
         positive = model.encode(prompt)

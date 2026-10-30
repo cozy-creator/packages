@@ -48,6 +48,7 @@ from cozy_runtime.author import (
     Context,
     EncodingRule,
     ImageFrame,
+    ImageReference,
     ImageRequest,
     ImageResult,
     Loader,
@@ -58,7 +59,6 @@ from cozy_runtime.author import (
     Preflight,
     QuantizationPlan,
     Recipe,
-    ReferenceImages,
     Sizes,
     Telemetry,
     denoise_loop,
@@ -96,7 +96,7 @@ _NATIVE = 1.5
 
 class GenerateInput(ImageRequest):
     #: SDXL makes images from text only.
-    reference_images: Annotated[ReferenceImages, msgspec.Meta(max_length=0)] = msgspec.field(
+    references: Annotated[list[ImageReference], msgspec.Meta(max_length=0)] = msgspec.field(
         default_factory=list
     )
     #: None runs HiDiffusion where base SDXL cannot go: above 1 MP. An explicit choice always
@@ -626,6 +626,7 @@ def generate(
     ctx.plan({"text_encoder", "text_encoder_2"}, "unet", "vae")
     hold_decode_dtype(model.pipe.components["vae"], tel)
     payload.ignored(adj, "prompt_upsampling", reason="SDXL has no prompt upsampler")
+    prompt = payload.rendered(adj)
     adj.extend(facts.adjustments)
     seed = payload.drawn_seed()
     width, height = facts.width, facts.height
@@ -636,7 +637,7 @@ def generate(
     classifier_free = guidance > 1.0
 
     with tel.stage("tokenize", overall_range=(0.00, 0.02)):
-        ids, ids_2 = _tokenize(model.tokenizers, payload.prompt)
+        ids, ids_2 = _tokenize(model.tokenizers, prompt)
         if classifier_free:
             neg, neg_2 = _tokenize(model.tokenizers, negative_prompt)
 
@@ -658,7 +659,7 @@ def generate(
         asset = out.save_image(ImageFrame(decoded_w, decoded_h, rgb), format="webp")
     tel.log("sampled", sampler="ddim eta=1.0" if hidiffusion_applied else "euler", steps=steps,
             guidance=guidance, classifier_free=classifier_free, hidiffusion=hidiffusion_applied)
-    return ImageResult(asset, decoded_w, decoded_h, seed, payload.prompt)
+    return ImageResult(asset, decoded_w, decoded_h, seed, prompt)
 
 
 # ------------------------------------------------------------------ quantized lanes

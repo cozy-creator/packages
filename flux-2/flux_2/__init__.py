@@ -12,11 +12,11 @@ from cozy_runtime.author import (
     Adjustments,
     App,
     Context,
+    ImageReference,
     ImageRequest,
     ImageResult,
     Memoize,
     Outputs,
-    ReferenceImages,
     Sizes,
     Telemetry,
     held,
@@ -35,15 +35,22 @@ SIZES = Sizes((MIN_SIDE**2 / MEGAPIXEL, MAX_PIXELS / MEGAPIXEL), (MIN_SIDE, MAX_
 
 
 class GenerateInput(ImageRequest):
-    reference_images: Annotated[ReferenceImages, msgspec.Meta(max_length=10)] = msgspec.field(
+    references: Annotated[list[ImageReference], msgspec.Meta(max_length=10)] = msgspec.field(
         default_factory=list
     )
+
+
+def label(n: int, reference: ImageReference) -> str:
+    """FLUX.2's word for the Nth reference, as BFL's prompting guide writes it ("subject from image 1,
+    style from image 2"); the text encoder sees no image, so this is convention, not a token."""
+    return f"image {n}"
 
 
 def _generate(ctx: Context, payload: GenerateInput, model: Flux2, turbo: Flux2TurboLoRA | None,
               upsampler: Flux2Upsampler, out: Outputs, tel: Telemetry, adj: Adjustments) -> ImageResult:
     seed = payload.drawn_seed()
-    images = [asset.read() for asset in payload.reference_images]
+    payload.unplaced(adj, "FLUX.2 has no layout control")
+    images = [asset.read() for asset in payload.images()]
     width, height = payload.size(adj, images[0].size if images else None, SIZES, megapixels=1.0)
     # The function names the regime (`generate_turbo` passes `turbo`): [dev] 50 steps at guidance 4,
     # with its Turbo fal's 8 sigmas at 2.5; a [klein] as Base 50 steps of CFG 4, or distilled 4 steps
@@ -67,10 +74,10 @@ def _generate(ctx: Context, payload: GenerateInput, model: Flux2, turbo: Flux2Tu
     tel.log("sampling", model="[dev]" if model.dev else "[klein]",
             regime="turbo" if turbo else "distilled" if distilled else "base", steps=steps,
             guidance=guidance, cfg=cfg)
-    prompt = payload.prompt
+    prompt = payload.rendered(adj, label)
     if payload.prompt_upsampling:
         with tel.stage("upsampling prompt", overall_range=(0.0, 0.15)):
-            prompt = upsampler.upsample(payload.prompt, images)
+            prompt = upsampler.upsample(prompt, images)
         tel.log("upsampled prompt", caption=prompt[:2000])
     ctx.raise_if_cancelled()
     references = None

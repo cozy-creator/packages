@@ -12,11 +12,11 @@ from cozy_runtime.author import (
     Adjustments,
     App,
     Context,
+    ImageReference,
     ImageRequest,
     ImageResult,
     Memoize,
     Outputs,
-    ReferenceImages,
     Region,
     Sizes,
     Telemetry,
@@ -39,7 +39,7 @@ STEPS, GUIDANCE = 48, 7.0
 
 class GenerateInput(ImageRequest):
     #: Ideogram 4 is text to image only.
-    reference_images: Annotated[ReferenceImages, msgspec.Meta(max_length=0)] = msgspec.field(default_factory=list)
+    references: Annotated[list[ImageReference], msgspec.Meta(max_length=0)] = msgspec.field(default_factory=list)
     #: Elements placed by box, in order: an object (`prompt`), or rendered text (`text`, styled as `prompt` says).
     regions: list[Region] = msgspec.field(default_factory=list)
 
@@ -70,16 +70,16 @@ def _with_regions(caption: dict[str, Any], regions: list[Region]) -> str:
     return json.dumps(caption, separators=(",", ":"), ensure_ascii=False)
 
 
-def caption(payload: GenerateInput, upsampler: QwenUpsampler, *, width: int, height: int, seed: int,
-            tel: Telemetry) -> str:
+def caption(payload: GenerateInput, prompt: str, upsampler: QwenUpsampler, *, width: int, height: int,
+            seed: int, tel: Telemetry) -> str:
     """The JSON caption Ideogram 4 reads. A JSON prompt is the caption as given; otherwise the
     upsampler writes one. `regions` are appended to its elements. A plain prompt without the
     upsampler is refused: Ideogram 4 reads only captions, and on a bare description it draws its own
     "Image blocked by safety filter" card (runs 19807, 19809), so this package writes no caption
     content the request did not give."""
-    given = _json_object(payload.prompt)
+    given = _json_object(prompt)
     if given is not None:
-        return _with_regions(given, payload.regions) if payload.regions else payload.prompt
+        return _with_regions(given, payload.regions) if payload.regions else prompt
     if payload.prompt_upsampling is False:
         raise UnsupportedInput(
             "Ideogram 4 reads a JSON caption, and a plain prompt with prompt_upsampling=false has none: "
@@ -87,7 +87,7 @@ def caption(payload: GenerateInput, upsampler: QwenUpsampler, *, width: int, hei
             "itself as the prompt (high_level_description, and compositional_deconstruction with its "
             "background and elements)", code="prompt", fields=("prompt", "prompt_upsampling"))
     with tel.stage("upsampling prompt", overall_range=(0.0, 0.15)):
-        written = json.loads(upsampler.caption(payload.prompt, width=width, height=height, seed=seed))
+        written = json.loads(upsampler.caption(prompt, width=width, height=height, seed=seed))
     return _with_regions(written, payload.regions)
 
 
@@ -118,13 +118,13 @@ def generate(ctx: Context, payload: GenerateInput, model: Ideogram4, text_encode
     """Ideogram 4, 48 steps at guidance 7 (3 on the last steps): a JSON caption, or a prompt the
     upsampler expands into one, with `regions` placed by box."""
     payload.ignored(adj, "negative_prompt", reason="Ideogram 4's unconditional DiT reads no text")
-    payload.placements()  # no references: any reference_boxes entry is a length mismatch
+    prompt = payload.rendered(adj)
     steps = held(adj, "steps", payload.steps or STEPS, 1, 200)
     weight = held(adj, "guidance", GUIDANCE if payload.guidance is None else payload.guidance, 1.0, 20.0)
     seed = payload.drawn_seed()
     width, height = payload.size(adj, None, SIZES, megapixels=1.0)
-    written = caption(payload, upsampler, width=width, height=height, seed=seed, tel=tel)
-    if written != payload.prompt:
+    written = caption(payload, prompt, upsampler, width=width, height=height, seed=seed, tel=tel)
+    if written != prompt:
         tel.log("caption", caption=written[:4000])
     ctx.raise_if_cancelled()
     with tel.stage("encoding prompt", overall_range=(0.15, 0.2)):

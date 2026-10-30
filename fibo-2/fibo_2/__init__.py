@@ -10,15 +10,16 @@ from cozy_runtime.author import (
     Adjustments,
     App,
     Context,
+    ImageReference,
     ImageRequest,
     ImageResult,
     Memoize,
     Outputs,
-    ReferenceImages,
     Sizes,
     Telemetry,
     UnsupportedInput,
     held,
+    name_label,
 )
 from PIL import Image
 
@@ -50,9 +51,16 @@ NEGATIVE_T2I = (
 )
 
 class GenerateInput(ImageRequest):
-    reference_images: Annotated[ReferenceImages, msgspec.Meta(max_length=4)] = msgspec.field(
+    references: Annotated[list[ImageReference], msgspec.Meta(max_length=4)] = msgspec.field(
         default_factory=list
     )
+
+
+def label(n: int, reference: ImageReference) -> str:
+    """Fibo's word for the Nth of several references: the edit wraps them as `image_1`, `image_2`,
+    ... (Diffusers `BriaFibo2Pipeline`), and Bria's instructions name them `<image_N>`. A lone
+    reference is the edit's `image`, so it keeps its name."""
+    return f"<image_{n}>"
 
 
 def _json_object(prompt: str) -> dict[str, object] | None:
@@ -102,7 +110,9 @@ def _generate(
 ) -> ImageResult:
     default, most = _STEPS[function]
     steps = held(adj, "steps", payload.steps or default, 1, most)
-    images = [asset.read() for asset in payload.reference_images]
+    payload.unplaced(adj, "Fibo 2.0 has no layout control")
+    prompt = payload.rendered(adj, label if len(payload.references) > 1 else name_label)
+    images = [asset.read() for asset in payload.images()]
     if function == "generate":
         guidance = held(adj, "guidance", GUIDANCE if payload.guidance is None else payload.guidance, 1.0, 20.0)
         negative = payload.negative_prompt or (None if images else NEGATIVE_T2I)
@@ -113,8 +123,8 @@ def _generate(
     width, height = payload.size(adj, images[0].size if images else None, SIZES, megapixels=1.0)
     upsample = True if payload.prompt_upsampling is None else payload.prompt_upsampling
     with tel.stage("upsampling prompt", overall_range=(0.0, 0.15)):
-        caption = _caption(payload.prompt, images, upsample, upsampler, edit_upsampler, adj)
-    if caption != payload.prompt:
+        caption = _caption(prompt, images, upsample, upsampler, edit_upsampler, adj)
+    if caption != prompt:
         tel.log("upsampled prompt", caption=caption[:2000])
     ctx.raise_if_cancelled()
     with tel.stage("encoding prompt", overall_range=(0.15, 0.2)):

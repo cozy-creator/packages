@@ -60,7 +60,7 @@ def main() -> None:
         (dest / "pyproject.toml").write_text(project)
         # The CLI regenerates this interface from the changed source. Retaining the old
         # generated ladder would misrepresent degree8 as a degree4 capture.
-        (dest / "metadata" / "package-interface.json").unlink()
+        (dest / "metadata" / "package-interface.json").unlink(missing_ok=True)
         proof = {"source_sha": source_sha, "source": str(source), "degree": degree,
                  "generator_sha256": sha(Path(__file__)),
                  "base_lane": targets["_DEFAULT_MODEL_LADDER"],

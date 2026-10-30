@@ -11,13 +11,13 @@ from cozy_runtime.author import (
     App,
     Context,
     ImageFrame,
+    ImageReference,
     ImageRequest,
     ImageResult,
     Memoize,
     Outputs,
     QuantizationPlan,
     Recipe,
-    ReferenceImages,
     Sizes,
     Telemetry,
     UnsupportedInput,
@@ -55,7 +55,7 @@ CARD_NEGATIVE = (
 
 class GenerateInput(ImageRequest):
     #: Anima makes images from text only.
-    reference_images: Annotated[ReferenceImages, msgspec.Meta(max_length=0)] = msgspec.field(
+    references: Annotated[list[ImageReference], msgspec.Meta(max_length=0)] = msgspec.field(
         default_factory=list
     )
     #: CFG interval (cr-086 arm 1, Kynkäänniemi et al., NeurIPS 2024): guidance helps only
@@ -100,6 +100,7 @@ def generate(
     # Both prompt branches are conditioned before the repeated transformer phase.
     ctx.plan("text_encoder", "text_conditioner", "transformer", "vae")
     payload.ignored(adj, "prompt_upsampling", reason="Anima has no prompt upsampler")
+    prompt = payload.rendered(adj)
     width, height = payload.size(adj, None, SIZES, megapixels=SIZES.megapixels[1])
     steps = held(adj, "steps", payload.steps or _STEPS[0], *_STEPS[1:])
     guidance = held(adj, "guidance", _GUIDANCE[0] if payload.guidance is None else payload.guidance,
@@ -116,7 +117,7 @@ def generate(
     batched = guided and payload.first_block_cache <= 0.0
     with _Phases(tel) as phases:
         images = model.render(
-            payload.prompt,
+            prompt,
             negative,
             width,
             height,
@@ -138,7 +139,7 @@ def generate(
         rgb = bytes(pixels.numpy().tobytes())
         phases.enter(_SAVE)
         asset = out.save_image(ImageFrame(width, height, rgb), format="webp")
-    return ImageResult(asset, width, height, seed, payload.prompt)
+    return ImageResult(asset, width, height, seed, prompt)
 
 
 # ------------------------------------------------------------------ quantized lanes

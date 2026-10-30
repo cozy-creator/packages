@@ -11,7 +11,9 @@ open-weights models on Artificial Analysis (2026-10-20).
 | `generate` | Fibo 2.0 Dev | 50 | `guidance` 5.0 (CFG), `negative_prompt` |
 | `generate_turbo` | Fibo 2.0 Edit Turbo, distilled from Dev | 4 | none |
 
-Both generate from text, or edit when `reference_images` are given (up to four, `<image_1>`…`<image_4>`).
+Both generate from text, or edit when `references` are given (up to four). With two or more, a `<Name>`
+mention reads as Bria's `<image_1>`…`<image_4>` (the edit's `image_N` keys); a lone reference's reads as its
+name ([references](../docs/references.md)).
 Bria ships Edit Turbo for editing; it also renders text-to-image.
 
 Write the request in a file, `request.yaml`:
@@ -31,7 +33,7 @@ Inline inputs work too, and override the file's:
 ```sh
 cozy run fibo-2/generate prompt='An origami whale swimming through paper clouds' aspect_ratio=16:9 seed=7
 cozy run fibo-2/generate_turbo prompt='Replace the jacket with a red leather one' \
-  --asset reference_images.0=photo.jpg
+  references:='[{"name": "Photo", "image": "photo.jpg"}]'
 ```
 
 Both take the shared image request (`ImageRequest`). Unset knobs take Fibo's defaults: `steps` 50 (Dev) or 4
@@ -41,8 +43,8 @@ Both take the shared image request (`ImageRequest`). Unset knobs take Fibo's def
 first one's aspect ratio and pixel count; `aspect_ratio` or `megapixels` replaces only that one. Sizes are
 held to 0.25–1 MP and 64–8192 px sides, steps to 200 (Dev) or 50 (Turbo) and guidance to 1–20, each move a
 `clamp` adjustment. A lone reference is cropped to the output's size; several are each cropped to about 1 MP
-at their own ratio (Diffusers). The result is `image`, its size, the `seed` and `prompt`: the prompt the
-image was made from.
+at their own ratio (Diffusers). A reference's `box` is ignored with a warning (no layout control). The result
+is `image`, its size, the `seed` and `prompt`: the prompt the image was made from.
 
 ## Prompts
 
