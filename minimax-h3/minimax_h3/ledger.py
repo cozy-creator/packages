@@ -23,6 +23,8 @@ from typing import Any, Iterator
 import torch
 from cozy_runtime.internal import residency
 
+from . import fit
+
 
 class _Nvml(threading.Thread):
     def __init__(self) -> None:
@@ -139,6 +141,7 @@ def watch(tel: Any, transformer: Any, evaluations: int, sparse_from: int) -> Ite
         native = _native()
         summary: dict[str, Any] = {
             "step": state["step"],
+            "wanted_gb": state["resident_wanted_gb"],
             "s": round(now - state["t0"], 2),
             "store_gb": _gb(c["store"] - base["store"]),
             "baked_gb": _gb(c["baked"] - base["baked"]),
@@ -163,6 +166,32 @@ def watch(tel: Any, transformer: Any, evaluations: int, sparse_from: int) -> Ite
                 summary["profile"] = _profile_summary(path)
             except Exception as exc:  # a diagnostic never fails the request
                 summary["profile_error"] = repr(exc)[:300]
+            stats = torch.cuda.memory_stats(device)
+            summary["torch_stats"] = {
+                k: stats.get(k)
+                for k in (
+                    "segment.all.current",
+                    "segment.large_pool.current",
+                    "oversize_segments.current",
+                    "oversize_allocations.peak",
+                    "inactive_split_bytes.all.current",
+                    "active_bytes.all.peak",
+                    "reserved_bytes.all.peak",
+                    "num_alloc_retries",
+                    "num_device_alloc",
+                    "num_device_free",
+                )
+            }
+            segments = sorted(
+                (
+                    (seg["total_size"], sum(b["size"] for b in seg["blocks"] if b["state"] == "active_allocated"))
+                    for seg in torch.cuda.memory_snapshot()
+                    if seg.get("device") == device.index
+                ),
+                reverse=True,
+            )
+            summary["segments_gb"] = [[_gb(t), _gb(a)] for t, a in segments[:40]]
+            summary["segments_small_gb"] = _gb(sum(t for t, _ in segments[40:]))
             summary["blocks"] = [[r[0], _gb(r[1]), _gb(r[2]), _gb(r[3]), _gb(r[4]), _gb(r[5]), _gb(r[6])] for r in rows]
         _emit(tel, state["step"], json.dumps(summary, separators=(",", ":")))
 
@@ -187,6 +216,12 @@ def watch(tel: Any, transformer: Any, evaluations: int, sparse_from: int) -> Ite
         if pending is not None:
             state["rows"].append((*pending, torch.cuda.max_memory_allocated(device)))
 
+    memory = residency._MEMORIES.get("cuda:0")
+    if memory is not None:
+        fit.RESIDENT = sum(
+            sum(b.nbytes for b in m.groups()) for m in memory.models.values() if m.name.endswith("/transformer")
+        )
+    state["resident_wanted_gb"] = _gb(fit.RESIDENT)
     handles.append(transformer.register_forward_pre_hook(step_start, with_kwargs=True))
     handles.append(transformer.register_forward_hook(step_end, with_kwargs=True))
     for index, block in enumerate(blocks):

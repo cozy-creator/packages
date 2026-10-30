@@ -68,7 +68,7 @@ from cozy_runtime.author.kernels import (
 from cozy_runtime.rows import Rows, rows
 
 from .adaln_pruned import AdaLNPrunedMiniMaxH3Transformer
-from .fit import fits, release
+from .fit import beside, fits, release
 
 CONTRACT = "h3-glue-call-and-topology/2"
 
@@ -677,16 +677,20 @@ class H3AttnProcessor(MiniMaxH3AttnProcessor):  # type: ignore[misc]
         rotary_emb: tuple[Any, Any] | None = None,
         attention_mask: Any | None = None,
     ) -> Any:
+        whole = fits(hidden_states, attn)
+        lean = whole and not beside(hidden_states, attn)
         heads = (
             None
-            if fits(hidden_states, attn)
+            if whole and not lean
             else _Heads.of(self, attn, hidden_states, rotary_emb, attention_mask)
         )
         if heads is None:
             hidden_states = self.whole(attn, hidden_states, rotary_emb, attention_mask)
             return attn.to_out[1](attn.to_out[0](hidden_states.flatten(2, 3)))
+        # Diagnostic (xs-089): beside a streamed DiT, fixed windows of 14 heads, shape-only.
+        most = heads.shape[0] * heads.shape[1] * 14 * heads.shape[3] if lean else None
         with quantize_once(hidden_states):
-            attended = split(heads, heads, Cut(2))
+            attended = split(heads, heads, Cut(2), most=most)
         out = attn.to_out[1](split(attn.to_out[0], attended.flatten(2, 3), Cut(1)))
         del attended
         release()

@@ -34,6 +34,22 @@ def fits(hidden: Any, attn: Any) -> bool:
     return need <= _capacity(index) - torch.cuda.memory_allocated(index) - _BESIDE
 
 
+#: Diagnostic (xs-089): the running DiT's weight bytes, set by the ledger; 0 leaves `beside` as `fits`.
+RESIDENT = 0
+
+
+def beside(hidden: Any, attn: Any) -> bool:
+    """Whether the whole call fits beside the running DiT's weights as well as what is allocated."""
+    quantized = isinstance(hidden, PreQuantized)
+    device = hidden.payload.device if quantized else hidden.device
+    if device.type != "cuda":
+        return True
+    tokens, width = math.prod(hidden.shape[:-1]), int(hidden.shape[-1])
+    need = 6 * tokens * attn.heads * attn.head_dim * 2 + tokens * width
+    index = device.index if device.index is not None else torch.cuda.current_device()
+    return need <= _capacity(index) - torch.cuda.memory_allocated(index) - _BESIDE - RESIDENT
+
+
 def release_if_tight(hidden: Any, attn: Any) -> None:
     """Return Torch's free cached segments where the call does not fit: an odd-sized block left
     in the cache is split for the next differently sized allocation, and on an 8 GB card the
