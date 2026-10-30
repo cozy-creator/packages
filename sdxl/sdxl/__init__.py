@@ -646,7 +646,9 @@ def generate(
         hidiffusion_applied=hidiffusion_applied, seed=seed, ctx=ctx, tel=tel,
     )
     tel.metric("image_absmax", _finite(torch, image))
-    pixels = ((image / 2 + 0.5).clamp(0, 1)[0] * 255).to(torch.uint8).permute(1, 2, 0).contiguous()
+    # F32 and rounded, as Diffusers' `VaeImageProcessor`: bf16 then truncation darkened every pixel.
+    pixels = ((image[0].float() / 2 + 0.5).clamp(0, 1) * 255).round().to(torch.uint8)
+    pixels = pixels.permute(1, 2, 0).contiguous()
     _integrity(torch, image, pixels, tel)
 
     rgb = bytes(pixels.cpu().numpy().tobytes())
