@@ -172,39 +172,40 @@ def qkv_chunks(
     attn: MiniMaxH3Attention,
     hidden: torch.Tensor | PreQuantized,
     tokens: int,
-    values: list[torch.Tensor | None] | None = None,
+    values: torch.Tensor | None = None,
 ) -> Iterator[torch.Tensor]:
     """Kitchen's `[rows, 3 x H x 128]` chunks: each chunk's Q, K and V projections (their leaves
-    quantize the rows once between them). Where `values` holds this call's V by chunk
-    (`project_values`), V is read from it, each chunk dropped once read."""
-    for index, start in enumerate(range(0, tokens, CHUNK)):
-        chunk = rows(hidden, start, min(tokens, start + CHUNK))
+    quantize the rows once between them). Where `values` holds this call's V (`project_values`),
+    V is read from it."""
+    for start in range(0, tokens, CHUNK):
+        stop = min(tokens, start + CHUNK)
+        chunk = rows(hidden, start, stop)
         # Original module calls retain encoded leaves, resident weights and Turbo hooks.
         parts = [attn.to_q(chunk), attn.to_k(chunk)]
-        if values is None:
-            parts.append(attn.to_v(chunk))
-        if values is not None:
-            value, values[index] = values[index], None
-            if value is None:
-                raise ValueError("H3 producer read a call's projected values twice")
-            parts.append(value)
+        parts.append(attn.to_v(chunk) if values is None else values[:, start:stop])
         yield torch.cat(parts, dim=-1).squeeze(0)
 
 
 def project_values(
     attn: MiniMaxH3Attention, hidden: torch.Tensor | PreQuantized, tokens: int
-) -> tuple[list[torch.Tensor | None], torch.Tensor]:
-    """This call's V by chunk, as `qkv_chunks` projects it, and its per-(head, channel) absmax
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """This call's V, projected by chunk as `qkv_chunks` would, and its per-(head, channel) absmax
     over the live document, F32 [H, 128]: Kitchen's value scale is the call's own, so V is
-    projected here, before Kitchen's pass, which reads it back instead of projecting it again."""
-    values: list[torch.Tensor | None] = []
+    projected here, before Kitchen's pass, which reads it back instead of projecting it again.
+    It is one block the size of Kitchen's output, freed when the pass ends, just before Kitchen
+    allocates that output, which reuses it: the call's peak does not grow (chunks would leave
+    holes the output cannot use, and a 4090 then paged more than it saved)."""
+    values: torch.Tensor | None = None
     found: torch.Tensor | None = None
     for start in range(0, tokens, CHUNK):
-        value = attn.to_v(rows(hidden, start, min(tokens, start + CHUNK)))
+        stop = min(tokens, start + CHUNK)
+        value = attn.to_v(rows(hidden, start, stop))
+        if values is None:  # one block, the size of Kitchen's output: freed before it, reused by it
+            values = value.new_empty((1, tokens, value.shape[-1]))
+        values[:, start:stop].copy_(value)
         peak = torch.linalg.vector_norm(value.reshape(-1, value.shape[-1]), ord=INF, dim=0)
         found = peak if found is None else torch.maximum(found, peak)
-        values.append(value)
-    if found is None:
+    if values is None or found is None:
         raise ValueError("H3 producer has no live rows to scale")
     return values, found.float().reshape(attn.heads, 128)
 
@@ -359,12 +360,12 @@ def _produce(
     heads: int,
     geometry: tuple[int, ...],
     freqs: torch.Tensor,
-    chunks: Callable[[list[torch.Tensor | None] | None], Iterator[torch.Tensor]],
-    values: Callable[[], tuple[list[torch.Tensor | None] | None, torch.Tensor]],
+    chunks: Callable[[torch.Tensor | None], Iterator[torch.Tensor]],
+    values: Callable[[], tuple[torch.Tensor | None, torch.Tensor]],
 ) -> tuple[torch.Tensor, bool]:
     """Kitchen's call over `chunks(projected)`. Where the key mean carries, `values()` gives the
     call's own V absmax for its value scale, and the V it projected for it (or None), which
-    the one pass Kitchen then makes reads back and drops chunk by chunk."""
+    the one pass Kitchen then makes reads back; the pass's end drops it."""
     attn, layout, state = call.module, call.layout, call.state
     carry = _CARRY.get()
     if carry is None:
@@ -374,7 +375,7 @@ def _produce(
     else:  # one GPU (H3's `denoise_loop` path): a slot a call has written
         rolling = carry.rolling and id(attn) in state.carried
         prior_mean, prior_scale = (carry.slots[id(attn)] if rolling else None), None
-    held: list[list[torch.Tensor | None] | None] = []
+    held: list[torch.Tensor | None] = []
     if prior_mean is not None:  # the key mean carries; the values are this call's own
         projected, absmax = values()
         prior_scale = value_scale(absmax)
