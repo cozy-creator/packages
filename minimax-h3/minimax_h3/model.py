@@ -25,7 +25,7 @@ from cozy_runtime.author import (
 )
 from cozy_runtime.author.kernels import Plan
 
-from . import glue, producer, regenerate
+from . import glue, producer, regenerate, shot_latents
 from .latent_upscaler import H3LatentUpscaler as H3LatentUpscaler
 from .official import (
     REGENERATE_COMPONENT,
@@ -199,6 +199,10 @@ class H3Model(
         )  # fmt: skip
         self.pipe.condition_text("fl2va", state, self.device)
         return state.prompt_embeds, state.text_token_tags
+
+    def latent_space(self) -> str:
+        """The video VAE's latent space (`shot_latents.vae_space`), from its config alone."""
+        return shot_latents.vae_space(self.pipe.components["vae"])
 
     @uses_components("vae")
     def encode_clip(self, pixels: Any) -> Any:
