@@ -1,0 +1,573 @@
+{
+ "kernels": {
+  "011d57cdb21cefeb816e843a08fb5fed42edfd1c08bd5eb03d4269085b02d7fe": {
+   "files": [
+    "head_norm_rope_kernel.cubin",
+    "head_norm_rope_kernel.json"
+   ],
+   "group": "head_norm_rope_kernel.json",
+   "set": "fused.qwenimage21transformerblock.e74f042b82d7",
+   "sm": 80
+  },
+  "06d4f579620814e582cdd3a092952beb7750449a3c47f7a0b1a514486653efc6": {
+   "files": [
+    "norm_modulate_kernel.cubin",
+    "norm_modulate_kernel.json"
+   ],
+   "group": "norm_modulate_kernel.json",
+   "set": "fused.qwenimage21transformerblock.e74f042b82d7",
+   "sm": 90
+  },
+  "0a33a845b6ebb2b3a268ec804d16bc6eb60944cd8d156d186395f56da974588c": {
+   "files": [
+    "head_norm_rope_kernel.cubin",
+    "head_norm_rope_kernel.json"
+   ],
+   "group": "head_norm_rope_kernel.json",
+   "set": "fused.qwenimage21transformerblock.e74f042b82d7",
+   "sm": 90
+  },
+  "10ae3d18509d7b386d146b90215e3b6d74a39cc1448c0a93b58c9e3ce7116533": {
+   "files": [
+    "norm_modulate_kernel.cubin",
+    "norm_modulate_kernel.json"
+   ],
+   "group": "norm_modulate_kernel.json",
+   "set": "fused.qwenimage21transformerblock.e74f042b82d7",
+   "sm": 120
+  },
+  "10f19d1acaa688bdf7f6287a9e75097774aff3be4b6b98bf6a3d6b0a5e49bbef": {
+   "files": [
+    "swiglu_kernel.cubin",
+    "swiglu_kernel.json"
+   ],
+   "group": "swiglu_kernel.json",
+   "set": "fused.qwenimage21transformerblock.e74f042b82d7",
+   "sm": 87
+  },
+  "115a20149cae1cd5d80751092e5ca27714557ff9dc277adb92b978eb954329fc": {
+   "files": [
+    "swiglu_kernel.cubin",
+    "swiglu_kernel.json"
+   ],
+   "group": "swiglu_kernel.json",
+   "set": "fused.qwenimage21transformerblock.e74f042b82d7",
+   "sm": 86
+  },
+  "12d8bee71e0f4984e8a63f29105ca7c70a2a988c43cb078a38ed2c2cdeb1242c": {
+   "files": [
+    "norm_modulate_kernel.cubin",
+    "norm_modulate_kernel.json"
+   ],
+   "group": "norm_modulate_kernel.json",
+   "set": "fused.qwenimage21transformerblock.e74f042b82d7",
+   "sm": 89
+  },
+  "154aa2dd2339938e9db81a32501ba1d3e200db664702a9bea29b8e9e1ca8a346": {
+   "files": [
+    "norm_modulate_kernel.cubin",
+    "norm_modulate_kernel.json"
+   ],
+   "group": "norm_modulate_kernel.json",
+   "set": "fused.qwenimage21transformerblock.e74f042b82d7",
+   "sm": 89
+  },
+  "1976efdfb7e0835eca4e732404a7aecdaf6d69a212115a732f795b381fde6353": {
+   "files": [
+    "swiglu_kernel.cubin",
+    "swiglu_kernel.json"
+   ],
+   "group": "swiglu_kernel.json",
+   "set": "fused.qwenimage21transformerblock.e74f042b82d7",
+   "sm": 90
+  },
+  "200240ee1f0b25a39bf31135897edb1acacaddafd48c5a730ba2fb679f37b04d": {
+   "files": [
+    "channel_norm_kernel.cubin",
+    "channel_norm_kernel.json"
+   ],
+   "group": "channel_norm_kernel.json",
+   "set": "fused.qwenimage21rms_norm.bf16",
+   "sm": 80
+  },
+  "20b368f2d0c9c5d7183f5dd5825614d3ce0346fbeacfdc543b28314f88660752": {
+   "files": [
+    "channel_norm_kernel.cubin",
+    "channel_norm_kernel.json"
+   ],
+   "group": "channel_norm_kernel.json",
+   "set": "fused.qwenimage21rms_norm.bf16",
+   "sm": 87
+  },
+  "226d5d9ce9ba75e408604f09cc2570e7d664845707347efa1df00022618e7765": {
+   "files": [
+    "norm_modulate_kernel.cubin",
+    "norm_modulate_kernel.json"
+   ],
+   "group": "norm_modulate_kernel.json",
+   "set": "fused.qwenimage21transformerblock.e74f042b82d7",
+   "sm": 80
+  },
+  "2579c277fb11cde15320633d934f6b1dfccb1117074e8c6da139d48dfe9abb69": {
+   "files": [
+    "swiglu_kernel.cubin",
+    "swiglu_kernel.json"
+   ],
+   "group": "swiglu_kernel.json",
+   "set": "fused.qwenimage21transformerblock.e74f042b82d7",
+   "sm": 120
+  },
+  "3175919fd00072a022e983e6910e275be7f3a0b92b293b0a7095c92315eb3e93": {
+   "files": [
+    "channel_norm_kernel.cubin",
+    "channel_norm_kernel.json"
+   ],
+   "group": "channel_norm_kernel.json",
+   "set": "fused.qwenimage21rms_norm.bf16",
+   "sm": 86
+  },
+  "3669b8bac344f82a4b27af3907e8af3a09ac0a77c1e4aae49264980b3a244f51": {
+   "files": [
+    "channel_norm_kernel.cubin",
+    "channel_norm_kernel.json"
+   ],
+   "group": "channel_norm_kernel.json",
+   "set": "fused.qwenimage21rms_norm.bf16",
+   "sm": 121
+  },
+  "442b90fee257ab4061079fca9343b4459859e99ba3ecb2f1fa2936356b6fbd62": {
+   "files": [
+    "channel_norm_kernel.cubin",
+    "channel_norm_kernel.json"
+   ],
+   "group": "channel_norm_kernel.json",
+   "set": "fused.qwenimage21rms_norm.bf16",
+   "sm": 100
+  },
+  "47e9f0258a6d9a50c1947bfc9bf6938a5d1296addc7a1d8ac99b622e37aad78c": {
+   "files": [
+    "norm_modulate_kernel.cubin",
+    "norm_modulate_kernel.json"
+   ],
+   "group": "norm_modulate_kernel.json",
+   "set": "fused.qwenimage21transformerblock.e74f042b82d7",
+   "sm": 87
+  },
+  "49e1f64df7c73b6476eeed7679d0484a5a037c05388a018d5d205e017cae2836": {
+   "files": [
+    "norm_modulate_kernel.cubin",
+    "norm_modulate_kernel.json"
+   ],
+   "group": "norm_modulate_kernel.json",
+   "set": "fused.qwenimage21transformerblock.e74f042b82d7",
+   "sm": 80
+  },
+  "4c01c857c5e694d5647f389b6a64215eeed83251cac837ff4864157c0b948d96": {
+   "files": [
+    "norm_modulate_kernel.cubin",
+    "norm_modulate_kernel.json"
+   ],
+   "group": "norm_modulate_kernel.json",
+   "set": "fused.qwenimage21transformerblock.e74f042b82d7",
+   "sm": 121
+  },
+  "4daae92a82befc3e36808e4f1bca7a0036807d8bd3faa46f37951724736e8cb1": {
+   "files": [
+    "head_norm_rope_kernel.cubin",
+    "head_norm_rope_kernel.json"
+   ],
+   "group": "head_norm_rope_kernel.json",
+   "set": "fused.qwenimage21transformerblock.e74f042b82d7",
+   "sm": 87
+  },
+  "55f1a05dac9b48c29bb48c937e71d4f7fb30f7525be99dcdfd08edceb6e8f4d6": {
+   "files": [
+    "norm_modulate_kernel.cubin",
+    "norm_modulate_kernel.json"
+   ],
+   "group": "norm_modulate_kernel.json",
+   "set": "fused.qwenimage21transformerblock.e74f042b82d7",
+   "sm": 120
+  },
+  "581f355c2a80479821797e642397eb820b3345bb74298afc5eff9b29d68e23bd": {
+   "files": [
+    "head_norm_rope_kernel.cubin",
+    "head_norm_rope_kernel.json"
+   ],
+   "group": "head_norm_rope_kernel.json",
+   "set": "fused.qwenimage21transformerblock.e74f042b82d7",
+   "sm": 121
+  },
+  "5dc83711b4ba49388fab50848c34a2f9c870f3166e6011f1ffdce54362ea6b64": {
+   "files": [
+    "norm_modulate_kernel.cubin",
+    "norm_modulate_kernel.json"
+   ],
+   "group": "norm_modulate_kernel.json",
+   "set": "fused.qwenimage21transformerblock.e74f042b82d7",
+   "sm": 100
+  },
+  "6013e97c4820a74eefd074619010ecbe7312a30c83bd39fee13b66afe5adb727": {
+   "files": [
+    "norm_modulate_kernel.cubin",
+    "norm_modulate_kernel.json"
+   ],
+   "group": "norm_modulate_kernel.json",
+   "set": "fused.qwenimage21transformerblock.e74f042b82d7",
+   "sm": 103
+  },
+  "65da5f41618da7a9ac62e7dbbc32623696c0147bbf39df95f8a5ae4c2b80f59c": {
+   "files": [
+    "swiglu_kernel.cubin",
+    "swiglu_kernel.json"
+   ],
+   "group": "swiglu_kernel.json",
+   "set": "fused.qwenimage21transformerblock.e74f042b82d7",
+   "sm": 103
+  },
+  "69e3fa17c831fc77adf07b1aae7f86a6139ac4d68c4d77c7b8c00ae8a44067fb": {
+   "files": [
+    "channel_norm_kernel.cubin",
+    "channel_norm_kernel.json"
+   ],
+   "group": "channel_norm_kernel.json",
+   "set": "fused.qwenimage21rms_norm.bf16",
+   "sm": 120
+  },
+  "6af89a044d7b53b772582e517c3ffbdad5b444ca54e0b6f89c2ef9f8dba190a7": {
+   "files": [
+    "channel_norm_kernel.cubin",
+    "channel_norm_kernel.json"
+   ],
+   "group": "channel_norm_kernel.json",
+   "set": "fused.qwenimage21rms_norm.bf16",
+   "sm": 120
+  },
+  "6db3197add687b1b60d7351c29c7b71a893b7bb049baeb13c08f3444bbf6d067": {
+   "files": [
+    "channel_norm_kernel.cubin",
+    "channel_norm_kernel.json"
+   ],
+   "group": "channel_norm_kernel.json",
+   "set": "fused.qwenimage21rms_norm.bf16",
+   "sm": 89
+  },
+  "73ead6e9f61df0378ad957e2b40113f64277afa2454cc161cc416916e2a99aa6": {
+   "files": [
+    "channel_norm_kernel.cubin",
+    "channel_norm_kernel.json"
+   ],
+   "group": "channel_norm_kernel.json",
+   "set": "fused.qwenimage21rms_norm.bf16",
+   "sm": 89
+  },
+  "741e6aad6937e9693a1873ff62eb558491d4fdede7f04c57044bd555e54ddf4b": {
+   "files": [
+    "norm_modulate_kernel.cubin",
+    "norm_modulate_kernel.json"
+   ],
+   "group": "norm_modulate_kernel.json",
+   "set": "fused.qwenimage21transformerblock.e74f042b82d7",
+   "sm": 103
+  },
+  "7b81e4b6fe79b97396da0d11ea854f139cc3de192fb8bf32039a5ce70391643a": {
+   "files": [
+    "swiglu_kernel.cubin",
+    "swiglu_kernel.json"
+   ],
+   "group": "swiglu_kernel.json",
+   "set": "fused.qwenimage21transformerblock.e74f042b82d7",
+   "sm": 100
+  },
+  "7d8b206e198f52bb06dfbd29b93101f0a65716f0fe4c647ca8ddec23873f518b": {
+   "files": [
+    "channel_norm_kernel.cubin",
+    "channel_norm_kernel.json"
+   ],
+   "group": "channel_norm_kernel.json",
+   "set": "fused.qwenimage21rms_norm.bf16",
+   "sm": 100
+  },
+  "804b0c5c23885abb000b978346318616bb32cafe1241adcbde203f0ab0c25e3c": {
+   "files": [
+    "head_norm_rope_kernel.cubin",
+    "head_norm_rope_kernel.json"
+   ],
+   "group": "head_norm_rope_kernel.json",
+   "set": "fused.qwenimage21transformerblock.e74f042b82d7",
+   "sm": 89
+  },
+  "8097d83900a95ea6326885aae28da28edf56cbd294636f7cdcefc20411a94a3d": {
+   "files": [
+    "channel_norm_kernel.cubin",
+    "channel_norm_kernel.json"
+   ],
+   "group": "channel_norm_kernel.json",
+   "set": "fused.qwenimage21rms_norm.bf16",
+   "sm": 90
+  },
+  "88ca09f9b5bfc6805273a8f8f43898be07a40526e4b857b32c028a66e59b0afa": {
+   "files": [
+    "norm_modulate_kernel.cubin",
+    "norm_modulate_kernel.json"
+   ],
+   "group": "norm_modulate_kernel.json",
+   "set": "fused.qwenimage21transformerblock.e74f042b82d7",
+   "sm": 89
+  },
+  "8c1b82e8589308e22d13bf9b312e8f299dcb3789f009cada14d95c5e2c187ff7": {
+   "files": [
+    "swiglu_kernel.cubin",
+    "swiglu_kernel.json"
+   ],
+   "group": "swiglu_kernel.json",
+   "set": "fused.qwenimage21transformerblock.e74f042b82d7",
+   "sm": 80
+  },
+  "8c7388d9e12a66a77296671d7464f1f00743903b512dbe1d3d7d864161ddb6e6": {
+   "files": [
+    "channel_norm_kernel.cubin",
+    "channel_norm_kernel.json"
+   ],
+   "group": "channel_norm_kernel.json",
+   "set": "fused.qwenimage21rms_norm.bf16",
+   "sm": 90
+  },
+  "8c797dab52da57702e0da42b32c24736f7a32be76da312e4f4f3ce277dc99265": {
+   "files": [
+    "channel_norm_kernel.cubin",
+    "channel_norm_kernel.json"
+   ],
+   "group": "channel_norm_kernel.json",
+   "set": "fused.qwenimage21rms_norm.bf16",
+   "sm": 80
+  },
+  "8e39029a2433de3dc4283621be1d55c33d0d296fb999fdda786f6c4fbaaf0f1e": {
+   "files": [
+    "norm_modulate_kernel.cubin",
+    "norm_modulate_kernel.json"
+   ],
+   "group": "norm_modulate_kernel.json",
+   "set": "fused.qwenimage21transformerblock.e74f042b82d7",
+   "sm": 100
+  },
+  "8f3ef8ccc39c75d6c53cc74dd53810917dea6b20831a0edea0cd4a4d93a79c2a": {
+   "files": [
+    "norm_modulate_kernel.cubin",
+    "norm_modulate_kernel.json"
+   ],
+   "group": "norm_modulate_kernel.json",
+   "set": "fused.qwenimage21transformerblock.e74f042b82d7",
+   "sm": 90
+  },
+  "9151e00d3880f06bbf6cbdd7b01e7618c6a358e180016ae93a42f17d34e69f55": {
+   "files": [
+    "norm_modulate_kernel.cubin",
+    "norm_modulate_kernel.json"
+   ],
+   "group": "norm_modulate_kernel.json",
+   "set": "fused.qwenimage21transformerblock.e74f042b82d7",
+   "sm": 86
+  },
+  "9538e80d4ebecff8123774055cbe641dd8c37083ff21fbe92bdea54e586a6ceb": {
+   "files": [
+    "head_norm_rope_kernel.cubin",
+    "head_norm_rope_kernel.json"
+   ],
+   "group": "head_norm_rope_kernel.json",
+   "set": "fused.qwenimage21transformerblock.e74f042b82d7",
+   "sm": 103
+  },
+  "984ccc65818d910fa01aa32b03f4f2fce969f3478b58e2b4383ff6246930c741": {
+   "files": [
+    "norm_modulate_kernel.cubin",
+    "norm_modulate_kernel.json"
+   ],
+   "group": "norm_modulate_kernel.json",
+   "set": "fused.qwenimage21transformerblock.e74f042b82d7",
+   "sm": 121
+  },
+  "a71a479cf28511f38cd425594766aacda933e312dd4f40796069d66439e53a1c": {
+   "files": [
+    "norm_modulate_kernel.cubin",
+    "norm_modulate_kernel.json"
+   ],
+   "group": "norm_modulate_kernel.json",
+   "set": "fused.qwenimage21transformerblock.e74f042b82d7",
+   "sm": 121
+  },
+  "b184826d7ae8fc2844a7086c94cbc79b489f069bdf57e07d1206af3ca04a2739": {
+   "files": [
+    "swiglu_kernel.cubin",
+    "swiglu_kernel.json"
+   ],
+   "group": "swiglu_kernel.json",
+   "set": "fused.qwenimage21transformerblock.e74f042b82d7",
+   "sm": 89
+  },
+  "b2a980a5aec22e3059829df7d6981dd220eef95d1311a881d2a1f9db2bccfdb1": {
+   "files": [
+    "norm_modulate_kernel.cubin",
+    "norm_modulate_kernel.json"
+   ],
+   "group": "norm_modulate_kernel.json",
+   "set": "fused.qwenimage21transformerblock.e74f042b82d7",
+   "sm": 120
+  },
+  "b38a0836433104ca571d9f091b7906915dfc69d3a8b5551ff85f45dc2ee989cc": {
+   "files": [
+    "norm_modulate_kernel.cubin",
+    "norm_modulate_kernel.json"
+   ],
+   "group": "norm_modulate_kernel.json",
+   "set": "fused.qwenimage21transformerblock.e74f042b82d7",
+   "sm": 86
+  },
+  "c6d0e8814d81f2c9ac13f11460b35c0f610d8af026dacd68c07657da6e8dd089": {
+   "files": [
+    "swiglu_kernel.cubin",
+    "swiglu_kernel.json"
+   ],
+   "group": "swiglu_kernel.json",
+   "set": "fused.qwenimage21transformerblock.e74f042b82d7",
+   "sm": 121
+  },
+  "d0776c8ed26d3099debac1db48a22cd87170fbae302f658fbb8120c8c236d636": {
+   "files": [
+    "norm_modulate_kernel.cubin",
+    "norm_modulate_kernel.json"
+   ],
+   "group": "norm_modulate_kernel.json",
+   "set": "fused.qwenimage21transformerblock.e74f042b82d7",
+   "sm": 86
+  },
+  "d193631c42dbf4867ac742d4d831c19d09d44c2212e46f25bd74e3f12a01a698": {
+   "files": [
+    "channel_norm_kernel.cubin",
+    "channel_norm_kernel.json"
+   ],
+   "group": "channel_norm_kernel.json",
+   "set": "fused.qwenimage21rms_norm.bf16",
+   "sm": 103
+  },
+  "d1f8b68d222f5b43e0405d58351be433bc8130c00bed3c8edc2a82b17a70eed5": {
+   "files": [
+    "norm_modulate_kernel.cubin",
+    "norm_modulate_kernel.json"
+   ],
+   "group": "norm_modulate_kernel.json",
+   "set": "fused.qwenimage21transformerblock.e74f042b82d7",
+   "sm": 90
+  },
+  "d24d9634d0c6faa3d02bb19448531e065ed1cf6e868db02afc73f4b001f6577b": {
+   "files": [
+    "channel_norm_kernel.cubin",
+    "channel_norm_kernel.json"
+   ],
+   "group": "channel_norm_kernel.json",
+   "set": "fused.qwenimage21rms_norm.bf16",
+   "sm": 121
+  },
+  "d55d6ce0e4efaab4460432aed747824d2455acf8dc14ab4d10709b57079ac34b": {
+   "files": [
+    "head_norm_rope_kernel.cubin",
+    "head_norm_rope_kernel.json"
+   ],
+   "group": "head_norm_rope_kernel.json",
+   "set": "fused.qwenimage21transformerblock.e74f042b82d7",
+   "sm": 120
+  },
+  "dc8cdce0bc80f72547f917fba6f2ca6134d69d3aa3681a6d2fcd1812b812835f": {
+   "files": [
+    "head_norm_rope_kernel.cubin",
+    "head_norm_rope_kernel.json"
+   ],
+   "group": "head_norm_rope_kernel.json",
+   "set": "fused.qwenimage21transformerblock.e74f042b82d7",
+   "sm": 100
+  },
+  "e09cf92ff06d64551aa9e95f2245f1d8b32a84d57caadc1cec27ab4b3ac05781": {
+   "files": [
+    "channel_norm_kernel.cubin",
+    "channel_norm_kernel.json"
+   ],
+   "group": "channel_norm_kernel.json",
+   "set": "fused.qwenimage21rms_norm.bf16",
+   "sm": 103
+  },
+  "e11bdcb8afb76a8abd1138b0ead43971b79c55df8388188f9737f8d58693cdac": {
+   "files": [
+    "norm_modulate_kernel.cubin",
+    "norm_modulate_kernel.json"
+   ],
+   "group": "norm_modulate_kernel.json",
+   "set": "fused.qwenimage21transformerblock.e74f042b82d7",
+   "sm": 100
+  },
+  "ec9246cefb1cd03d66197a502afcdb01faa3ebe97c848051170092095c6523c1": {
+   "files": [
+    "norm_modulate_kernel.cubin",
+    "norm_modulate_kernel.json"
+   ],
+   "group": "norm_modulate_kernel.json",
+   "set": "fused.qwenimage21transformerblock.e74f042b82d7",
+   "sm": 80
+  },
+  "ed51cedbfef6cbb71b0b8f2284e933ca7011ed7dcf94fa058edd0aaa065ec8d9": {
+   "files": [
+    "norm_modulate_kernel.cubin",
+    "norm_modulate_kernel.json"
+   ],
+   "group": "norm_modulate_kernel.json",
+   "set": "fused.qwenimage21transformerblock.e74f042b82d7",
+   "sm": 87
+  },
+  "eda3330f3659e9b941a9cffac402797aa2285627a40ac9be297bdd843d5d79da": {
+   "files": [
+    "channel_norm_kernel.cubin",
+    "channel_norm_kernel.json"
+   ],
+   "group": "channel_norm_kernel.json",
+   "set": "fused.qwenimage21rms_norm.bf16",
+   "sm": 86
+  },
+  "f61f1497dd7d8738745c79e687a216f02935912eb57ccf414d825f5006f54659": {
+   "files": [
+    "norm_modulate_kernel.cubin",
+    "norm_modulate_kernel.json"
+   ],
+   "group": "norm_modulate_kernel.json",
+   "set": "fused.qwenimage21transformerblock.e74f042b82d7",
+   "sm": 87
+  },
+  "f6870499e7030ea7d286df302456452e2c814dcd35c20e229ec538c324be644f": {
+   "files": [
+    "head_norm_rope_kernel.cubin",
+    "head_norm_rope_kernel.json"
+   ],
+   "group": "head_norm_rope_kernel.json",
+   "set": "fused.qwenimage21transformerblock.e74f042b82d7",
+   "sm": 86
+  },
+  "fb1a7692476d699784807cb6ef75fed99eb71e1da6af298bf73098ec1902d57d": {
+   "files": [
+    "norm_modulate_kernel.cubin",
+    "norm_modulate_kernel.json"
+   ],
+   "group": "norm_modulate_kernel.json",
+   "set": "fused.qwenimage21transformerblock.e74f042b82d7",
+   "sm": 103
+  },
+  "ffbf32b621959cd4f6cd23acf2159dd5d673c8bbe207d1ed2936b84355386cfd": {
+   "files": [
+    "channel_norm_kernel.cubin",
+    "channel_norm_kernel.json"
+   ],
+   "group": "channel_norm_kernel.json",
+   "set": "fused.qwenimage21rms_norm.bf16",
+   "sm": 87
+  }
+ },
+ "launcher": {},
+ "triton": "3.8.0"
+}

@@ -1,0 +1,168 @@
+{
+ "kernels": {
+  "0062ed11dd6b729fba5ac67b9f2640ca565096b24857cbeac8f3e4dce3236faa": {
+   "files": [
+    "channel_norm_kernel.cubin",
+    "channel_norm_kernel.json"
+   ],
+   "group": "channel_norm_kernel.json",
+   "set": "fused.qwenimagerms_norm.fp16",
+   "sm": 80
+  },
+  "1c5619af4983aed0d3b6175348c14811ee21330367d128f01c4e5c2be1b61fff": {
+   "files": [
+    "channel_norm_kernel.cubin",
+    "channel_norm_kernel.json"
+   ],
+   "group": "channel_norm_kernel.json",
+   "set": "fused.qwenimagerms_norm.fp16",
+   "sm": 90
+  },
+  "30dcc329460eecf9485e6f83950a7c04eac5591043b0a625e6591c25491710c1": {
+   "files": [
+    "channel_norm_kernel.cubin",
+    "channel_norm_kernel.json"
+   ],
+   "group": "channel_norm_kernel.json",
+   "set": "fused.qwenimagerms_norm.fp16",
+   "sm": 89
+  },
+  "6b1ab9b68aca9d77071e3743a8262da2923fe95cddbfac56e3bc5003161f6a1a": {
+   "files": [
+    "channel_norm_kernel.cubin",
+    "channel_norm_kernel.json"
+   ],
+   "group": "channel_norm_kernel.json",
+   "set": "fused.qwenimagerms_norm.fp16",
+   "sm": 87
+  },
+  "7289d766466d0d7e9bd105999e63c67d27201c9625868f7475c7102c975b1328": {
+   "files": [
+    "channel_norm_kernel.cubin",
+    "channel_norm_kernel.json"
+   ],
+   "group": "channel_norm_kernel.json",
+   "set": "fused.qwenimagerms_norm.fp16",
+   "sm": 103
+  },
+  "8bbaa21e89050846d7378374075806e90a0725ed6fe5e71f87ad2196427ecf9a": {
+   "files": [
+    "channel_norm_kernel.cubin",
+    "channel_norm_kernel.json"
+   ],
+   "group": "channel_norm_kernel.json",
+   "set": "fused.qwenimagerms_norm.fp16",
+   "sm": 100
+  },
+  "90c69e9fd6be6ec4e06d7308c636c8c9750c92248b7a3e3894524dad170b565d": {
+   "files": [
+    "channel_norm_kernel.cubin",
+    "channel_norm_kernel.json"
+   ],
+   "group": "channel_norm_kernel.json",
+   "set": "fused.qwenimagerms_norm.fp16",
+   "sm": 120
+  },
+  "97349c06230042774ba94380c8ed29fb27fc42b295d60ebe089700934b0c192c": {
+   "files": [
+    "channel_norm_kernel.cubin",
+    "channel_norm_kernel.json"
+   ],
+   "group": "channel_norm_kernel.json",
+   "set": "fused.qwenimagerms_norm.fp16",
+   "sm": 103
+  },
+  "a129534b8d1bc54a354c71e91b33e68072abccefc667e8563bfa89e5f3358100": {
+   "files": [
+    "channel_norm_kernel.cubin",
+    "channel_norm_kernel.json"
+   ],
+   "group": "channel_norm_kernel.json",
+   "set": "fused.qwenimagerms_norm.fp16",
+   "sm": 100
+  },
+  "a993aa517dddd90faea98b27c98e1f86b0f2141c5f715004813abe93f1cd6df2": {
+   "files": [
+    "channel_norm_kernel.cubin",
+    "channel_norm_kernel.json"
+   ],
+   "group": "channel_norm_kernel.json",
+   "set": "fused.qwenimagerms_norm.fp16",
+   "sm": 90
+  },
+  "aa265838fcbe4cc2ae3867f31d2965865b7dfa67d89917e28f083f79c654d1e3": {
+   "files": [
+    "channel_norm_kernel.cubin",
+    "channel_norm_kernel.json"
+   ],
+   "group": "channel_norm_kernel.json",
+   "set": "fused.qwenimagerms_norm.fp16",
+   "sm": 121
+  },
+  "c88da633e7d95a94c053eee7fdf5ccbad79102086059b05964e3bff12f57d647": {
+   "files": [
+    "channel_norm_kernel.cubin",
+    "channel_norm_kernel.json"
+   ],
+   "group": "channel_norm_kernel.json",
+   "set": "fused.qwenimagerms_norm.fp16",
+   "sm": 121
+  },
+  "c9e5c2612a5972e067bb23b1d28529410604eff03b6d05a4d63449e7c2f968f4": {
+   "files": [
+    "channel_norm_kernel.cubin",
+    "channel_norm_kernel.json"
+   ],
+   "group": "channel_norm_kernel.json",
+   "set": "fused.qwenimagerms_norm.fp16",
+   "sm": 89
+  },
+  "cd03d2dc8604d9f84dd5ba370477d502d75dd30435b94eb625929ae0e1c57f35": {
+   "files": [
+    "channel_norm_kernel.cubin",
+    "channel_norm_kernel.json"
+   ],
+   "group": "channel_norm_kernel.json",
+   "set": "fused.qwenimagerms_norm.fp16",
+   "sm": 120
+  },
+  "dfe72c2262d0338eddadc4c44d2da7d1b48e5b3a0b748fc9ead941ebdd8449b1": {
+   "files": [
+    "channel_norm_kernel.cubin",
+    "channel_norm_kernel.json"
+   ],
+   "group": "channel_norm_kernel.json",
+   "set": "fused.qwenimagerms_norm.fp16",
+   "sm": 86
+  },
+  "e04fd51e948f92e9e4ebf5fa2cffe75677448050675bd23a74c54c4377692aaa": {
+   "files": [
+    "channel_norm_kernel.cubin",
+    "channel_norm_kernel.json"
+   ],
+   "group": "channel_norm_kernel.json",
+   "set": "fused.qwenimagerms_norm.fp16",
+   "sm": 80
+  },
+  "e0ccccff0583011c22db49ba7db9a85e3baffaefe5ab1aefbb2d62b825a03724": {
+   "files": [
+    "channel_norm_kernel.cubin",
+    "channel_norm_kernel.json"
+   ],
+   "group": "channel_norm_kernel.json",
+   "set": "fused.qwenimagerms_norm.fp16",
+   "sm": 87
+  },
+  "f397e4bc6180c65ea547b79fe1107a42d6068e364a7ce887dcf84c4a5161bc1c": {
+   "files": [
+    "channel_norm_kernel.cubin",
+    "channel_norm_kernel.json"
+   ],
+   "group": "channel_norm_kernel.json",
+   "set": "fused.qwenimagerms_norm.fp16",
+   "sm": 86
+  }
+ },
+ "launcher": {},
+ "triton": "3.8.0"
+}
