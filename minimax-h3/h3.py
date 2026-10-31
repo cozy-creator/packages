@@ -1841,7 +1841,7 @@ async def shot(ctx: Context, payload: ShotRequest, out: Outputs, tel: Telemetry)
                             "about 2 s late; spacing the beats further apart avoids it")  # fmt: skip
     tel.log("h3 shot pieces", pieces=count, seconds=",".join(map(str, pieces)),
             boundaries_s=",".join(f"{start / FPS:.2f}" for start in starts[1:]), delivered_frames=total,
-            clip_windows="; ".join(",".join(f"{name}@{at}" for name, at in w.items()) for w in windows))  # fmt: skip
+            clip_windows=";".join(",".join(f"{name}@{at}" for name, at in w.items()) for w in windows))  # fmt: skip
     if not calls[0].references and any(call.references for call in calls[1:]):
         # Only a text-only first piece (FL2VA) runs ahead of a Ref2VA one. A hint the shot never
         # uses loads on after it ends and holds the GPU from the next run (0.2.0 gate 41159884913:
