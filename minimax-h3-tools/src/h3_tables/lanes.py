@@ -31,8 +31,8 @@ from .source import Row, dtype, plain
 
 CastDtype = Literal["bf16", "f16"]
 #: Which of a component's float32 rows a cast covers: `component` is every plain one,
-#: `decode_operands` the video VAE's serving destination only (`NORMALISED_COMPONENTS`).
-CastScope = Literal["component", "decode_operands"]
+#: `vae_operands` the video VAE's serving destination only (`NORMALISED_COMPONENTS`).
+CastScope = Literal["component", "vae_operands"]
 Encoding = Literal["fp8.rowwise", "int8.convrot", "nvfp4", "w4a8.convrot"]
 Modulation = Literal["full", "adaln-pruned"]
 
@@ -181,20 +181,22 @@ NVFP4_DIT_INT8: tuple[str, ...] = tuple(f"transformer_blocks.{block}.ff.net.2.we
 #: projection `proj_out` stays f16; `proj_in` (24 columns) is never selected.
 VAE_INT8_KEEP: tuple[str, ...] = ("decoder.proj_out.weight",)
 
-#: The video VAE's stored form is not a lane choice. `MiniMaxH3VideoDecodeStep` decodes inside
-#: `torch.autocast(float16)`, so the decoder's conv/linear operands are rounded to f16 on every
-#: forward whatever they are stored as; `official.py:_apply_video_vae_dtype` builds them at
-#: float16 (bit-exact, 10.4 -> 5.6 GB), and the fill refuses a stored dtype that differs from
-#: the destination, so every lane stores f16 operands, `bf16-full` included. The encoder, norms,
-#: biases and `decoder.rope.inv_freq` stay f32. `h3-conform.py` proves this predicate selects
-#: exactly the keys `_apply_video_vae_dtype` casts.
+#: The video VAE's stored form is not a lane choice, and the fill refuses a stored dtype that differs
+#: from the destination, so every lane stores these rows f16, `bf16-full` included
+#: (`official.py:_apply_video_vae_dtype` builds them so):
+#: - the decoder's conv/linear operands, which `MiniMaxH3VideoDecodeStep`'s `torch.autocast(float16)`
+#:   rounds to f16 on every forward whatever they are stored as (bit-exact, 10.4 -> 5.6 GB);
+#: - every row of the encoder and `quant_conv`, which compute in plain float16 (dtype audit M1: the
+#:   largest activation is 181, 362x inside float16's range; bf16 loses 9.2% on near-black: never bf16).
+#: The decoder's norms, biases and `decoder.rope.inv_freq` stay f32.
 DECODE_OPERAND_KEYS = frozenset({"post_quant_conv.weight"})
 DECODE_OPERAND_PREFIX = "decoder."
+ENCODE_PREFIXES = ("encoder.", "quant_conv.")
 
 
-def decode_operand(key: str, shape: Sequence[int]) -> bool:
-    """Is this row an operand the release decode's float16 autocast already rounds?"""
-    return (
+def vae_operand(key: str, shape: Sequence[int]) -> bool:
+    """Is this video-VAE row stored f16: any encoder row, or a decode operand?"""
+    return key.startswith(ENCODE_PREFIXES) or (
         len(shape) >= 2
         and key.rsplit(".", 1)[-1] == "weight"
         and (key.startswith(DECODE_OPERAND_PREFIX) or key in DECODE_OPERAND_KEYS)
@@ -203,12 +205,12 @@ def decode_operand(key: str, shape: Sequence[int]) -> bool:
 
 CAST_SCOPES: Mapping[str, Callable[[str, Sequence[int]], bool]] = {
     "component": lambda key, shape: True,
-    "decode_operands": decode_operand,
+    "vae_operands": vae_operand,
 }
 
 #: Applied to EVERY lane, ahead of whatever that lane authors; one component, one treatment.
 NORMALISED_COMPONENTS: Mapping[str, Treatment] = {
-    "vae": Treatment(cast="f16", cast_scope="decode_operands"),
+    "vae": Treatment(cast="f16", cast_scope="vae_operands"),
 }
 
 
