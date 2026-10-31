@@ -1473,7 +1473,9 @@ async def regenerate_shot(
     """`upscale.model: regenerate-2k` over a whole shot: its 768p latent upscaled, refined at
     `resolution` in overlapping windows where the card needs them, and decoded with its
     soundtrack."""
-    ctx.plan("vae", "text_encoder", "audio_vae", "upscaler", {"transformer", "fl2va_regenerate"}, "vae")
+    # In the order they run; the shot's own latents skip the encode.
+    encode = () if payload.latents is not None else ("vae",)
+    ctx.plan(*encode, "upscaler", "text_encoder", "audio_vae", {"transformer", "fl2va_regenerate"}, "vae")
     cancel = ctx.raise_if_cancelled
     if payload.latents is not None:
         # The shot's own latent: no encode, and no decode-and-encode loss (NVIDIA's `--input-latents`).
