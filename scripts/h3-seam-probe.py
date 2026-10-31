@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Seam metrics for MiniMax-H3 long_form joins, read from the delivered MP4.
+"""Seam metrics for a MiniMax-H3 shot's piece joins, read from the delivered MP4.
 
 Per join: audio continuity (waveform NCC across the join, relative to the same NCC at
 neighbouring in-segment points), loudness and noise-floor steps (K-weighted, LUFS-like),

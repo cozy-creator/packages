@@ -16,11 +16,13 @@ from __future__ import annotations
 
 import json
 import math
+import re
 import struct
 from dataclasses import dataclass
 from fractions import Fraction
 from typing import Any, NoReturn, cast
 
+import msgspec
 import torch
 from safetensors.torch import load, save
 
@@ -354,3 +356,23 @@ class DeliveredFrames:
         if self.seen != self.plan.sample_frames or self.delivered != self.plan.delivered_frames:
             _refuse("completed continuation decode differs from its sampled/delivered frame plan")
         return self.delivered
+
+
+class RenderProvenance(msgspec.Struct, frozen=True):
+    """The model selections a piece rendered with: a carried context names them."""
+
+    model_manifest: str
+    turbo_lora_manifest: str = ""
+
+
+def provenance(model_manifest: str, turbo_lora_manifest: str = "") -> RenderProvenance:
+    if not re.fullmatch(r"sha256:[0-9a-f]{64}", model_manifest):
+        raise InvalidRequest("H3 rendering needs its exact model manifest", code="render_model")
+    if turbo_lora_manifest and not re.fullmatch(r"sha256:[0-9a-f]{64}", turbo_lora_manifest):
+        raise InvalidRequest("H3 turbo needs its exact adapter manifest", code="render_model")
+    return RenderProvenance(model_manifest, turbo_lora_manifest)
+
+
+def context_provenance(renderer: RenderProvenance) -> str:
+    """Record model selections for native context compatibility without code hashes."""
+    return msgspec.json.encode(renderer).decode("utf-8")

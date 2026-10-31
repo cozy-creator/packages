@@ -1,83 +1,71 @@
 # MiniMax H3
 
-Video with sound from MiniMax H3: 5 to 15 seconds at 768p, optionally taken to 1080p, 1440p
-or 2160p by SeedVR2 or NVIDIA's Regenerate.
+Video with sound from MiniMax H3, as two node functions for Cozy Creator's projects:
 
-| Function | Makes a video from |
-|---|---|
-| `fl2va` | a prompt and up to two keyframes: the first and the last frame |
-| `ref2va` | a prompt and references: characters, backgrounds, audio, action videos |
-| `long_form` | several segments sharing their references, joined into one video ([LONG_FORM.md](LONG_FORM.md)) |
-| `regenerate` | an existing H3 video and its prompt, re-rendered at 768p to 2160p ([UPSCALE.md](UPSCALE.md)) |
+- **`shot`** renders one continuous shot of any length (the `video/shot` interface).
+- **`upscale`** takes a whole shot to 1080p, 1440p or 2160p ([UPSCALE.md](UPSCALE.md)).
 
-The model's timestep plans set the step counts: `fl2va` and `ref2va` take `steps` 30, 40 or 50
-(default 30), and `fl2va_turbo` and `ref2va_turbo` run the turbo LoRA's eight. The functions
-default to `minimaxai/minimax-h3@1.0.0-rc.6` and `alibaba-pai/minimax-h3-turbo-lora@1.0.1`. Releases before
-`minimaxai/minimax-h3@1.0.0-rc.4` carry no plans and refuse with `model_asset_missing`.
-
-Write the request in a file, `request.yaml`:
+A project composes shots into a film: it renders the pictures, keeps world states, cuts the
+edit and calls these per shot. Either runs alone:
 
 ```yaml
-prompt: The camera pulls back from a lighthouse as a storm rolls in.
-duration_s: 6
+# shot.yaml — cozy run minimax-h3/shot --input shot.yaml
+prompt: <Theo> and <Juno> spar on <Dock>.     # holds for the whole shot
+duration_s: 40                                # any length; past 15 s it needs beats
+beats:                                        # each holds until the next
+  - {at: 0, prompt: They circle each other.}
+  - {at: 13, prompt: <Juno> sweeps <Theo>'s legs.}
+  - {at: 27, prompt: <Theo> rolls and stands.}
+style: 35 mm film, warm grade
+soundscape: gulls, surf, wind
+music: N/A
+assets:                                       # every one is used, named or not
+  - {name: Theo, kind: character, image: ./theo.png}
+  - {name: Juno, kind: character, image: ./juno.png, description: a red coat, voice: ./juno.wav}
+  - {name: Lantern, kind: prop, image: ./lantern.png}
+  - {name: Dock, kind: environment, image: ./dock-b.png}      # the setup plate
+audio: [{name: Rain, audio: ./rain.wav}]
+reference_footage: [{name: Walk, video: "./walk.mp4#t=0:03,0:09", use_audio: false}]
+world_state: [{name: Stage, image: ./stage.png, layout: Theo by the hut, left; Juno by the crates, right.}]
+keyframes: {first: ./open.png}                # and/or last
+writes: [last, 12.5]                          # frames to return
+turbo: true                                   # false: the full model at steps 30, 40 or 50
 ```
 
-```sh
-cozy run minimax-h3/fl2va_turbo --input request.yaml --asset first=./first.png --asset last=./last.png
-```
+- **Pieces.** A shot renders in the fewest pieces that reach its length: the first up to
+  15 s, each later one up to 14 s new (the 22 frames it carries from the last share H3's 15 s
+  window), so 1 + ⌈(d − 15) / 14⌉ for d > 15. Each piece continues the last from its carried
+  latents. Edges go between beats: no beat starts from 2 s before an edge to 2.5 s after it,
+  because a carried head delays a new action (run 20751: beats on an edge started about 6 s
+  late). Where that can't hold, the shot warns. Within that, each piece is as long as it can
+  be, since a longer generation is more consistent. A shot of several pieces decodes their
+  latents as one video, so no join steps the picture. An 8 s shot with beats at 0 and 5 is
+  one generation; the 40 s shot above is pieces of 15, 14 and 11 s.
+- **Text.** Each piece is one `[Shot 1]` paragraph: the shot's `prompt`, the beat it is in
+  ("Continuing: …" when that beat began earlier) and each later beat ("Then …"). The first
+  piece ends "One continuous shot with no cuts."; a later one opens "The same shot continues
+  without a cut; the camera holds its framing." and leaves out sentences that move the
+  camera, which a carried head would repeat. Beats carry no times: H3 marks cuts with timed
+  `[Shot N]`. A prompt with its own `integrated_multimodal_description:`/`audio:`/
+  `non_diegetic_music:` fields keeps them.
+- **Pictures.** Characters, props and the environment (`<Dock>`) are definitions in every
+  piece's text, each with its `description` when given. A project cleans character and prop
+  pictures (background removal) before they reach `shot`, so a direct call should pass clean
+  ones; nothing describes them automatically. A world state is a soft picture of the set
+  read at 512 px, with its `layout` in its definition: the shot keeps who stands where without
+  opening on that frame.
+  A later piece's environment is the previous piece's last frame, with the environment picture
+  beside it as a soft world state: the place holds without the picture's framing pulling the
+  shot back with a cut (runs 20996, 21955, 21957).
+- **Footage.** `reference_footage` gives motion and camera; a `plate` (`{video}`) is followed
+  frame by frame, for a shot of one piece: an edit LoRA decides what changes, and without one the
+  shot comes back close to the clip (run 21018). `keyframes` anchor the first and last frames.
+- **Result.** `video` (768p mp4), `frames` (one per `writes` entry) and `warnings`. A piece
+  renders whole seconds on H3's 17n+5 frame grid, so the video can run up to a second past
+  `duration_s`; the edit trims it.
+- **Models.** `minimaxai/minimax-h3@1.0.0-rc.6` and `alibaba-pai/minimax-h3-turbo-lora@1.0.1`.
+  `model.base_model=<checkpoint>` and `--lora <org/lora>[,strength]` serve every piece; a
+  LoRA trained on the other transformer than a piece runs is applied to it, with a warning.
 
-Inline inputs work too, and override the file's:
-
-```sh
-cozy run minimax-h3/fl2va_turbo prompt='The camera pulls back from a lighthouse as a storm rolls in.' \
-  duration_s=6 --asset first=./first.png --asset last=./last.png
-cozy run minimax-h3/ref2va_turbo --input scene.json
-cozy run minimax-h3/long_form --input story.json
-```
-
-`scene.json` names its references, by file path or description, and uses them in the prompt as
-`<Name>`; a long-form `story.json` adds `segments` ([example](examples/dialogue-garden.json)):
-
-```json
-{
-  "prompt": "<Rover> waves in a bright studio.",
-  "duration_s": 6,
-  "references": [
-    {"name": "Rover", "kind": "character", "image": "./rover.png"},
-    {"name": "Studio", "kind": "background", "description": "A bright studio."}
-  ]
-}
-```
-
-A `kind: video` reference guides motion; with `guide: true` it is the source the output follows
-frame by frame, for edit LoRAs such as head swap and style transfer
-([LONG_FORM.md](LONG_FORM.md#action-videos)).
-
-Supplied character images have their backgrounds removed (BiRefNet) and are described in one
-sentence (Qwen3.5); `clean_references=false` and `describe_references=false` turn
-either off. Write prompts in MiniMax's
-[full-reference format](https://huggingface.co/MiniMaxAI/MiniMax-H3/blob/main/docs/VIDEO_PROMPT_WRITING_GUIDE_ref_en.md);
-`resolution` and `upscale` are in [UPSCALE.md](UPSCALE.md). The video is an MP4 in
-`~/.cozy/outputs`.
-
-LoRAs: add one `--lora <org/lora>[,strength]` per LoRA (strength 1 by default), in the order they
-stack, or list them in the request file:
-
-```sh
-cozy run minimax-h3/ref2va_turbo --input scene.yaml --lora alissonerdx/minimax-h3-live-wallpaper,1.0
-```
-
-```yaml
-lora:
-  - {ref: alissonerdx/minimax-h3-live-wallpaper, strength: 1.0}
-```
-
-Each function adapts the transformer it runs: `transformer` for `fl2va`, `transformer_ref` for
-`ref2va` and `long_form`. A LoRA trained for the other one still loads, but its effect is untested.
-
-GPU: one NVIDIA card with 80 GB or more (H100, RTX PRO 6000, H200); the 8-bit lane is 70 GiB,
-and `--on new` rents a card that holds it. Measured on one H100 at 30 steps: about 3 minutes
-for 5 s of video and 16 minutes for 14 s; turbo runs 8 steps. Most computers rent: add
-`--on new`.
-
-`encode_text`, `assemble_video` and `long_form_cuts` are the workflow's parts, callable alone.
+GPU: one RTX 4090 works (int8, streaming); an 80 GB card is faster. Measured on one H100 at
+30 steps: about 3 minutes for 5 s and 16 minutes for 14 s; turbo runs 8 steps.

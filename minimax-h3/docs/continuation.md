@@ -1,6 +1,6 @@
-# H3 segment continuation
+# H3 piece continuation
 
-A segment carries a **picture window** (22, 39 or 56 frames) and/or **one second of sound**
+A piece carries a **picture window** (22, 39 or 56 frames) and/or **one second of sound**
 from its predecessor, chosen independently. Both are sliced from the predecessor's denoised
 latents: there is no decode/re-encode round trip, whose ~2.4% darkening per link compounded
 into colour drift and softening down a chain.
@@ -15,7 +15,7 @@ target head they condition. The head is regenerated beside them and cut: the own
 form (2026-10-10), never a single frozen copy (tag `archive/h3-single-copy-context-20261010`).
 The native scheduler never writes condition rows, so the carry is hard-locked.
 
-The predecessor's picture therefore ends at its last sampled frame. Each segment samples
+The predecessor's picture therefore ends at its last sampled frame. Each piece samples
 its carried window plus its seconds snapped up to the grid and delivers everything after the
 head: 15 s first = 362 frames, then 14 s + 22 carried = 362 sampled, 340 delivered.
 
@@ -31,7 +31,7 @@ cut head: the picture window's, or for sound alone a one-second head. Placed imm
 before the target start instead, H3 read it as a reference to imitate and did not continue it
 (run 5485, join 4: 20 dB quieter, NCC at cover-band level).
 
-Each segment delivers sound from where its predecessor's ended to the end of its own (when
+Each piece delivers sound from where its predecessor's ended to the end of its own (when
 its successor carries sound) or to its picture end. Concatenated, the soundtrack is
 continuous and the clocks telescope: never more than a frame from the picture at a join, in
 sync at the end. A successor carrying sound alone needs the sound to reach the join, so the
