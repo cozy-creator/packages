@@ -63,7 +63,7 @@ turbo: true                                   # false: the full model at steps 3
 - **Result.** `video` (768p mp4), `frames` (one per `writes` entry) and `warnings`. A piece
   renders whole seconds on H3's 17n+5 frame grid, so the video can run up to a second past
   `duration_s`; the edit trims it.
-- **Models.** `minimaxai/minimax-h3@1.0.0-rc.6` and `alibaba-pai/minimax-h3-turbo-lora@1.0.1`.
+- **Models.** `minimaxai/minimax-h3@1.0.0-rc.7` and `alibaba-pai/minimax-h3-turbo-lora@1.0.1`.
   `model.base_model=<checkpoint>` and `--lora <org/lora>[,strength]` serve every piece; a
   LoRA trained on the other transformer than a piece runs is applied to it, with a warning.
 
