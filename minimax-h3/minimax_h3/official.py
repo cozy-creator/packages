@@ -2069,13 +2069,14 @@ def _apply_transformer_dtype(transformer: Any) -> Any:
 
 
 def _apply_video_vae_dtype(vae: Any, config: Config | None = None) -> Any:
-    """Construct decode operands in their checkpoint dtype before Runtime's census.
+    """Construct the encoder and the decode operands in their checkpoint dtype before Runtime's census.
 
     Both original FP32 and pre-rounded FP16 matrix weights run under the same FP16
-    decode autocast. Loading must preserve their supplied logical dtype and price the
-    actual residency, rather than requiring a checkpoint rewrite. Encoder, norms,
-    biases, register tokens and config-derived RoPE retain their FP32 contract.
-    Config-only construction defaults to the original FP32 architecture.
+    decode autocast. The encoder and `quant_conv` compute in the dtype they are stored
+    in, FP16 in every lane (`h3_tables.lanes.vae_operand`): `encode` aligns its pixels to
+    it. Loading must preserve their supplied logical dtype and price the actual residency.
+    The decoder's norms, biases, register tokens and config-derived RoPE retain their FP32
+    contract. Config-only construction defaults to the original FP32 architecture.
     """
     config = config or Config({})
     weights = [
@@ -2084,6 +2085,8 @@ def _apply_video_vae_dtype(vae: Any, config: Config | None = None) -> Any:
         if name.rsplit(".", 1)[-1] == "weight" and parameter.dim() >= 2
     ]
     weights.append(("post_quant_conv.weight", vae.post_quant_conv.weight))
+    for part in ("encoder", "quant_conv"):
+        weights += [(f"{part}.{name}", parameter) for name, parameter in getattr(vae, part).named_parameters()]
     supported = {"f32": torch.float32, "f16": torch.float16}
     for name, parameter in weights:
         key = f"vae.{name}"

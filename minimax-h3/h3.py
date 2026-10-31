@@ -836,7 +836,7 @@ def _nonfinite_fraction(torch: Any, value: Any) -> float:
 
 
 #: The releases every H3 callable defaults to; the machine picks each lane from the GPU.
-_MODEL = "minimaxai/minimax-h3@1.0.0-rc.6"
+_MODEL = "minimaxai/minimax-h3@1.0.0-rc.7"
 _TURBO_LORA = "alibaba-pai/minimax-h3-turbo-lora@1.0.1"
 _REGENERATE_LORA = "efficient-large-model/open-h3-regenerate-2k@0.1.0"
 _LATENT_UPSCALER = "lbh-123-ai/h3-latent-upscaler@0.1.0"
@@ -1917,8 +1917,6 @@ async def upscale(ctx: Context, payload: UpscaleInput, out: Outputs, tel: Teleme
     if payload.resolution is Resolution.NATIVE:
         raise InvalidRequest("seedvr2 restores above 768p; 768p is regenerate-2k's refine-only pass",
                              fields=["resolution"])  # fmt: skip
-    if payload.prompt.strip():
-        warnings.append("prompt applies to regenerate-2k only")
     probe = payload.video.probe()
     restore = cast(Callable[..., Awaitable[RestorationOutput]], restore_video)
     with tel.scope(f"SeedVR2 upscale to {payload.resolution.value}"):

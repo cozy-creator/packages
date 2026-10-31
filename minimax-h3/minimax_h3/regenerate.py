@@ -83,7 +83,11 @@ def frames_of(latent_frames: int) -> int:
 def windows(latent_frames: int, rows_per_frame: int, capacity: int) -> list[tuple[int, int]]:
     """`(first latent frame, latent frames)` spans: the whole clip when its rows fit `capacity`
     bytes and `_MOST_ROWS`, else the fewest equal `5n + 2` windows overlapping by at least
-    OVERLAP that do."""
+    OVERLAP that do, each starting on the VAE's latent chunk grid (a multiple of
+    LATENTS_PER_CHUNK). A window is laid out as a clip of its own, and H3's rotary clock spaces
+    latent frames 5/3 x (1, 4, 4, 4, 4) from a clip's start, so a window off the grid gives each
+    chunk's one-frame latent a four-frame step: it flickers at every chunk (run 22567, the middle
+    of three windows, starting at 32)."""
     fit = min(max(0, capacity - _BESIDE) // _ROW_BYTES, _MOST_ROWS) // rows_per_frame
     if latent_frames <= fit:
         return [(0, latent_frames)]
@@ -97,10 +101,11 @@ def windows(latent_frames: int, rows_per_frame: int, capacity: int) -> list[tupl
         need = math.ceil((latent_frames + (count - 1) * OVERLAP) / count)
         length = need + (-(need - 2)) % LATENTS_PER_CHUNK
         if length <= fit:
-            break
+            chunks = (latent_frames - length) // LATENTS_PER_CHUNK
+            starts = [LATENTS_PER_CHUNK * round(index * chunks / (count - 1)) for index in range(count)]
+            if all(start + length - after >= OVERLAP for start, after in zip(starts, starts[1:], strict=False)):
+                return [(start, length) for start in starts]
         count += 1
-    starts = [round(index * (latent_frames - length) / (count - 1)) for index in range(count)]
-    return [(start, length) for start in starts]
 
 
 def blend(spans: list[tuple[int, int]], latent_frames: int, rows_per_frame: int, device: Any) -> list[torch.Tensor]:
