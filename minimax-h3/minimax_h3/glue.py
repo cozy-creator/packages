@@ -63,7 +63,7 @@ from cozy_runtime.author.kernels import (
     PreQuantized,
     TritonEntry,
     TritonKernels,
-    quantize_once,
+    int8_rows,
 )
 from cozy_runtime.rows import Rows, rows
 
@@ -597,7 +597,9 @@ def swiglu(launch: Launch, x: Any, *, fp8: bool = False) -> Any:
 
 
 def rmsnorm_rope(launch: Launch, x: Any, weight: Any, cos: Any, sin: Any, eps: float) -> Any:
-    """Per-head RMSNorm then partial rotary on `(batch, seq, heads, head_dim)`.
+    """Per-head RMSNorm then partial rotary on `(batch, seq, heads, head_dim)`, in place: each
+    program reads its heads' rows whole before it writes them, so `x` (a projection's own
+    output) never exists twice (2.3 GB of Q and K at 15 s).
 
     `cos`/`sin` are `(seq, rotary_dim)`; channels past `rotary_dim` pass through.
     """
@@ -606,12 +608,11 @@ def rmsnorm_rope(launch: Launch, x: Any, weight: Any, cos: Any, sin: Any, eps: f
     rotary = int(cos.shape[-1])
     flat = x.reshape(batch * seq, heads * head_dim)
     flat = flat if flat.stride(-1) == 1 else flat.contiguous()
-    out = torch.empty_like(flat)
     launch(
         _rope_norm_kernel,
         (batch * seq, -(-heads // _ROPE_HEADS), 1),
         flat,
-        out,
+        flat,
         weight,
         cos.contiguous(),
         sin.contiguous(),
@@ -622,7 +623,7 @@ def rmsnorm_rope(launch: Launch, x: Any, weight: Any, cos: Any, sin: Any, eps: f
         rotary,
         _ROPE_HEADS,
     )
-    return out.view(batch, seq, heads, head_dim)
+    return flat.view(batch, seq, heads, head_dim)
 
 
 def warm(launch: Launch, device: Any, *, heads: int, fp8: bool) -> float:
@@ -685,8 +686,7 @@ class H3AttnProcessor(MiniMaxH3AttnProcessor):  # type: ignore[misc]
         if heads is None:
             hidden_states = self.whole(attn, hidden_states, rotary_emb, attention_mask)
             return attn.to_out[1](attn.to_out[0](hidden_states.flatten(2, 3)))
-        with quantize_once(hidden_states):
-            attended = split(heads, heads, Cut(2))
+        attended = split(heads, heads, Cut(2))
         out = attn.to_out[1](split(attn.to_out[0], attended.flatten(2, 3), Cut(1)))
         del attended
         release()
@@ -889,7 +889,14 @@ class _FFN:
     def __call__(self, normed: Any) -> Any:
         if isinstance(normed, _Tokens):
             normed = normed.operand
-        return self.ff.net[2](self.ff.net[0](normed))
+        act, down = self.ff.net[0], self.ff.net[2]
+        if not isinstance(act, FusedSwiGLU) or act._fusion_fp8:
+            return down(act(normed))
+        # An int8 down projection quantizes `value * silu(gate)` from the projection's
+        # [value | gate] halves itself (the same law as `swiglu`): the product is never written.
+        both = act.proj(normed)
+        rows = int8_rows(both, (down,), activation="swiglu")
+        return down(swiglu(act._glue, both) if rows is None else rows)
 
 
 class _Tokens:
