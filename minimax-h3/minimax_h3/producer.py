@@ -55,6 +55,7 @@ from .glue import KEY_MEAN, FusedMiniMaxH3AttnProcessor, H3AttnProcessor, KeyMea
 FAST = "kitchen-sol-producer-fast-shared-qkv"
 FP4_LOWMEM = "kitchen-sol-producer-fp4-lowmem-shared-qkv"
 FIXED_MEANS = "kitchen-sol-producer-fp4-fixed-means-shared-qkv"
+INT4QK = "kitchen-sol-producer-int4qk-shared-qkv"
 CHUNK = 4096
 #: A channel's absmax in one reduction pass (`|x|` is never written): the max-abs norm.
 INF = float("inf")
@@ -650,6 +651,7 @@ PRODUCERS = {
     for producer in (
         _register(FIXED_MEANS, "kitchen-sol-fp4-fixed-means", context_parallel=True),
         _register(FP4_LOWMEM, "kitchen-sol-fp4-lowmem"),
+        _register(INT4QK, "kitchen-sol-int4qk"),
         _register(FAST, "kitchen-sol"),
     )
 }
