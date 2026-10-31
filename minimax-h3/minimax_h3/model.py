@@ -270,12 +270,13 @@ class H3TurboBase(H3Model, encoded_leaves="accept"):
         audio: Any,
         schedule: Schedule,
         seed: int,
+        preset: str,
         on_step: Any,
     ) -> Any:
         """The Regenerate refine of normalized latents at their canvas, on the FL2VA DiT."""
         return overlay.refine(
             self, latents, prompt_embeds=prompt_embeds, text_tags=text_tags, spans=spans,
-            audio=audio, schedule=schedule, seed=seed, on_step=on_step,
+            audio=audio, schedule=schedule, seed=seed, preset=preset, on_step=on_step,
         )  # fmt: skip
 
     @uses_components("transformer_ref")
@@ -405,11 +406,12 @@ class H3RegenerateLoRA(Model[OfficialH3RegenerateLoRA], encoded_leaves="accept")
         audio: Any,
         schedule: Schedule,
         seed: int,
+        preset: str,
         on_step: Any,
     ) -> Any:
         return regenerate.refine(
             base.pipe.components["transformer"],
             self.pipe.overlay(base.pipe),
             latents=latents, prompt_embeds=prompt_embeds, text_tags=text_tags, spans=spans,
-            audio=audio, schedule=schedule, seed=seed, on_step=on_step,
+            audio=audio, schedule=schedule, seed=seed, preset=preset, on_step=on_step,
         )  # fmt: skip

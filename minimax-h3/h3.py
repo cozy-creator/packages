@@ -861,6 +861,8 @@ _REGENERATE_PIXELS = {
 RegenerateResolution = Annotated[Resolution, Shape(pixels=_REGENERATE_PIXELS)]
 
 
+#: Regenerate's refine forwards (`regenerate.PRESETS`), the video interfaces' `preset`.
+Preset = Literal["quality", "balanced", "fast"]
 #: A shot's latents (`shot_latents`): `ShotResult.latents`, `UpscaleInput.latents`.
 Latents = Annotated[File, FileBound(max_bytes=1 << 30, media_types=("application/octet-stream",))]
 
@@ -877,6 +879,9 @@ class RegenerateInput(msgspec.Struct, kw_only=True):
     resolution: RegenerateResolution = Resolution.QHD
     strength: float = 0.909
     seed: int | None = None
+    #: NVIDIA's refine forwards (`regenerate.PRESETS`): `quality` dense (`standard`), `balanced`
+    #: step 0 dense then sparse at tau 1.0 (`sol_engine`), `fast` all sparse at tau 1.75.
+    preset: Preset = "balanced"
 
     def __post_init__(self) -> None:
         if round(self.strength, 3) not in REGENERATE_STRENGTHS:
@@ -1494,13 +1499,14 @@ async def regenerate_shot(
     steps = schedule.transformer_evaluations
     seed = payload.seed if payload.seed is not None else int.from_bytes(
         hashlib.sha256(f"{ctx.request_id}/h3/regenerate".encode()).digest()[:4], "big")  # fmt: skip
-    tel.log("h3 regenerate", resolution=resolution, strength=payload.strength, start_sigma=schedule.start,
+    tel.log("h3 regenerate", resolution=resolution, strength=payload.strength, preset=payload.preset, start_sigma=schedule.start,
             transformer_evaluations=steps, latent="x".join(str(int(value)) for value in latents.shape[2:]),
             windows=len(spans), window_latent_frames=spans[0][1])  # fmt: skip
     with tel.stage("refine", overall_range=(0.14, 0.85)):
         refined = base_model.refine(
             latents, overlay=regenerate_lora, prompt_embeds=text[0], text_tags=text[1], spans=spans,
             audio=base_model.silence(refine_math.frames_of(spans[0][1])), schedule=schedule, seed=seed,
+            preset=payload.preset,
             on_step=tel.step_callback(steps, stage="refine", overall_range=(0.14, 0.85)),
         )  # fmt: skip
     cancel()
@@ -1637,6 +1643,8 @@ class ShotRequest(msgspec.Struct, kw_only=True):
     #: (UPSCALE.md); Regenerate starts from the shot's own latents.
     resolution: RegenerateResolution = Resolution.NATIVE
     upscale: Upscale | None = None
+    #: The upscale's preset (`UpscaleInput.preset`) above 768p.
+    preset: Preset = "balanced"
 
 
 class ShotResult(msgspec.Struct):
@@ -1922,7 +1930,7 @@ async def shot(ctx: Context, payload: ShotRequest, out: Outputs, tel: Telemetry)
         # Through `upscale`, as every caller: the shot's own latents, so Regenerate encodes nothing.
         request = UpscaleInput(video=video, resolution=payload.resolution, upscale=payload.upscale,
                                prompt=_upscale_prompt(payload), seed=piece_seed(payload.seed, ctx.request_id, count),
-                               latents=latents)  # fmt: skip
+                               latents=latents, preset=payload.preset)  # fmt: skip
         video = (await upscale(ctx, request, out, tel)).video
         out.publish("video", video, label=f"Video at {payload.resolution.value}")
     ctx.release_gpus()
@@ -1965,6 +1973,9 @@ class UpscaleInput(msgspec.Struct, kw_only=True):
     #: The shot's latents (`ShotResult.latents`): regenerate-2k starts from them instead of
     #: encoding `video`. SeedVR2 restores pixels and reads `video` alone.
     latents: Latents | None = None
+    #: regenerate-2k's refine, as NVIDIA's forwards (UPSCALE.md): `quality` (`standard`, dense),
+    #: `balanced` (`sol_engine`), `fast` (`sol_engine_fast`). SeedVR2 has one.
+    preset: Preset = "balanced"
 
 
 class UpscaleOutput(msgspec.Struct):
@@ -1984,7 +1995,8 @@ async def upscale(ctx: Context, payload: UpscaleInput, out: Outputs, tel: Teleme
             raise InvalidRequest("regenerate-2k re-renders the video from the prompt it was made from",
                                  fields=["prompt"])  # fmt: skip
         call = RegenerateInput(video=payload.video, latents=payload.latents, prompt=payload.prompt,
-                               resolution=payload.resolution, strength=method.start, seed=seed)  # fmt: skip
+                               resolution=payload.resolution, strength=method.start, seed=seed,
+                               preset=payload.preset)  # fmt: skip
         with tel.scope(f"Regenerate at {payload.resolution.value}"):
             result = await cast(Callable[..., Awaitable[RegenerateOutput]], regenerate_shot)(payload=call)
         tel.log("h3 upscale", model=method.model, warnings="; ".join(warnings + result.warnings))
