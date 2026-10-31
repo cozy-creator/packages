@@ -381,6 +381,27 @@ app.entrypoint(
     weights=(WeightsOutput("bf16-full", max_new_bytes=MAX_FULL_BYTES + MAX_VIDEO_VAE_BYTES),),
     accelerator=False,
 )
+@invocable(memo_version="h3-lane/1", memo_dependencies=LANES_MEMO)
+async def vae(ctx: Context, *, source: Weights[Any], tel: Telemetry) -> ModelArtifact:
+    """A lane's video VAE alone, normalised (`NORMALISED_COMPONENTS`): one component and no base,
+    so writing it fetches that component only. `cozy model upload --base` composes it into lanes."""
+    opened = open_source(ctx, source)
+    held = rows(opened)["vae"]
+    selection = _lanes.select(
+        "vae", NORMALISED_COMPONENTS["vae"], opened, held, allow_inert=True
+    )
+    cast = {key for key, _ in selection.cast}
+    order = [("vae", key) for key in held]
+    with ctx.output("vae", Derivation(base=None, sources=(opened,), order=order)) as out:
+        copy_assets(out, opened, "vae")
+        for key in held:
+            if key not in cast and not out.has("vae", key):
+                out.copy("vae", key, opened)
+        stats = _treat(opened, out, ctx, tel, ArtifactQuantizationRequest(), selection)
+        _log_treatment(tel, "vae", selection, stats)
+        return ctx.adopt_model(out)
+
+
 # The pruned lanes compute AdaLN tables on the GPU.
 app.entrypoint(
     bf16_pruned,
@@ -391,6 +412,12 @@ app.entrypoint(
     fp8_pruned,
     name="fp8-pruned",
     weights=(WeightsOutput("fp8", max_new_bytes=MAX_QUANTIZED_LANE_BYTES),),
+)
+app.entrypoint(
+    vae,
+    name="vae",
+    weights=(WeightsOutput("vae", max_new_bytes=MAX_VIDEO_VAE_BYTES),),
+    accelerator=False,
 )
 
 

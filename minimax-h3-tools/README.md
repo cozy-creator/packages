@@ -19,6 +19,7 @@ ingested or already fetched the input, its objects are in the pod Store and noth
 | `turbo-lora` | the converted `alibaba-pai/MiniMax-H3-Acc-LoRAs` release (one fl2va and one ref2va component) | `pdd8` | `model.base=<full-precision H3>`; reads its modulation weights and heads only |
 | `regenerate-lora` | the release's `lora/` folder of `Efficient-Large-Model/Open-H3-Regenerate-2K`, converted with `--source-format h3.lora` (one component) | `bf16` | `model.base=<full-precision H3>`; the merged rank-576 factors in bf16, and refine-plan tables with LMS Sharp's AdaLN curve added |
 | `retable` | an AdaLN-pruned lane | `adaln-pruned`, `tables` | `model.full=<full-precision H3>`; recomputes tables only |
+| `vae` | any H3 lane | `vae` | the video VAE alone, normalised; no base, so it fetches only that component. `cozy model upload <it> <org/model> --lane L --base <lane L commit>:vae` composes it into a lane by header |
 
 Its quantized lanes are recipes (`FP8`, `INT8`, `NVFP4`, `W4A8` in `h3_tables.job`): code, as a
 `DerivationHook`, since what a lane encodes depends on what the source still holds plain. Both
