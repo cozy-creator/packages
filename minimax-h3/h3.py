@@ -28,6 +28,16 @@ import torch
 from cozy_runtime import stepcache
 from cozy_runtime.author import (
     App,
+    AudioReference,
+    Beat,
+    CharacterReference,
+    ContinueFrom,
+    EnvironmentReference,
+    Plate,
+    PropReference,
+    ShotRequest,
+    ShotResult,
+    VideoReference,
     AudioFile,
     AudioProbe,
     ChildCallError,
@@ -1195,11 +1205,13 @@ def _anchors(
 ContextFrames = Literal[0, 22, 39, 56]
 
 
+#: A piece's carry: a predecessor's exported context (~2.7 MB), or a resumed video's whole latents
+#: file, whose carry the piece reads (`shot_latents.context`).
 ContextFile = Annotated[
-    File, FileBound(max_bytes=16 << 20, media_types=("application/octet-stream",))
+    File, FileBound(max_bytes=1 << 30, media_types=("application/octet-stream",))
 ]
 #: A piece's delivered video latents (`_Pieces`), about 3 MB a second at 768p.
-LatentFile = Annotated[File, FileBound(max_bytes=256 << 20, media_types=("application/octet-stream",))]
+LatentFile = Annotated[File, FileBound(max_bytes=1 << 30, media_types=("application/octet-stream",))]
 PieceVideo = Annotated[VideoFile, FileBound(max_bytes=1 << 30, max_decoded_bytes=32 << 20, media_types=("video/mp4",))]
 
 
@@ -1353,7 +1365,7 @@ async def ref2va_piece(
     if plan.carried:
         if payload.context is None:
             raise InvalidRequest("a carried picture or sound needs the previous context", fields=["payload.context"])
-        context = decode_context(payload.context.read_bytes())
+        context = decode_context(shot_latents.context(payload.context.read_bytes()))
     _reference_policy(assets)
     handed = _Pieces(out, base_model, plan, observed, payload.latents)
     earlier = None
@@ -1589,111 +1601,85 @@ ShotFootage = Annotated[
 ]
 
 
-class Beat(msgspec.Struct):
-    """From `at` seconds into the shot, `prompt` is what happens."""
+class Character(CharacterReference, tag="character", kw_only=True):
+    """A person, kept as pictured (or, `follow: loose`, their arrangement). `voice` is their
+    voice's timbre (H3's `reference` retention)."""
 
-    at: Annotated[float, msgspec.Meta(ge=0)]
-    prompt: str
-
-
-class ShotAsset(msgspec.Struct, kw_only=True):
-    """A picture of a character, a prop, or the environment (the shot's setup plate). Every one
-    is used, named in the text or not; `description` joins its definition, `voice` is a
-    character's timbre."""
-
-    name: str
-    kind: Literal["character", "prop", "environment"]
     image: ShotImage
-    description: str = ""
     voice: ShotSound | None = None
 
 
-class ShotAudio(msgspec.Struct):
-    name: str
+class Prop(PropReference, tag="prop", kw_only=True):
+    image: ShotImage
+
+
+class Environment(EnvironmentReference, tag="environment", kw_only=True):
+    """A place: its architecture and materials; `follow: loose` keeps only its arrangement (a world
+    state), read at 512 px so the shot does not open on that frame."""
+
+    image: ShotImage
+
+
+class Clip(VideoReference, tag="video", kw_only=True):
+    """A motion and camera guide, read second for second with the shot (`shot_windows`); its sound
+    only with `use_audio`."""
+
+    video: ShotFootage
+
+
+class Sound(AudioReference, tag="audio", kw_only=True):
+    """Sound the soundtrack reuses (H3's `partially_copy`)."""
+
     audio: ShotSound
 
 
-class ReferenceFootage(msgspec.Struct, kw_only=True):
-    """A clip whose motion and camera the shot performs, second for second; its sound only
-    with `use_audio`."""
-
-    name: str
-    video: ShotFootage
-    use_audio: bool = False
-
-
-class Plate(msgspec.Struct):
-    """A clip the shot follows frame by frame (Add Guide rows), across all its pieces."""
+class EditPlate(Plate, kw_only=True):
+    """The video being edited, followed frame by frame (Add Guide rows) across every piece: the
+    prompt, or an edit LoRA, decides what changes."""
 
     video: ShotFootage
 
 
-class Keyframes(msgspec.Struct, kw_only=True):
-    first: FrameImage = None
-    last: FrameImage = None
+class Continue(ContinueFrom, kw_only=True):
+    """A video this package made, and its `latents`: the request runs on its timeline and resumes
+    at its end."""
+
+    latents: Latents | None = None
 
 
-class WorldState(msgspec.Struct, kw_only=True):
-    """How a place stood: a soft picture of the set, read at 512 px, and `layout`, one line of
-    who and what is where."""
+class GenerateInput(ShotRequest, kw_only=True):
+    """One continuous video of any length (README.md), on the shot contract. `turbo` (the
+    default) runs the turbo LoRA's 8 steps; `turbo: false` the full model at `steps`. `style` holds
+    in every piece, with what must or must not appear ("no person appears"); `prompt` is how the
+    video opens and is left out of later pieces (se-087)."""
 
-    name: str
-    image: ShotImage
-    layout: str = ""
-
-
-class ShotRequest(msgspec.Struct, kw_only=True):
-    """One continuous shot of any length (README.md). `writes` asks for frames of it: `first`,
-    `last` or seconds in. `turbo` and `steps` are this package's sampling: the turbo LoRA's
-    eight steps, or the full model's 30, 40 or 50."""
-
-    prompt: str
     duration_s: Annotated[float, msgspec.Meta(
-        gt=0, extra={"max_piece_s": 15},
-        description="Any length; rendered in pieces of at most 15 s (max_piece_s), so a longer shot needs beats.",
+        gt=0, extra={"max_piece_s": MAX_DURATION_S, "min_piece_s": MIN_DURATION_S},
+        description="Any length; rendered in pieces of at most 15 s (max_piece_s), so a longer video needs "
+                    "beats. With continue_from, its whole length.",
     )]  # fmt: skip
-    beats: list[Beat] = []
-    seed: int | None = None
-    #: What holds for the whole shot, in every piece: its look, and what must or must not appear ("no
-    #: person appears"). `prompt` is how the shot opens and is left out of later pieces (se-087).
-    style: str = ""
-    soundscape: str = ""
+    references: list[Character | Prop | Environment | Clip | Sound] = msgspec.field(default_factory=list)
+    plate: EditPlate | None = None
+    first_frame: FrameImage = None
+    last_frame: FrameImage = None
+    continue_from: Continue | None = None
     music: str = "N/A"
-    assets: list[ShotAsset] = []
-    audio: list[ShotAudio] = []
-    reference_footage: list[ReferenceFootage] = []
-    plate: Plate | None = None
-    keyframes: Keyframes | None = None
-    world_state: list[WorldState] = []
-    writes: list[Literal["first", "last"] | Annotated[float, msgspec.Meta(ge=0)]] = []
     turbo: bool = True
     steps: FullSteps | None = None
-    #: `768p` is H3's own size. Above it the finished shot is upscaled whole by `upscale.model`
-    #: (UPSCALE.md); Regenerate starts from the shot's own latents.
+    #: `768p` is H3's own size. Above it the finished video is upscaled whole by `upscale.model`
+    #: (UPSCALE.md); Regenerate starts from its own latents.
     resolution: RegenerateResolution = Resolution.NATIVE
     upscale: Upscale | None = None
-    #: Speed against fidelity, for the whole shot: Turbo's dense steps (`TURBO_DENSE_STEPS`) and,
-    #: above 768p, the upscale's (`UpscaleInput.preset`).
-    preset: Preset = "balanced"
-
-
-class ShotResult(msgspec.Struct):
-    video: Annotated[VideoFile, FileBound(max_bytes=1 << 30, media_types=("video/mp4",))]
-    #: One per `writes` entry, in order, from the 768p render.
-    frames: list[ImageFile]
-    warnings: list[str]
-    #: The 768p shot's own latents (`shot_latents`), for a later `upscale` to start from.
-    latents: Latents | None = None
 
 
 #: What each later piece carries from the one before: 22 frames of picture and one second of sound.
 _CARRY = Carry(22, True)
 #: A later piece's new seconds: its carried frames share the 362-frame window, so 14.
 _MAX_NEXT_S = (MAX_FRAMES - _CARRY.head_frames) // FPS
-#: A world state's picture is read at this short edge: the full picture opens the shot on a
-#: copy of it (run 20661, first-frame SSIM 0.871), 256 px keeps the set but not who stands
-#: where (run 20689); its `layout` line carries the positions.
-_WORLD_STATE_EDGE = 512
+#: A loose picture (`follow: loose`, a world state) is read at this short edge: the full picture
+#: opens the shot on a copy of it (run 20661, first-frame SSIM 0.871), 256 px keeps the set but not
+#: who stands where (run 20689); its description carries the positions.
+_LOOSE_EDGE = 512
 #: The first piece's closing sentence, and each later piece's opening one: a continued piece picks
 #: up the carried frames as they are, the camera still doing what it did, and starts nothing new
 #: for its first two seconds (MiniMax's extend and the ComfyUI chainers restate the incoming state;
@@ -1721,15 +1707,18 @@ def _delivered(seconds: int, first: bool) -> int:
     return ContinuationPlan(seconds, Carry() if first else _CARRY).delivered_frames
 
 
-def plan_pieces(duration_s: float, beats: Iterable[float]) -> list[int]:
+def plan_pieces(duration_s: float, beats: Iterable[float], carried: bool = False) -> list[int]:
     """A shot's pieces in whole seconds: the fewest that reach `duration_s` (the first at most
-    15 s, each later one at most 14, none under 5). Within that count: the fewest edges in a
+    15 s, or 14 when it is `carried` from a video it continues, each later one at most 14, none
+    under 5). Within that count: the fewest edges in a
     beat's window (`_BEFORE_EDGE_S` before it to `_AFTER_EDGE_S` after it), so each piece cuts
     between beats; then the least overshoot, in whole seconds; then each piece as long as it
     can be (Paul, 10-30: a longer generation is more consistent); then the least overshoot in
     frames."""
     target = max(1, math.ceil(duration_s * FPS - 1e-6))
-    count = 1 + max(0, math.ceil((target - _delivered(MAX_DURATION_S, True)) / _delivered(_MAX_NEXT_S, False)))
+    fresh = not carried
+    first_s = MAX_DURATION_S if fresh else _MAX_NEXT_S
+    count = 1 + max(0, math.ceil((target - _delivered(first_s, fresh)) / _delivered(_MAX_NEXT_S, False)))
     marks = [at * FPS for at in beats]
     # Each end, in frames, the pieces before the last reach: its score (minus the edges in a
     # beat's window, the lengths) and those lengths.
@@ -1737,31 +1726,33 @@ def plan_pieces(duration_s: float, beats: Iterable[float]) -> list[int]:
     for index in range(count - 1):
         reached: dict[int, tuple[int, list[int]]] = {}
         for start, (clear, lengths) in best.items():
-            for length in range(MIN_DURATION_S, (MAX_DURATION_S if index == 0 else _MAX_NEXT_S) + 1):
-                end = start + _delivered(length, index == 0)
+            for length in range(MIN_DURATION_S, (first_s if index == 0 else _MAX_NEXT_S) + 1):
+                end = start + _delivered(length, index == 0 and fresh)
                 hit = any(end - _BEFORE_EDGE_S * FPS <= mark <= end + _AFTER_EDGE_S * FPS for mark in marks)
                 score = (clear - hit, [*lengths, length])
                 if end < target and (end not in reached or score > reached[end]):
                     reached[end] = score
         best = reached
-    longest = MAX_DURATION_S if count == 1 else _MAX_NEXT_S
+    longest, alone = (first_s, fresh) if count == 1 else (_MAX_NEXT_S, False)
     plans = [
         (clear, -math.ceil((end - target) / FPS), lengths, -end, [*lengths, length])
         for start, (clear, lengths) in best.items()
         for length in range(MIN_DURATION_S, longest + 1)
-        if (end := start + _delivered(length, count == 1)) >= target
-        and all(start + _delivered(shorter, count == 1) < target for shorter in range(MIN_DURATION_S, length))
+        if (end := start + _delivered(length, alone)) >= target
+        and all(start + _delivered(shorter, alone) < target for shorter in range(MIN_DURATION_S, length))
     ]
     return max(plans)[-1]
 
 
-def _has_people(payload: ShotRequest) -> bool:
+def _has_people(payload: GenerateInput) -> bool:
     """Whether a shot's text may name people: it has a character picture. Read from the request's
     types, never from its prose (se-089)."""
-    return any(asset.kind == "character" for asset in payload.assets)
+    return any(isinstance(ref, Character) for ref in payload.references)
 
 
-def piece_texts(prompt: str, beats: Sequence[Beat], starts: Sequence[float], *, people: bool) -> list[str]:
+def piece_texts(
+    prompt: str, beats: Sequence[Beat], starts: Sequence[float], *, people: bool, continued: bool = False
+) -> list[str]:
     """Each piece's text, one `[Shot 1]` paragraph with no cut times (H3's `[Shot N] At
     MM:SS.mmm` marks a cut; its guide writes in-shot change as plain English). The first piece:
     the shot's text, the beat it is in and the beats it reaches, in order, ending that it is one
@@ -1770,8 +1761,8 @@ def piece_texts(prompt: str, beats: Sequence[Beat], starts: Sequence[float], *, 
     `people`), the beat in force (already under way, when it
     began before the piece) and the beats it reaches. Restating the opening pulls a shot that has
     moved on back to it, with a cut (0.2.4 gate, runs 24980/24981: back in the food cart).
-    `starts` are the pieces' start times. The text ends the prompt's description, ahead of any
-    audio or music field it has."""
+    `starts` are the pieces' start times; with `continued`, the first one continues a video too.
+    The text ends the prompt's description, ahead of any audio or music field it has."""
     prompt = prompt.strip()
     head = found.group(0) if (found := _DESCRIPTION.match(prompt)) else ""
     after = _AFTER.search(prompt, len(head))
@@ -1780,12 +1771,12 @@ def piece_texts(prompt: str, beats: Sequence[Beat], starts: Sequence[float], *, 
     timed = sorted(((beat.at, beat.prompt.strip()) for beat in beats), key=lambda beat: beat[0])
     texts = []
     for index, (start, end) in enumerate(zip(starts, [*starts[1:], math.inf], strict=True)):
-        parts = [_CONTINUED[people]] if index else [body]
+        parts = [_CONTINUED[people]] if index or continued else [body]
         if current := [beat for beat in timed if beat[0] <= start]:
             at, text = current[-1]
             parts.append(f"Already under way, not begun again: {_lower(text)}" if at < start else text)
         parts += [f"Then {_lower(text)}" for at, text in timed if start < at < end]
-        if not index:
+        if not (index or continued):
             parts.append(_ONE_SHOT)
         text = head + "[Shot 1] " + " ".join(part for part in parts if part)
         texts.append(f"{text}\n\n{tail}" if tail else text)
@@ -1828,7 +1819,7 @@ def _lower(text: str) -> str:
     return text[:1].lower() + text[1:] if text[:1].isupper() and not text[1:2].isupper() and not text.startswith("<") else text
 
 
-def _fl2va_text(text: str, payload: ShotRequest) -> str:
+def _fl2va_text(text: str, payload: GenerateInput) -> str:
     """An FL2VA piece's text: its own, opening with the style, with the soundscape as its `audio`
     line and the music as its `non_diegetic_music` line where it has none."""
     if (style := payload.style.strip()) and style.casefold() not in text.casefold():
@@ -1842,22 +1833,29 @@ def _fl2va_text(text: str, payload: ShotRequest) -> str:
     return "\n\n".join([text.rstrip(), *lines])
 
 
-def _shot_references(payload: ShotRequest) -> tuple[list[StoryReference], list[str]]:
-    """Every picture, sound and clip the shot attaches, and the warnings reading them gives."""
-    refs = [
-        StoryReference(name=asset.name, kind="background" if asset.kind == "environment" else asset.kind,
-                       description=asset.description, image=asset.image, voice=asset.voice)
-        for asset in payload.assets
-    ]  # fmt: skip
-    refs += [StoryReference(name=sound.name, kind="audio", audio=sound.audio) for sound in payload.audio]
+def _shot_references(payload: GenerateInput) -> tuple[list[StoryReference], list[str]]:
+    """Every picture, sound and clip the video attaches, as H3's story kinds (a `loose` picture is
+    an attribute_transfer world state, read at 512 px), and the warnings reading them gives."""
+    refs: list[StoryReference] = []
     warnings = []
-    for clip in payload.reference_footage:
-        silent = clip.use_audio and clip.video.probe().soundtrack is None
-        if silent:
-            warnings.append(f"<{clip.name}> has no audio track; use_audio ignored")
-        refs.append(StoryReference(name=clip.name, kind="video", video=clip.video, use_audio=clip.use_audio and not silent))
-    refs += [StoryReference(name=state.name, kind="world_state", image=state.image, description=state.layout)
-             for state in payload.world_state]  # fmt: skip
+    for ref in payload.references:
+        match ref:
+            case Clip():
+                silent = ref.use_audio and ref.video.probe().soundtrack is None
+                if silent:
+                    warnings.append(f"<{ref.name}> has no audio track; use_audio ignored")
+                refs.append(StoryReference(name=ref.name, kind="video", video=ref.video, use_audio=ref.use_audio and not silent))
+            case Sound():
+                refs.append(StoryReference(name=ref.name, kind="audio", audio=ref.audio))
+            case _ if ref.follow == "loose":
+                refs.append(StoryReference(name=ref.name, kind="world_state", image=ref.image, description=ref.description))
+            case Character():
+                refs.append(StoryReference(name=ref.name, kind="character", image=ref.image,
+                                           description=ref.description, voice=ref.voice))  # fmt: skip
+            case Prop():
+                refs.append(StoryReference(name=ref.name, kind="prop", image=ref.image, description=ref.description))
+            case Environment():
+                refs.append(StoryReference(name=ref.name, kind="background", image=ref.image, description=ref.description))
     if payload.plate is not None:
         refs.append(StoryReference(name="Plate", kind="anchor_video", video=payload.plate.video))
     validate_references(refs)
@@ -1872,42 +1870,57 @@ def piece_seed(seed: int | None, request_id: str, index: int) -> int:
     return int.from_bytes(hashlib.sha256(f"{request_id}/h3/shot/{index}".encode()).digest()[:4], "big")
 
 
-async def shot(ctx: Context, payload: ShotRequest, out: Outputs, tel: Telemetry) -> ShotResult:
-    """One continuous shot of any length, with sound.
+async def generate(ctx: Context, payload: GenerateInput, out: Outputs, tel: Telemetry) -> ShotResult:
+    """One continuous video of any length, with sound, from MiniMax H3.
 
-    `video/shot`: its pieces rendered in order, each continuing the last, joined into one video
-    published as it grows; and the frames its `writes` ask for, each taken by the piece that
-    delivers it. The run's model stack (`--lora`, `model.base_model`) serves every piece."""
+    Its pieces of at most 15 s render in order, each continuing the last from its carried latents,
+    and decode as one video, published as it grows. `continue_from` resumes a video this package
+    made, from its latents, on its timeline: the result is the whole video. The run's model stack
+    (`--lora`, `model.base_model`) serves every piece. Returns the video and its latents, whose
+    carry a later `continue_from` resumes."""
     ctx.raise_if_cancelled()
-    pieces = plan_pieces(payload.duration_s, [beat.at for beat in payload.beats])
-    if len(pieces) > 1 and not payload.beats:
-        raise InvalidRequest(f"a shot longer than {MAX_DURATION_S} s needs beats: say what happens when "
-                             f"in this {payload.duration_s:g} s shot", fields=["beats"])  # fmt: skip
-    keyframes = payload.keyframes or Keyframes()
-    if payload.plate is not None and keyframes.first is not None:
-        raise InvalidRequest("a plate sets the shot's opening; it takes no first keyframe", fields=["keyframes.first"])
-    references, warnings = _shot_references(payload)
     if payload.turbo and payload.steps is not None:
-        warnings.append(f"turbo runs its LoRA's 8 steps; steps {payload.steps} ignored")
+        raise InvalidRequest(f"turbo runs its LoRA's 8 steps; steps {payload.steps} needs turbo: false",
+                             fields=["steps"])  # fmt: skip
+    if payload.plate is not None and payload.first_frame is not None:
+        raise InvalidRequest("a plate sets the video's opening; it takes no first_frame", fields=["first_frame"])
+    resumed, done = payload.continue_from, 0
+    if resumed is not None:
+        if resumed.latents is None:
+            raise InvalidRequest("continue_from resumes from the latents this package returned with the video; "
+                                 "a video alone is not continued yet", fields=["continue_from.latents"])  # fmt: skip
+        if payload.first_frame is not None:
+            raise InvalidRequest("continue_from sets the opening; it takes no first_frame", fields=["first_frame"])
+        done = shot_latents.delivered(resumed.latents.read_bytes())
+        if done >= payload.duration_s * FPS:
+            raise InvalidRequest(f"duration_s {payload.duration_s:g} is not past the {done / FPS:.2f} s "
+                                 "continue_from already has", fields=["duration_s"])  # fmt: skip
+    begun = done / FPS
+    later = [beat.at - begun for beat in payload.beats if beat.at > begun]
+    pieces = plan_pieces(payload.duration_s - begun, later, carried=resumed is not None)
+    if len(pieces) > 1 and not later:
+        raise InvalidRequest(f"a video longer than {MAX_DURATION_S} s needs beats: say what happens when "
+                             f"in this {payload.duration_s:g} s video", fields=["beats"])  # fmt: skip
+    references, warnings = _shot_references(payload)
+    if payload.aspect_ratio is not None:
+        w, h = (int(side) for side in payload.aspect_ratio.split(":"))
+        if abs(w / h - 1344 / 768) > 0.05:
+            warnings.append(f"minimax-h3 renders 1344x768 for now, not {payload.aspect_ratio}")
     steps = None if payload.turbo else payload.steps
     count = len(pieces)
-    plans = [ContinuationPlan(length, _CARRY if index else Carry(), _CARRY if index + 1 < count else Carry())
+    # Every piece carries into a successor, its last too: the video's latents keep that carry, which
+    # a `continue_from` of it resumes.
+    plans = [ContinuationPlan(length, _CARRY if index or resumed else Carry(), _CARRY)
              for index, length in enumerate(pieces)]  # fmt: skip
-    *starts, total = accumulate((plan.delivered_frames for plan in plans), initial=0)
+    *starts, total = accumulate((plan.delivered_frames for plan in plans), initial=done)
     windows, notes = shot_windows(references, [(start - plan.prefix_frames, plan.sample_frames)
                                                for start, plan in zip(starts, plans, strict=True)])  # fmt: skip
     warnings += notes
-    exports: dict[int, list[int]] = {}
-    order: list[tuple[int, int]] = []
-    for write in payload.writes:
-        at = 0 if write == "first" else total - 1 if write == "last" else min(total - 1, round(write * FPS))
-        piece = max(index for index, start in enumerate(starts) if start <= at)
-        order.append((piece, len(exports.setdefault(piece, []))))
-        exports[piece].append(at - starts[piece])
     style, sound, music = payload.style, payload.soundscape, payload.music
     # A continued piece's place is the previous piece's last frame, with the setup plate beside it as an
     # attribute_transfer world state: the plate as the place pulls a shot that has moved from its framing back
-    # with a cut (run 20996), and the last frame alone lets the place drift (run 21955).
+    # with a cut (run 20996), and the last frame alone lets the place drift (run 21955). A resumed video's
+    # first piece has no last frame of a piece (its parent cannot hand one on): the plate alone holds the place.
     places = [ref.name for ref in references if ref.kind == "background"]
     plates = [StoryReference(name=f"{ref.name} plate", kind="world_state", image=ref.image,
                              description=f"It is <{ref.name}>'s setup plate: its architecture and materials, not its framing.")
@@ -1917,27 +1930,36 @@ async def shot(ctx: Context, payload: ShotRequest, out: Outputs, tel: Telemetry)
     calls: list[PieceCall] = []
     people = _has_people(payload)
     here = "who and what" if people else "what"
-    texts = piece_texts(payload.prompt, payload.beats, [start / FPS for start in starts], people=people)
+    texts = piece_texts(
+        payload.prompt, payload.beats, [start / FPS for start in starts], people=people, continued=resumed is not None
+    )
     for index, text in enumerate(texts):
         own = [ref for ref in references if ref.kind not in CLIPS or ref.name in windows[index]]
         # A continued piece with no place to carry starts from the previous piece's last frame as a world state,
         # after the request's own pictures so their <Picture N> keep their numbers: who and what is where now. Every
         # continued piece that saw one joined cleanly (se-087: 9 of 9 seams); those without, character-only and
-        # footage shots, reframed or cut (24525, 24603).
+        # footage shots, reframed or cut (24525, 24603). A resumed video's first piece has no previous piece.
         anchor = [StoryReference(name=f"Piece {index} end", kind="world_state",
                                  description=f"This piece starts from it: {here} is where now.")
                   ] if index and not places else []  # fmt: skip
-        call = piece_call(text, [*own, *plates, *anchor] if index else own, style=style,
-                          soundscape=sound, music=music, index=index,
+        if index:
+            own = [*own, *plates, *anchor]
+        elif resumed is not None:
+            own = [*(ref for ref in own if ref.kind != "background"), *plates]
+        call = piece_call(text, own, style=style, soundscape=sound, music=music, index=index,
                           forced=forced | {ref.name for ref in anchor})  # fmt: skip
+        if not call.references and resumed is not None:
+            raise InvalidRequest("continue_from carries into Ref2VA, which needs a picture: give a reference "
+                                 "picture", fields=["references"])  # fmt: skip
         calls.append(call if call.references else PieceCall(_fl2va_text(text, payload), [], call.warnings))
         warnings += call.warnings
-    for edge in starts[1:]:
+    edges = [*starts[1:], *([done] if resumed is not None else [])]
+    for edge in edges:
         late = [beat.at for beat in payload.beats if edge / FPS - _BEFORE_EDGE_S <= beat.at <= edge / FPS + _AFTER_EDGE_S]
         if late:
             warnings.append(f"a piece starts at {edge / FPS:.1f} s, near the beat at {late[0]:g} s, which may start "
                             "about 2 s late; spacing the beats further apart avoids it")  # fmt: skip
-    tel.log("h3 shot pieces", pieces=count, seconds=",".join(map(str, pieces)),
+    tel.log("h3 shot pieces", pieces=count, seconds=",".join(map(str, pieces)), resumed_at=done,
             boundaries_s=",".join(f"{start / FPS:.2f}" for start in starts[1:]), delivered_frames=total,
             clip_windows=";".join(",".join(f"{name}@{at}" for name, at in w.items()) for w in windows))  # fmt: skip
     if not calls[0].references and any(call.references for call in calls[1:]):
@@ -1947,13 +1969,17 @@ async def shot(ctx: Context, payload: ShotRequest, out: Outputs, tel: Telemetry)
         prefetch(ref2va_piece)
     work = [plan.sample_frames for plan in plans]
     seeds = [piece_seed(payload.seed, ctx.request_id, index) for index in range(count)]
-    several = count > 1
-    context, expected = None, None
+    # A resumed video's latents and its video join this one's at its last piece, decoded as one.
+    before = ((resumed.latents,), (resumed.video,)) if resumed is not None and resumed.latents is not None else ((), ())
+    joined = count > 1 or resumed is not None
+    context: File | None = resumed.latents if resumed is not None else None
+    expected = None
     returned: list[PieceOutput] = []
     for index, (call, plan) in enumerate(zip(calls, plans, strict=True)):
         ctx.raise_if_cancelled()
-        first = keyframes.first if index == 0 else None
-        last = keyframes.last if index + 1 == count else None
+        first = payload.first_frame if index == 0 else None
+        last = payload.last_frame if index + 1 == count else None
+        end_piece = joined and index + 1 == count
         span = (sum(work[:index]) / sum(work), sum(work[: index + 1]) / sum(work))
         try:
             with tel.scope(f"Piece {index + 1} of {count}", overall_range=span):
@@ -1970,10 +1996,10 @@ async def shot(ctx: Context, payload: ShotRequest, out: Outputs, tel: Telemetry)
                             context_audio=plan.carried.audio,
                             next_context_frames=cast(ContextFrames, plan.successor.frames),
                             next_context_audio=plan.successor.audio, first_frame=first, last_frame=last,
-                            exports=tuple(exports.get(index, ())), latents=True,
-                            earlier_latents=tuple(r.latents for r in returned) if several and index + 1 == count else (),
-                            earlier_videos=tuple(r.video for r in returned) if several and index + 1 == count else (),
-                            picture_edges=tuple(_WORLD_STATE_EDGE if ref.kind == "world_state" else 0
+                            latents=True,
+                            earlier_latents=(*before[0], *(r.latents for r in returned)) if end_piece else (),
+                            earlier_videos=(*before[1], *(r.video for r in returned)) if end_piece else (),
+                            picture_edges=tuple(_LOOSE_EDGE if ref.kind == "world_state" else 0
                                                 for ref in call.references if FILE[ref.kind] == "image"),
                         ), assets=_call_assets(files | ({place: returned[-1].last_frame for place in places} if index else {}),
                                                call.references),
@@ -1984,8 +2010,7 @@ async def shot(ctx: Context, payload: ShotRequest, out: Outputs, tel: Telemetry)
                             prompt=call.prompt, seed=seeds[index], duration_s=pieces[index], steps=steps,
                             turbo=payload.turbo, preset=payload.preset, first_frame=first, last_frame=last,
                             next_context_frames=cast(ContextFrames, plan.successor.frames),
-                            next_context_audio=plan.successor.audio, exports=tuple(exports.get(index, ())),
-                            latents=True,
+                            next_context_audio=plan.successor.audio, latents=True,
                         ),
                     )  # fmt: skip
         except ChildCallError as failure:
@@ -1994,15 +2019,16 @@ async def shot(ctx: Context, payload: ShotRequest, out: Outputs, tel: Telemetry)
             raise OutputError(f"piece {index + 1} of {count} failed ({failure.code}): {str(failure)[:512]}",
                               code="piece_failed") from failure  # fmt: skip
         expected = result.provenance
-        context = result.context if plan.successor else None
+        context = result.context
         returned.append(result)
         warnings += result.warnings
         files[f"Piece {index + 1} end"] = result.last_frame
         out.publish("video", result.video, label="Video" if index + 1 == count else f"Piece {index + 1} of {count}")
-    latents = _shot_latents(out, returned, total, _upscale_prompt(payload))
+    latents = _shot_latents(out, [*before[0], *(r.latents for r in returned)], total, returned[-1].context,
+                            _upscale_prompt(payload))  # fmt: skip
     video = returned[-1].video
     if payload.resolution is not Resolution.NATIVE:
-        # Through `upscale`, as every caller: the shot's own latents, so Regenerate encodes nothing.
+        # Through `upscale`, as every caller: the video's own latents, so Regenerate encodes nothing.
         request = UpscaleInput(video=video, resolution=payload.resolution, upscale=payload.upscale,
                                prompt=_upscale_prompt(payload), seed=piece_seed(payload.seed, ctx.request_id, count),
                                latents=latents, preset=payload.preset)  # fmt: skip
@@ -2010,29 +2036,28 @@ async def shot(ctx: Context, payload: ShotRequest, out: Outputs, tel: Telemetry)
         out.publish("video", video, label=f"Video at {payload.resolution.value}")
     ctx.release_gpus()
     tel.log("h3 shot", pieces=count, delivered_frames=total, turbo=payload.turbo, preset=payload.preset)
-    return ShotResult(video=video, frames=[returned[piece].frames[slot] for piece, slot in order],
-                      warnings=list(dict.fromkeys(warnings)), latents=latents)  # fmt: skip
+    return ShotResult(video=video, warnings=list(dict.fromkeys(warnings)), latents=latents)
 
 
-def _shot_latents(out: Outputs, pieces: Sequence[PieceOutput], frames: int, text: str) -> File:
-    """The whole shot's latents: each piece's delivered latents end to end (each piece cuts its
-    carried head, whole VAE cycles, so they join in phase), in the latent space they name, with
-    the text the shot was made from."""
-    parts = [piece.latents.read_bytes() for piece in pieces]
-    spaces = {shot_latents.metadata(data).get("vae_space", "") for data in parts}
+def _shot_latents(out: Outputs, parts: Sequence[File], frames: int, context: File, text: str) -> File:
+    """The whole video's latents: each part's delivered latents end to end (each piece cuts its
+    carried head, whole VAE cycles, so they join in phase; a resumed video's own latents first), in
+    the latent space they name, with its last piece's carry and the text it was made from."""
+    blobs = [part.read_bytes() for part in parts]
+    spaces = {shot_latents.metadata(data).get("vae_space", "") for data in blobs}
     if len(spaces) != 1 or "" in spaces:
-        raise OutputError("the shot's pieces name no single latent space", code="output_integrity")
-    latents = torch.cat([load_tensors(data)["latents"] for data in parts], dim=2)
-    return out.save_bytes(shot_latents.save(latents, frames, spaces.pop(), text), media_type="application/octet-stream")
+        raise OutputError("the video's pieces name no single latent space", code="output_integrity")
+    latents = torch.cat([load_tensors(data)["latents"] for data in blobs], dim=2)
+    data = shot_latents.save(latents, frames, spaces.pop(), context.read_bytes(), text)
+    return out.save_bytes(data, media_type="application/octet-stream")
 
 
-def _upscale_prompt(payload: ShotRequest) -> str:
-    """The text a shot was made from, for an upscale that re-renders it (Paul, 10-31): the whole
-    shot as one piece's text (`piece_texts`) after each asset's description and world state's
-    layout, opening with the style and closing with the soundscape and music as its pieces do
-    (`_fl2va_text`). Names lose their brackets: the re-render attaches no reference."""
-    defined = [(asset.name, asset.description) for asset in payload.assets]
-    defined += [(state.name, state.layout) for state in payload.world_state]
+def _upscale_prompt(payload: GenerateInput) -> str:
+    """The text a video was made from, for an upscale that re-renders it (Paul, 10-31): the whole
+    video as one piece's text (`piece_texts`) after each reference's description, opening with the
+    style and closing with the soundscape and music as its pieces do (`_fl2va_text`). Names lose their
+    brackets: the re-render attaches no reference."""
+    defined = [(ref.name, ref.description) for ref in payload.references if not isinstance(ref, Clip | Sound)]
     lines = " ".join(f"{name}: {text.strip().rstrip('.')}." for name, text in defined if text.strip())
     text = piece_texts(payload.prompt, payload.beats, [0.0], people=_has_people(payload))[0]
     if lines:
@@ -2077,11 +2102,15 @@ async def upscale(ctx: Context, payload: UpscaleInput, out: Outputs, tel: Teleme
     method = payload.upscale or Upscale()
     warnings = method.ignored()
     if method.model == "regenerate-2k":
-        # The text the shot was made from: given, else the one its latents carry.
+        probe = payload.video.probe()
+        if (probe.width, probe.height) != (1344, 768):
+            raise InvalidRequest(f"regenerate-2k refines H3's own 1344x768; this video is {probe.width}x{probe.height}: "
+                                 "upscale it with seedvr2", fields=["video"])  # fmt: skip
+        # The text the video was made from: given, else the one its latents carry.
         prompt = payload.prompt.strip() or (shot_latents.text(payload.latents.read_bytes()) if payload.latents else "")
         if not prompt:
-            raise InvalidRequest("regenerate-2k re-renders the video from the text it was made from: give "
-                                 "prompt, or the shot's latents", fields=["prompt"])  # fmt: skip
+            raise InvalidRequest("regenerate-2k re-renders the video from the text it was made from: give prompt, "
+                                 "or its latents", fields=["prompt"])  # fmt: skip
         call = RegenerateInput(video=payload.video, latents=payload.latents, prompt=prompt,
                                resolution=payload.resolution, strength=method.start, seed=seed,
                                preset=payload.preset)  # fmt: skip
@@ -2097,12 +2126,13 @@ async def upscale(ctx: Context, payload: UpscaleInput, out: Outputs, tel: Teleme
     with tel.scope(f"SeedVR2 upscale to {payload.resolution.value}"):
         restored = await restore(
             video=payload.video, resolution=RestorationResolution(payload.resolution.value), seed=seed,
-            aspect_ratio="16:9" if (probe.width, probe.height) == (1344, 768) else "source",
+            # The input's own aspect: an upscaler never letterboxes (the project fills its canvas).
+            aspect_ratio="source",
             **{k: getattr(method, k) for k in _SEEDVR2_FIELDS if getattr(method, k) is not None},
         )  # fmt: skip
     tel.log("h3 upscale", model=method.model, warnings="; ".join(warnings))
     return UpscaleOutput(restored.video)
 
 
-app.entrypoint(shot, emits_media=True, accelerator=False)
+app.entrypoint(generate, emits_media=True, accelerator=False)
 app.entrypoint(upscale, emits_media=True, accelerator=False)
