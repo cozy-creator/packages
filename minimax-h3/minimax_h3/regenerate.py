@@ -84,8 +84,10 @@ def windows(latent_frames: int, rows_per_frame: int, capacity: int) -> list[tupl
     """`(first latent frame, latent frames)` spans: the whole clip when its rows fit `capacity`
     bytes and `_MOST_ROWS`, else the fewest equal `5n + 2` windows overlapping by at least
     OVERLAP that do, each starting on the VAE's latent chunk grid (a multiple of
-    LATENTS_PER_CHUNK). A window is laid out as a clip of its own, so one off the grid refines
-    every chunk out of phase and flickers at each (run 22567: the middle of three, at 32)."""
+    LATENTS_PER_CHUNK). A window is laid out as a clip of its own, and H3's rotary clock spaces
+    latent frames 5/3 x (1, 4, 4, 4, 4) from a clip's start, so a window off the grid gives each
+    chunk's one-frame latent a four-frame step: it flickers at every chunk (run 22567, the middle
+    of three windows, starting at 32)."""
     fit = min(max(0, capacity - _BESIDE) // _ROW_BYTES, _MOST_ROWS) // rows_per_frame
     if latent_frames <= fit:
         return [(0, latent_frames)]
