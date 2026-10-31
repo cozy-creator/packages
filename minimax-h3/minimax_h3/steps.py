@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from typing import Any
 
 import torch
+from cozy_runtime import stepcache
 from cozy_runtime.author import AttentionLayout, attention_scope, denoise_loop, producer_sites
 
 from . import producer
@@ -36,8 +37,11 @@ def denoise_fl2va(
     layout_at: Callable[[int], AttentionLayout],
     sol_dense_steps: int,
     on_step: Callable[[int], None],
+    *,
+    cache: stepcache.Policy | None = None,
 ) -> None:
-    """One rank's FL2VA denoise of the loop's block `state`, its latents advanced in place."""
+    """One rank's FL2VA denoise of the loop's block `state`, its latents advanced in place,
+    its DiT's stack under `cache` when a preset names one."""
     plan = state.row_timestep_plan
     fields = state.denoiser_input_fields
     position_ids, tags = fields["position_ids"], fields["token_tags"]
@@ -99,6 +103,7 @@ def denoise_fl2va(
             carried=slots,
             phases=phases,
             on_step=on_step,
+            cache=cache,
         )
     state.noise_pred = state.audio_noise_pred = None  # the official loop's outputs; none reads them
 
