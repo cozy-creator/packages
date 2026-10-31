@@ -10,12 +10,15 @@ import numpy as np
 import torch
 from omegaconf import OmegaConf
 from PIL import Image, ImageOps
+from cozy_runtime import fusion
 from cozy_runtime.author import Config, Cut, Loader, Model, Telemetry, split, uses_components
+from cozy_runtime.author.kernels import Plan
 
 from .color import Correction, correct
 from .frames import extend
 from .upstream.infer import VideoDiffusionInfer
 from .upstream.models.dit.nadit import NaDiT
+from .upstream.models.dit.nablocks.mmsr_block import QK_ROPE
 from .upstream.models.video_vae_v3.modules.attn_video_vae import VideoAutoencoderKLWrapper
 
 # SeedVR's configs_7b/main.yaml: separate text/video weights throughout.
@@ -112,6 +115,17 @@ class RestorationModel(
 
     def load(self, loader: Loader) -> None:
         self.graph = loader.construct(Graph, factory=build)
+
+    def execution_plan(self, plan: Plan) -> str:
+        """The video q/k norms' fused RMSNorm + RoPE (`QK_ROPE`, by the norms' weight dtype)."""
+        attentions = [block.attn for block in self.graph.components["dit"].blocks]
+        dtype = attentions[0].norm_q.vid.weight.dtype
+        layout = QK_ROPE.get(dtype)
+        if layout is None:
+            plan.report("seedvr2.qk-rope", {"applied": False, "reason": f"norm weights {dtype}"})
+            return ""
+        norms = [n for a in attentions for n in (a.norm_q.vid, a.norm_k.vid)]
+        return fusion.install_head_norms(plan, layout, norms)
 
     @uses_components("vae")
     def encode(self, pixels: torch.Tensor) -> torch.Tensor:

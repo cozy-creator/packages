@@ -14,6 +14,7 @@
 
 from typing import Tuple, Union
 import torch
+from cozy_runtime import fusion
 from cozy_runtime.author import Cut, split
 from einops import rearrange
 
@@ -103,6 +104,8 @@ class NaSwinAttention(MMWindowAttention):
 
         rows, window_shape, lengths, windows = cache_win("win_rows_by_length", layout)
         freqs = cache_win("rope_freqs_3d_by_length", lambda: self.rope.get_freqs(window_shape)) if self.rope else None
+        head = QK_ROPE.get(self.norm_q.vid.weight.dtype) if freqs is not None else None
+        tables = cache_win("rope_tables", lambda: head.tables((freqs.cos(), freqs.sin()))) if head else None
         txt_rows = txt_q.shape[0]
         out = None
         txt_sum = None
@@ -112,9 +115,16 @@ class NaSwinAttention(MMWindowAttention):
             at = rows[first:last]
             qkv = rearrange(self.proj_qkv.vid(vid.index_select(0, at)), "l (o h d) -> l o h d", o=3, d=self.head_dim)
             q, k, v = qkv.unbind(1)
-            q, k = self.norm_q.vid(q), self.norm_k.vid(k)
-            if freqs is not None:
-                q, k = (_rotary(freqs[first:last], x) for x in (q, k))
+            fused = None
+            if tables is not None:
+                part = (tables[0][first:last], tables[1][first:last], *tables[2:])
+                fused = [head.apply(n, x, part) for n, x in ((self.norm_q.vid, q), (self.norm_k.vid, k))]
+            if fused is not None and None not in fused:
+                q, k = fused
+            else:
+                q, k = self.norm_q.vid(q), self.norm_k.vid(k)
+                if freqs is not None:
+                    q, k = (_rotary(freqs[first:last], x) for x in (q, k))
             o_vid, start = [], 0
             for count, length in _runs(lengths[w] for w in group):
                 rows_ = slice(start, start + count * length)
@@ -136,6 +146,17 @@ class NaSwinAttention(MMWindowAttention):
         txt_out = (txt_sum / windows).type_as(txt_q)
         return out, self.proj_out.txt(rearrange(txt_out, "l h d -> l (h d)"))
 
+
+#: The video q/k per-head RMSNorm + RoPE in one Runtime kernel (`fusion.HeadNormRope`), by the norm
+#: weights' dtype: the eager path normalizes and rotates in F32 and rounds once; 60 of 128 channels
+#: rotate in interleaved pairs (three axes of 10 frequencies).
+QK_ROPE = {
+    dtype: fusion.HeadNormRope(
+        f"seedvr2_qk_{name}", head_dim=128, weights=name, rms_rounding="once",
+        rope=fusion.Rope("freqs", interleaved=True, rotary=60, rounding="fp32"),
+    )
+    for dtype, name in ((torch.float16, "fp16"), (torch.bfloat16, "bf16"), (torch.float32, "fp32"))
+}  # fmt: skip
 
 #: Video tokens a window group holds at most (whole windows; a longer window is a group alone).
 GROUP = 16384
