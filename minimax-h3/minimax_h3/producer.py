@@ -169,46 +169,83 @@ def _whole_shard(attn: MiniMaxH3Attention) -> bool:
     )
 
 
+#: `(rows, out)`: a projection of `rows` landing in `out`, a column range of a packed buffer.
+Project = Callable[[torch.Tensor | PreQuantized, torch.Tensor], torch.Tensor]
+
+
+def whole(projection: Any) -> Project:
+    """A whole projection as a `Project`: the original module call (encoded leaves, Turbo hooks),
+    an encoded leaf's GEMM writing `out` in place; a result elsewhere (another module, a hook
+    that replaced it) is copied there."""
+    takes = getattr(projection, "WRITES_INTO", None) is not None
+
+    def project(x: torch.Tensor | PreQuantized, out: torch.Tensor) -> torch.Tensor:
+        found = projection(x, out=out) if takes else projection(x)
+        return out if found is out else out.copy_(found)
+
+    return project
+
+
+def _empty(hidden: torch.Tensor | PreQuantized, tokens: int, width: int) -> torch.Tensor:
+    if isinstance(hidden, PreQuantized):
+        return hidden.payload.new_empty((1, tokens, width), dtype=torch.bfloat16)
+    return hidden.new_empty((1, tokens, width))
+
+
+def pack(
+    hidden: torch.Tensor | PreQuantized,
+    start: int,
+    qkv: tuple[Project, Project, Project],
+    out: torch.Tensor,
+    values: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """Rows `start:` of `hidden` projected into `out`, `[1, rows, 3 x width]` as Kitchen reads
+    them: each GEMM writes its own range (the leaves quantize the rows once between them), V
+    copied in from `values` where it holds this call's V (`project_values`). No concatenation."""
+    width, q, k, v = out.shape[-1] // 3, *qkv
+    chunk = rows(hidden, start, start + out.shape[1])
+    with quantize_once(chunk):
+        q(chunk, out[..., :width])
+        k(chunk, out[..., width : 2 * width])
+        if values is None:
+            v(chunk, out[..., 2 * width :])
+    if values is not None:
+        out[..., 2 * width :].copy_(values[:, start : start + out.shape[1]])
+    return out
+
+
 def qkv_chunks(
-    attn: MiniMaxH3Attention,
     hidden: torch.Tensor | PreQuantized,
     tokens: int,
+    qkv: tuple[Project, Project, Project],
+    width: int,
     values: torch.Tensor | None = None,
 ) -> Iterator[torch.Tensor]:
-    """Kitchen's `[rows, 3 x H x 128]` chunks: each chunk's Q, K and V projections (their leaves
-    quantize the rows once between them). Where `values` holds this call's V (`project_values`),
-    V is read from it."""
+    """Kitchen's `[rows, 3 x width]` chunks (`pack`)."""
     for start in range(0, tokens, CHUNK):
-        stop = min(tokens, start + CHUNK)
-        chunk = rows(hidden, start, stop)
-        # Original module calls retain encoded leaves, resident weights and Turbo hooks.
-        parts = [attn.to_q(chunk), attn.to_k(chunk)]
-        parts.append(attn.to_v(chunk) if values is None else values[:, start:stop])
-        yield torch.cat(parts, dim=-1).squeeze(0)
+        out = _empty(hidden, min(tokens, start + CHUNK) - start, 3 * width)
+        yield pack(hidden, start, qkv, out, values).squeeze(0)
 
 
 def project_values(
-    attn: MiniMaxH3Attention, hidden: torch.Tensor | PreQuantized, tokens: int
+    hidden: torch.Tensor | PreQuantized, tokens: int, v: Project, width: int
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """This call's V, projected by chunk as `qkv_chunks` would, and its per-(head, channel) absmax
-    over the live document, F32 [H, 128]: Kitchen's value scale is the call's own, so V is
+    """This call's V, projected by chunk into one block, and its per-(head, channel) absmax over
+    the live document, F32 [width / 128, 128]: Kitchen's value scale is the call's own, so V is
     projected here, before Kitchen's pass, which reads it back instead of projecting it again.
-    It is one block the size of Kitchen's output, freed when the pass ends, just before Kitchen
+    The block is the size of Kitchen's output, freed when the pass ends, just before Kitchen
     allocates that output, which reuses it: the call's peak does not grow (chunks would leave
     holes the output cannot use, and a 4090 then paged more than it saved)."""
-    values: torch.Tensor | None = None
+    values = _empty(hidden, tokens, width)
     found: torch.Tensor | None = None
     for start in range(0, tokens, CHUNK):
         stop = min(tokens, start + CHUNK)
-        value = attn.to_v(rows(hidden, start, stop))
-        if values is None:  # one block, the size of Kitchen's output: freed before it, reused by it
-            values = value.new_empty((1, tokens, value.shape[-1]))
-        values[:, start:stop].copy_(value)
-        peak = torch.linalg.vector_norm(value.reshape(-1, value.shape[-1]), ord=INF, dim=0)
+        value = v(rows(hidden, start, stop), values[:, start:stop])
+        peak = torch.linalg.vector_norm(value.reshape(-1, width), ord=INF, dim=0)
         found = peak if found is None else torch.maximum(found, peak)
-    if values is None or found is None:
+    if found is None:
         raise ValueError("H3 producer has no live rows to scale")
-    return values, found.float().reshape(attn.heads, 128)
+    return values, found.float().reshape(-1, 128)
 
 
 def value_scale(absmax: torch.Tensor) -> torch.Tensor:
@@ -328,12 +365,13 @@ def produce(
         means = _Means(call, key, name, (tokens, attn.heads, layout.protected_prefix))
         heads = _Heads.of(call, means, hidden_states, freqs)
         if heads is None:
+            qkv, width = (whole(attn.to_q), whole(attn.to_k), whole(attn.to_v)), attn.heads * 128
             output, mean, _ = _produce(
                 call,
                 attn.heads,
                 freqs,
-                lambda values: qkv_chunks(attn, hidden_states, tokens, values),
-                lambda: project_values(attn, hidden_states, tokens),
+                lambda values: qkv_chunks(hidden_states, tokens, qkv, width, values),
+                lambda: project_values(hidden_states, tokens, qkv[2], width),
                 means.prior,
             )
             means.keep(slice(0, attn.heads), mean)
@@ -445,44 +483,24 @@ class _Heads:
         assert isinstance(window, slice)
         start, stop = window.start * 128, window.stop * 128
         tokens = layout.live_tokens
-        q, k, v = self.projections
-
-        def chunks(values: torch.Tensor | None) -> Iterator[torch.Tensor]:
-            for at in range(0, tokens, CHUNK):
-                end = min(tokens, at + CHUNK)
-                chunk = rows(self.hidden, at, end)
-                with quantize_once(chunk):
-                    parts = [q(chunk, start, stop), k(chunk, start, stop)]
-                    parts.append(v(chunk, start, stop) if values is None else values[:, at:end])
-                yield torch.cat(parts, dim=-1).squeeze(0)
-
-        def values() -> tuple[torch.Tensor, torch.Tensor]:
-            # One block, as `project_values`: freed before Kitchen's output, which reuses it.
-            projected: torch.Tensor | None = None
-            found: torch.Tensor | None = None
-            for at in range(0, tokens, CHUNK):
-                end = min(tokens, at + CHUNK)
-                value = v(rows(self.hidden, at, end), start, stop)
-                if projected is None:
-                    projected = value.new_empty((1, tokens, value.shape[-1]))
-                projected[:, at:end].copy_(value)
-                peak = torch.linalg.vector_norm(value.reshape(-1, value.shape[-1]), ord=INF, dim=0)
-                found = peak if found is None else torch.maximum(found, peak)
-            if projected is None or found is None:
-                raise ValueError("H3 producer has no live rows to scale")
-            return projected, found.float().reshape(window.stop - window.start, 128)
-
-        count, prior = window.stop - window.start, self.means.prior
+        q, k, v = (partial(_columns, project, start, stop) for project in self.projections)
+        width, count, prior = stop - start, window.stop - window.start, self.means.prior
         output, mean, _ = _produce(
             self.call,
             count,
             self.freqs,
-            chunks,
-            values,
+            lambda values: qkv_chunks(self.hidden, tokens, (q, k, v), width, values),
+            lambda: project_values(self.hidden, tokens, v, width),
             None if prior is None else prior[window],
         )
         self.means.keep(window, mean)
         return output.reshape(1, tokens, count, 128)
+
+
+def _columns(
+    project: Rows, start: int, stop: int, x: torch.Tensor | PreQuantized, out: torch.Tensor
+) -> torch.Tensor:
+    return project(x, start, stop, out=out)
 
 
 def _produce(
@@ -536,15 +554,10 @@ def _project_qkv(
             for projection in (attn.to_q, attn.to_k, attn.to_v)
         )
         return query, key, value
-    packed = None
-    offset = 0
-    for chunk in qkv_chunks(attn, hidden, tokens):
-        if packed is None:
-            packed = chunk.new_empty((tokens, chunk.shape[-1]))
-        packed[offset : offset + chunk.shape[0]].copy_(chunk)
-        offset += chunk.shape[0]
-    if packed is None or offset != tokens:
-        raise ValueError("H3 CP projection did not cover the local token shard")
+    qkv, width = (whole(attn.to_q), whole(attn.to_k), whole(attn.to_v)), attn.heads * 128
+    packed = _empty(hidden, tokens, 3 * width)
+    for start in range(0, tokens, CHUNK):
+        pack(hidden, start, qkv, packed[:, start : start + CHUNK])
     query, key, value = packed.reshape(1, tokens, 3, attn.heads, 128).unbind(2)
     return query, key, value
 
