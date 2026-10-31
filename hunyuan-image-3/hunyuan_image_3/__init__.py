@@ -1,4 +1,4 @@
-"""Tencent's HunyuanImage 3.0: text to image, or an edit or fusion of up to three ordered picture assets, with the
+"""Tencent's HunyuanImage 3.0: text to image, or an edit or fusion of up to three ordered pictures, with the
 model's own think-and-rewrite stage. `generate_turbo` is Instruct-Distil (8 steps), `generate` Instruct (50)."""
 
 from __future__ import annotations
@@ -10,7 +10,7 @@ from cozy_runtime.author import (
     Adjustments,
     App,
     Context,
-    PictureAsset,
+    Picture,
     ImageRequest,
     ImageResult,
     Memoize,
@@ -37,11 +37,11 @@ class HunyuanRequest(ImageRequest, forbid_unknown_fields=True):
     """The shared image request. With no `aspect_ratio` the model picks its size, as Tencent's
     `image_size="auto"`; it makes about 1 MP whatever `megapixels` asks."""
 
-    assets: Annotated[list[PictureAsset], msgspec.Meta(max_length=3)] = msgspec.field(default_factory=list)
+    pictures: Annotated[list[Picture], msgspec.Meta(max_length=3)] = msgspec.field(default_factory=list)
 
 
-def label(n: int, asset: PictureAsset) -> str:
-    """HunyuanImage 3.0's word for the Nth asset: every prompt Tencent documents names them 图1, 图2,
+def label(n: int, picture: Picture) -> str:
+    """HunyuanImage 3.0's word for the Nth picture: every prompt Tencent documents names them 图1, 图2,
     图3 (`run_demo_instruct.sh`); the images precede the prompt with no label of their own."""
     return f"图{n}"
 

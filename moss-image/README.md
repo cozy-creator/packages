@@ -33,7 +33,7 @@ cozy run moss-image/generate prompt='A minimalist travel poster, cream backgroun
 Fields: `prompt`, `regions`, `aspect_ratio` (any `W:H`, default 1:1), `megapixels` (default 1), `steps`,
 `guidance`, `negative_prompt` (default empty, as upstream's; upstream's user guide suggests
 `nsfw, worst quality, bad anatomy, watermark, jpeg artifact`) and `seed` (random when omitted,
-returned). MOSS-Image makes images from text only: it takes no `assets` (refused before upload), so a `<Name>` in its prompt stays as written, with a warning ([assets](../docs/assets.md)); place elements with `regions`.
+returned). MOSS-Image makes images from text only: it takes no `pictures` (refused before upload), so a `<Name>` in its prompt stays as written, with a warning ([references](../docs/references.md)); place elements with `regions`.
 It has no prompt upsampler, so `prompt_upsampling` is warned about and ignored. Unknown fields are
 dropped with a warning.
 

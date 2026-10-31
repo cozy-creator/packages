@@ -11,7 +11,7 @@ from cozy_runtime.author import (
     Adjustments,
     App,
     Context,
-    PictureAsset,
+    Picture,
     ImageRequest,
     ImageResult,
     Memoize,
@@ -35,7 +35,7 @@ GUIDANCE = 3.0
 
 class GenerateInput(ImageRequest):
     #: MOSS-Image makes images from text only; place elements with `regions`.
-    assets: Annotated[list[PictureAsset], msgspec.Meta(max_length=0)] = msgspec.field(
+    pictures: Annotated[list[Picture], msgspec.Meta(max_length=0)] = msgspec.field(
         default_factory=list
     )
     #: Elements and rendered text placed by box, described in words (`\n` in `text` breaks a line); the
