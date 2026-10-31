@@ -53,11 +53,23 @@ tasks:
           [ -z "$on" ] || { echo "$r $(ver "$r") already exists on $on: bump its version on master; nothing published" >&2; exit 1; }
         done
         shipped=
-        # The package's Triton sets for every card row, compiled on this CPU into <module>/_triton, ship in the release.
+        # The Triton sets the package's import declares, compiled on this CPU for every card row, ship in the release: each
+        # into `_triton` beside the module that declares it (its home, where machines look), which need not be the object's
+        # (minimax-h3: object h3, sets in minimax_h3).
+        prebuild='import importlib, sys
+        from pathlib import Path
+        importlib.import_module(sys.argv[1])
+        from cozy_runtime.author.kernels import _SETS
+        from cozy_runtime.internal import triton_kernels, triton_prebuild
+        here = Path.cwd().resolve()
+        for home in sorted({triton_kernels.home(k) for k in _SETS.values() if k.entries}):
+            module = Path(sys.modules[home].__file__).resolve().parent
+            if module.is_relative_to(here):
+                triton_prebuild.build(Path(sys.argv[2], module.relative_to(here), triton_kernels.SHIPPED), None, home)'
         kernels() { m=$(sed -n 's/^object = "\([A-Za-z0-9_]*\).*/\1/p' "$1/package.toml"); e=$work/.env-$1
           (cd "$1" && UV_PROJECT_ENVIRONMENT=$e uv sync -q --frozen --no-dev --python 3.12)
           VIRTUAL_ENV=$e uv pip install -q --no-deps --upgrade --reinstall-package cozy-runtime "{{.RUNTIME}}"
-          nice -n 19 "$e/bin/python" -I -m cozy_runtime.internal.triton_prebuild "$work/.kernels/$1/$m/_triton" --package "$m" >/dev/null; }
+          (cd "$1" && nice -n 19 "$e/bin/python" -I -c "$prebuild" "$m" "$work/.kernels/$1") >/dev/null; }
         ship() {
           on=$(held "$1"); [ -z "$on" ] || { echo "$1 $(ver "$1") already exists on $on: not published, not yanked" >&2; exit 1; }
           kernels "$1"
