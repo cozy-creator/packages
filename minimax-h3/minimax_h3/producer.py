@@ -324,23 +324,24 @@ def produce(
         output, reuse = _parallel_produce(call, hidden_states, name, key)
     else:
         freqs = rope_presentation(rotary_emb, tokens, state)
-        heads = _Heads.of(call, key, name, hidden_states, freqs)
+        means = _Means(call, key, name, (tokens, attn.heads, layout.protected_prefix))
+        heads = _Heads.of(call, means, hidden_states, freqs)
         if heads is None:
-            output, reuse = _produce(
+            output, mean, _ = _produce(
                 call,
-                key,
-                name,
                 attn.heads,
-                (tokens, attn.heads, layout.protected_prefix),
                 freqs,
                 lambda values: qkv_chunks(attn, hidden_states, tokens, values),
                 lambda: project_values(attn, hidden_states, tokens),
+                means.prior,
             )
+            means.keep(slice(0, attn.heads), mean)
         else:
             # Kitchen's call holds the whole document's K/V codes and its whole output: an exact
             # split by query heads, which the Runtime sizes beside the DiT's weights.
             output = split(heads, heads, Cut(2))
-            reuse = heads.reuse
+        means.close()
+        reuse = means.prior is not None
     statistics = "kmean=previous-step,vscale=current-call" if reuse else "current-call"
     call.served(
         f"comfy_kitchen.sol_attn_chunked(int8, stats={statistics}, vmargin=1.1, "
@@ -351,6 +352,43 @@ def produce(
     return out
 
 
+class _Means:
+    """A one-GPU call's Kitchen key means, F32 [heads, 128]: the previous step's (`prior`, or None
+    where the call measures its keys) and this call's, which each head window writes its rows of
+    (`keep`). `close` leaves them where the next step reads them, the module's `Carry` slot in
+    `denoise_loop`, else `RequestState.statistics` under the call's key, after the whole call:
+    a split the Runtime retries in smaller windows reads the same prior."""
+
+    __slots__ = ("call", "carry", "geometry", "key", "mean", "prior")
+
+    def __init__(
+        self, call: ProducerCall, key: tuple[object, ...], name: str, geometry: tuple[int, ...]
+    ) -> None:
+        attn, state = call.module, call.state
+        self.call, self.key, self.geometry, self.carry = call, key, geometry, _CARRY.get()
+        self.mean: torch.Tensor | None = None
+        if self.carry is None:
+            self.prior, _ = previous_statistics(
+                state, key, call.layout.step, geometry, replay_safe=PRODUCERS[name].context_parallel
+            )
+        else:  # a rolling step reads the slot the previous step's call wrote
+            rolling = self.carry.rolling and id(attn) in state.carried
+            self.prior = self.carry.slots[id(attn)] if rolling else None
+
+    def keep(self, window: slice, mean: torch.Tensor) -> None:
+        if self.mean is None:
+            self.mean = mean.new_empty((self.call.module.heads, *mean.shape[1:]))
+        self.mean[window].copy_(mean)
+
+    def close(self) -> None:
+        attn, state = self.call.module, self.call.state
+        if self.carry is None:
+            state.statistics[self.key] = (self.call.layout.step, self.geometry, self.mean, None)
+        else:
+            self.carry.slots[id(attn)].copy_(self.mean)
+            state.carried.add(id(attn))
+
+
 class _Heads:
     """One sparse call as `split` cuts it by query heads: its shape is the call's [batch, tokens,
     heads, 128] output, a window of it a slice of heads, and calling it on a window runs Kitchen
@@ -358,33 +396,29 @@ class _Heads:
     (`cozy_runtime.rows`). Exact: Kitchen's norms, RoPE, key means, value scales and routing are
     per head and its sink ranges per token. Called on itself (`split` running whole), all heads."""
 
-    __slots__ = ("call", "device", "dtype", "freqs", "hidden", "key", "name", "projections",
-                 "reuse", "shape")  # fmt: skip
+    __slots__ = ("call", "device", "dtype", "freqs", "hidden", "means", "projections", "shape")
 
     def __init__(
         self,
         call: ProducerCall,
-        key: tuple[object, ...],
-        name: str,
+        means: _Means,
         hidden: torch.Tensor | PreQuantized,
         freqs: torch.Tensor,
         projections: tuple[Rows, Rows, Rows],
     ) -> None:
-        self.call, self.key, self.name, self.hidden, self.freqs = call, key, name, hidden, freqs
+        self.call, self.means, self.hidden, self.freqs = call, means, hidden, freqs
         self.projections = projections
         attn = call.module
         self.shape = (1, call.layout.live_tokens, attn.heads, 128)
         quantized = isinstance(hidden, PreQuantized)
         self.dtype = torch.bfloat16 if quantized else hidden.dtype
         self.device = hidden.payload.device if quantized else hidden.device
-        self.reuse = False
 
     @classmethod
     def of(
         cls,
         call: ProducerCall,
-        key: tuple[object, ...],
-        name: str,
+        means: _Means,
         hidden: torch.Tensor | PreQuantized,
         freqs: torch.Tensor,
     ) -> _Heads | None:
@@ -393,7 +427,7 @@ class _Heads:
         found = tuple(columns(m) for m in (attn.to_q, attn.to_k, attn.to_v))
         if any(r is None for r in found):
             return None
-        return cls(call, key, name, hidden, freqs, found)  # type: ignore[arg-type]
+        return cls(call, means, hidden, freqs, found)  # type: ignore[arg-type]
 
     def dim(self) -> int:
         return len(self.shape)
@@ -438,51 +472,40 @@ class _Heads:
                 raise ValueError("H3 producer has no live rows to scale")
             return projected, found.float().reshape(window.stop - window.start, 128)
 
-        count = window.stop - window.start
-        output, self.reuse = _produce(
+        count, prior = window.stop - window.start, self.means.prior
+        output, mean, _ = _produce(
             self.call,
-            (*self.key, window.start),
-            self.name,
             count,
-            (tokens, count, layout.protected_prefix),
             self.freqs,
             chunks,
             values,
-            window,
+            None if prior is None else prior[window],
         )
+        self.means.keep(window, mean)
         return output.reshape(1, tokens, count, 128)
 
 
 def _produce(
     call: ProducerCall,
-    key: tuple[object, ...],
-    name: str,
     heads: int,
-    geometry: tuple[int, ...],
     freqs: torch.Tensor,
     chunks: Callable[[list[torch.Tensor | None] | None], Iterator[torch.Tensor]],
     values: Callable[[], tuple[list[torch.Tensor | None] | None, torch.Tensor]],
-    window: slice = slice(None),
-) -> tuple[torch.Tensor, bool]:
-    """Kitchen's call over `chunks(projected)`. Where the key mean carries, `values()` gives the
-    call's own V absmax for its value scale, and the V it projected for it (or None), which
-    the one pass Kitchen then makes reads back and drops chunk by chunk."""
-    attn, layout, state = call.module, call.layout, call.state
-    carry = _CARRY.get()
-    if carry is None:
-        prior_mean, prior_scale = previous_statistics(
-            state, key, layout.step, geometry, replay_safe=PRODUCERS[name].context_parallel
-        )
-    else:  # one GPU (H3's `denoise_loop` path): a slot a call has written
-        rolling = carry.rolling and id(attn) in state.carried
-        prior_mean, prior_scale = (carry.slots[id(attn)][window] if rolling else None), None
+    prior_mean: torch.Tensor | None,
+    prior_scale: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Kitchen's call over `chunks(projected)`: its output, key mean and value scale. Where the
+    previous step's key mean carries, `values()` gives the call's own V absmax for its value
+    scale, and the V it projected for it (or None), which the one pass Kitchen then makes reads
+    back and drops chunk by chunk."""
+    attn, layout = call.module, call.layout
     held: list[list[torch.Tensor | None] | None] = []
     if prior_mean is not None:  # the key mean carries; the values are this call's own
         projected, absmax = values()
         prior_scale = value_scale(absmax)
         held.append(projected)
         del projected
-    output, mean, scale = call.kernel.sol_attn_chunked(
+    return call.kernel.sol_attn_chunked(  # type: ignore[no-any-return]
         # Kitchen passes once with both statistics, twice (measuring first) without.
         lambda: chunks(held.pop() if held else None),
         layout.live_tokens,
@@ -498,12 +521,6 @@ def _produce(
         sink_q=[0, -(-layout.protected_prefix // 64)],
         token_aug=0,
     )
-    if carry is None:
-        state.statistics[key] = (layout.step, geometry, mean, scale)
-    else:
-        carry.slots[id(attn)][window].copy_(mean)
-        state.carried.add(id(attn))
-    return output, prior_mean is not None
 
 
 def _project_qkv(
@@ -564,16 +581,22 @@ def _parallel_produce(
                     [x[:, start : start + CHUNK].flatten(2, 3) for x in (q, k, v)], dim=-1
                 ).squeeze(0)
 
-        output, reuse = _produce(
+        statistics = (*key, group)
+        geometry = (tokens, heads, layout.protected_prefix, degree, rank, group)
+        prior_mean, prior_scale = previous_statistics(
+            state, statistics, layout.step, geometry, replay_safe=PRODUCERS[name].context_parallel
+        )
+        output, mean, scale = _produce(
             call,
-            (*key, group),
-            name,
             heads,
-            (tokens, heads, layout.protected_prefix, degree, rank, group),
             freqs,
             chunks,
             lambda: (None, torch.linalg.vector_norm(v[0], ord=INF, dim=0).float()),
+            prior_mean,
+            prior_scale,
         )
+        state.statistics[statistics] = (layout.step, geometry, mean, scale)
+        reuse = prior_mean is not None
         return output
 
     return call.exchange(query, key_tensor, value, compute), reuse
