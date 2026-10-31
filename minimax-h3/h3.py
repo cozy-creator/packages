@@ -1919,10 +1919,11 @@ async def shot(ctx: Context, payload: ShotRequest, out: Outputs, tel: Telemetry)
     latents = _shot_latents(out, returned, total)
     video = returned[-1].video
     if payload.resolution is not Resolution.NATIVE:
+        # Through `upscale`, as every caller: the shot's own latents, so Regenerate encodes nothing.
         request = UpscaleInput(video=video, resolution=payload.resolution, upscale=payload.upscale,
-                               prompt=_upscale_prompt(payload), latents=latents)  # fmt: skip
-        video, more = await _upscale(request, piece_seed(payload.seed, ctx.request_id, count), tel)
-        warnings += more
+                               prompt=_upscale_prompt(payload), seed=piece_seed(payload.seed, ctx.request_id, count),
+                               latents=latents)  # fmt: skip
+        video = (await upscale(ctx, request, out, tel)).video
         out.publish("video", video, label=f"Video at {payload.resolution.value}")
     ctx.release_gpus()
     tel.log("h3 shot", pieces=count, delivered_frames=total, turbo=payload.turbo)
@@ -1970,9 +1971,12 @@ class UpscaleOutput(msgspec.Struct):
     video: Annotated[VideoFile, FileBound(max_bytes=1 << 30, media_types=("video/mp4",))]
 
 
-async def _upscale(payload: UpscaleInput, seed: int, tel: Telemetry) -> tuple[VideoFile, list[str]]:
-    """`payload.video` at `payload.resolution` by its model, and the warnings: `upscale`'s, and
-    `shot`'s when it asks for more than 768p."""
+async def upscale(ctx: Context, payload: UpscaleInput, out: Outputs, tel: Telemetry) -> UpscaleOutput:
+    """One whole shot upscaled, the one way in for every caller (`shot` above 768p, projects,
+    `cozy run`): regenerate-2k from its latents when given, else its video; SeedVR2 from its
+    video. The fields its model ignores are logged."""
+    seed = payload.seed if payload.seed is not None else int.from_bytes(
+        hashlib.sha256(f"{ctx.request_id}/h3/upscale".encode()).digest()[:4], "big")  # fmt: skip
     method = payload.upscale or Upscale()
     warnings = method.ignored()
     if method.model == "regenerate-2k":
@@ -1983,7 +1987,8 @@ async def _upscale(payload: UpscaleInput, seed: int, tel: Telemetry) -> tuple[Vi
                                resolution=payload.resolution, strength=method.start, seed=seed)  # fmt: skip
         with tel.scope(f"Regenerate at {payload.resolution.value}"):
             result = await cast(Callable[..., Awaitable[RegenerateOutput]], regenerate_shot)(payload=call)
-        return result.video, warnings + result.warnings
+        tel.log("h3 upscale", model=method.model, warnings="; ".join(warnings + result.warnings))
+        return UpscaleOutput(result.video)
     if payload.resolution is Resolution.NATIVE:
         raise InvalidRequest("seedvr2 restores above 768p; 768p is regenerate-2k's refine-only pass",
                              fields=["resolution"])  # fmt: skip
@@ -1995,16 +2000,8 @@ async def _upscale(payload: UpscaleInput, seed: int, tel: Telemetry) -> tuple[Vi
             aspect_ratio="16:9" if (probe.width, probe.height) == (1344, 768) else "source",
             **{k: getattr(method, k) for k in _SEEDVR2_FIELDS if getattr(method, k) is not None},
         )  # fmt: skip
-    return restored.video, warnings
-
-
-async def upscale(ctx: Context, payload: UpscaleInput, out: Outputs, tel: Telemetry) -> UpscaleOutput:
-    """One whole shot upscaled; the fields its model ignores are logged."""
-    seed = payload.seed if payload.seed is not None else int.from_bytes(
-        hashlib.sha256(f"{ctx.request_id}/h3/upscale".encode()).digest()[:4], "big")  # fmt: skip
-    video, warnings = await _upscale(payload, seed, tel)
-    tel.log("h3 upscale", model=(payload.upscale or Upscale()).model, warnings="; ".join(warnings))
-    return UpscaleOutput(video)
+    tel.log("h3 upscale", model=method.model, warnings="; ".join(warnings))
+    return UpscaleOutput(restored.video)
 
 
 app.entrypoint(shot, emits_media=True, accelerator=False)
