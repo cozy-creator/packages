@@ -12,7 +12,7 @@ import hashlib
 import math
 import queue
 import re
-from collections.abc import Awaitable, Callable, Iterable, Iterator, Sequence
+from collections.abc import Awaitable, Callable, Iterable, Iterator, Mapping, Sequence
 from concurrent.futures import Future
 from contextlib import suppress
 from dataclasses import dataclass
@@ -112,6 +112,7 @@ from seedvr2 import UpscaleOutput as RestorationOutput
 from seedvr2 import upscale as restore_video
 from story import (
     AUDIO_READ_BYTES,
+    CLIPS,
     FILE,
     IMAGE_READ_BYTES,
     REFERENCE_AUDIO,
@@ -159,18 +160,20 @@ ReferenceFiles = Annotated[
 
 
 class VideoUse(msgspec.Struct, frozen=True):
-    """How a call uses one of its videos: its sound (`use_audio`), and whether its frames are
-    anchored in the output (`anchor_video`)."""
+    """How a call uses one of its videos: its sound (`use_audio`), whether its frames are
+    anchored in the output (`anchor_video`), and the frame of it, on the 24-fps clock, the
+    call's window starts at (`shot_windows`)."""
 
     audio: bool = False
     anchor: bool = False
+    start: Annotated[int, msgspec.Meta(ge=0)] = 0
 
 
-def video_uses(references: Sequence[StoryReference]) -> tuple[VideoUse, ...]:
-    """Each of a call's videos, in packed order."""
+def video_uses(references: Sequence[StoryReference], starts: Mapping[str, int]) -> tuple[VideoUse, ...]:
+    """Each of a call's videos, in packed order, from its window's `starts`."""
     return tuple(
-        VideoUse(ref.use_audio, ref.kind == "anchor_video")
-        for ref in references if ref.kind in ("video", "anchor_video")
+        VideoUse(ref.use_audio, ref.kind == "anchor_video", starts[ref.name])
+        for ref in references if ref.kind in CLIPS
     )
 
 
@@ -383,12 +386,11 @@ def assets_to_h3_refs(
 ) -> tuple[list[Any], ReferenceSizing, GuideClip | None]:
     """Check every reference from its header and size the vision budget, then read each.
 
-    Durations are Runtime's (`REFERENCE_VIDEO`/`REFERENCE_AUDIO`): `probe().duration` is the
-    length a read returns, so a truncated clip is budgeted at 15 s. A video streams straight to
-    the size it is used at on the 24-fps clock (`read_reference_video`), keeping only the
-    call's `frames`, which is all the official pipeline keeps of it; its soundtrack is decoded
-    only where its `videos` entry (per video in packed order) says so. An anchor video is not a
-    reference (`guide_rows`): Qwen never sees it.
+    A video is read over its window: from its `videos` entry's `start` (per video in packed
+    order), the call's `frames` at most, which is all the official pipeline keeps of it, and
+    budgeted at that length. It streams straight to the size it is used at on the 24-fps clock
+    (`read_reference_video`); its soundtrack is decoded only where its entry says so. An anchor
+    video is not a reference (`guide_rows`): Qwen never sees it.
     """
     audio_duration = Fraction(0)
     video_tokens = 0
@@ -424,9 +426,8 @@ def assets_to_h3_refs(
             keeps[index] = keeps[index] and video.soundtrack is not None
             _validate_video(video, field, sound=keeps[index])
             if not uses[index].anchor:
-                video_tokens += reference_video_vision_tokens(
-                    video.width, video.height, video.duration
-                )
+                window = min(Fraction(frames, FPS), video.duration - Fraction(uses[index].start, FPS))
+                video_tokens += reference_video_vision_tokens(video.width, video.height, window)
         else:
             audio = reference.probe()
             _validate_audio(audio, field)
@@ -435,14 +436,15 @@ def assets_to_h3_refs(
     sizing = resolve_reference_sizing(
         images, default=DEFAULT_REFERENCE_IMAGE_SHORT_EDGE, video_tokens=video_tokens
     )
-    window = Fraction(frames, FPS)
     prepared = []
     guide = None
     for index, reference in enumerate(references):
         if isinstance(reference, ImageFile):
             prepared.append(pipe.image_reference(reference.read()))
         elif isinstance(reference, VideoFile):
-            with reference.stream(end=window, audio=keeps[index]) as events:
+            start = uses[index].start
+            with reference.stream(start=Fraction(start, FPS), end=Fraction(start + frames, FPS),
+                                  audio=keeps[index]) as events:  # fmt: skip
                 clip = read_reference_video(
                     events, frames=frames, audio=keeps[index], guide=uses[index].anchor
                 )
@@ -1540,7 +1542,8 @@ class ShotAudio(msgspec.Struct):
 
 
 class ReferenceFootage(msgspec.Struct, kw_only=True):
-    """A clip whose motion and camera the shot performs; its sound only with `use_audio`."""
+    """A clip whose motion and camera the shot performs, second for second; its sound only
+    with `use_audio`."""
 
     name: str
     video: ShotFootage
@@ -1548,7 +1551,7 @@ class ReferenceFootage(msgspec.Struct, kw_only=True):
 
 
 class Plate(msgspec.Struct):
-    """A clip the shot follows frame by frame (Add Guide rows), no longer than the shot."""
+    """A clip the shot follows frame by frame (Add Guide rows), across all its pieces."""
 
     video: ShotFootage
 
@@ -1693,6 +1696,34 @@ def piece_texts(prompt: str, beats: Sequence[Beat], starts: Sequence[float]) -> 
     return texts
 
 
+def shot_windows(
+    references: Sequence[StoryReference], spans: Sequence[tuple[int, int]]
+) -> tuple[list[dict[str, int]], list[str]]:
+    """Where each piece's window of each clip starts, and the warnings. A piece reads the shot
+    frames it samples, its carried head included (`spans`: first frame, count), 1:1 from the
+    clip's first frame on the 24-fps clock, so a plate stays frame-aligned across an edge. A
+    piece takes the tail of a clip that ends in its window, and none of one that leaves it
+    less than `REFERENCE_VIDEO`'s minimum."""
+    least = math.ceil(Fraction(REFERENCE_VIDEO.min_seconds or 0) * FPS)
+    windows: list[dict[str, int]] = [{} for _ in spans]
+    total = spans[-1][0] + spans[-1][1]
+    warnings = []
+    for ref in references:
+        if ref.kind not in CLIPS:
+            continue
+        assert ref.video is not None
+        length = math.floor(ref.video.probe().duration * FPS + Fraction(1, 2))
+        for window, (start, frames) in zip(windows, spans, strict=True):
+            if min(start + frames, length) - start >= least:
+                window[ref.name] = start
+        if length < total:
+            warnings.append(f"<{ref.name}> ends {length / FPS:.1f} s into this {total / FPS:.1f} s shot, "
+                            "which runs on without it")  # fmt: skip
+        elif length > total:
+            warnings.append(f"<{ref.name}> is {length / FPS:.1f} s long; the shot uses its first {total / FPS:.1f} s")
+    return windows, warnings
+
+
 def _lower(text: str) -> str:
     """A sentence continuing another: its first letter lower-cased, unless it opens a name."""
     return text[:1].lower() + text[1:] if text[:1].isupper() and not text[1:2].isupper() and not text.startswith("<") else text
@@ -1731,11 +1762,6 @@ def _shot_references(payload: ShotRequest) -> tuple[list[StoryReference], list[s
     if payload.plate is not None:
         refs.append(StoryReference(name="Plate", kind="anchor_video", video=payload.plate.video))
     validate_references(refs)
-    for ref in refs:
-        probe = None if ref.video is None else ref.video.probe()
-        if probe is not None and probe.source_duration > probe.duration:
-            warnings.append(f"<{ref.name}> is {float(probe.source_duration):.1f} s long; "
-                            f"H3 used its first {float(probe.duration):g} s.")  # fmt: skip
     return refs, warnings
 
 
@@ -1760,9 +1786,6 @@ async def shot(ctx: Context, payload: ShotRequest, out: Outputs, tel: Telemetry)
     keyframes = payload.keyframes or Keyframes()
     if payload.plate is not None and keyframes.first is not None:
         raise InvalidRequest("a plate sets the shot's opening; it takes no first keyframe", fields=["keyframes.first"])
-    if payload.plate is not None and len(pieces) > 1:
-        raise InvalidRequest(f"a plate is followed within one piece of at most {MAX_DURATION_S} s; "
-                             f"this shot is {payload.duration_s:g} s", fields=["plate"])  # fmt: skip
     references, warnings = _shot_references(payload)
     if payload.turbo and payload.steps is not None:
         warnings.append(f"turbo runs its LoRA's 8 steps; steps {payload.steps} ignored")
@@ -1771,6 +1794,9 @@ async def shot(ctx: Context, payload: ShotRequest, out: Outputs, tel: Telemetry)
     plans = [ContinuationPlan(length, _CARRY if index else Carry(), _CARRY if index + 1 < count else Carry())
              for index, length in enumerate(pieces)]  # fmt: skip
     *starts, total = accumulate((plan.delivered_frames for plan in plans), initial=0)
+    windows, notes = shot_windows(references, [(start - plan.prefix_frames, plan.sample_frames)
+                                               for start, plan in zip(starts, plans, strict=True)])  # fmt: skip
+    warnings += notes
     exports: dict[int, list[int]] = {}
     order: list[tuple[int, int]] = []
     for write in payload.writes:
@@ -1790,6 +1816,7 @@ async def shot(ctx: Context, payload: ShotRequest, out: Outputs, tel: Telemetry)
     files: dict[str, File | None] = {ref.name: getattr(ref, FILE[ref.kind]) for ref in voices([*references, *plates])[0]}
     calls: list[PieceCall] = []
     for index, text in enumerate(piece_texts(payload.prompt, payload.beats, [start / FPS for start in starts])):
+        own = [ref for ref in references if ref.kind not in CLIPS or ref.name in windows[index]]
         # A continued piece with no place to carry starts from the previous piece's last frame as a world state,
         # after the request's own pictures so their <Picture N> keep their numbers: who and what is where now. Every
         # continued piece that saw one joined cleanly (se-087: 9 of 9 seams); those without, character-only and
@@ -1797,7 +1824,7 @@ async def shot(ctx: Context, payload: ShotRequest, out: Outputs, tel: Telemetry)
         anchor = [StoryReference(name=f"Piece {index} end", kind="world_state",
                                  description="This piece starts from it: who and what is where now.")
                   ] if index and not places else []  # fmt: skip
-        call = piece_call(text, [*references, *plates, *anchor] if index else references, style=style,
+        call = piece_call(text, [*own, *plates, *anchor] if index else own, style=style,
                           soundscape=sound, music=music, index=index,
                           forced=forced | {ref.name for ref in anchor})  # fmt: skip
         calls.append(call if call.references else PieceCall(_fl2va_text(text, payload), [], call.warnings))
@@ -1808,7 +1835,8 @@ async def shot(ctx: Context, payload: ShotRequest, out: Outputs, tel: Telemetry)
             warnings.append(f"a piece starts at {edge / FPS:.1f} s, near the beat at {late[0]:g} s, which may start "
                             "about 2 s late; spacing the beats further apart avoids it")  # fmt: skip
     tel.log("h3 shot pieces", pieces=count, seconds=",".join(map(str, pieces)),
-            boundaries_s=",".join(f"{start / FPS:.2f}" for start in starts[1:]), delivered_frames=total)  # fmt: skip
+            boundaries_s=",".join(f"{start / FPS:.2f}" for start in starts[1:]), delivered_frames=total,
+            clip_windows="; ".join(",".join(f"{name}@{at}" for name, at in w.items()) for w in windows))  # fmt: skip
     if not calls[0].references and any(call.references for call in calls[1:]):
         # Only a text-only first piece (FL2VA) runs ahead of a Ref2VA one. A hint the shot never
         # uses loads on after it ends and holds the GPU from the next run (0.2.0 gate 41159884913:
@@ -1829,7 +1857,7 @@ async def shot(ctx: Context, payload: ShotRequest, out: Outputs, tel: Telemetry)
                 log_prompt(tel, "h3 piece prompt", call.prompt, piece=index + 1,
                            references=", ".join(ref.name for ref in call.references))  # fmt: skip
                 if call.references:
-                    uses = video_uses(call.references)
+                    uses = video_uses(call.references, windows[index])
                     result = await ref2va_piece(  # type: ignore[call-arg]
                         payload=Ref2VAInput(
                             prompt=call.prompt, seed=seeds[index], duration_s=pieces[index], steps=steps,
