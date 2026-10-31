@@ -13,8 +13,19 @@
 # // limitations under the License.
 
 from typing import Callable, Optional
-from diffusers.models.normalization import RMSNorm
+
+import torch
+from diffusers.models.normalization import RMSNorm as _DiffusersRMSNorm
 from torch import nn
+
+
+class RMSNorm(_DiffusersRMSNorm):
+    """One fused `F.rms_norm` kernel in place of Diffusers' F32 pow/mean/rsqrt/mul chain: 1.7 s less of a
+    1080p 5 s denoise on a 4090 (runs 23864 -> 23899, 46.3 dB to the unfused output)."""
+
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        weight = None if self.weight is None else self.weight.to(hidden_states.dtype)
+        return torch.nn.functional.rms_norm(hidden_states, (hidden_states.shape[-1],), weight, self.eps)
 
 # (dim: int, eps: float, elementwise_affine: bool)
 norm_layer_type = Callable[[int, float, bool], nn.Module]
