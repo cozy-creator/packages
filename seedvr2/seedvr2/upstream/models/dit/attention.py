@@ -33,6 +33,13 @@ class WindowAttnProcessor:
     def __call__(
         self, attn: WindowAttention, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, runs: Runs
     ) -> torch.Tensor:
+        if len(runs) == 1 and runs[0][0] == 0 and runs[0][1] * runs[0][2] == q.shape[0]:
+            _, count, length = runs[0]
+            return dispatch_attention_fn(
+                *(x.view(count, length, *x.shape[1:]) for x in (q, k, v)),
+                backend=self._attention_backend,
+                parallel_config=self._parallel_config,
+            ).flatten(0, 1)
         out = torch.empty_like(q)
         for start, count, length in runs:
             rows = slice(start, start + count * length)
