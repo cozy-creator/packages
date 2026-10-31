@@ -158,6 +158,10 @@ QK_ROPE = {
     for dtype, name in ((torch.float16, "fp16"), (torch.bfloat16, "bf16"), (torch.float32, "fp32"))
 }  # fmt: skip
 
+#: The video stream's adaLN row chains in one Runtime kernel each (`fusion.AdaRows`): its norms
+#: are weightless RMSNorms, the modulation `x * scale + shift` (`1 + (scale - 1)`), the gates plain.
+ADA_ROWS = fusion.AdaRows("seedvr2_vid", width=3072, rms_rounding="once")
+
 #: Video tokens a window group holds at most (whole windows; a longer window is a group alone).
 GROUP = 16384
 
@@ -258,6 +262,11 @@ class NaMMSRTransformerBlock(MMWindowTransformerBlock):
         torch.LongTensor,
         torch.LongTensor,
     ]:
+        rows = vars(self).get("_cozy_rows")
+        if rows is not None and emb.shape[0] == 1:
+            fused = self._fused(rows, vid, txt, vid_shape, txt_shape, emb, cache)
+            if fused is not None:
+                return fused
         hid_len = MMArg(
             cache("vid_len", lambda: vid_shape.prod(-1)),
             cache("txt_len", lambda: txt_shape.prod(-1)),
@@ -284,3 +293,38 @@ class NaMMSRTransformerBlock(MMWindowTransformerBlock):
         vid_mlp, txt_mlp = (vid_mlp + vid_attn), (txt_mlp + txt_attn)
 
         return vid_mlp, txt_mlp, vid_shape, txt_shape
+
+    def _fused(self, rows, vid, txt, vid_shape, txt_shape, emb, cache):
+        """[Override] One sample's video stream with its norms, modulation and gated residuals as
+        `ADA_ROWS`' kernels (every token reads the one modulation row); the short text stream
+        eager. None while eager serves."""
+        ada, txt_ada, eps = self.ada.vid, self.ada.txt, float(self.attn_norm.vid.eps)
+        index = cache("ada_index", lambda: torch.zeros(1, dtype=torch.long, device=vid.device))
+        layers = rearrange(emb, "b (d l g) -> b d l g", l=len(ada.layers), g=3)
+
+        def table(layer):
+            shift, scale, gate = layers[..., ada.layers.index(layer), :].unbind(-1)
+            named = lambda what: getattr(ada, f"{layer}_{what}")  # noqa: E731
+            return tuple(t.to(vid.dtype) for t in (
+                shift + named("shift"), scale + named("scale") - 1, gate + named("gate")
+            ))  # fmt: skip
+
+        shift, scale, gate = table("attn")
+        vid_in = rows.first(vid, scale, shift, index, eps=eps)
+        if vid_in is None:
+            return None
+        txt_len = cache("txt_len", lambda: txt_shape.prod(-1))
+        txt_kwargs = dict(emb=emb, cache=cache, branch_tag="txt", hid_len=txt_len)
+        txt_in = txt_ada(self.attn_norm.txt(txt), layer="attn", mode="in", **txt_kwargs)
+        vid_attn, txt_attn = self.attn(vid_in, txt_in, vid_shape, txt_shape, cache)
+        shift_mlp, scale_mlp, gate_mlp = table("mlp")
+        between = rows.between(vid, vid_attn, gate, scale_mlp, shift_mlp, index, eps=eps)
+        if between is None:
+            return None
+        vid, vid_mlp = between
+        txt = txt_ada(txt_attn, layer="attn", mode="out", **txt_kwargs) + txt
+        vid_mlp = split(self.mlp.vid, vid_mlp, Cut(0), most=GROUP * vid_mlp.shape[-1])
+        txt_mlp = self.mlp.txt(txt_ada(self.mlp_norm.txt(txt), layer="mlp", mode="in", **txt_kwargs))
+        vid = rows.last(vid, vid_mlp, gate_mlp, index)
+        txt = txt_ada(txt_mlp, layer="mlp", mode="out", **txt_kwargs) + txt
+        return vid, txt, vid_shape, txt_shape
