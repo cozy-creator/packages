@@ -6,7 +6,9 @@ Publish a merged package, and everything that locks it, to both Hubs:
 task publish -- qwen-image-2
 ```
 
-It fast-forwards the checkout to `origin/master` and publishes a `git archive` of the package to each of `HUBS`.
+It fast-forwards the checkout to `origin/master` and publishes a `git archive` of the package to each of `HUBS`,
+with the Triton sets its import declares compiled on this CPU for every card row into `<module>/_triton`, against
+the newest Runtime (`RUNTIME`), so a fresh machine's first request runs its fused plans.
 Then, in dependency order, each package whose `uv.lock` holds a republished package is
 relocked to it (`cozy package lock --upgrade-package <it>` against production, plus
 `cozy-runtime` or `tensorfs` when its floor is above the dependent's lock),
