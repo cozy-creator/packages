@@ -1917,8 +1917,6 @@ async def upscale(ctx: Context, payload: UpscaleInput, out: Outputs, tel: Teleme
     if payload.resolution is Resolution.NATIVE:
         raise InvalidRequest("seedvr2 restores above 768p; 768p is regenerate-2k's refine-only pass",
                              fields=["resolution"])  # fmt: skip
-    if payload.prompt.strip():
-        warnings.append("prompt applies to regenerate-2k only")
     probe = payload.video.probe()
     restore = cast(Callable[..., Awaitable[RestorationOutput]], restore_video)
     with tel.scope(f"SeedVR2 upscale to {payload.resolution.value}"):
