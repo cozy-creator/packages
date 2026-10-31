@@ -1,10 +1,10 @@
 [project]
 name = "minimax-h3"
-version = "0.2.1"
+version = "0.2.2"
 description = "MiniMax H3 video with sound: one continuous shot of any length, and its upscale"
 requires-python = ">=3.12"
 dependencies = [
-    "cozy-runtime[adapters,media]>=0.36.0",
+    "cozy-runtime[adapters,media]>=0.36.11",
     "diffusers>=0.41,<0.42",
     "hf-xet>=1.6.0",
     # The AdaLN table producer owns the row-label reader the pruned DiT is built from.

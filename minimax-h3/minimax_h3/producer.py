@@ -1,12 +1,14 @@
 """H3's shared-QKV Kitchen Sol producers: the attention call of a sparse step.
 
-On a sparse step the producer owns the H3 attention module's whole call: one rowwise fp8
-quantization of the hidden states shared by the Q, K and V projections, fed in 4096-row
-chunks to Kitchen's `sol_attn_chunked` (per-head RMSNorm and split-half RoPE fused), with the
-previous step's key means reused per site within one request and the value scales of the call's
-own values: a scale from the previous step saturates Kitchen's int8 values wherever they grew
-(every site of H3 Turbo's steps 5-7, up to 44% of a block's channels). Dense steps, dense paths
-and exact paths call the site's own processor, served by the producer's Runtime base backend.
+On a sparse step the producer owns the H3 attention module's whole call: the Q, K and V
+projections of each 4096-row chunk (their leaves quantize the rows once between them), fed to
+Kitchen's `sol_attn_chunked` (per-head RMSNorm and split-half RoPE
+fused), with the previous step's key means reused per site within one request and the value
+scales of the call's own values: a scale from the previous step saturates Kitchen's int8 values
+wherever they grew (every site of H3 Turbo's steps 5-7, up to 44% of a block's channels). V is
+projected once, before Kitchen's pass, for its scale, and that pass reads it back
+(`project_values`). Dense steps, dense paths and exact paths call the site's own processor,
+served by the producer's Runtime base backend.
 
 The approved SM120 recipe (`kitchen-sol-producer-fp4-fixed-means-shared-qkv`) serves dense
 calls with Sage3 fixed-means NVFP4 and also shards over Ulysses: its projection runs on the
@@ -53,6 +55,8 @@ FAST = "kitchen-sol-producer-fast-shared-qkv"
 FP4_LOWMEM = "kitchen-sol-producer-fp4-lowmem-shared-qkv"
 FIXED_MEANS = "kitchen-sol-producer-fp4-fixed-means-shared-qkv"
 CHUNK = 4096
+#: A channel's absmax in one reduction pass (`|x|` is never written): the max-abs norm.
+INF = float("inf")
 #: Kitchen's value-scale margin (`sol_attn_chunked`'s `vscale_next`): absmax / 127 x 1.1.
 VMARGIN = 1.1
 _ROTARY_HOOK = "cozy_cp_producer_rotary"
@@ -146,77 +150,64 @@ def rows(value: torch.Tensor | PreQuantized, start: int, stop: int) -> torch.Ten
     return value[:, start:stop]
 
 
-def shared_qkv_refusal(attn: MiniMaxH3Attention) -> str:
-    """Only known tensor-preserving hooks may share the positional operand's codes: the turbo
-    overlay's LoRA hook reads the original tensor operand and adds into the output.
+def _whole_shard(attn: MiniMaxH3Attention) -> bool:
+    """Whether a CP shard's Q, K and V project whole, with no packing copy: rowwise fp8 leaves
+    under no hooks but the turbo overlay's LoRA (it reads the original tensor operand and adds
+    into the output). Other leaves keep the chunks' layout (`qkv_chunks`).
 
     WeightResidency wraps forward rather than registering a pre-hook. Calling the original
     modules below keeps its acquire/bind/bake/release boundary intact.
     """
     if torch_module._global_forward_pre_hooks or torch_module._global_forward_hooks:
-        return "global-projection-hook"
-    for projection in (attn.to_q, attn.to_k, attn.to_v):
-        if getattr(projection, "provider", None) != ROWWISE_FP8:
-            return "non-rowwise-leaf"
-        if projection._forward_pre_hooks:
-            return "projection-pre-hook"
-        if any(not isinstance(hook, lora.Hook) for hook in projection._forward_hooks.values()):
-            return "unknown-projection-hook"
-    return ""
+        return False
+    return all(
+        getattr(projection, "provider", None) == ROWWISE_FP8
+        and not projection._forward_pre_hooks
+        and all(isinstance(hook, lora.Hook) for hook in projection._forward_hooks.values())
+        for projection in (attn.to_q, attn.to_k, attn.to_v)
+    )
 
 
 def qkv_chunks(
     attn: MiniMaxH3Attention,
     hidden: torch.Tensor | PreQuantized,
     tokens: int,
-    quantize: Callable[[Any], PreQuantized],
-    *,
-    shared: bool = False,
-    counts: dict[str, int] | None = None,
+    values: torch.Tensor | None = None,
 ) -> Iterator[torch.Tensor]:
-    refusal = shared_qkv_refusal(attn) if shared else "disabled"
+    """Kitchen's `[rows, 3 x H x 128]` chunks: each chunk's Q, K and V projections (their leaves
+    quantize the rows once between them). Where `values` holds this call's V (`project_values`),
+    V is read from it."""
     for start in range(0, tokens, CHUNK):
-        chunk = rows(hidden, start, min(tokens, start + CHUNK))
-        operand = None
-        outcome = refusal
-        if shared and isinstance(chunk, PreQuantized):
-            outcome = "already-quantized"
-        elif shared and not refusal:
-            operand = quantize(chunk)
-            outcome = "shared"
-        if shared and counts is not None:
-            counts[outcome] = counts.get(outcome, 0) + 1
+        stop = min(tokens, start + CHUNK)
+        chunk = rows(hidden, start, stop)
         # Original module calls retain encoded leaves, resident weights and Turbo hooks.
-        yield torch.cat(
-            [
-                projection(chunk) if operand is None else projection(chunk, prequantized=operand)
-                for projection in (attn.to_q, attn.to_k, attn.to_v)
-            ],
-            dim=-1,
-        ).squeeze(0)
+        parts = [attn.to_q(chunk), attn.to_k(chunk)]
+        parts.append(attn.to_v(chunk) if values is None else values[:, start:stop])
+        yield torch.cat(parts, dim=-1).squeeze(0)
 
 
-def value_absmax(
-    attn: MiniMaxH3Attention,
-    hidden: torch.Tensor | PreQuantized,
-    tokens: int,
-    quantize: Callable[[Any], PreQuantized],
-) -> torch.Tensor:
-    """This call's per-(head, channel) value absmax over the live document, F32 [H, 128]: the
-    V projection alone, in the chunks and with the shared operand `qkv_chunks` gives Kitchen."""
-    shared = not shared_qkv_refusal(attn)
+def project_values(
+    attn: MiniMaxH3Attention, hidden: torch.Tensor | PreQuantized, tokens: int
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """This call's V, projected by chunk as `qkv_chunks` would, and its per-(head, channel) absmax
+    over the live document, F32 [H, 128]: Kitchen's value scale is the call's own, so V is
+    projected here, before Kitchen's pass, which reads it back instead of projecting it again.
+    It is one block the size of Kitchen's output, freed when the pass ends, just before Kitchen
+    allocates that output, which reuses it: the call's peak does not grow (chunks would leave
+    holes the output cannot use, and a 4090 then paged more than it saved)."""
+    values: torch.Tensor | None = None
     found: torch.Tensor | None = None
     for start in range(0, tokens, CHUNK):
-        chunk = rows(hidden, start, min(tokens, start + CHUNK))
-        if shared and not isinstance(chunk, PreQuantized):
-            value = attn.to_v(chunk, prequantized=quantize(chunk))
-        else:
-            value = attn.to_v(chunk)
-        peak = value.reshape(-1, value.shape[-1]).abs().amax(dim=0)
+        stop = min(tokens, start + CHUNK)
+        value = attn.to_v(rows(hidden, start, stop))
+        if values is None:  # one block, the size of Kitchen's output: freed before it, reused by it
+            values = value.new_empty((1, tokens, value.shape[-1]))
+        values[:, start:stop].copy_(value)
+        peak = torch.linalg.vector_norm(value.reshape(-1, value.shape[-1]), ord=INF, dim=0)
         found = peak if found is None else torch.maximum(found, peak)
-    if found is None:
+    if values is None or found is None:
         raise ValueError("H3 producer has no live rows to scale")
-    return found.float().reshape(attn.heads, 128)
+    return values, found.float().reshape(attn.heads, 128)
 
 
 def value_scale(absmax: torch.Tensor) -> torch.Tensor:
@@ -333,10 +324,9 @@ def produce(
         raise ValueError("single-GPU producer expects an unpadded live H3 document")
     if attn.norm_q.eps != attn.norm_k.eps:
         raise ValueError("Kitchen producer requires matching Q/K RMSNorm epsilon")
-    shared_counts: dict[str, int] = {}
     tight = not fits(hidden_states, attn)
     if parallel:
-        output, reuse = _parallel_produce(call, hidden_states, name, key, shared_counts)
+        output, reuse = _parallel_produce(call, hidden_states, name, key)
     else:
         freqs = rope_presentation(rotary_emb, tokens, state)
         output, reuse = _produce(
@@ -346,16 +336,13 @@ def produce(
             attn.heads,
             (tokens, attn.heads, layout.protected_prefix),
             freqs,
-            lambda: qkv_chunks(
-                attn, hidden_states, tokens, call.quantize, shared=True, counts=shared_counts
-            ),
-            lambda: value_absmax(attn, hidden_states, tokens, call.quantize),
+            lambda values: qkv_chunks(attn, hidden_states, tokens, values),
+            lambda: project_values(attn, hidden_states, tokens),
         )
     statistics = "kmean=previous-step,vscale=current-call" if reuse else "current-call"
-    shared = ",".join(f"{kind}:{count}" for kind, count in sorted(shared_counts.items()))
     call.served(
         f"comfy_kitchen.sol_attn_chunked(int8, stats={statistics}, vmargin=1.1, "
-        f"prefix=int8, qkv={shared})"
+        f"prefix=int8, qkv=one-operand{',v=once' if reuse and not parallel else ''})"
     )
     if not tight:
         return attn.to_out[1](attn.to_out[0](output.flatten(2, 3)))
@@ -373,9 +360,12 @@ def _produce(
     heads: int,
     geometry: tuple[int, ...],
     freqs: torch.Tensor,
-    chunks: Callable[[], Iterator[torch.Tensor]],
-    absmax: Callable[[], torch.Tensor],
+    chunks: Callable[[torch.Tensor | None], Iterator[torch.Tensor]],
+    values: Callable[[], tuple[torch.Tensor | None, torch.Tensor]],
 ) -> tuple[torch.Tensor, bool]:
+    """Kitchen's call over `chunks(projected)`. Where the key mean carries, `values()` gives the
+    call's own V absmax for its value scale, and the V it projected for it (or None), which
+    the one pass Kitchen then makes reads back; the pass's end drops it."""
     attn, layout, state = call.module, call.layout, call.state
     carry = _CARRY.get()
     if carry is None:
@@ -385,10 +375,15 @@ def _produce(
     else:  # one GPU (H3's `denoise_loop` path): a slot a call has written
         rolling = carry.rolling and id(attn) in state.carried
         prior_mean, prior_scale = (carry.slots[id(attn)] if rolling else None), None
+    held: list[torch.Tensor | None] = []
     if prior_mean is not None:  # the key mean carries; the values are this call's own
-        prior_scale = value_scale(absmax())
+        projected, absmax = values()
+        prior_scale = value_scale(absmax)
+        held.append(projected)
+        del projected
     output, mean, scale = call.kernel.sol_attn_chunked(
-        chunks,
+        # Kitchen passes once with both statistics, twice (measuring first) without.
+        lambda: chunks(held.pop() if held else None),
         layout.live_tokens,
         heads,
         freqs,
@@ -411,31 +406,21 @@ def _produce(
 
 
 def _project_qkv(
-    attn: MiniMaxH3Attention,
-    hidden: torch.Tensor | PreQuantized,
-    tokens: int,
-    quantize: Callable[[Any], PreQuantized],
-    counts: dict[str, int] | None = None,
+    attn: MiniMaxH3Attention, hidden: torch.Tensor | PreQuantized, tokens: int
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Project a local shard with one shared quantization and no QKV packing copy.
-
-    Original module calls retain residency and Turbo hooks. The LoRA hook already owns its
-    fixed-row arithmetic. Other projection semantics keep the chunk path.
-    """
+    """A local shard's Q, K and V from one quantization: whole where `_whole_shard`, else by
+    chunks packed into one buffer. Original module calls retain residency and Turbo hooks."""
     if len(hidden.shape) != 3 or hidden.shape[0] != 1 or hidden.shape[1] != tokens or tokens < 1:
         raise ValueError("H3 CP projection requires the complete nonempty local token shard")
-    if not isinstance(hidden, PreQuantized) and not shared_qkv_refusal(attn):
-        operand = quantize(hidden)
-        if counts is not None:
-            counts["shared"] = counts.get("shared", 0) + 1
+    if not isinstance(hidden, PreQuantized) and _whole_shard(attn):
         query, key, value = (
-            projection(hidden, prequantized=operand).reshape(1, tokens, attn.heads, 128)
+            projection(hidden).reshape(1, tokens, attn.heads, 128)
             for projection in (attn.to_q, attn.to_k, attn.to_v)
         )
         return query, key, value
     packed = None
     offset = 0
-    for chunk in qkv_chunks(attn, hidden, tokens, quantize, shared=True, counts=counts):
+    for chunk in qkv_chunks(attn, hidden, tokens):
         if packed is None:
             packed = chunk.new_empty((tokens, chunk.shape[-1]))
         packed[offset : offset + chunk.shape[0]].copy_(chunk)
@@ -451,7 +436,6 @@ def _parallel_produce(
     hidden: torch.Tensor | PreQuantized,
     name: str,
     key: tuple[object, ...],
-    counts: dict[str, int],
 ) -> tuple[torch.Tensor, bool]:
     attn, layout, state = call.module, call.layout, call.state
     degree, rank = dist.get_world_size(call.group), dist.get_rank(call.group)
@@ -463,7 +447,7 @@ def _parallel_produce(
     if rotary is None or rotary[0].shape[0] != tokens:
         raise ValueError("H3 CP producer requires this component's full pre-split rotary tables")
     freqs = rope_presentation(rotary, tokens, state)
-    query, key_tensor, value = _project_qkv(attn, hidden, expected, call.quantize, counts)
+    query, key_tensor, value = _project_qkv(attn, hidden, expected)
     reuse, groups = False, 0
 
     def compute(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
@@ -473,7 +457,7 @@ def _parallel_produce(
         heads, group = q.shape[2], groups
         groups += 1
 
-        def chunks() -> Iterator[torch.Tensor]:
+        def chunks(_: object) -> Iterator[torch.Tensor]:
             for start in range(0, tokens, CHUNK):
                 yield torch.cat(
                     [x[:, start : start + CHUNK].flatten(2, 3) for x in (q, k, v)], dim=-1
@@ -487,7 +471,7 @@ def _parallel_produce(
             (tokens, heads, layout.protected_prefix, degree, rank, group),
             freqs,
             chunks,
-            lambda: v[0].abs().amax(dim=0).float(),
+            lambda: (None, torch.linalg.vector_norm(v[0], ord=INF, dim=0).float()),
         )
         return output
 
