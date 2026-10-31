@@ -46,9 +46,10 @@ from cozy_runtime.author import (
     register_attention,
     split,
 )
-from cozy_runtime.author.kernels import ROWWISE_FP8, PreQuantized
+from cozy_runtime.author.kernels import ROWWISE_FP8, PreQuantized, quantize_once
+from cozy_runtime.rows import Rows
+from cozy_runtime.rows import rows as columns
 
-from .fit import fits, release
 from .glue import KEY_MEAN, FusedMiniMaxH3AttnProcessor, H3AttnProcessor, KeyMean
 
 FAST = "kitchen-sol-producer-fast-shared-qkv"
@@ -289,11 +290,7 @@ def produce(
         raise ValueError("H3 producer serves unmasked noncausal attention only")
     # A recipe that shards over Ulysses keys its statistics and replays per module instance.
     key = (call.component, call.path, id(attn)) if sharded else (call.component, call.path)
-    # Kitchen's chunked call holds the whole document's K/V codes and allocates its whole
-    # [tokens, heads, 128] output beside them: on a card the call does not fit (15 s on an RTX
-    # 3070: step 5 asked 1.46 GiB with 1.8 GiB free in pieces), the site's own processor serves
-    # the sparse step instead, by head groups, through the producer's base backend.
-    if not sparse_step(layout, call.path) or (not parallel and not fits(hidden_states, attn)):
+    if not sparse_step(layout, call.path):
         state.statistics.pop(key, None)
         state.replay_inputs.pop(key, None)
         carry, seed = _CARRY.get(), None
@@ -323,33 +320,137 @@ def produce(
         raise ValueError("single-GPU producer expects an unpadded live H3 document")
     if attn.norm_q.eps != attn.norm_k.eps:
         raise ValueError("Kitchen producer requires matching Q/K RMSNorm epsilon")
-    tight = not fits(hidden_states, attn)
     if parallel:
         output, reuse = _parallel_produce(call, hidden_states, name, key)
     else:
         freqs = rope_presentation(rotary_emb, tokens, state)
-        output, reuse = _produce(
-            call,
-            key,
-            name,
-            attn.heads,
-            (tokens, attn.heads, layout.protected_prefix),
-            freqs,
-            lambda values: qkv_chunks(attn, hidden_states, tokens, values),
-            lambda: project_values(attn, hidden_states, tokens),
-        )
+        heads = _Heads.of(call, key, name, hidden_states, freqs)
+        if heads is None:
+            output, reuse = _produce(
+                call,
+                key,
+                name,
+                attn.heads,
+                (tokens, attn.heads, layout.protected_prefix),
+                freqs,
+                lambda values: qkv_chunks(attn, hidden_states, tokens, values),
+                lambda: project_values(attn, hidden_states, tokens),
+            )
+        else:
+            # Kitchen's call holds the whole document's K/V codes and its whole output: an exact
+            # split by query heads, which the Runtime sizes beside the DiT's weights.
+            output = split(heads, heads, Cut(2))
+            reuse = heads.reuse
     statistics = "kmean=previous-step,vscale=current-call" if reuse else "current-call"
     call.served(
         f"comfy_kitchen.sol_attn_chunked(int8, stats={statistics}, vmargin=1.1, "
         f"prefix=int8, qkv=one-operand{',v=once' if reuse and not parallel else ''})"
     )
-    if not tight:
-        return attn.to_out[1](attn.to_out[0](output.flatten(2, 3)))
-    # Where the whole call does not fit, as the site's own processor runs it.
     out = attn.to_out[1](split(attn.to_out[0], output.flatten(2, 3), Cut(1)))
     del output
-    release()
     return out
+
+
+class _Heads:
+    """One sparse call as `split` cuts it by query heads: its shape is the call's [batch, tokens,
+    heads, 128] output, a window of it a slice of heads, and calling it on a window runs Kitchen
+    over those heads alone (`_produce`), their Q, K and V projected from their weight rows
+    (`cozy_runtime.rows`). Exact: Kitchen's norms, RoPE, key means, value scales and routing are
+    per head and its sink ranges per token. Called on itself (`split` running whole), all heads."""
+
+    __slots__ = ("call", "device", "dtype", "freqs", "hidden", "key", "name", "projections",
+                 "reuse", "shape")  # fmt: skip
+
+    def __init__(
+        self,
+        call: ProducerCall,
+        key: tuple[object, ...],
+        name: str,
+        hidden: torch.Tensor | PreQuantized,
+        freqs: torch.Tensor,
+        projections: tuple[Rows, Rows, Rows],
+    ) -> None:
+        self.call, self.key, self.name, self.hidden, self.freqs = call, key, name, hidden, freqs
+        self.projections = projections
+        attn = call.module
+        self.shape = (1, call.layout.live_tokens, attn.heads, 128)
+        quantized = isinstance(hidden, PreQuantized)
+        self.dtype = torch.bfloat16 if quantized else hidden.dtype
+        self.device = hidden.payload.device if quantized else hidden.device
+        self.reuse = False
+
+    @classmethod
+    def of(
+        cls,
+        call: ProducerCall,
+        key: tuple[object, ...],
+        name: str,
+        hidden: torch.Tensor | PreQuantized,
+        freqs: torch.Tensor,
+    ) -> _Heads | None:
+        """The call cut by heads, or None where a projection does not cut by rows."""
+        attn = call.module
+        found = tuple(columns(m) for m in (attn.to_q, attn.to_k, attn.to_v))
+        if any(r is None for r in found):
+            return None
+        return cls(call, key, name, hidden, freqs, found)  # type: ignore[arg-type]
+
+    def dim(self) -> int:
+        return len(self.shape)
+
+    def element_size(self) -> int:
+        return int(self.dtype.itemsize)
+
+    def __getitem__(self, index: tuple[slice, ...]) -> slice:
+        return index[2]
+
+    def __call__(self, heads: _Heads | slice) -> torch.Tensor:
+        attn, layout = self.call.module, self.call.layout
+        window = slice(0, attn.heads) if heads is self else heads
+        assert isinstance(window, slice)
+        start, stop = window.start * 128, window.stop * 128
+        tokens = layout.live_tokens
+        q, k, v = self.projections
+
+        def chunks(values: list[torch.Tensor | None] | None) -> Iterator[torch.Tensor]:
+            for index, at in enumerate(range(0, tokens, CHUNK)):
+                chunk = rows(self.hidden, at, min(tokens, at + CHUNK))
+                with quantize_once(chunk):
+                    parts = [q(chunk, start, stop), k(chunk, start, stop)]
+                    if values is None:
+                        parts.append(v(chunk, start, stop))
+                if values is not None:
+                    value, values[index] = values[index], None
+                    if value is None:
+                        raise ValueError("H3 producer read a call's projected values twice")
+                    parts.append(value)
+                yield torch.cat(parts, dim=-1).squeeze(0)
+
+        def values() -> tuple[list[torch.Tensor | None], torch.Tensor]:
+            projected: list[torch.Tensor | None] = []
+            found: torch.Tensor | None = None
+            for at in range(0, tokens, CHUNK):
+                value = v(rows(self.hidden, at, min(tokens, at + CHUNK)), start, stop)
+                peak = torch.linalg.vector_norm(value.reshape(-1, value.shape[-1]), ord=INF, dim=0)
+                found = peak if found is None else torch.maximum(found, peak)
+                projected.append(value)
+            if found is None:
+                raise ValueError("H3 producer has no live rows to scale")
+            return projected, found.float().reshape(window.stop - window.start, 128)
+
+        count = window.stop - window.start
+        output, self.reuse = _produce(
+            self.call,
+            (*self.key, window.start),
+            self.name,
+            count,
+            (tokens, count, layout.protected_prefix),
+            self.freqs,
+            chunks,
+            values,
+            window,
+        )
+        return output.reshape(1, tokens, count, 128)
 
 
 def _produce(
@@ -361,6 +462,7 @@ def _produce(
     freqs: torch.Tensor,
     chunks: Callable[[list[torch.Tensor | None] | None], Iterator[torch.Tensor]],
     values: Callable[[], tuple[list[torch.Tensor | None] | None, torch.Tensor]],
+    window: slice = slice(None),
 ) -> tuple[torch.Tensor, bool]:
     """Kitchen's call over `chunks(projected)`. Where the key mean carries, `values()` gives the
     call's own V absmax for its value scale, and the V it projected for it (or None), which
@@ -373,7 +475,7 @@ def _produce(
         )
     else:  # one GPU (H3's `denoise_loop` path): a slot a call has written
         rolling = carry.rolling and id(attn) in state.carried
-        prior_mean, prior_scale = (carry.slots[id(attn)] if rolling else None), None
+        prior_mean, prior_scale = (carry.slots[id(attn)][window] if rolling else None), None
     held: list[list[torch.Tensor | None] | None] = []
     if prior_mean is not None:  # the key mean carries; the values are this call's own
         projected, absmax = values()
@@ -399,7 +501,7 @@ def _produce(
     if carry is None:
         state.statistics[key] = (layout.step, geometry, mean, scale)
     else:
-        carry.slots[id(attn)].copy_(mean)
+        carry.slots[id(attn)][window].copy_(mean)
         state.carried.add(id(attn))
     return output, prior_mean is not None
 
