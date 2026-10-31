@@ -50,7 +50,7 @@ from cozy_runtime.author.kernels import ROWWISE_FP8, PreQuantized, quantize_once
 from cozy_runtime.rows import Rows
 from cozy_runtime.rows import rows as columns
 
-from .glue import KEY_MEAN, FusedMiniMaxH3AttnProcessor, H3AttnProcessor, KeyMean
+from .glue import KEY_MEAN, FusedMiniMaxH3AttnProcessor, H3AttnProcessor, KeyMean, Owned, take
 
 FAST = "kitchen-sol-producer-fast-shared-qkv"
 FP4_LOWMEM = "kitchen-sol-producer-fp4-lowmem-shared-qkv"
@@ -315,11 +315,12 @@ def sparse_step(layout: AttentionLayout, path: str) -> bool:
 def produce(
     name: str,
     call: ProducerCall,
-    hidden_states: torch.Tensor | PreQuantized,
+    hidden_states: torch.Tensor | PreQuantized | Owned,
     rotary_emb: tuple[torch.Tensor, torch.Tensor] | None = None,
     attention_mask: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    """One H3 attention module call at a site `name` is selected for."""
+    """One H3 attention module call at a site `name` is selected for. An `Owned` input passes
+    on to the dense processor as it came, or goes here before the out projection."""
     attn, layout, state = call.module, call.layout, call.state
     parallel, sharded = call.group is not None, PRODUCERS[name].context_parallel
     if parallel and not sharded:
@@ -336,8 +337,9 @@ def produce(
             if carry is not None:  # `denoise_loop`: the phase says which step seeds
                 seed = KeyMean(carry.slots[id(attn)]) if carry.seeding else None
             elif layout.step == layout.dense_until_step - 1:  # a step loop: the last dense step
-                device = (hidden_states.payload if isinstance(hidden_states, PreQuantized)
-                          else hidden_states).device  # fmt: skip
+                held = hidden_states.value if isinstance(hidden_states, Owned) else hidden_states
+                device = (held.payload if isinstance(held, PreQuantized) else held).device
+                del held
                 seed = KeyMean(torch.empty(attn.heads, 128, dtype=torch.float32, device=device))
         token = KEY_MEAN.set(seed)
         try:
@@ -351,36 +353,9 @@ def produce(
                 geometry = (layout.live_tokens, attn.heads, layout.protected_prefix)
                 state.statistics[key] = (layout.step, geometry, seed.slot, None)
         return output
-    if rotary_emb is None or hidden_states.shape[0] != 1:
-        raise ValueError("H3 producer requires batch1 and rotary tables")
-    tokens = layout.live_tokens
-    if not parallel and hidden_states.shape[1] != tokens:
-        raise ValueError("single-GPU producer expects an unpadded live H3 document")
-    if attn.norm_q.eps != attn.norm_k.eps:
-        raise ValueError("Kitchen producer requires matching Q/K RMSNorm epsilon")
-    if parallel:
-        output, reuse = _parallel_produce(call, hidden_states, name, key)
-    else:
-        freqs = rope_presentation(rotary_emb, tokens, state)
-        means = _Means(call, key, name, (tokens, attn.heads, layout.protected_prefix))
-        heads = _Heads.of(call, means, hidden_states, freqs)
-        if heads is None:
-            qkv, width = (whole(attn.to_q), whole(attn.to_k), whole(attn.to_v)), attn.heads * 128
-            output, mean, _ = _produce(
-                call,
-                attn.heads,
-                freqs,
-                lambda values: qkv_chunks(hidden_states, tokens, qkv, width, values),
-                lambda: project_values(hidden_states, tokens, qkv[2], width),
-                means.prior,
-            )
-            means.keep(slice(0, attn.heads), mean)
-        else:
-            # Kitchen's call holds the whole document's K/V codes and its whole output: an exact
-            # split by query heads, which the Runtime sizes beside the DiT's weights.
-            output = split(heads, heads, Cut(2))
-        means.close()
-        reuse = means.prior is not None
+    # The input (an owned one taken here) is the helper's alone: it goes as it returns, before
+    # the out projection's output comes.
+    output, reuse = _attend(name, call, key, take(hidden_states), rotary_emb)
     statistics = "kmean=previous-step,vscale=current-call" if reuse else "current-call"
     call.served(
         f"comfy_kitchen.sol_attn_chunked(int8, stats={statistics}, vmargin=1.1, "
@@ -495,6 +470,50 @@ class _Heads:
         )
         self.means.keep(window, mean)
         return output.reshape(1, tokens, count, 128)
+
+
+def _attend(
+    name: str,
+    call: ProducerCall,
+    key: tuple[object, ...],
+    hidden_states: torch.Tensor | PreQuantized,
+    rotary_emb: tuple[torch.Tensor, torch.Tensor] | None,
+) -> tuple[torch.Tensor, bool]:
+    """A sparse step's attention, before its out projection, and whether last step's statistics
+    carried: its input's references end here, at its return."""
+    attn, layout, state = call.module, call.layout, call.state
+    parallel = call.group is not None
+    if rotary_emb is None or hidden_states.shape[0] != 1:
+        raise ValueError("H3 producer requires batch1 and rotary tables")
+    tokens = layout.live_tokens
+    if not parallel and hidden_states.shape[1] != tokens:
+        raise ValueError("single-GPU producer expects an unpadded live H3 document")
+    if attn.norm_q.eps != attn.norm_k.eps:
+        raise ValueError("Kitchen producer requires matching Q/K RMSNorm epsilon")
+    if parallel:
+        output, reuse = _parallel_produce(call, hidden_states, name, key)
+    else:
+        freqs = rope_presentation(rotary_emb, tokens, state)
+        means = _Means(call, key, name, (tokens, attn.heads, layout.protected_prefix))
+        heads = _Heads.of(call, means, hidden_states, freqs)
+        if heads is None:
+            qkv, width = (whole(attn.to_q), whole(attn.to_k), whole(attn.to_v)), attn.heads * 128
+            output, mean, _ = _produce(
+                call,
+                attn.heads,
+                freqs,
+                lambda values: qkv_chunks(hidden_states, tokens, qkv, width, values),
+                lambda: project_values(hidden_states, tokens, qkv[2], width),
+                means.prior,
+            )
+            means.keep(slice(0, attn.heads), mean)
+        else:
+            # Kitchen's call holds the whole document's K/V codes and its whole output: an exact
+            # split by query heads, which the Runtime sizes beside the DiT's weights.
+            output = split(heads, heads, Cut(2))
+        means.close()
+        reuse = means.prior is not None
+    return output, reuse
 
 
 def _columns(
