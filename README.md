@@ -107,7 +107,7 @@ in pieces of at most 15 s, each an internal serving child on one of H3's officia
 piece's latents ([continuation](minimax-h3/docs/continuation.md)).
 
 - **Models.** `base_model: H3TurboBase` is the AdaLN-pruned five-root checkpoint
-  (`minimaxai/minimax-h3@1.0.0-rc.6`; pruned lanes bf16, fp8, int8 and nvfp4, and a FULL reference
+  (`minimaxai/minimax-h3@1.0.0-rc.7`; pruned lanes bf16, fp8, int8 and nvfp4, and a FULL reference
   lane), and `turbo_lora: H3TurboLoRA` holds `fl2va_turbo` and `ref2va_turbo`
   (`alibaba-pai/minimax-h3-turbo-lora@1.0.1`, PDD-8). Both DiTs share one BF16 Qwen3-VL conditioner
   (layers 0–49, the pre-norm `hidden_states[50]`), one video VAE and one audio VAE; Runtime's
