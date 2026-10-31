@@ -88,6 +88,8 @@ HIDDEN, FFN, HEAD_DIM, ROTARY = 5376, 14336, 128, 96
 _ROW_WARPS = 16
 _ROPE_HEADS = 8
 _ROPE_WARPS = 4
+_KEY_TOKENS = 64
+_KEY_WARPS = 4
 _SWIGLU_BLOCK = 1024
 _SWIGLU_WARPS = 8
 #: The codes eager serves past; any other is breakage and refuses.
@@ -290,6 +292,29 @@ def _rope_norm_kernel(  # type: ignore[no-untyped-def]
     tl.store(out_ptr + base + chan, out.to(tl.bfloat16), mask=mask)
 
 
+@triton.jit  # type: ignore[untyped-decorator]
+def _key_sum_kernel(  # type: ignore[no-untyped-def]
+    key_ptr,
+    out_ptr,
+    tokens,
+    stride_t,
+    HEAD_DIM: tl.constexpr,
+    BLOCK_T: tl.constexpr,
+):
+    # One head's F32 key sum over its tokens, tile after tile in token order: the same additions
+    # whatever heads the call holds. torch's sum regroups them by its output count, so a head
+    # window's key mean differed from the whole call's (xs-089 diagnostic run 23636).
+    head = tl.program_id(0)
+    chan = tl.arange(0, HEAD_DIM)
+    acc = tl.zeros((HEAD_DIM,), dtype=tl.float32)
+    for start in range(0, tokens, BLOCK_T):
+        row = start + tl.arange(0, BLOCK_T)
+        offset = row[:, None].to(tl.int64) * stride_t + head * HEAD_DIM + chan[None, :]
+        tile = tl.load(key_ptr + offset, mask=(row < tokens)[:, None], other=0.0)
+        acc += tl.sum(tile.to(tl.float32), axis=0)
+    tl.store(out_ptr + head * HEAD_DIM + chan, acc)
+
+
 def _next_pow2(n: int) -> int:
     return 1 << (n - 1).bit_length()
 
@@ -402,6 +427,20 @@ def _entries(fp8s: tuple[int, ...]) -> Iterator[TritonEntry]:
         {"HEAD_DIM": HEAD_DIM, "ROTARY": ROTARY, "HEADS": _ROPE_HEADS},
         ("x_ptr", "out_ptr", "weight_ptr", "cos_ptr", "sin_ptr"),
         _ROPE_WARPS,
+    )
+    yield TritonEntry(
+        _key_sum_kernel,
+        {
+            "key_ptr": "*bf16",
+            "out_ptr": "*fp32",
+            "tokens": "i32",
+            "stride_t": "i32",
+            "HEAD_DIM": "constexpr",
+            "BLOCK_T": "constexpr",
+        },
+        {"HEAD_DIM": HEAD_DIM, "BLOCK_T": _KEY_TOKENS},
+        ("key_ptr", "out_ptr", "stride_t"),
+        _KEY_WARPS,
     )
 
 
@@ -625,6 +664,17 @@ def rmsnorm_rope(launch: Launch, x: Any, weight: Any, cos: Any, sin: Any, eps: f
     return flat.view(batch, seq, heads, head_dim)
 
 
+def key_sums(launch: Launch, key: Any) -> Any:
+    """F32 [heads, head_dim] sums over tokens of `key`'s [1, tokens, heads, head_dim]."""
+    _require(key)
+    _, tokens, heads, head_dim = (int(d) for d in key.shape)
+    flat = key[0].reshape(tokens, heads * head_dim)
+    flat = flat if flat.stride(-1) == 1 else flat.contiguous()
+    out = torch.empty(heads, head_dim, dtype=torch.float32, device=key.device)
+    launch(_key_sum_kernel, (heads, 1, 1), flat, out, tokens, flat.stride(0), head_dim, _KEY_TOKENS)
+    return out
+
+
 def warm(launch: Launch, device: Any, *, heads: int, fp8: bool) -> float:
     """Launch every entry the served widths need, on two rows; nothing compiles. Returns the
     milliseconds the first launches took to enqueue."""
@@ -646,6 +696,7 @@ def warm(launch: Launch, device: Any, *, heads: int, fp8: bool) -> float:
     angles = torch.randn(rows, ROTARY, device=device)
     head_weight = torch.ones(HEAD_DIM, device=device, dtype=torch.bfloat16)
     rmsnorm_rope(launch, q, head_weight, angles, angles, 1e-5)
+    key_sums(launch, q)
     return (time.perf_counter() - started) * 1000
 
 
@@ -692,7 +743,7 @@ class H3AttnProcessor(MiniMaxH3AttnProcessor):  # type: ignore[misc]
         attention_mask: Any | None,
     ) -> Any:
         query, key, value = self.qkv(attn, hidden_states, rotary_emb)
-        seed_key_mean(key, slice(None))
+        seed_key_mean(getattr(self, "_glue", None), key, slice(None))
         return self.attend(query, key, value, attention_mask)
 
     def attend(self, query: Any, key: Any, value: Any, attention_mask: Any | None = None) -> Any:
@@ -743,12 +794,14 @@ class FusedMiniMaxH3AttnProcessor(H3AttnProcessor):
         return query, key
 
 
-def seed_key_mean(key: Any, heads: slice) -> None:
+def seed_key_mean(launch: Launch | None, key: Any, heads: slice) -> None:
     """`KEY_MEAN`'s heads from this call's [1, tokens, heads, 128] post-RoPE keys, summed in F32
-    without an F32 copy."""
+    without an F32 copy: by each head alone where the glue kernels serve (`key_sums`), so a head
+    window seeds the bits the whole call does."""
     target = KEY_MEAN.get()
     if target is not None:
-        found = key[0].sum(0, dtype=torch.float32) / key.shape[1]
+        found = key[0].sum(0, dtype=torch.float32) if launch is None else key_sums(launch, key)
+        found /= key.shape[1]
         target.slot[heads].copy_(found)
         target.heads += found.shape[0]
 
@@ -811,7 +864,7 @@ class _Heads:
             project(self.hidden, start, stop).unflatten(-1, (-1, d)) for project in self.projections
         )
         query, key = self.processor.rope(self.attn, query, key, self.rotary)
-        seed_key_mean(key, window)
+        seed_key_mean(getattr(self.processor, "_glue", None), key, window)
         return self.processor.attend(query, key, value)
 
 
