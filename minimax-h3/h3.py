@@ -864,8 +864,12 @@ _REGENERATE_PIXELS = {
 RegenerateResolution = Annotated[Resolution, Shape(pixels=_REGENERATE_PIXELS)]
 
 
-#: Regenerate's refine forwards (`regenerate.PRESETS`), the video interfaces' `preset`.
+#: The video interfaces' `preset`: Turbo's dense steps (`TURBO_DENSE_STEPS`) and Regenerate's
+#: refine forwards (`regenerate.PRESETS`).
 Preset = Literal["quality", "balanced", "fast"]
+#: Turbo's dense steps of eight: all (NVIDIA HyperFlow's `quality`), four, and one (Sol-Engine's
+#: `sol_bsa`). The full model has one recipe, ten dense steps.
+TURBO_DENSE_STEPS: dict[Preset, int] = {"quality": 8, "balanced": 4, "fast": 1}
 #: A shot's latents (`shot_latents`): `ShotResult.latents`, `UpscaleInput.latents`.
 Latents = Annotated[File, FileBound(max_bytes=1 << 30, media_types=("application/octet-stream",))]
 
@@ -1008,6 +1012,7 @@ def _render_keyframes(
     first: Image | None,
     last: Image | None,
     turbo_lora: H3TurboLoRA | None = None,
+    preset: Preset = "balanced",
     delivery: ContinuationPlan | None = None,
     completed: Callable[[Any], None] | None = None,
     ended: Callable[[Any], None] | None = None,
@@ -1044,7 +1049,7 @@ def _render_keyframes(
         sample = model.sample_fl2va
     else:
         assert isinstance(model, H3TurboBase)
-        sample = partial(model.sample_fl2va_turbo, turbo_lora=turbo_lora)
+        sample = partial(model.sample_fl2va_turbo, turbo_lora=turbo_lora, sol_dense_steps=TURBO_DENSE_STEPS[preset])
     with tel.stage("denoise", overall_range=(0.15, 0.85)):
         schedule = sample(
             state,
@@ -1140,7 +1145,7 @@ def _references_to_video(
         sample = model.sample_ref2va
     else:
         assert isinstance(model, H3TurboBase)
-        sample = partial(model.sample_ref2va_turbo, turbo_lora=turbo_lora)
+        sample = partial(model.sample_ref2va_turbo, turbo_lora=turbo_lora, sol_dense_steps=TURBO_DENSE_STEPS[payload.preset])
     with tel.stage("denoise", overall_range=(0.15, 0.85)):
         schedule = sample(
             state,
@@ -1223,6 +1228,7 @@ class Ref2VAInput(msgspec.Struct):
     #: A shot's last piece: the earlier pieces' latents and videos, decoded with it as one.
     earlier_latents: tuple[LatentFile, ...] = ()
     earlier_videos: tuple[PieceVideo, ...] = ()
+    preset: Preset = "balanced"
 
 
 class PieceOutput(msgspec.Struct):
@@ -1388,6 +1394,7 @@ class FL2VAInput(msgspec.Struct, kw_only=True):
     duration_s: DurationSeconds
     steps: int | None
     turbo: bool
+    preset: Preset = "balanced"
     first_frame: FrameImage = None
     last_frame: FrameImage = None
     next_context_frames: ContextFrames = 0
@@ -1447,7 +1454,7 @@ async def fl2va_piece(
         prompt=encoder_prompt("fl2va", payload.prompt), seed=payload.seed,
         duration_s=payload.duration_s, steps=payload.steps,
         first=_frame(payload.first_frame, "first_frame"), last=_frame(payload.last_frame, "last_frame"),
-        turbo_lora=lora, delivery=plan if plan.successor else None,
+        turbo_lora=lora, preset=payload.preset, delivery=plan if plan.successor else None,
         completed=handed if handed.wanted else None,
         ended=partial(_keep_frames, out, payload.exports, ended, exported),
     )  # fmt: skip
@@ -1648,7 +1655,8 @@ class ShotRequest(msgspec.Struct, kw_only=True):
     #: (UPSCALE.md); Regenerate starts from the shot's own latents.
     resolution: RegenerateResolution = Resolution.NATIVE
     upscale: Upscale | None = None
-    #: The upscale's preset (`UpscaleInput.preset`) above 768p.
+    #: Speed against fidelity, for the whole shot: Turbo's dense steps (`TURBO_DENSE_STEPS`) and,
+    #: above 768p, the upscale's (`UpscaleInput.preset`).
     preset: Preset = "balanced"
 
 
@@ -1827,6 +1835,9 @@ async def shot(ctx: Context, payload: ShotRequest, out: Outputs, tel: Telemetry)
     references, warnings = _shot_references(payload)
     if payload.turbo and payload.steps is not None:
         warnings.append(f"turbo runs its LoRA's 8 steps; steps {payload.steps} ignored")
+    if not payload.turbo and payload.preset != "balanced":
+        warnings.append(f"the full model renders its one recipe (10 dense steps); preset {payload.preset} "
+                        "sets Turbo's and the upscale's")  # fmt: skip
     steps = None if payload.turbo else payload.steps
     count = len(pieces)
     plans = [ContinuationPlan(length, _CARRY if index else Carry(), _CARRY if index + 1 < count else Carry())
@@ -1894,7 +1905,7 @@ async def shot(ctx: Context, payload: ShotRequest, out: Outputs, tel: Telemetry)
                     result = await ref2va_piece(  # type: ignore[call-arg]
                         payload=Ref2VAInput(
                             prompt=call.prompt, seed=seeds[index], duration_s=pieces[index], steps=steps,
-                            turbo=payload.turbo, frames=held_frames(plan, uses), videos=uses,
+                            turbo=payload.turbo, preset=payload.preset, frames=held_frames(plan, uses), videos=uses,
                             previous_provenance=expected, context=context if plan.carried else None,
                             context_frames=cast(ContextFrames, plan.carried.frames),
                             context_audio=plan.carried.audio,
@@ -1912,7 +1923,7 @@ async def shot(ctx: Context, payload: ShotRequest, out: Outputs, tel: Telemetry)
                     result = await fl2va_piece(  # type: ignore[call-arg]
                         payload=FL2VAInput(
                             prompt=call.prompt, seed=seeds[index], duration_s=pieces[index], steps=steps,
-                            turbo=payload.turbo, first_frame=first, last_frame=last,
+                            turbo=payload.turbo, preset=payload.preset, first_frame=first, last_frame=last,
                             next_context_frames=cast(ContextFrames, plan.successor.frames),
                             next_context_audio=plan.successor.audio, exports=tuple(exports.get(index, ())),
                             latents=True,
@@ -1939,7 +1950,7 @@ async def shot(ctx: Context, payload: ShotRequest, out: Outputs, tel: Telemetry)
         video = (await upscale(ctx, request, out, tel)).video
         out.publish("video", video, label=f"Video at {payload.resolution.value}")
     ctx.release_gpus()
-    tel.log("h3 shot", pieces=count, delivered_frames=total, turbo=payload.turbo)
+    tel.log("h3 shot", pieces=count, delivered_frames=total, turbo=payload.turbo, preset=payload.preset)
     return ShotResult(video=video, frames=[returned[piece].frames[slot] for piece, slot in order],
                       warnings=list(dict.fromkeys(warnings)), latents=latents)  # fmt: skip
 
