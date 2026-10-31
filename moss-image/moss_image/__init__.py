@@ -75,8 +75,9 @@ _MEMO = ("moss_image", "moss_image.model")
                 memoize=Memoize(requires=["seed"]), memo_dependencies=_MEMO)
 def generate(ctx: Context, payload: GenerateInput, model: MossImage, out: Outputs, tel: Telemetry,
              adj: Adjustments) -> ImageResult:
-    """MOSS-Image SFT: 50 Euler steps at CFG 3 (the negative branch skips block 22), with `regions` laid
-    out as upstream's layout JSON."""
+    """MOSS-Image SFT, 50 Euler steps at CFG 3, with `regions` laid out as upstream's layout JSON.
+
+    The negative branch skips block 22."""
     model.hold_vae(tel)
     payload.ignored(adj, "prompt_upsampling", reason="MOSS-Image has no prompt upsampler")
     steps = held(adj, "steps", payload.steps or STEPS, 1, MOST_STEPS, "MOSS-Image's 1-200 steps")

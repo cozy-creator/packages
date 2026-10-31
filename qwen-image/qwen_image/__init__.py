@@ -123,8 +123,9 @@ def generate(
     tel: Telemetry,
     adj: Adjustments,
 ) -> ImageResult:
-    """Qwen-Image-2512 from text (50 steps), Qwen-Image-Edit-2511 with picture assets (40 steps), both
-    with true CFG 4.0."""
+    """Qwen-Image-2512 from text (50 steps), or Qwen-Image-Edit-2511 with pictures (40 steps).
+
+    Both with true CFG 4.0."""
     edit = bool(payload.assets)
     steps = held(adj, "steps", payload.steps or (EDIT_STEPS if edit else TEXT_STEPS), 2, 100,
                  "at least 2 (the schedule stretches its last step to the terminal sigma), at most 100")

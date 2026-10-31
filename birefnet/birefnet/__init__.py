@@ -52,6 +52,7 @@ def remove_background(
     out: Outputs,
     tel: Telemetry,
 ) -> RemoveBackgroundOutput:
+    """An image's subject cut out onto a white background, as a WebP."""
     ctx.raise_if_cancelled()
     with tel.stage("reading reference", overall_range=(0.0, 0.1)):
         image = payload.image.read()

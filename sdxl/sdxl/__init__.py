@@ -622,7 +622,9 @@ def generate(
     tel: Telemetry,
     adj: Adjustments,
 ) -> ImageResult:
-    """One text-to-image generation: tokenize, encode, denoise, decode, encode a WebP."""
+    """SDXL 1.0 text to image, as a WebP.
+
+    Tokenize, encode, denoise, decode, encode the WebP."""
     ctx.plan({"text_encoder", "text_encoder_2"}, "unet", "vae")
     hold_decode_dtype(model.pipe.components["vae"], tel)
     payload.ignored(adj, "prompt_upsampling", reason="SDXL has no prompt upsampler")

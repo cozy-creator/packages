@@ -1855,10 +1855,11 @@ def piece_seed(seed: int | None, request_id: str, index: int) -> int:
 
 
 async def shot(ctx: Context, payload: ShotRequest, out: Outputs, tel: Telemetry) -> ShotResult:
-    """One continuous shot (`video/shot`): its pieces rendered in order, each continuing the
-    last, joined into one video published as it grows; and the frames its `writes` ask for, each
-    taken by the piece that delivers it. The run's model stack (`--lora`, `model.base_model`)
-    serves every piece."""
+    """One continuous shot of any length, with sound.
+
+    `video/shot`: its pieces rendered in order, each continuing the last, joined into one video
+    published as it grows; and the frames its `writes` ask for, each taken by the piece that
+    delivers it. The run's model stack (`--lora`, `model.base_model`) serves every piece."""
     ctx.raise_if_cancelled()
     pieces = plan_pieces(payload.duration_s, [beat.at for beat in payload.beats])
     if len(pieces) > 1 and not payload.beats:
@@ -2045,9 +2046,11 @@ class UpscaleOutput(msgspec.Struct):
 
 
 async def upscale(ctx: Context, payload: UpscaleInput, out: Outputs, tel: Telemetry) -> UpscaleOutput:
-    """One whole shot upscaled, the one way in for every caller (`shot` above 768p, projects,
-    `cozy run`): regenerate-2k from its latents when given, else its video; SeedVR2 from its
-    video. The fields its model ignores are logged."""
+    """A shot upscaled, its sound kept: SeedVR2 restores it, or H3 re-renders it from its prompt.
+
+    The one way in for every caller (`shot` above 768p, projects, `cozy run`): regenerate-2k from
+    its latents when given, else its video; SeedVR2 from its video. The fields its model ignores
+    are logged."""
     seed = payload.seed if payload.seed is not None else int.from_bytes(
         hashlib.sha256(f"{ctx.request_id}/h3/upscale".encode()).digest()[:4], "big")  # fmt: skip
     method = payload.upscale or Upscale()

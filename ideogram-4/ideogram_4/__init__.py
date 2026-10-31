@@ -115,8 +115,9 @@ def refusal_card(image: Any) -> bool:
 )
 def generate(ctx: Context, payload: GenerateInput, model: Ideogram4, text_encoder: QwenEncoder,
              upsampler: QwenUpsampler, out: Outputs, tel: Telemetry, adj: Adjustments) -> ImageResult:
-    """Ideogram 4, 48 steps at guidance 7 (3 on the last steps): a JSON caption, or a prompt the
-    upsampler expands into one, with `regions` placed by box."""
+    """Ideogram 4, 48 steps at guidance 7: a JSON caption or a prompt, with `regions` placed by box.
+
+    Guidance is 3 on the last steps; the upsampler expands a prompt into the caption."""
     model.hold_vae(tel)
     payload.ignored(adj, "negative_prompt", reason="Ideogram 4's unconditional DiT reads no text")
     prompt = payload.rendered(adj)

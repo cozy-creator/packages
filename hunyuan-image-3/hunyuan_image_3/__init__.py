@@ -103,8 +103,9 @@ _COMPONENTS = {"model": ("model",)}
                 memoize=Memoize(requires=["seed"]))
 def generate_turbo(ctx: Context, payload: HunyuanRequest, model: HunyuanImage3, out: Outputs, tel: Telemetry,
                    adj: Adjustments) -> ImageResult:
-    """HunyuanImage 3.0 Instruct-Distil, 8 steps, guidance 2.5 (distilled): text to image, or an edit of up to
-    three picture assets; the model thinks and rewrites the prompt first unless `prompt_upsampling` is false."""
+    """HunyuanImage 3.0 Instruct-Distil, 8 steps at guidance 2.5: text to image, or an edit of up to three pictures.
+
+    The model thinks and rewrites the prompt first unless `prompt_upsampling` is false."""
     return _generate(ctx, payload, payload.steps or 8, model, out, tel, adj)
 
 
@@ -112,6 +113,7 @@ def generate_turbo(ctx: Context, payload: HunyuanRequest, model: HunyuanImage3, 
                 memoize=Memoize(requires=["seed"]))
 def generate(ctx: Context, payload: HunyuanRequest, model: HunyuanImage3, out: Outputs, tel: Telemetry,
              adj: Adjustments) -> ImageResult:
-    """HunyuanImage 3.0 Instruct, 50 steps with CFG 2.5: text to image, or an edit of up to three picture assets;
-    the model thinks and rewrites the prompt first unless `prompt_upsampling` is false."""
+    """HunyuanImage 3.0 Instruct, 50 steps with CFG 2.5: text to image, or an edit of up to three pictures.
+
+    The model thinks and rewrites the prompt first unless `prompt_upsampling` is false."""
     return _generate(ctx, payload, payload.steps or 50, model, out, tel, adj)
