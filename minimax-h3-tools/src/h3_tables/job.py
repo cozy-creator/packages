@@ -436,8 +436,12 @@ QUANTIZER_RECIPES: Mapping[str, Mapping[str, _lanes.Treatment]] = {
 }
 
 
-def quantizer_selections(source: Checkpoint, encoding: _lanes.Encoding) -> list[Selection]:
-    """The recipe's components this source still holds plain, resolved for `encoding`."""
+def quantizer_selections(
+    source: Checkpoint, encoding: _lanes.Encoding | None, *, pruned: bool = True
+) -> list[Selection]:
+    """The recipe's components this source still holds plain, resolved for `encoding`, and the
+    lane normalisations; with no encoding, the normalisations of a plain lane (`pruned`: AdaLN-pruned,
+    else full) alone."""
     present = rows(source)
     if set(present) != set(COMPONENTS):
         raise UnsupportedInput(
@@ -445,13 +449,23 @@ def quantizer_selections(source: Checkpoint, encoding: _lanes.Encoding) -> list[
         )
     sections = parse_full_config(_asset("model-config.json"))
     for component in DIT_COMPONENT.values():
-        if set(removed_keys(H3Topology.from_config(sections[component]))) & set(present[component]):
+        removed = set(removed_keys(H3Topology.from_config(sections[component])))
+        if pruned and removed & set(present[component]):
             raise UnsupportedInput(
                 f"{component} still carries its AdaLN modulation rows; quantize an AdaLN-pruned "
                 "lane (bf16 or fp8)",
                 code="h3_quantize_unpruned",
             )
-    recipe = QUANTIZER_RECIPES[encoding]
+        if not pruned and not removed <= set(present[component]):
+            raise UnsupportedInput(
+                f"{component} lacks its AdaLN modulation rows; bf16-full is written from a full lane",
+                code="h3_quantize_pruned",
+            )
+    if encoding is None and any(row.encoding for held in present.values() for row in held.values()):
+        raise UnsupportedInput(
+            "a bf16 lane is plain and this source carries encodings", code="h3_quantize_mixed"
+        )
+    recipe = QUANTIZER_RECIPES[encoding] if encoding is not None else {}
     selections = []
     for component in [*recipe, *(c for c in NORMALISED_COMPONENTS if c not in recipe)]:
         treatment = recipe.get(component)
@@ -480,7 +494,7 @@ def quantizer_selections(source: Checkpoint, encoding: _lanes.Encoding) -> list[
             selections.append(selection)
     if not selections:
         raise UnsupportedInput(
-            f"every component of H3's recipe already carries {encoding}, normalised",
+            f"every component of H3's recipe already carries {encoding or 'nothing'}, normalised",
             code="h3_quantize_nothing",
         )
     return selections
@@ -491,13 +505,13 @@ def _quantize_lane(
     tel: Telemetry,
     weights: Weights[Any],
     lane: str,
-    encoding: _lanes.Encoding,
+    encoding: _lanes.Encoding | None,
     max_relative_frobenius: float | None,
 ) -> ModelArtifact:
     source = open_source(ctx, weights)
     for task in DIT_COMPONENT:
         _production_plan(source, task)
-    selections = quantizer_selections(source, encoding)
+    selections = quantizer_selections(source, encoding, pruned=lane != "bf16-full")
     order = [(component, key) for component, keys in rows(source).items() for key in keys]
     request = ArtifactQuantizationRequest(max_relative_frobenius=max_relative_frobenius)
     with ctx.output(lane, Derivation(base=source, order=order)) as out:
@@ -510,14 +524,16 @@ def _quantize_lane(
             lane=lane,
             encoded=",".join(selection.component for selection in selections),
             inherited=",".join(
-                sorted(set(QUANTIZER_RECIPES[encoding]) - {s.component for s in selections})
+                sorted(set(QUANTIZER_RECIPES.get(encoding or "", {})) - {s.component for s in selections})
             ),
         )
         return ctx.adopt_model(out)
 
 
-#: Each quantized lane's encoding.
-QUANTIZER_ENCODINGS: Mapping[str, _lanes.Encoding] = {
+#: Each recipe lane's encoding; the bf16 lanes encode nothing and apply the normalisations alone.
+QUANTIZER_ENCODINGS: Mapping[str, _lanes.Encoding | None] = {
+    "bf16-full": None,
+    "bf16": None,
     "fp8": "fp8.rowwise",
     "int8": "int8.convrot",
     "nvfp4": "nvfp4",
@@ -528,12 +544,16 @@ QUANTIZER_ENCODINGS: Mapping[str, _lanes.Encoding] = {
 def quantize_lane(ctx: Context, tel: Telemetry, source: Weights[Any], output: str) -> ModelArtifact:
     """H3's recipe for lane `output` (`QUANTIZER_RECIPES`): fp8 row-wise, int8 W8A8 on the int8
     tensor cores, nvfp4 W4A4 on Blackwell's FP4 tensor cores, w4a8 W4A8 on the int8 tensor cores
-    (Ampere, Ada, Hopper)."""
+    (Ampere, Ada, Hopper); bf16 and bf16-full re-apply the normalisations to such a lane."""
     return _quantize_lane(ctx, tel, source, output, QUANTIZER_ENCODINGS[output], None)
 
 
 #: `cozy model quantize <H3 checkpoint> --lane fp8|int8|nvfp4|w4a8 --package <this>`: code, not a
-#: plan, since what a lane encodes depends on what the source still holds plain.
+#: plan, since what a lane encodes depends on what the source still holds plain. `--lane bf16|bf16-full`
+#: on such a plain lane writes its normalisations alone (the lane functions write those lanes from the
+#: converted source).
+BF16 = Recipe(lane="bf16", model=Model, plan=DerivationHook(quantize_lane))
+BF16_FULL = Recipe(lane="bf16-full", model=Model, plan=DerivationHook(quantize_lane))
 FP8 = Recipe(lane="fp8", model=Model, plan=DerivationHook(quantize_lane))
 INT8 = Recipe(lane="int8", model=Model, plan=DerivationHook(quantize_lane))
 NVFP4 = Recipe(lane="nvfp4", model=Model, plan=DerivationHook(quantize_lane))

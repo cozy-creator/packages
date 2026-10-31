@@ -24,7 +24,8 @@ Its quantized lanes are recipes (`FP8`, `INT8`, `NVFP4`, `W4A8` in `h3_tables.jo
 `DerivationHook`, since what a lane encodes depends on what the source still holds plain. Both
 DiTs and the text conditioner's 350 decoder linears, and in int8, nvfp4 and w4a8 the video VAE
 decoder's 216 block linears at int8.convrot, encoding what is still plain. Every recipe also
-applies the video VAE's f16 normalisation, so a lane written before it re-casts only those rows; CPU:
+applies the video VAE's f16 normalisation, so a lane written before it re-casts only those rows, and
+`--lane bf16` / `--lane bf16-full` on a plain pruned / full lane apply that normalisation alone; CPU:
 
 ```sh
 cozy model quantize minimaxai/minimax-h3@sha256:<pruned commit> --lane fp8 --package minimax-h3-tools --on NAME
