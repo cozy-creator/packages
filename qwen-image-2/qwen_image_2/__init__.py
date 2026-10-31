@@ -182,3 +182,5 @@ def generate_turbo(
 ) -> ImageResult:
     """Qwen-Image-2.1-Turbo: the same inputs, on its 8-step distilled schedule."""
     return _generate(ctx, payload, model, out, tel, adj, TURBO_SIGMAS)
+
+# proof/xs089-prebuilt-2: the same source under another digest (a second, unmemoized run)

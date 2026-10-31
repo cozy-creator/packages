@@ -177,3 +177,5 @@ INT8 = Recipe(
         output_precision="preserve",
     ),
 )
+
+# proof/xs089-prebuilt-2: the same source under another digest (a second, unmemoized run)
