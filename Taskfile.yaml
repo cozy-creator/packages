@@ -4,6 +4,7 @@ silent: true
 vars:
   LOCK_HUB: https://tensorhub.com # committed locks resolve against production
   HUBS: https://tensorhub.com http://127.0.0.1:8819
+  RUNTIME: cozy-runtime # the Runtime machines run, which keys its fused kernels: the newest release
 
 tasks:
   # First-party packages publish at the root namespace (`--root`, Hub admins). Locks pin first-party callees exactly, so each release of X is followed by one of every package
@@ -52,10 +53,17 @@ tasks:
           [ -z "$on" ] || { echo "$r $(ver "$r") already exists on $on: bump its version on master; nothing published" >&2; exit 1; }
         done
         shipped=
+        # The package's Triton sets for every card row, compiled on this CPU into <module>/_triton, ship in the release.
+        kernels() { m=$(sed -n 's/^object = "\([A-Za-z0-9_]*\).*/\1/p' "$1/package.toml"); e=$work/.env-$1
+          (cd "$1" && UV_PROJECT_ENVIRONMENT=$e uv sync -q --frozen --no-dev --python 3.12)
+          VIRTUAL_ENV=$e uv pip install -q --no-deps --upgrade --reinstall-package cozy-runtime "{{.RUNTIME}}"
+          nice -n 19 "$e/bin/python" -I -m cozy_runtime.internal.triton_prebuild "$work/.kernels/$1/$m/_triton" --package "$m" >/dev/null; }
         ship() {
           on=$(held "$1"); [ -z "$on" ] || { echo "$1 $(ver "$1") already exists on $on: not published, not yanked" >&2; exit 1; }
+          kernels "$1"
           for h in {{.HUBS}}; do
             rm -rf "${work:?}/$1"; git archive HEAD "$1" | tar -x -C "$work"
+            [ ! -d "$work/.kernels/$1" ] || cp -r "$work/.kernels/$1/." "$work/$1/"
             (cd "$work/$1" && COZY_HUB_URL="$h" cozy package publish --root)
             COZY_HUB_URL="$h" cozy package yank "$1@$(ver "$1")" -y ||
               { echo "$1 $(ver "$1") is published on $h but NOT yanked: yank it there now" >&2; exit 1; }
