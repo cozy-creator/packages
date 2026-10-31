@@ -68,7 +68,7 @@ from cozy_runtime.author.kernels import (
 from cozy_runtime.rows import Rows, rows
 
 from .adaln_pruned import AdaLNPrunedMiniMaxH3Transformer
-from .fit import fits, release
+from .fit import release_if_tight
 
 CONTRACT = "h3-glue-call-and-topology/2"
 
@@ -661,14 +661,14 @@ class FusedSwiGLU(SwiGLU):  # type: ignore[misc]
 
 
 class H3AttnProcessor(MiniMaxH3AttnProcessor):  # type: ignore[misc]
-    """Diffusers' H3 attention. Where the device holds the whole call (`fits`), it runs as it
-    always did: Q, K and V whole, freed before the out projection. Where it does not (15 s on an
-    8 GB card: the three take 4.8 GB beside 2.4 GB of residual and normed rows), the call goes
-    through `split` by query heads, each window computing its own rows of the projections
-    (`cozy_runtime.rows`), per-head norms and RoPE, then the out projection by tokens; Torch's
-    cache is returned after it, so its odd-sized blocks are not split for the next block's row
-    sets (fragmentation ran step 2 out of memory with 2.14 GiB cached). A projection that does
-    not cut by rows, a mask or a sequence-parallel exchange runs the heads whole."""
+    """Diffusers' H3 attention, declared as an exact split by query heads: each window computes
+    its own rows of the projections (`cozy_runtime.rows`), per-head norms and RoPE, and the out
+    projection runs by tokens. The Runtime sizes the windows against the memory the DiT's
+    weights leave (whole on a card that holds both). On a card that does not hold the whole
+    call (15 s on an 8 GB card: Q, K and V take 4.8 GB beside 2.4 GB of residual and normed
+    rows) Torch's cache is returned after it, so its odd-sized blocks are not split for the next
+    block's row sets (fragmentation ran step 2 out of memory with 2.14 GiB cached). A
+    projection that does not cut by rows, a mask or a sequence-parallel exchange runs whole."""
 
     def __call__(
         self,
@@ -677,11 +677,7 @@ class H3AttnProcessor(MiniMaxH3AttnProcessor):  # type: ignore[misc]
         rotary_emb: tuple[Any, Any] | None = None,
         attention_mask: Any | None = None,
     ) -> Any:
-        heads = (
-            None
-            if fits(hidden_states, attn)
-            else _Heads.of(self, attn, hidden_states, rotary_emb, attention_mask)
-        )
+        heads = _Heads.of(self, attn, hidden_states, rotary_emb, attention_mask)
         if heads is None:
             hidden_states = self.whole(attn, hidden_states, rotary_emb, attention_mask)
             return attn.to_out[1](attn.to_out[0](hidden_states.flatten(2, 3)))
@@ -689,7 +685,7 @@ class H3AttnProcessor(MiniMaxH3AttnProcessor):  # type: ignore[misc]
             attended = split(heads, heads, Cut(2))
         out = attn.to_out[1](split(attn.to_out[0], attended.flatten(2, 3), Cut(1)))
         del attended
-        release()
+        release_if_tight(hidden_states, attn)
         return out
 
     def whole(
