@@ -1,10 +1,10 @@
 [project]
 name = "seedvr2"
-version = "0.1.5"
+version = "0.1.7"
 description = "SeedVR2 7B temporally consistent video restoration"
 requires-python = ">=3.12"
 dependencies = [
-    "cozy-runtime[media]>=0.36.0",
+    "cozy-runtime[media]>=0.36.3",
     "diffusers>=0.40",
     "einops>=0.8",
     "msgspec>=0.19",
