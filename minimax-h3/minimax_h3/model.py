@@ -25,7 +25,7 @@ from cozy_runtime.author import (
 )
 from cozy_runtime.author.kernels import Plan
 
-from . import glue, producer, regenerate
+from . import glue, producer, regenerate, shot_latents
 from .latent_upscaler import H3LatentUpscaler as H3LatentUpscaler
 from .official import (
     REGENERATE_COMPONENT,
@@ -200,6 +200,10 @@ class H3Model(
         self.pipe.condition_text("fl2va", state, self.device)
         return state.prompt_embeds, state.text_token_tags
 
+    def latent_space(self) -> str:
+        """The video VAE's latent space (`shot_latents.vae_space`), from its config alone."""
+        return shot_latents.vae_space(self.pipe.components["vae"])
+
     @uses_components("vae")
     def encode_clip(self, pixels: Any) -> Any:
         return self.pipe.encode_clip(pixels, regenerate.POSTERIOR_SEED)
@@ -266,12 +270,13 @@ class H3TurboBase(H3Model, encoded_leaves="accept"):
         audio: Any,
         schedule: Schedule,
         seed: int,
+        preset: str,
         on_step: Any,
     ) -> Any:
         """The Regenerate refine of normalized latents at their canvas, on the FL2VA DiT."""
         return overlay.refine(
             self, latents, prompt_embeds=prompt_embeds, text_tags=text_tags, spans=spans,
-            audio=audio, schedule=schedule, seed=seed, on_step=on_step,
+            audio=audio, schedule=schedule, seed=seed, preset=preset, on_step=on_step,
         )  # fmt: skip
 
     @uses_components("transformer_ref")
@@ -401,11 +406,12 @@ class H3RegenerateLoRA(Model[OfficialH3RegenerateLoRA], encoded_leaves="accept")
         audio: Any,
         schedule: Schedule,
         seed: int,
+        preset: str,
         on_step: Any,
     ) -> Any:
         return regenerate.refine(
             base.pipe.components["transformer"],
             self.pipe.overlay(base.pipe),
             latents=latents, prompt_embeds=prompt_embeds, text_tags=text_tags, spans=spans,
-            audio=audio, schedule=schedule, seed=seed, on_step=on_step,
+            audio=audio, schedule=schedule, seed=seed, preset=preset, on_step=on_step,
         )  # fmt: skip

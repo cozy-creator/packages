@@ -532,7 +532,7 @@ def _produce(
         (attn.norm_q.weight, attn.norm_k.weight),
         kmean=prior_mean,
         vscale=prior_scale,
-        tau=1.0,
+        tau=layout.tau,
         scale=128**-0.5,
         rope_eps=attn.norm_q.eps,
         sink_blocks=[0, -(-layout.protected_prefix // 64)],

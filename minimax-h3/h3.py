@@ -63,6 +63,7 @@ from safetensors.torch import save as save_tensors
 
 from gates import MediaFacts, refuse_before_encode
 from minimax_h3 import regenerate as refine_math
+from minimax_h3 import shot_latents
 from minimax_h3.continuation import (
     AVContext,
     Carry,
@@ -93,6 +94,7 @@ from minimax_h3.official import (
     MAX_REFERENCES,
     MAX_VIDEO_REFERENCES,
     REFERENCE_IMAGE_SHORT_EDGE,
+    VAE_SPATIAL_RATIO,
     OfficialH3Pipeline,
     ReferencePolicyFacts,
     ScheduleFacts,
@@ -237,6 +239,9 @@ class Resolution(Enum):
 
 #: The refine starts the Regenerate overlay serves (`efficient-large-model/open-h3-regenerate-2k@0.1.0`'s plan).
 REGENERATE_STRENGTHS = (0.7, 0.8, 0.909)
+#: The default start (Paul, 10-31): NVIDIA's 0.909 redraws a face as another person's, its hat and sunglasses, and a
+#: painted look as a photograph; 0.7 keeps them (fidelity test, runs 24518-24554).
+REGENERATE_STRENGTH = 0.7
 _SEEDVR2_FIELDS = (
     "color_correction", "input_noise_scale", "latent_noise_scale", "batch_size",
     "uniform_batch_size", "temporal_overlap", "prepend_frames",
@@ -256,7 +261,7 @@ class Upscale(msgspec.Struct, kw_only=True):
       letterboxes. At `768p` it is a refine-only pass at the native size.
 
     `strength` (regenerate-2k): how much of the source the refine redraws, as its start noise:
-    0.909 (default, NVIDIA's), 0.8 or 0.7. Lower keeps more of the source (faces, on-screen text)
+    0.7 (default), 0.8 or 0.909 (NVIDIA's). Lower keeps more of the source (faces, on-screen text)
     and is faster; higher invents more detail. Small text is redrawn at every strength and can
     become other letters; SeedVR2 keeps it.
     """
@@ -292,7 +297,7 @@ class Upscale(msgspec.Struct, kw_only=True):
 
     @property
     def start(self) -> float:
-        return REGENERATE_STRENGTHS[-1] if self.strength is None else self.strength
+        return REGENERATE_STRENGTH if self.strength is None else self.strength
 
 
 class H3VideoOutput(msgspec.Struct):
@@ -861,16 +866,27 @@ _REGENERATE_PIXELS = {
 RegenerateResolution = Annotated[Resolution, Shape(pixels=_REGENERATE_PIXELS)]
 
 
+#: Regenerate's refine forwards (`regenerate.PRESETS`), the video interfaces' `preset`.
+Preset = Literal["quality", "balanced", "fast"]
+#: A shot's latents (`shot_latents`): `ShotResult.latents`, `UpscaleInput.latents`.
+Latents = Annotated[File, FileBound(max_bytes=1 << 30, media_types=("application/octet-stream",))]
+
+
 class RegenerateInput(msgspec.Struct, kw_only=True):
-    """`upscale`'s Regenerate route (`regenerate_shot`): the video's 768p frames encoded,
-    upscaled in latent space and refined by H3 at `resolution` from `prompt`, its soundtrack
-    kept. The 7:4 frame fills 16:9, stretched 1.6% horizontally; `768p` refines only."""
+    """`upscale`'s Regenerate route (`regenerate_shot`): the shot's 768p latents (`latents`, its
+    own, as NVIDIA's `--input-latents`), else its video's frames encoded, upscaled in latent space
+    and refined by H3 at `resolution` from `prompt`, the video's soundtrack kept. The 7:4 frame
+    fills 16:9, stretched 1.6% horizontally; `768p` refines only."""
 
     video: Annotated[VideoFile, FileBound(max_bytes=1 << 30, max_decoded_bytes=2 << 30)]
+    latents: Latents | None = None
     prompt: str
     resolution: RegenerateResolution = Resolution.QHD
-    strength: float = 0.909
+    strength: float = REGENERATE_STRENGTH
     seed: int | None = None
+    #: NVIDIA's refine forwards (`regenerate.PRESETS`): `quality` dense (`standard`), `balanced`
+    #: step 0 dense then sparse at tau 1.0 (`sol_engine`), `fast` all sparse at tau 1.75.
+    preset: Preset = "balanced"
 
     def __post_init__(self) -> None:
         if round(self.strength, 3) not in REGENERATE_STRENGTHS:
@@ -886,6 +902,8 @@ class RegenerateOutput(msgspec.Struct):
 
 #: The canvas the refine's latent is encoded at: H3's native 1344x768.
 _DRAFT_SIZE = (768, 1344)
+#: The draft's latent grid: `_DRAFT_SIZE` over the VAE's 16 px.
+_DRAFT_LATENT = (_DRAFT_SIZE[0] // VAE_SPATIAL_RATIO, _DRAFT_SIZE[1] // VAE_SPATIAL_RATIO)
 
 
 def _read_draft(video: VideoFile) -> tuple[Any, Any | None, int, int, list[str]]:
@@ -932,6 +950,30 @@ def _read_draft(video: VideoFile) -> tuple[Any, Any | None, int, int, list[str]]
         if int(waveform.shape[0]) not in _AUDIO_LAYOUTS:
             raise InvalidRequest("regenerate keeps mono or stereo soundtracks", fields=["video"])
     return pixels, waveform, rate, count, warnings
+
+
+def _read_soundtrack(video: VideoFile, frames: int) -> tuple[Any | None, int]:
+    """The `(channels, samples)` soundtrack of a video its latents stand for (`frames` frames at
+    24 fps), and its sample rate; its pictures are not decoded."""
+    probe = video.probe()
+    if probe.frame_rate != FPS:
+        raise InvalidRequest(f"regenerate takes 24 fps video, not {probe.frame_rate}", fields=["video"])
+    if abs(round(probe.duration * FPS) - frames) > 1:
+        raise InvalidRequest(f"the latents are {frames} frames and the video {round(probe.duration * FPS)}: "
+                             "they are not the same shot", fields=["latents"])  # fmt: skip
+    pcm: list[list[Any]] = []
+    rate = 0
+    with video.stream(pictures=False) as stream:
+        for event in stream:
+            if isinstance(event, DecodedAudioChunk):
+                rate = event.sample_rate
+                pcm.append([np.frombuffer(data, dtype=np.float32) for data in event.pcm_f32le])
+    if not pcm:
+        return None, rate
+    waveform = torch.from_numpy(np.stack([np.concatenate(c) for c in zip(*pcm, strict=True)]))
+    if int(waveform.shape[0]) not in _AUDIO_LAYOUTS:
+        raise InvalidRequest("regenerate keeps mono or stereo soundtracks", fields=["video"])
+    return waveform, rate
 
 
 def _cover(frame: Any) -> Any:
@@ -1247,7 +1289,8 @@ class _Pieces:
             # previous piece's latents in phase.
             head = video_tokens(self.plan.carried.frames) if self.plan.carried.frames else 0
             delivered = state.latents[:, :, head:].detach().float().cpu().contiguous()
-            self.saved["latents"] = self.out.save_bytes(save_tensors({"latents": delivered}),
+            space = self.model.latent_space()
+            self.saved["latents"] = self.out.save_bytes(save_tensors({"latents": delivered}, {"vae_space": space}),
                                                        media_type="application/octet-stream")  # fmt: skip
 
     @property
@@ -1435,13 +1478,22 @@ async def regenerate_shot(
     """`upscale.model: regenerate-2k` over a whole shot: its 768p latent upscaled, refined at
     `resolution` in overlapping windows where the card needs them, and decoded with its
     soundtrack."""
-    ctx.plan("vae", "text_encoder", "audio_vae", "upscaler", {"transformer", "fl2va_regenerate"}, "vae")
+    # In the order they run; the shot's own latents skip the encode.
+    encode = () if payload.latents is not None else ("vae",)
+    ctx.plan(*encode, "upscaler", "text_encoder", "audio_vae", {"transformer", "fl2va_regenerate"}, "vae")
     cancel = ctx.raise_if_cancelled
-    with tel.stage("read_video", overall_range=(0.00, 0.03)):
-        pixels, waveform, sample_rate, frames, warnings = _read_draft(payload.video)
-    with tel.stage("encode_video", overall_range=(0.03, 0.08)):
-        latents = base_model.encode_clip(pixels)
-    del pixels
+    if payload.latents is not None:
+        # The shot's own latent: no encode, and no decode-and-encode loss (NVIDIA's `--input-latents`).
+        with tel.stage("read_video", overall_range=(0.00, 0.08)):
+            latents, frames = shot_latents.load(payload.latents.read_bytes(), base_model.latent_space(), _DRAFT_LATENT)
+            waveform, sample_rate = _read_soundtrack(payload.video, frames)
+            warnings: list[str] = []
+    else:
+        with tel.stage("read_video", overall_range=(0.00, 0.03)):
+            pixels, waveform, sample_rate, frames, warnings = _read_draft(payload.video)
+        with tel.stage("encode_video", overall_range=(0.03, 0.08)):
+            latents = base_model.encode_clip(pixels)
+        del pixels
     resolution = payload.resolution.value
     with tel.stage("upscale_latent", overall_range=(0.08, 0.10)):
         for height, width in refine_math.upscale_passes(resolution):
@@ -1454,13 +1506,14 @@ async def regenerate_shot(
     steps = schedule.transformer_evaluations
     seed = payload.seed if payload.seed is not None else int.from_bytes(
         hashlib.sha256(f"{ctx.request_id}/h3/regenerate".encode()).digest()[:4], "big")  # fmt: skip
-    tel.log("h3 regenerate", resolution=resolution, strength=payload.strength, start_sigma=schedule.start,
+    tel.log("h3 regenerate", resolution=resolution, strength=payload.strength, preset=payload.preset, start_sigma=schedule.start,
             transformer_evaluations=steps, latent="x".join(str(int(value)) for value in latents.shape[2:]),
             windows=len(spans), window_latent_frames=spans[0][1])  # fmt: skip
     with tel.stage("refine", overall_range=(0.14, 0.85)):
         refined = base_model.refine(
             latents, overlay=regenerate_lora, prompt_embeds=text[0], text_tags=text[1], spans=spans,
             audio=base_model.silence(refine_math.frames_of(spans[0][1])), schedule=schedule, seed=seed,
+            preset=payload.preset,
             on_step=tel.step_callback(steps, stage="refine", overall_range=(0.14, 0.85)),
         )  # fmt: skip
     cancel()
@@ -1594,13 +1647,21 @@ class ShotRequest(msgspec.Struct, kw_only=True):
     writes: list[Literal["first", "last"] | Annotated[float, msgspec.Meta(ge=0)]] = []
     turbo: bool = True
     steps: FullSteps | None = None
+    #: `768p` is H3's own size. Above it the finished shot is upscaled whole by `upscale.model`
+    #: (UPSCALE.md); Regenerate starts from the shot's own latents.
+    resolution: RegenerateResolution = Resolution.NATIVE
+    upscale: Upscale | None = None
+    #: The upscale's preset (`UpscaleInput.preset`) above 768p.
+    preset: Preset = "balanced"
 
 
 class ShotResult(msgspec.Struct):
     video: Annotated[VideoFile, FileBound(max_bytes=1 << 30, media_types=("video/mp4",))]
-    #: One per `writes` entry, in order.
+    #: One per `writes` entry, in order, from the 768p render.
     frames: list[ImageFile]
     warnings: list[str]
+    #: The 768p shot's own latents (`shot_latents`), for a later `upscale` to start from.
+    latents: Latents | None = None
 
 
 #: What each later piece carries from the one before: 22 frames of picture and one second of sound.
@@ -1870,7 +1931,7 @@ async def shot(ctx: Context, payload: ShotRequest, out: Outputs, tel: Telemetry)
                             context_audio=plan.carried.audio,
                             next_context_frames=cast(ContextFrames, plan.successor.frames),
                             next_context_audio=plan.successor.audio, first_frame=first, last_frame=last,
-                            exports=tuple(exports.get(index, ())), latents=several and index + 1 < count,
+                            exports=tuple(exports.get(index, ())), latents=True,
                             earlier_latents=tuple(r.latents for r in returned) if several and index + 1 == count else (),
                             earlier_videos=tuple(r.video for r in returned) if several and index + 1 == count else (),
                             picture_edges=tuple(_WORLD_STATE_EDGE if ref.kind == "world_state" else 0
@@ -1885,7 +1946,7 @@ async def shot(ctx: Context, payload: ShotRequest, out: Outputs, tel: Telemetry)
                             turbo=payload.turbo, first_frame=first, last_frame=last,
                             next_context_frames=cast(ContextFrames, plan.successor.frames),
                             next_context_audio=plan.successor.audio, exports=tuple(exports.get(index, ())),
-                            latents=several,
+                            latents=True,
                         ),
                     )  # fmt: skip
         except ChildCallError as failure:
@@ -1899,10 +1960,45 @@ async def shot(ctx: Context, payload: ShotRequest, out: Outputs, tel: Telemetry)
         warnings += result.warnings
         files[f"Piece {index + 1} end"] = result.last_frame
         out.publish("video", result.video, label="Video" if index + 1 == count else f"Piece {index + 1} of {count}")
+    latents = _shot_latents(out, returned, total, _upscale_prompt(payload))
+    video = returned[-1].video
+    if payload.resolution is not Resolution.NATIVE:
+        # Through `upscale`, as every caller: the shot's own latents, so Regenerate encodes nothing.
+        request = UpscaleInput(video=video, resolution=payload.resolution, upscale=payload.upscale,
+                               prompt=_upscale_prompt(payload), seed=piece_seed(payload.seed, ctx.request_id, count),
+                               latents=latents, preset=payload.preset)  # fmt: skip
+        video = (await upscale(ctx, request, out, tel)).video
+        out.publish("video", video, label=f"Video at {payload.resolution.value}")
     ctx.release_gpus()
     tel.log("h3 shot", pieces=count, delivered_frames=total, turbo=payload.turbo)
-    return ShotResult(video=returned[-1].video, frames=[returned[piece].frames[slot] for piece, slot in order],
-                      warnings=list(dict.fromkeys(warnings)))  # fmt: skip
+    return ShotResult(video=video, frames=[returned[piece].frames[slot] for piece, slot in order],
+                      warnings=list(dict.fromkeys(warnings)), latents=latents)  # fmt: skip
+
+
+def _shot_latents(out: Outputs, pieces: Sequence[PieceOutput], frames: int, text: str) -> File:
+    """The whole shot's latents: each piece's delivered latents end to end (each piece cuts its
+    carried head, whole VAE cycles, so they join in phase), in the latent space they name, with
+    the text the shot was made from."""
+    parts = [piece.latents.read_bytes() for piece in pieces]
+    spaces = {shot_latents.metadata(data).get("vae_space", "") for data in parts}
+    if len(spaces) != 1 or "" in spaces:
+        raise OutputError("the shot's pieces name no single latent space", code="output_integrity")
+    latents = torch.cat([load_tensors(data)["latents"] for data in parts], dim=2)
+    return out.save_bytes(shot_latents.save(latents, frames, spaces.pop(), text), media_type="application/octet-stream")
+
+
+def _upscale_prompt(payload: ShotRequest) -> str:
+    """The text a shot was made from, for an upscale that re-renders it (Paul, 10-31): the whole
+    shot as one piece's text (`piece_texts`) after each asset's description and world state's
+    layout, opening with the style and closing with the soundscape and music as its pieces do
+    (`_fl2va_text`). Names lose their brackets: the re-render attaches no reference."""
+    defined = [(asset.name, asset.description) for asset in payload.assets]
+    defined += [(state.name, state.layout) for state in payload.world_state]
+    lines = " ".join(f"{name}: {text.strip().rstrip('.')}." for name, text in defined if text.strip())
+    text = piece_texts(payload.prompt, payload.beats, [0.0])[0]
+    if lines:
+        text = text.replace("[Shot 1] ", f"{lines} [Shot 1] ", 1)
+    return re.sub(r"<([^<>]+)>", r"\1", _fl2va_text(text, payload))
 
 
 # --- upscale: one whole shot (`video/upscale`) ---------------------------------------------
@@ -1916,8 +2012,15 @@ class UpscaleInput(msgspec.Struct, kw_only=True):
     video: Annotated[VideoFile, FileBound(max_bytes=1 << 30, max_decoded_bytes=2 << 30)]
     resolution: RegenerateResolution = Resolution.QHD
     upscale: Upscale | None = None
+    #: regenerate-2k's text; absent, the text `latents` carry (the shot's whole text).
     prompt: str = ""
     seed: int | None = None
+    #: The shot's latents (`ShotResult.latents`): regenerate-2k starts from them instead of
+    #: encoding `video`. SeedVR2 restores pixels and reads `video` alone.
+    latents: Latents | None = None
+    #: regenerate-2k's refine, as NVIDIA's forwards (UPSCALE.md): `quality` (`standard`, dense),
+    #: `balanced` (`sol_engine`), `fast` (`sol_engine_fast`). SeedVR2 has one.
+    preset: Preset = "balanced"
 
 
 class UpscaleOutput(msgspec.Struct):
@@ -1925,17 +2028,22 @@ class UpscaleOutput(msgspec.Struct):
 
 
 async def upscale(ctx: Context, payload: UpscaleInput, out: Outputs, tel: Telemetry) -> UpscaleOutput:
-    """One whole shot upscaled; the fields its model ignores are logged."""
-    method = payload.upscale or Upscale()
-    warnings = method.ignored()
+    """One whole shot upscaled, the one way in for every caller (`shot` above 768p, projects,
+    `cozy run`): regenerate-2k from its latents when given, else its video; SeedVR2 from its
+    video. The fields its model ignores are logged."""
     seed = payload.seed if payload.seed is not None else int.from_bytes(
         hashlib.sha256(f"{ctx.request_id}/h3/upscale".encode()).digest()[:4], "big")  # fmt: skip
+    method = payload.upscale or Upscale()
+    warnings = method.ignored()
     if method.model == "regenerate-2k":
-        if not payload.prompt.strip():
-            raise InvalidRequest("regenerate-2k re-renders the video from the prompt it was made from",
-                                 fields=["prompt"])  # fmt: skip
-        call = RegenerateInput(video=payload.video, prompt=payload.prompt, resolution=payload.resolution,
-                               strength=method.start, seed=seed)  # fmt: skip
+        # The text the shot was made from: given, else the one its latents carry.
+        prompt = payload.prompt.strip() or (shot_latents.text(payload.latents.read_bytes()) if payload.latents else "")
+        if not prompt:
+            raise InvalidRequest("regenerate-2k re-renders the video from the text it was made from: give "
+                                 "prompt, or the shot's latents", fields=["prompt"])  # fmt: skip
+        call = RegenerateInput(video=payload.video, latents=payload.latents, prompt=prompt,
+                               resolution=payload.resolution, strength=method.start, seed=seed,
+                               preset=payload.preset)  # fmt: skip
         with tel.scope(f"Regenerate at {payload.resolution.value}"):
             result = await cast(Callable[..., Awaitable[RegenerateOutput]], regenerate_shot)(payload=call)
         tel.log("h3 upscale", model=method.model, warnings="; ".join(warnings + result.warnings))

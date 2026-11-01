@@ -115,6 +115,7 @@ def denoise_refine(
     sigmas: torch.Tensor,
     windows: list[tuple[int, int]],
     weights: list[torch.Tensor],
+    dense_steps: int,
     layout_at: Callable[[int], AttentionLayout],
     on_step: Callable[[int], None],
 ) -> None:
@@ -138,22 +139,24 @@ def denoise_refine(
         producer.present(sites, rotary, tags.numel())
         timesteps = torch.stack([times for times, _ in plan]).to(device)
         indices = torch.stack([rows for _, rows in plan]).to(device)
-        # A key mean carried from a step's last window is no other window's: windows compute
-        # their own statistics. Every step is sparse, so no dense step seeds them.
-        rolling = bool(sites) and len(windows) == 1
+        # The first `dense_steps` run dense (the preset's), the last of them seeding the Kitchen
+        # producer's key means. A key mean carried from a step's last window is no other window's:
+        # windows compute their own statistics.
+        single = bool(sites) and len(windows) == 1
         phases = tuple(
-            Phase(True, int(times.numel()), rolling and index > 0, False)
+            Phase(index >= dense_steps, int(times.numel()), single and index >= max(dense_steps, 1),
+                  single and index == dense_steps - 1)  # fmt: skip
             for index, (times, _) in enumerate(plan)
         )
-        layout = layout_at(0)
+        layouts = {sparse: layout_at(dense_steps if sparse else 0) for sparse in (False, True)}
         keys = tuple(id(site.module) for site in sites)
         slots = tuple(torch.zeros(site.module.heads, 128, device=device) for site in sites)
 
         def step(i: torch.Tensor, rows: Any, *means: Any, phase: Phase) -> None:
-            carry = producer.Carry(dict(zip(keys, means, strict=True)), phase.rolling)
+            carry = producer.Carry(dict(zip(keys, means, strict=True)), phase.rolling, phase.seeding)
             velocity = torch.zeros_like(rows)
             for (start, count), weight in zip(windows, weights, strict=True):
-                with attention_scope(layout), producer.carrying(carry):
+                with attention_scope(layouts[phase.sparse]), producer.carrying(carry):
                     predicted, _ = transformer(
                         hidden_states=rows[None, start : start + count],
                         audio_hidden_states=audio[None],
