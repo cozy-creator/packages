@@ -1,5 +1,5 @@
 # Native H3 head operation
 
-Implementation work in progress for xs-138. The first closed contract covers the actual projected `_Heads` call on a single GPU when its selected dense route is INT4QK. Q/K/V, norm/RoPE, optional key-mean seed, output and exact backend scratch belong to one native choice before legacy sizing. Actual Rows and baked hook semantics remain. Kitchen INT8, sparse producers and multiple GPUs are explicit later migrations.
+The package now declares the actual projected `_Heads` call on a single GPU when Runtime can serve its selected dense INT4QK route. Q/K/V, norm/RoPE, optional key-mean seed, output and exact backend scratch belong to one native choice before legacy sizing. Actual Rows and baked hook semantics remain. Kitchen INT8, sparse producers and multiple GPUs are explicit later migrations.
 
-No consumer implementation or GPU qualification is claimed by this initial planning commit. Runtime design: `docs/varena-native-heads.md` on `codex/xs138-p2-heads`.
+The successful full processor call records completed seed heads; each piece still writes the same key-mean bytes. Both GLUE sets retain exactly their previous compiled identities. An older Runtime without the intent uses the original callable. CPU construction and static checks pass; GPU qualification is pending. Runtime design: `docs/varena-native-heads.md` on `codex/xs138-p2-heads`.

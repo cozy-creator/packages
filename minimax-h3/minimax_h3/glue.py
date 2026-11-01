@@ -758,11 +758,14 @@ class H3AttnProcessor(MiniMaxH3AttnProcessor):  # type: ignore[misc]
         heads = _Heads.of(self, attn, hidden_states, rotary_emb, attention_mask)
         if heads is None:
             hidden_states = self.whole(attn, hidden_states, rotary_emb, attention_mask)
-            return attn.to_out[1](attn.to_out[0](hidden_states.flatten(2, 3)))
-        attended = split(heads, heads, Cut(2))
-        del heads, hidden_states  # an owned input goes before the out projection's output comes
-        out = attn.to_out[1](split(attn.to_out[0], attended.flatten(2, 3), Cut(1)))
-        del attended
+            out = attn.to_out[1](attn.to_out[0](hidden_states.flatten(2, 3)))
+        else:
+            attended = split(heads, heads, Cut(2), intent=heads.intent())
+            del heads, hidden_states  # an owned input goes before the out projection's output comes
+            out = attn.to_out[1](split(attn.to_out[0], attended.flatten(2, 3), Cut(1)))
+            del attended
+        if (seed := KEY_MEAN.get()) is not None:
+            seed.heads += attn.heads  # this complete call submitted every head's seed
         return out
 
     def whole(
@@ -833,7 +836,6 @@ def seed_key_mean(launch: Launch | None, key: Any, heads: slice) -> None:
         found = key[0].sum(0, dtype=torch.float32) if launch is None else key_sums(launch, key)
         found /= key.shape[1]
         target.slot[heads].copy_(found)
-        target.heads += found.shape[0]
 
 
 class _Heads:
@@ -884,6 +886,31 @@ class _Heads:
 
     def __getitem__(self, index: tuple[slice, ...]) -> slice:
         return index[2]
+
+    def intent(self) -> Any:
+        """Declare the complete known head operation before any legacy head sizing."""
+        from cozy_runtime.author import kernels
+
+        declared = getattr(kernels, "ProjectedHeads", None)
+        processor, attn = self.processor, self.attn
+        if (
+            declared is None
+            or type(processor) is not FusedMiniMaxH3AttnProcessor
+            or isinstance(self.hidden, PreQuantized)
+            or self.rotary is None
+            or not hasattr(processor, "_projected_head_entries")
+        ):
+            return None
+        rope, key_sum = processor._projected_head_entries
+        seed = KEY_MEAN.get()
+        return declared(
+            hidden=self.hidden, query=attn.to_q, key=attn.to_k, value=attn.to_v,
+            heads=attn.heads, backend=processor._attention_backend,
+            launch=processor._glue, rope=rope, key_sum=key_sum,
+            norm_q=attn.norm_q.weight, norm_k=attn.norm_k.weight,
+            eps_q=attn.norm_q.eps, eps_k=attn.norm_k.eps,
+            cos=self.rotary[0], sin=self.rotary[1], seed=None if seed is None else seed.slot,
+        )
 
     def __call__(self, heads: _Heads | slice) -> Any:
         window = slice(0, self.attn.heads) if heads is self else heads
@@ -1237,6 +1264,10 @@ def _install_transformer(
         processor._attention_backend = attn.processor._attention_backend
         processor._parallel_config = attn.processor._parallel_config
         processor._glue = glue
+        processor._projected_head_entries = (
+            next(entry for entry in GLUE.entries if entry.kernel is _rope_norm_kernel),
+            next(entry for entry in GLUE.entries if entry.kernel is _key_sum_kernel),
+        )
         substitutions.append(
             (f"{path}.attn.processor", _type_name(attn.processor), _type_name(processor))
         )
