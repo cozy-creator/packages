@@ -1,11 +1,12 @@
-"""A shot's latents as a file: what `shot` returns and `upscale` starts from (`ShotResult.latents`,
-`UpscaleRequest.latents`), so Regenerate refines the shot's own latent, as NVIDIA's
-`infer.py --input-latents` does, instead of re-encoding its decoded video.
+"""A shot's latents as a file: what `generate` returns, `upscale` starts from (Regenerate refines
+the shot's own latent, as NVIDIA's `infer.py --input-latents` does, instead of re-encoding its
+decoded video) and `continue_from` resumes.
 
 The file is safetensors: `latents`, the normalized `(1, 24, T, h, w)` video latents in float16 on
-the VAE's `5n + 2` grid, and metadata naming the format, the latent space (`vae_space`), the
-frames the shot delivered (the grid's `17n + 5` frames, or fewer when its duration was trimmed) and
-the text the shot was made from (`text`), which an upscale re-renders it from."""
+the VAE's `5n + 2` grid; `context`, its last piece's carry (encoded `AVContext`), which a
+continuation's first piece carries in; and metadata naming the format, the latent space
+(`vae_space`), the frames the shot delivered (the grid's `17n + 5` frames, or fewer when its
+duration was trimmed) and the text it was made from (`text`), which an upscale re-renders it from."""
 
 from __future__ import annotations
 
@@ -21,7 +22,7 @@ from safetensors.torch import save as save_tensors
 
 from .official import FRAMES_PER_CHUNK, LATENTS_PER_CHUNK
 
-FORMAT = "minimax-h3/latents/1"
+FORMAT = "minimax-h3/latents/2"
 #: The config the latent space depends on: what the encoder writes and the decoder reads.
 _SPACE = ("latent_channels", "latents_mean", "latents_std", "spatial_compression_ratio", "temporal_compression_ratio")
 
@@ -34,11 +35,43 @@ def vae_space(vae: Any) -> str:
     return hashlib.sha256(json.dumps(space, sort_keys=True).encode()).hexdigest()[:16]
 
 
-def save(latents: torch.Tensor, frames: int, space: str, text: str) -> bytes:
+def save(latents: torch.Tensor, frames: int, space: str, context: bytes, text: str) -> bytes:
+    """A shot's latents, with its last piece's carry (`context`, encoded `AVContext`), what a
+    `continue_from` of it carries into its first piece, and the text it was made from (`text`),
+    which an upscale that re-renders it reads when given none."""
+    carry = torch.frombuffer(bytearray(context), dtype=torch.uint8) if context else torch.zeros(0, dtype=torch.uint8)
     return save_tensors(
-        {"latents": latents.detach().to("cpu", torch.float16).contiguous()},
+        {"latents": latents.detach().to("cpu", torch.float16).contiguous(), "context": carry},
         metadata={"format": FORMAT, "vae_space": space, "frames": str(frames), "text": text},
     )
+
+
+def context(data: bytes) -> bytes:
+    """The carry a piece continues from: a shot latents file's `context`, else `data` itself (a
+    piece's own exported context)."""
+    if metadata_or_none(data).get("format") != FORMAT:
+        return data
+    return bytes(load_tensors(data)["context"].numpy().tobytes())
+
+
+def delivered(data: bytes) -> int:
+    """The frames a shot latents file stands for."""
+    try:
+        meta = metadata(data)
+        frames = int(meta["frames"])
+    except (struct.error, ValueError, KeyError, json.JSONDecodeError) as exc:
+        raise InvalidRequest("continue_from.latents is not a minimax-h3 latents file", fields=["continue_from.latents"]) from exc
+    if meta.get("format") != FORMAT:
+        raise InvalidRequest(f"continue_from.latents is {meta.get('format')!r}, not {FORMAT}", fields=["continue_from.latents"])
+    return frames
+
+
+def metadata_or_none(data: bytes) -> dict[str, str]:
+    """`metadata`, or nothing for bytes that are not safetensors."""
+    try:
+        return metadata(data)
+    except (struct.error, ValueError, json.JSONDecodeError, UnicodeDecodeError):
+        return {}
 
 
 def metadata(data: bytes) -> dict[str, str]:
