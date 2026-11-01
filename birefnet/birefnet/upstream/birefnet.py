@@ -1394,7 +1394,7 @@ from torchvision.models import vgg16, vgg16_bn, VGG16_Weights, VGG16_BN_Weights,
 
 config = Config()
 
-def build_backbone(bb_name, pretrained=True, params_settings=''):
+def build_backbone(bb_name, pretrained=True, **params):
     if pretrained:
         raise ValueError('Runtime owns BiRefNet checkpoint loading')
     if bb_name == 'vgg16':
@@ -1407,7 +1407,7 @@ def build_backbone(bb_name, pretrained=True, params_settings=''):
         bb_net = list(resnet50(pretrained=ResNet50_Weights.DEFAULT if pretrained else None).children())
         bb = nn.Sequential(OrderedDict({'conv1': nn.Sequential(*bb_net[0:3]), 'conv2': bb_net[4], 'conv3': bb_net[5], 'conv4': bb_net[6]}))
     else:
-        bb = eval('{}({})'.format(bb_name, params_settings))
+        bb = _named(bb_name)(**params)
     return bb
 
 
@@ -1654,7 +1654,7 @@ class RefinerPVTInChannels4(nn.Module):
         super(RefinerPVTInChannels4, self).__init__()
         self.config = Config()
         self.epoch = 1
-        self.bb = build_backbone(self.config.bb, params_settings='in_channels=4')
+        self.bb = build_backbone(self.config.bb, in_channels=4)
 
         lateral_channels_in_collection = {
             'vgg16': [512, 256, 128, 64], 'vgg16bn': [512, 256, 128, 64], 'resnet50': [1024, 512, 256, 64],
@@ -1743,8 +1743,8 @@ class Decoder(nn.Module):
     def __init__(self, channels):
         super(Decoder, self).__init__()
         self.config = Config()
-        DecoderBlock = eval('BasicDecBlk')
-        LateralBlock = eval('BasicLatBlk')
+        DecoderBlock = BasicDecBlk
+        LateralBlock = BasicLatBlk
 
         self.decoder_block4 = DecoderBlock(channels[0], channels[1])
         self.decoder_block3 = DecoderBlock(channels[1], channels[2])
@@ -1957,6 +1957,15 @@ from einops import rearrange
 from .BiRefNet_config import BiRefNetConfig
 
 
+def _named(name):
+    """The backbone or block class a config names (upstream `eval`s the name)."""
+    return {cls.__name__: cls for cls in (
+        swin_v1_t, swin_v1_s, swin_v1_b, swin_v1_l,
+        pvt_v2_b0, pvt_v2_b1, pvt_v2_b2, pvt_v2_b3, pvt_v2_b4, pvt_v2_b5,
+        BasicDecBlk, ResBlk, BasicLatBlk, ASPP, ASPPDeformable, RefUNet, Refiner, RefinerPVTInChannels4,
+    )}[name]
+
+
 def image2patches(image, grid_h=2, grid_w=2, patch_ref=None, transformation='b c (hg h) (wg w) -> (b hg wg) c h w'):
     if patch_ref is not None:
         grid_h, grid_w = image.shape[-2] // patch_ref.shape[-2], image.shape[-1] // patch_ref.shape[-1]
@@ -1990,8 +1999,8 @@ class BiRefNet(
 
         if self.config.squeeze_block:
             self.squeeze_module = nn.Sequential(*[
-                eval(self.config.squeeze_block.split('_x')[0])(channels[0]+sum(self.config.cxt), channels[0])
-                for _ in range(eval(self.config.squeeze_block.split('_x')[1]))
+                _named(self.config.squeeze_block.split('_x')[0])(channels[0]+sum(self.config.cxt), channels[0])
+                for _ in range(int(self.config.squeeze_block.split('_x')[1]))
             ])
 
         self.decoder = Decoder(channels)
@@ -2008,7 +2017,7 @@ class BiRefNet(
             if self.config.refine == 'itself':
                 self.stem_layer = StemLayer(in_channels=3+1, inter_channels=48, out_channels=3, norm_layer='BN' if self.config.batch_size > 1 else 'LN')
             else:
-                self.refiner = eval('{}({})'.format(self.config.refine, 'in_channels=3+1'))
+                self.refiner = _named(self.config.refine)(in_channels=3+1)
 
         if self.config.freeze_bb:
             # Freeze the backbone...
@@ -2075,8 +2084,8 @@ class Decoder(nn.Module):
     def __init__(self, channels):
         super(Decoder, self).__init__()
         self.config = Config()
-        DecoderBlock = eval(self.config.dec_blk)
-        LateralBlock = eval(self.config.lat_blk)
+        DecoderBlock = _named(self.config.dec_blk)
+        LateralBlock = _named(self.config.lat_blk)
 
         if self.config.dec_ipt:
             self.split = self.config.dec_ipt_split

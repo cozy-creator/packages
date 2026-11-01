@@ -4,4 +4,4 @@ Revision: e2bf8e4460fc8fa32bba5ea4d94b3233d367b0e4
 Original birefnet.py SHA-256: 208771ae626f653d64128fbf2d6ac9f8e645c5cc5e286258a73ec3322bbfe5ef
 Original BiRefNet_config.py SHA-256: e7b8c2a74f6cea6a59553d517f71d47f2c1d90e670a13416af17c25fe2f3dc52
 License: MIT; see LICENSE.
-Local changes: remove the unused pretrained-backbone checkpoint loader and refuse pretrained=True; Runtime owns all checkpoint loading. Use torch.nn.init.trunc_normal_ for constructor initialization so Runtime can recognize the standard initializer. Network architecture and forward implementation retained.
+Local changes: remove the unused pretrained-backbone checkpoint loader and refuse pretrained=True; Runtime owns all checkpoint loading. Use torch.nn.init.trunc_normal_ for constructor initialization so Runtime can recognize the standard initializer. Name the configured backbone and blocks with one lookup (`_named`) instead of `eval`. Network architecture and forward implementation retained.
