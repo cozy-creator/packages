@@ -1665,12 +1665,14 @@ def plan_pieces(duration_s: float, beats: Iterable[float]) -> list[int]:
 
 def piece_texts(prompt: str, beats: Sequence[Beat], starts: Sequence[float]) -> list[str]:
     """Each piece's text, one `[Shot 1]` paragraph with no cut times (H3's `[Shot N] At
-    MM:SS.mmm` marks a cut; its guide writes in-shot change as plain English): the shot's
-    text, the beat it is in (already under way, when that beat began before it) and the beats
-    it reaches, in order. The first piece ends saying it is one continuous shot; a later one
-    opens picking up the carried frames as they are (`_CONTINUED`) and keeps the whole text,
-    camera moves too. `starts` are the pieces' start times. The text ends the prompt's
-    description, ahead of any audio or music field it has."""
+    MM:SS.mmm` marks a cut; its guide writes in-shot change as plain English). The first piece:
+    the shot's text, the beat it is in and the beats it reaches, in order, ending that it is one
+    continuous shot. A later one describes the state where it starts, never the opening again:
+    the carried frames as they are (`_CONTINUED`), the beat in force (already under way, when it
+    began before the piece) and the beats it reaches. Restating the opening pulls a shot that has
+    moved on back to it, with a cut (0.2.4 gate, runs 24980/24981: back in the food cart).
+    `starts` are the pieces' start times. The text ends the prompt's description, ahead of any
+    audio or music field it has."""
     prompt = prompt.strip()
     head = found.group(0) if (found := _DESCRIPTION.match(prompt)) else ""
     after = _AFTER.search(prompt, len(head))
@@ -1679,14 +1681,12 @@ def piece_texts(prompt: str, beats: Sequence[Beat], starts: Sequence[float]) -> 
     timed = sorted(((beat.at, beat.prompt.strip()) for beat in beats), key=lambda beat: beat[0])
     texts = []
     for index, (start, end) in enumerate(zip(starts, [*starts[1:], math.inf], strict=True)):
-        parts = [body]
+        parts = [_CONTINUED] if index else [body]
         if current := [beat for beat in timed if beat[0] <= start]:
             at, text = current[-1]
             parts.append(f"Already under way, not begun again: {_lower(text)}" if at < start else text)
         parts += [f"Then {_lower(text)}" for at, text in timed if start < at < end]
-        if index:
-            parts = [_CONTINUED, *parts]
-        else:
+        if not index:
             parts.append(_ONE_SHOT)
         text = head + "[Shot 1] " + " ".join(part for part in parts if part)
         texts.append(f"{text}\n\n{tail}" if tail else text)
