@@ -45,8 +45,8 @@ turbo: true                                   # false: the full model at steps 3
   ("Already under way, not begun again: …" when that beat began earlier) and each later beat
   ("Then …"). The first piece ends "One continuous shot with no cuts."; a later one opens on
   the carried frames as they are (the same people in the same places, the camera still moving,
-  nothing new for two seconds) and keeps the whole text, and its first picture is the previous
-  piece's last frame (a place takes that frame instead). Beats carry no times: H3 marks cuts with timed
+  nothing new for two seconds) and keeps the whole text, and it sees the previous piece's last
+  frame as a picture after the shot's own (a place takes that frame instead). Beats carry no times: H3 marks cuts with timed
   `[Shot N]`. A prompt with its own `integrated_multimodal_description:`/`audio:`/
   `non_diegetic_music:` fields keeps them.
 - **Pictures.** Characters, props and the environment (`<Dock>`) are definitions in every
