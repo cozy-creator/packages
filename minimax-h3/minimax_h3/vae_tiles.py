@@ -201,7 +201,7 @@ class TileBatchedVideoVAE(AutoencoderKLMiniMaxH3):  # type: ignore[misc]
         suffix = positions.new_zeros((1, decoder.num_register_tokens + 1, 3))
         rotary = decoder.rope(torch.cat([positions, suffix], dim=1))
         for block in decoder.transformer_blocks:
-            hidden = split(_BlockRows(block, rotary), hidden, Cut(0))
+            hidden = _BlockRows(block, rotary).run(hidden)
         hidden = decoder.norm_out(hidden).to(get_parameter_dtype(decoder.proj_out))
         hidden = decoder.proj_out(hidden)[:, :patches, :]
         p, pt = decoder.patch_size, decoder.patch_size_t
@@ -232,6 +232,16 @@ class _BlockRows:
 
     def __call__(self, hidden: torch.Tensor) -> torch.Tensor:
         return self.block(hidden, self.rotary)
+
+    def run(self, hidden: torch.Tensor) -> torch.Tensor:
+        """Declare this complete layer-scale block before its outer batch chooser."""
+        from cozy_runtime.author import kernels
+
+        declaration = getattr(kernels, "LayerScaleBlock", None)
+        if declaration is None:
+            return split(self, hidden, Cut(0))
+        intent = declaration(self.block, hidden, self.rotary, "scale1", "scale2")
+        return split(self, hidden, Cut(0), intent=intent)
 
 
 def encode_condition(
