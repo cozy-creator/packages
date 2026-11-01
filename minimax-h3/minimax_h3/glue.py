@@ -739,6 +739,15 @@ class FusedSwiGLU(SwiGLU):  # type: ignore[misc]
         return swiglu(self._glue, self.proj(hidden_states), fp8=self._fusion_fp8)
 
 
+def output_projection(module: Any, value: Any) -> Any:
+    """This attention producer owns its result through its one output projection."""
+    from cozy_runtime.author import kernels
+
+    declare = getattr(kernels, "SingleUseProjection", None)
+    intent = None if declare is None else declare(module, value, exclusive_input=True)
+    return split(module, value, Cut(1), intent=intent)
+
+
 class H3AttnProcessor(MiniMaxH3AttnProcessor):  # type: ignore[misc]
     """Diffusers' H3 attention, declared as an exact split by query heads: each window computes
     its own rows of the projections (`cozy_runtime.rows`), per-head norms and RoPE, and the out
@@ -762,7 +771,7 @@ class H3AttnProcessor(MiniMaxH3AttnProcessor):  # type: ignore[misc]
         else:
             attended = split(heads, heads, Cut(2), intent=heads.intent())
             del heads, hidden_states  # an owned input goes before the out projection's output comes
-            out = attn.to_out[1](split(attn.to_out[0], attended.flatten(2, 3), Cut(1)))
+            out = attn.to_out[1](output_projection(attn.to_out[0], attended.flatten(2, 3)))
             del attended
         if (seed := KEY_MEAN.get()) is not None:
             seed.heads += attn.heads  # this complete call submitted every head's seed
