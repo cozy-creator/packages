@@ -3,8 +3,9 @@
 `infer.py --input-latents` does, instead of re-encoding its decoded video.
 
 The file is safetensors: `latents`, the normalized `(1, 24, T, h, w)` video latents in float16 on
-the VAE's `5n + 2` grid, and metadata naming the format, the latent space (`vae_space`) and the
-frames the shot delivered (the grid's `17n + 5` frames, or fewer when its duration was trimmed)."""
+the VAE's `5n + 2` grid, and metadata naming the format, the latent space (`vae_space`), the
+frames the shot delivered (the grid's `17n + 5` frames, or fewer when its duration was trimmed) and
+the text the shot was made from (`text`), which an upscale re-renders it from."""
 
 from __future__ import annotations
 
@@ -33,10 +34,10 @@ def vae_space(vae: Any) -> str:
     return hashlib.sha256(json.dumps(space, sort_keys=True).encode()).hexdigest()[:16]
 
 
-def save(latents: torch.Tensor, frames: int, space: str) -> bytes:
+def save(latents: torch.Tensor, frames: int, space: str, text: str) -> bytes:
     return save_tensors(
         {"latents": latents.detach().to("cpu", torch.float16).contiguous()},
-        metadata={"format": FORMAT, "vae_space": space, "frames": str(frames)},
+        metadata={"format": FORMAT, "vae_space": space, "frames": str(frames), "text": text},
     )
 
 
@@ -44,6 +45,14 @@ def metadata(data: bytes) -> dict[str, str]:
     """A safetensors file's `__metadata__`, read from its header alone."""
     (length,) = struct.unpack("<Q", data[:8])
     return dict(json.loads(data[8 : 8 + length]).get("__metadata__") or {})
+
+
+def text(data: bytes) -> str:
+    """The text the shot was made from; empty when the file carries none."""
+    try:
+        return metadata(data).get("text", "")
+    except (struct.error, ValueError, json.JSONDecodeError) as exc:
+        raise InvalidRequest("latents is not a minimax-h3 latents file", fields=["latents"]) from exc
 
 
 def load(data: bytes, space: str, size: tuple[int, int]) -> tuple[torch.Tensor, int]:

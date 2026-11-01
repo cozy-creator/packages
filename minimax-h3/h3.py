@@ -236,6 +236,9 @@ class Resolution(Enum):
 
 #: The refine starts the Regenerate overlay serves (`efficient-large-model/open-h3-regenerate-2k@0.1.0`'s plan).
 REGENERATE_STRENGTHS = (0.7, 0.8, 0.909)
+#: The default start (Paul, 10-31): NVIDIA's 0.909 redraws a face as another person's, its hat and sunglasses, and a
+#: painted look as a photograph; 0.7 keeps them (fidelity test, runs 24518-24554).
+REGENERATE_STRENGTH = 0.7
 _SEEDVR2_FIELDS = (
     "color_correction", "input_noise_scale", "latent_noise_scale", "batch_size",
     "uniform_batch_size", "temporal_overlap", "prepend_frames",
@@ -255,7 +258,7 @@ class Upscale(msgspec.Struct, kw_only=True):
       letterboxes. At `768p` it is a refine-only pass at the native size.
 
     `strength` (regenerate-2k): how much of the source the refine redraws, as its start noise:
-    0.909 (default, NVIDIA's), 0.8 or 0.7. Lower keeps more of the source (faces, on-screen text)
+    0.7 (default), 0.8 or 0.909 (NVIDIA's). Lower keeps more of the source (faces, on-screen text)
     and is faster; higher invents more detail. Small text is redrawn at every strength and can
     become other letters; SeedVR2 keeps it.
     """
@@ -291,7 +294,7 @@ class Upscale(msgspec.Struct, kw_only=True):
 
     @property
     def start(self) -> float:
-        return REGENERATE_STRENGTHS[-1] if self.strength is None else self.strength
+        return REGENERATE_STRENGTH if self.strength is None else self.strength
 
 
 class H3VideoOutput(msgspec.Struct):
@@ -877,7 +880,7 @@ class RegenerateInput(msgspec.Struct, kw_only=True):
     latents: Latents | None = None
     prompt: str
     resolution: RegenerateResolution = Resolution.QHD
-    strength: float = 0.909
+    strength: float = REGENERATE_STRENGTH
     seed: int | None = None
     #: NVIDIA's refine forwards (`regenerate.PRESETS`): `quality` dense (`standard`), `balanced`
     #: step 0 dense then sparse at tau 1.0 (`sol_engine`), `fast` all sparse at tau 1.75.
@@ -1926,7 +1929,7 @@ async def shot(ctx: Context, payload: ShotRequest, out: Outputs, tel: Telemetry)
         warnings += result.warnings
         files[f"Piece {index + 1} end"] = result.last_frame
         out.publish("video", result.video, label="Video" if index + 1 == count else f"Piece {index + 1} of {count}")
-    latents = _shot_latents(out, returned, total)
+    latents = _shot_latents(out, returned, total, _upscale_prompt(payload))
     video = returned[-1].video
     if payload.resolution is not Resolution.NATIVE:
         # Through `upscale`, as every caller: the shot's own latents, so Regenerate encodes nothing.
@@ -1941,22 +1944,30 @@ async def shot(ctx: Context, payload: ShotRequest, out: Outputs, tel: Telemetry)
                       warnings=list(dict.fromkeys(warnings)), latents=latents)  # fmt: skip
 
 
-def _shot_latents(out: Outputs, pieces: Sequence[PieceOutput], frames: int) -> File:
+def _shot_latents(out: Outputs, pieces: Sequence[PieceOutput], frames: int, text: str) -> File:
     """The whole shot's latents: each piece's delivered latents end to end (each piece cuts its
-    carried head, whole VAE cycles, so they join in phase), in the latent space they name."""
+    carried head, whole VAE cycles, so they join in phase), in the latent space they name, with
+    the text the shot was made from."""
     parts = [piece.latents.read_bytes() for piece in pieces]
     spaces = {shot_latents.metadata(data).get("vae_space", "") for data in parts}
     if len(spaces) != 1 or "" in spaces:
         raise OutputError("the shot's pieces name no single latent space", code="output_integrity")
     latents = torch.cat([load_tensors(data)["latents"] for data in parts], dim=2)
-    return out.save_bytes(shot_latents.save(latents, frames, spaces.pop()), media_type="application/octet-stream")
+    return out.save_bytes(shot_latents.save(latents, frames, spaces.pop(), text), media_type="application/octet-stream")
 
 
 def _upscale_prompt(payload: ShotRequest) -> str:
-    """The text a shot was made from, for Regenerate: its prompt, each beat, its style."""
-    text = " ".join([payload.prompt, *(f"Then, {beat.prompt}" for beat in payload.beats)])
-    text = re.sub(r"<([^<>]+)>", r"\1", text)
-    return f"{text}\n\nStyle: {payload.style}" if payload.style else text
+    """The text a shot was made from, for an upscale that re-renders it (Paul, 10-31): the whole
+    shot as one piece's text (`piece_texts`) after each asset's description and world state's
+    layout, opening with the style and closing with the soundscape and music as its pieces do
+    (`_fl2va_text`). Names lose their brackets: the re-render attaches no reference."""
+    defined = [(asset.name, asset.description) for asset in payload.assets]
+    defined += [(state.name, state.layout) for state in payload.world_state]
+    lines = " ".join(f"{name}: {text.strip().rstrip('.')}." for name, text in defined if text.strip())
+    text = piece_texts(payload.prompt, payload.beats, [0.0])[0]
+    if lines:
+        text = text.replace("[Shot 1] ", f"{lines} [Shot 1] ", 1)
+    return re.sub(r"<([^<>]+)>", r"\1", _fl2va_text(text, payload))
 
 
 # --- upscale: one whole shot (`video/upscale`) ---------------------------------------------
@@ -1970,6 +1981,7 @@ class UpscaleInput(msgspec.Struct, kw_only=True):
     video: Annotated[VideoFile, FileBound(max_bytes=1 << 30, max_decoded_bytes=2 << 30)]
     resolution: RegenerateResolution = Resolution.QHD
     upscale: Upscale | None = None
+    #: regenerate-2k's text; absent, the text `latents` carry (the shot's whole text).
     prompt: str = ""
     seed: int | None = None
     #: The shot's latents (`ShotResult.latents`): regenerate-2k starts from them instead of
@@ -1993,10 +2005,12 @@ async def upscale(ctx: Context, payload: UpscaleInput, out: Outputs, tel: Teleme
     method = payload.upscale or Upscale()
     warnings = method.ignored()
     if method.model == "regenerate-2k":
-        if not payload.prompt.strip():
-            raise InvalidRequest("regenerate-2k re-renders the video from the prompt it was made from",
-                                 fields=["prompt"])  # fmt: skip
-        call = RegenerateInput(video=payload.video, latents=payload.latents, prompt=payload.prompt,
+        # The text the shot was made from: given, else the one its latents carry.
+        prompt = payload.prompt.strip() or (shot_latents.text(payload.latents.read_bytes()) if payload.latents else "")
+        if not prompt:
+            raise InvalidRequest("regenerate-2k re-renders the video from the text it was made from: give "
+                                 "prompt, or the shot's latents", fields=["prompt"])  # fmt: skip
+        call = RegenerateInput(video=payload.video, latents=payload.latents, prompt=prompt,
                                resolution=payload.resolution, strength=method.start, seed=seed,
                                preset=payload.preset)  # fmt: skip
         with tel.scope(f"Regenerate at {payload.resolution.value}"):
