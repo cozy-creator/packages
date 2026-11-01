@@ -78,6 +78,8 @@ from minimax_h3.continuation import (
 )
 from minimax_h3.guide_rows import GuideClip
 from minimax_h3.model import (
+    FULL_BALANCED,
+    FullRecipe,
     H3LatentUpscaler as H3LatentUpscaler,
     H3Model as H3Model,
     H3RegenerateLoRA as H3RegenerateLoRA,
@@ -871,15 +873,16 @@ RegenerateResolution = Annotated[Resolution, Shape(pixels=_REGENERATE_PIXELS)]
 #: refine forwards (`regenerate.PRESETS`).
 Preset = Literal["quality", "balanced", "fast"]
 #: Turbo's dense steps of eight: all (NVIDIA HyperFlow's `quality`), four, and one (Sol-Engine's
-#: `sol_bsa`). The full model has one recipe, ten dense steps.
+#: `sol_bsa`), the rest sparse at tau 1.0.
 TURBO_DENSE_STEPS: dict[Preset, int] = {"quality": 8, "balanced": 4, "fast": 1}
-#: The full model's step cache (`stepcache`, NVIDIA sol-engine's 30-step tiers): `quality` H100's
-#: EasyCache, `fast` H100 `aggressive` / GB200 `fullopt`'s FirstBlockCache; `balanced` none.
-#: Turbo's eight distilled steps never cache (NVIDIA keeps cache reuse off on distilled paths).
-FULL_CACHE: dict[Preset, stepcache.Policy | None] = {
-    "quality": stepcache.EasyCache(0.30, retain=10, cooldown=4, max_hits=1),
-    "balanced": None,
-    "fast": stepcache.FirstBlockCache(0.08),
+#: The full model's recipes, NVIDIA sol-engine's tiers (forward indices, as theirs): `quality` H100's
+#: 15 dense steps, tau 0.5 and EasyCache; `balanced` its RTX `sol` arm, 10 dense at tau 1.0;
+#: `fast` that plus H100 `aggressive` / GB200 `fullopt`'s FirstBlockCache. Turbo's eight distilled
+#: steps never cache (NVIDIA keeps cache reuse off on distilled paths).
+FULL_RECIPES: dict[Preset, FullRecipe] = {
+    "quality": FullRecipe(15, 0.5, stepcache.EasyCache(0.30, retain=10, cooldown=4, max_hits=1)),
+    "balanced": FULL_BALANCED,
+    "fast": FullRecipe(10, 1.0, stepcache.FirstBlockCache(0.08)),
 }
 #: A shot's latents (`shot_latents`): `ShotResult.latents`, `UpscaleInput.latents`.
 Latents = Annotated[File, FileBound(max_bytes=1 << 30, media_types=("application/octet-stream",))]
@@ -1057,7 +1060,7 @@ def _render_keyframes(
         with tel.stage("condition_media", overall_range=(0.08, 0.15)):
             model.condition_fl2va_media(task, state)
     if turbo_lora is None:
-        sample = partial(model.sample_fl2va, cache=FULL_CACHE[preset])
+        sample = partial(model.sample_fl2va, recipe=FULL_RECIPES[preset])
     else:
         assert isinstance(model, H3TurboBase)
         sample = partial(model.sample_fl2va_turbo, turbo_lora=turbo_lora, sol_dense_steps=TURBO_DENSE_STEPS[preset])
@@ -1153,7 +1156,7 @@ def _references_to_video(
     with tel.stage("condition", overall_range=(0.03, 0.15)):
         condition_references(model, task, state, tel=tel)
     if turbo_lora is None:
-        sample = partial(model.sample_ref2va, cache=FULL_CACHE[payload.preset])
+        sample = partial(model.sample_ref2va, recipe=FULL_RECIPES[payload.preset])
     else:
         assert isinstance(model, H3TurboBase)
         sample = partial(model.sample_ref2va_turbo, turbo_lora=turbo_lora, sol_dense_steps=TURBO_DENSE_STEPS[payload.preset])
@@ -1651,6 +1654,8 @@ class ShotRequest(msgspec.Struct, kw_only=True):
     )]  # fmt: skip
     beats: list[Beat] = []
     seed: int | None = None
+    #: What holds for the whole shot, in every piece: its look, and what must or must not appear ("no
+    #: person appears"). `prompt` is how the shot opens and is left out of later pieces (se-087).
     style: str = ""
     soundscape: str = ""
     music: str = "N/A"
@@ -1692,10 +1697,11 @@ _WORLD_STATE_EDGE = 512
 #: The first piece's closing sentence, and each later piece's opening one: a continued piece picks
 #: up the carried frames as they are, the camera still doing what it did, and starts nothing new
 #: for its first two seconds (MiniMax's extend and the ComfyUI chainers restate the incoming state;
-#: one that holds the camera against a moving shot, or restages a beat, reframes: se-087, 24525).
+#: one that holds the camera against a moving shot, or restages a beat, reframes: se-087, 24525). It
+#: names nothing a shot may not have: "the same people" put people into a test pattern (se-089, 25176).
 _ONE_SHOT = "One continuous shot with no cuts."
-_CONTINUED = ("The same unbroken take goes on from its last moment: the same people in the same places, the camera "
-              "still moving as it was. For its first two seconds everything carries on exactly as it is.")
+_CONTINUED = ("The same unbroken take goes on from its last moment: everything stays where it was, the camera still "
+              "moving as it was. For its first two seconds everything carries on exactly as it is.")
 #: A pinned head delays a new action about 2.4 s, so no beat starts from 2 s before a piece's
 #: edge to 2.5 s after it, where the pieces can avoid it.
 _BEFORE_EDGE_S, _AFTER_EDGE_S = 2.0, 2.5
@@ -1900,11 +1906,11 @@ async def shot(ctx: Context, payload: ShotRequest, out: Outputs, tel: Telemetry)
     for index, text in enumerate(piece_texts(payload.prompt, payload.beats, [start / FPS for start in starts])):
         own = [ref for ref in references if ref.kind not in CLIPS or ref.name in windows[index]]
         # A continued piece with no place to carry starts from the previous piece's last frame as a world state,
-        # after the request's own pictures so their <Picture N> keep their numbers: who and what is where now. Every
+        # after the request's own pictures so their <Picture N> keep their numbers: what is where now. Every
         # continued piece that saw one joined cleanly (se-087: 9 of 9 seams); those without, character-only and
         # footage shots, reframed or cut (24525, 24603).
         anchor = [StoryReference(name=f"Piece {index} end", kind="world_state",
-                                 description="This piece starts from it: who and what is where now.")
+                                 description="This piece starts from it: what is where now.")
                   ] if index and not places else []  # fmt: skip
         call = piece_call(text, [*own, *plates, *anchor] if index else own, style=style,
                           soundscape=sound, music=music, index=index,

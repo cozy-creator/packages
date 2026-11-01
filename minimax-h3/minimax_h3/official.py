@@ -169,7 +169,9 @@ def _validate_sol_dense_steps(value: int) -> None:
         raise ValueError("sol_dense_steps must be a nonnegative integer")
 
 
-def _attention_layout(state: Any, step: int, *, sol_dense_steps: int = 10) -> AttentionLayout:
+def _attention_layout(
+    state: Any, step: int, *, sol_dense_steps: int = 10, tau: float = 1.0
+) -> AttentionLayout:
     fields = state.denoiser_input_fields
     # NVIDIA's H3 policy protects every row before target video, including target
     # audio. Diffusers packs text, reference media, target audio, then target video.
@@ -185,6 +187,7 @@ def _attention_layout(state: Any, step: int, *, sol_dense_steps: int = 10) -> At
         dense_until_step=sol_dense_steps,
         dense_paths=_DENSE_ATTENTION_PATHS,
         exact_paths=_EXACT_ATTENTION_PATHS,
+        tau=tau,
     )
 
 
@@ -1491,6 +1494,7 @@ class OfficialH3Pipeline:
         on_step: Callable[[int], None],
         cancel: Callable[[], None],
         sol_dense_steps: int = 10,
+        tau: float = 1.0,
         cache: stepcache.Policy | None = None,
     ) -> ScheduleFacts:
         _validate_sol_dense_steps(sol_dense_steps)
@@ -1549,7 +1553,7 @@ class OfficialH3Pipeline:
                 scoped.transformer,
                 scoped,
                 block_state,
-                lambda step: _attention_layout(block_state, step, sol_dense_steps=sol_dense_steps),
+                lambda step: _attention_layout(block_state, step, sol_dense_steps=sol_dense_steps, tau=tau),
                 sol_dense_steps,
                 on_step,
                 cache=cache,
@@ -1564,7 +1568,7 @@ class OfficialH3Pipeline:
                     if clips is not None and index == sol_dense_steps:
                         clips.release(block_state)
                     with attention_scope(
-                        _attention_layout(block_state, index, sol_dense_steps=sol_dense_steps)
+                        _attention_layout(block_state, index, sol_dense_steps=sol_dense_steps, tau=tau)
                     ):
                         _, block_state = loop.loop_step(scoped, block_state, i=index, t=timestep)
                     on_step(index)
