@@ -1798,13 +1798,16 @@ async def shot(ctx: Context, payload: ShotRequest, out: Outputs, tel: Telemetry)
     files: dict[str, File | None] = {ref.name: getattr(ref, FILE[ref.kind]) for ref in voices([*references, *plates])[0]}
     calls: list[PieceCall] = []
     for index, text in enumerate(piece_texts(payload.prompt, payload.beats, [start / FPS for start in starts])):
-        call = piece_call(text, [*references, *plates] if index else references, style=style, soundscape=sound,
-                          music=music, index=index, forced=forced)  # fmt: skip
-        if not call.references and index:
-            # Ref2VA carries the picture and needs a picture: the previous piece's last frame.
-            end = StoryReference(name=f"Piece {index} end", kind="world_state")
-            call = piece_call(text, [end], style=style, soundscape=sound, music=music, index=index,
-                              forced=frozenset({end.name}))  # fmt: skip
+        # A continued piece with no place to carry starts from the previous piece's last frame as a world state,
+        # after the request's own pictures so their <Picture N> keep their numbers: who and what is where now. Every
+        # continued piece that saw one joined cleanly (se-087: 9 of 9 seams); those without, character-only and
+        # footage shots, reframed or cut (24525, 24603).
+        anchor = [StoryReference(name=f"Piece {index} end", kind="world_state",
+                                 description="This piece starts from it: who and what is where now.")
+                  ] if index and not places else []  # fmt: skip
+        call = piece_call(text, [*references, *plates, *anchor] if index else references, style=style,
+                          soundscape=sound, music=music, index=index,
+                          forced=forced | {ref.name for ref in anchor})  # fmt: skip
         calls.append(call if call.references else PieceCall(_fl2va_text(text, payload), [], call.warnings))
         warnings += call.warnings
     for edge in starts[1:]:
