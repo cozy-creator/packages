@@ -10,7 +10,7 @@ from cozy_runtime.author import (
     Adjustments,
     App,
     Context,
-    PictureAsset,
+    Picture,
     ImageRequest,
     ImageResult,
     Memoize,
@@ -51,15 +51,15 @@ NEGATIVE_T2I = (
 )
 
 class GenerateInput(ImageRequest):
-    assets: Annotated[list[PictureAsset], msgspec.Meta(max_length=4)] = msgspec.field(
+    pictures: Annotated[list[Picture], msgspec.Meta(max_length=4)] = msgspec.field(
         default_factory=list
     )
 
 
-def label(n: int, asset: PictureAsset) -> str:
-    """Fibo's word for the Nth of several assets: the edit wraps them as `image_1`, `image_2`,
+def label(n: int, picture: Picture) -> str:
+    """Fibo's word for the Nth of several pictures: the edit wraps them as `image_1`, `image_2`,
     ... (Diffusers `BriaFibo2Pipeline`), and Bria's instructions name them `<image_N>`. A lone
-    asset is the edit's `image`, so it keeps its name."""
+    picture is the edit's `image`, so it keeps its name."""
     return f"<image_{n}>"
 
 
@@ -112,7 +112,7 @@ def _generate(
     default, most = _STEPS[function]
     steps = held(adj, "steps", payload.steps or default, 1, most)
     payload.unplaced(adj, "Fibo 2.0 has no layout control")
-    prompt = payload.rendered(adj, label if len(payload.assets) > 1 else name_label)
+    prompt = payload.rendered(adj, label if len(payload.pictures) > 1 else name_label)
     images = [asset.read() for asset in payload.images()]
     if function == "generate":
         guidance = held(adj, "guidance", GUIDANCE if payload.guidance is None else payload.guidance, 1.0, 20.0)
@@ -158,7 +158,7 @@ _MODEL = ("transformer", "text_encoder", "vae")
                 on_demand=("upsampler", "edit_upsampler"), memoize=Memoize(requires=["seed"]))
 def generate(ctx: Context, payload: GenerateInput, edit_upsampler: Captioner, model: Fibo2, upsampler: Captioner,
              out: Outputs, tel: Telemetry, adj: Adjustments) -> ImageResult:
-    """Fibo 2.0 Dev, 50 steps with CFG 5: text to image, or an edit of up to four ordered picture assets."""
+    """Fibo 2.0 Dev, 50 steps with CFG 5: text to image, or an edit of up to four ordered pictures."""
     return _generate(ctx, "generate", payload, model, upsampler, edit_upsampler, out, tel, adj)
 
 
@@ -168,5 +168,5 @@ def generate(ctx: Context, payload: GenerateInput, edit_upsampler: Captioner, mo
                 on_demand=("upsampler", "edit_upsampler"), memoize=Memoize(requires=["seed"]))
 def generate_turbo(ctx: Context, payload: GenerateInput, edit_upsampler: Captioner, model: Fibo2,
                    upsampler: Captioner, out: Outputs, tel: Telemetry, adj: Adjustments) -> ImageResult:
-    """Fibo 2.0 Edit Turbo, 4 steps without guidance: text to image, or an edit of up to four ordered picture assets."""
+    """Fibo 2.0 Edit Turbo, 4 steps without guidance: text to image, or an edit of up to four ordered pictures."""
     return _generate(ctx, "generate_turbo", payload, model, upsampler, edit_upsampler, out, tel, adj)
