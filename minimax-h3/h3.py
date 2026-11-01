@@ -1600,9 +1600,10 @@ class ShotResult(msgspec.Struct):
     warnings: list[str]
 
 
-#: What each later piece carries from the one before: 22 frames of picture and one second of sound.
-_CARRY = Carry(22, True)
-#: A later piece's new seconds: its carried frames share the 362-frame window, so 14.
+#: What each later piece carries from the one before: 39 frames of picture (1.625 s, as MiniMax's own
+#: extend carries) and one second of sound.
+_CARRY = Carry(39, True)
+#: A later piece's new seconds: its carried frames share the 362-frame window, so 13.
 _MAX_NEXT_S = (MAX_FRAMES - _CARRY.head_frames) // FPS
 #: A world state's picture is read at this short edge: the full picture opens the shot on a
 #: copy of it (run 20661, first-frame SSIM 0.871), 256 px keeps the set but not who stands

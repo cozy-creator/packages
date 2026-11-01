@@ -33,14 +33,14 @@ turbo: true                                   # false: the full model at steps 3
 ```
 
 - **Pieces.** A shot renders in the fewest pieces that reach its length: the first up to
-  15 s, each later one up to 14 s new (the 22 frames it carries from the last share H3's 15 s
-  window), so 1 + ⌈(d − 15) / 14⌉ for d > 15. Each piece continues the last from its carried
+  15 s, each later one up to 13 s new (the 39 frames it carries from the last share H3's 15 s
+  window), so 1 + ⌈(d − 15) / 13.4⌉ for d > 15. Each piece continues the last from its carried
   latents. Edges go between beats: no beat starts from 2 s before an edge to 2.5 s after it,
   because a carried head delays a new action (run 20751: beats on an edge started about 6 s
   late). Where that can't hold, the shot warns. Within that, each piece is as long as it can
   be, since a longer generation is more consistent. A shot of several pieces decodes their
   latents as one video, so no join steps the picture. An 8 s shot with beats at 0 and 5 is
-  one generation; the 40 s shot above is pieces of 15, 14 and 11 s.
+  one generation; the 40 s shot above is pieces of 15, 13 and 12 s.
 - **Text.** Each piece is one `[Shot 1]` paragraph: the shot's `prompt`, the beat it is in
   ("Already under way, not begun again: …" when that beat began earlier) and each later beat
   ("Then …"). The first piece ends "One continuous shot with no cuts."; a later one opens on
