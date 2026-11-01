@@ -1,0 +1,15 @@
+{
+  "passed": true,
+  "cuda_initialized": false,
+  "torch": "2.14.0+cu130",
+  "torch_git": "08187d9e0fba026dc8217405802ab5381dc88d90",
+  "actual_block_type": "MiniMaxH3VideoTransformerBlock",
+  "kernel_identity": "sha256:cc66a3347c9e0b8cfe30ed32cfe70974e806866ca4ccfdd99415ac0ac76eaea8",
+  "source_sha256": {
+    "fusion": "49b3a7e6f34a30f25041ea1d1ee77ea940fc4933a45d6c8ddaf656b930347e49",
+    "package_vae_tiles": "a3811e57ba3783b81a5a992a743b7585b14802cc94ba346a00e0cbad9e4b6517"
+  },
+  "scope": "actual meta-device model construction and full/ragged tensor-layout inventory only; no CUDA query, execution, allocation-census, numeric or performance proof",
+  "kernel_origin": "minimax_h3.vae_tiles",
+  "prior_kernel_identity": "sha256:cc66a3347c9e0b8cfe30ed32cfe70974e806866ca4ccfdd99415ac0ac76eaea8"
+}
