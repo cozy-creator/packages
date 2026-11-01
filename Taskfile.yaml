@@ -54,8 +54,7 @@ tasks:
         shipped=
         # The Triton sets the package's import declares, compiled on this CPU for every card row, ship in the release: each
         # into `_triton` beside the module that declares it (its home, where machines look), which need not be the object's
-        # (minimax-h3: object h3, sets in minimax_h3). They compile with the Runtime the package's lock pins, which keys them
-        # and is the one machines run it on.
+        # (minimax-h3: object h3, sets in minimax_h3). They compile with the Runtime the package's lock pins, which keys them.
         prebuild='import importlib, sys
         from pathlib import Path
         importlib.import_module(sys.argv[1])
@@ -66,9 +65,16 @@ tasks:
             module = Path(sys.modules[home].__file__).resolve().parent
             if module.is_relative_to(here):
                 triton_prebuild.build(Path(sys.argv[2], module.relative_to(here), triton_kernels.SHIPPED), None, home)'
+        # Once per (torch, Triton) the locked Runtime serves (its `torch-triton.txt`, at most two): the lock's environment
+        # with that torch installed (a lock carries none), the Runtime writing each Triton's sets into `_triton/<Triton>/`.
         kernels() { m=$(sed -n 's/^object = "\([A-Za-z0-9_]*\).*/\1/p' "$1/package.toml"); e=$work/.env-$1
           (cd "$1" && UV_PROJECT_ENVIRONMENT=$e uv sync -q --frozen --no-dev --python 3.12)
-          (cd "$1" && nice -n 19 "$e/bin/python" -I -c "$prebuild" "$m" "$work/.kernels/$1") >/dev/null; }
+          served=$("$e/bin/python" -I -c 'import cozy_runtime, pathlib; print((pathlib.Path(cozy_runtime.__file__).parent / "torch-triton.txt").read_text())' | grep -v '^#' | grep .) ||
+            { echo "$1: its locked Runtime ships no torch-triton.txt: lock a Runtime that does" >&2; exit 1; }
+          while read -r torch triton; do
+            VIRTUAL_ENV=$e uv pip install -q "$torch" "$triton"
+            (cd "$1" && nice -n 19 "$e/bin/python" -I -c "$prebuild" "$m" "$work/.kernels/$1") >/dev/null
+          done <<< "$served"; }
         ship() {
           on=$(held "$1"); [ -z "$on" ] || { echo "$1 $(ver "$1") already exists on $on: not published, not yanked" >&2; exit 1; }
           kernels "$1"
