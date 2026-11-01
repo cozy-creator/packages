@@ -45,10 +45,10 @@ from diffusers.models.transformers.transformer_cosmos import (
 )
 from diffusers.modular_pipelines.anima.before_denoise import AnimaPrepareLatentsStep
 
-# The extension takes DLPack arrays and a CUDA stream through nanobind and never links
-# libtorch, so an explicit Torch/CUDA cohort is admitted rather than every future release.
-TORCH_RELEASES = ("2.13.0", "2.14.0")
-CUDA_RELEASE = "13.0"
+# The extension takes DLPack arrays and a CUDA stream through nanobind and never links libtorch,
+# so any torch this package installs on serves it. It is built for CUDA 13.0: a torch built for
+# CUDA 13.0 or later proves the driver runs it.
+CUDA_MIN = (13, 0)
 #: Diffusers 0.40.0's sources the plan replaces or mirrors.
 _SOURCE_DIGESTS: dict[str, tuple[Callable[..., object], str]] = {
     "RMSNorm.forward": (
@@ -201,11 +201,9 @@ class FusedLatents(AnimaPrepareLatentsStep):
 
 def _capability() -> str:
     """Why this process cannot run the fused kernels, or "" when it can."""
-    release = torch.__version__.split("+", 1)[0]
-    if release not in TORCH_RELEASES:
-        return f"torch {release} is outside the fused plan's releases {', '.join(TORCH_RELEASES)}"
-    if torch.version.cuda != CUDA_RELEASE:
-        return f"torch.version.cuda {torch.version.cuda!r} != the fused plan's {CUDA_RELEASE!r}"
+    cuda = tuple(int(part) for part in (torch.version.cuda or "0.0").split(".")[:2])
+    if cuda < CUDA_MIN:
+        return f"torch.version.cuda {torch.version.cuda!r} is older than the fused plan's {'.'.join(map(str, CUDA_MIN))}"
     if (placed := device()).type != "cuda":
         return f"this process runs on {placed}, not a CUDA GPU"
     return native()

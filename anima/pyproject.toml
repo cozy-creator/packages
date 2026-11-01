@@ -15,8 +15,8 @@ dependencies = [
     "shellingham>=1.5.4",
     "tensorfs>=0.16",
     "tokenizers>=0.23.1",
-    "torch>=2.14",
-    "torchvision>=0.29",
+    "torch>=2.5",
+    "torchvision>=0.20",
     "transformers>=5.16.1",
 ]
 
