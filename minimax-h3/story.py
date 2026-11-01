@@ -366,11 +366,14 @@ def _piece_call(
                 default = (f"attribute_transfer - its movements, timing and camera work are performed "
                            f"by {cast}{where}.")
         elif ref.kind == "world_state":
+            # People are named only where the call has a character (se-089): a world state of a test pattern
+            # that said "each person" grew people (25176).
             definitions.append(
                 f"<{ref.name}> is the world state shown in {slot}: how the set is arranged and "
-                "where everything in it stands."
+                + ("where each person and object stands." if characters else "where everything in it stands.")
             )
-            default = (f"attribute_transfer - keep the set's arrangement and where everything in it stands "
+            kept = "each person's and object's position" if characters else "where everything in it stands"
+            default = (f"attribute_transfer - keep the set's arrangement and {kept} "
                        f"from {slot}, not its exact frame, framing or moment.")
             line_label = f"<{ref.name}>"
         else:
