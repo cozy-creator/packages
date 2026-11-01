@@ -106,8 +106,10 @@ def upscale(
     out: Outputs,
     tel: Telemetry,
 ) -> UpscaleOutput:
-    """Restore with SeedVR2 7B: the whole clip as one window, or windows of at most `batch_size`
-    frames that share `temporal_overlap`. The Runtime cuts the DiT's work to fit the device."""
+    """A video restored and upscaled by SeedVR2 7B.
+
+    The whole clip as one window, or windows of at most `batch_size` frames that share
+    `temporal_overlap`. The Runtime cuts the DiT's work to fit the device."""
     size, overlap = payload.batch_size or sys.maxsize, payload.temporal_overlap
     if overlap >= size:
         tel.log(

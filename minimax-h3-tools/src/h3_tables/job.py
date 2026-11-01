@@ -383,8 +383,10 @@ app.entrypoint(
 )
 @invocable(memo_version="h3-lane/1", memo_dependencies=LANES_MEMO)
 async def vae(ctx: Context, *, source: Weights[Any], tel: Telemetry) -> ModelArtifact:
-    """A lane's video VAE alone, normalised (`NORMALISED_COMPONENTS`): one component and no base,
-    so writing it fetches that component only. `cozy model upload --base` composes it into lanes."""
+    """A lane's video VAE alone, normalised.
+
+    `NORMALISED_COMPONENTS`: one component and no base, so writing it fetches that component
+    only. `cozy model upload --base` composes it into lanes."""
     opened = open_source(ctx, source)
     held = rows(opened)["vae"]
     selection = _lanes.select(

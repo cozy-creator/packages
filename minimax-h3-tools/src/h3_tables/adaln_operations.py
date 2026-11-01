@@ -191,6 +191,7 @@ def _project(ctx: Context, source: Checkpoint, task: Task, output: str) -> Model
 
 @invocable(memo_dependencies=ADALN)
 async def select_adaln_weights(ctx: Context, *, source: Weights[Any], task: Task) -> Selection:
+    """One DiT's AdaLN generating weights, selected from a full or pruned checkpoint."""
     ctx.raise_if_cancelled()
     opened = open_source(ctx, source)
     present = rows(opened)
@@ -234,6 +235,7 @@ async def compute_adaln_tables(
     plan_digest: str,
     tel: Telemetry,
 ) -> ModelArtifact:
+    """One DiT's AdaLN timestep tables, computed from its generating weights."""
     opened = open_source(ctx, source)
     plan = _plan(opened, task)
     if plan_digest != plan.digest:
@@ -373,6 +375,7 @@ async def apply_adaln(
     fl2va: Weights[Any],
     ref2va: Weights[Any],
 ) -> ModelArtifact:
+    """A full checkpoint AdaLN-pruned: both DiTs' modulation rows replaced by their tables."""
     return _apply_adaln(ctx, source=source, fl2va=fl2va, ref2va=ref2va, require_pruned=False)
 
 
@@ -384,4 +387,5 @@ async def retable_adaln(
     fl2va: Weights[Any],
     ref2va: Weights[Any],
 ) -> ModelArtifact:
+    """An AdaLN-pruned checkpoint with both DiTs' tables replaced."""
     return _apply_adaln(ctx, source=source, fl2va=fl2va, ref2va=ref2va, require_pruned=True)
