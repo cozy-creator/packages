@@ -9,11 +9,11 @@ from typing import Literal, NamedTuple
 
 from cozy_runtime.author import (
     MENTION,
-    Asset,
     AudioFile,
     AudioPreparation,
     ImageFile,
     InvalidRequest,
+    Reference,
     VideoFile,
     VideoPreparation,
     name_key,
@@ -70,7 +70,7 @@ TASKS = ("reference generation", "keyframe completion", "video editing", "video 
 SHORT_DESCRIPTION = 150
 
 
-class StoryReference(Asset, kw_only=True):
+class StoryReference(Reference, kw_only=True):
     """One reference file (`FILE[kind]`) a piece attaches.
 
     - `background`: the environment, the shot's setup plate.
