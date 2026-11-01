@@ -50,7 +50,14 @@ from cozy_runtime.author.kernels import ROWWISE_FP8, PreQuantized, quantize_once
 from cozy_runtime.rows import Rows
 from cozy_runtime.rows import rows as columns
 
-from .glue import KEY_MEAN, FusedMiniMaxH3AttnProcessor, H3AttnProcessor, KeyMean
+from .glue import (
+    KEY_MEAN,
+    FusedMiniMaxH3AttnProcessor,
+    H3AttnProcessor,
+    KeyMean,
+    ran_whole,
+    refused,
+)
 
 FAST = "kitchen-sol-producer-fast-shared-qkv"
 FP4_LOWMEM = "kitchen-sol-producer-fp4-lowmem-shared-qkv"
@@ -461,10 +468,12 @@ class _Heads:
         hidden: torch.Tensor | PreQuantized,
         freqs: torch.Tensor,
     ) -> _Heads | None:
-        """The call cut by heads, or None where a projection does not cut by rows."""
+        """The call cut by heads, or None where a projection does not cut by rows (and warns why)."""
         attn = call.module
         found = tuple(columns(m) for m in (attn.to_q, attn.to_k, attn.to_v))
-        if any(r is None for r in found):
+        reason = refused(attn, found)
+        if reason is not None:
+            ran_whole("sparse", reason)
             return None
         return cls(call, means, hidden, freqs, found)  # type: ignore[arg-type]
 
