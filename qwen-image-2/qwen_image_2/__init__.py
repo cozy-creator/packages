@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 import msgspec
 import torch
+from cozy_runtime import stepcache
 from cozy_runtime.author import (
     Adjustments,
     App,
@@ -42,6 +43,18 @@ class GenerateInput(ImageRequest):
     assets: Annotated[list[PictureAsset], msgspec.Meta(max_length=10)] = msgspec.field(
         default_factory=list
     )
+    #: Speed against fidelity: `fast` reuses the transformer's cached residual on steps that
+    #: change it little (`CACHE`); `quality` and `balanced` run every step.
+    preset: Literal["quality", "balanced", "fast"] = "balanced"
+
+
+#: The text-to-image denoise's step cache per preset (`stepcache`): FirstBlockCache 0.08 for
+#: `fast`, NVIDIA sol-engine's aggressive threshold; none otherwise.
+CACHE: dict[str, stepcache.Policy | None] = {
+    "quality": None,
+    "balanced": None,
+    "fast": stepcache.FirstBlockCache(0.08),
+}
 
 
 def label(n: int, asset: PictureAsset) -> str:
@@ -135,6 +148,7 @@ def _generate(
             reference_images=reference_images,
             reference_latents=reference_latents,
             image_pad_mask=image_pad_mask,
+            cache=CACHE[payload.preset],
         )
     ctx.raise_if_cancelled()
     with tel.stage("decoding image", overall_range=(0.9, 0.98)):

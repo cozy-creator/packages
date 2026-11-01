@@ -11,10 +11,10 @@ from __future__ import annotations
 
 import math
 from collections.abc import Callable
-from types import SimpleNamespace
 from typing import Any
 
 import torch
+from cozy_runtime.author import AttentionLayout
 from cozy_runtime.author import device as placed_device
 from diffusers.modular_pipelines.minimax_h3.before_denoise import (
     MiniMaxH3PrepareLayoutStep,
@@ -27,8 +27,8 @@ from .official import (
     LATENTS_PER_CHUNK,
     PATCH_SIZE,
     VAE_SPATIAL_RATIO,
+    _EXACT_ATTENTION_PATHS,
     Schedule,
-    _attention_layout,
 )
 from .steps import denoise_refine
 
@@ -42,6 +42,14 @@ TARGETS: dict[str, tuple[int, int, int]] = {
 }
 #: The upscaler's trained range ends at 1440p: a larger target goes through it first.
 UPSCALER_CEILING = (1440, 2560)
+#: NVIDIA's refine forwards (`open_h3/sol_engine_fwd.py` SPARSE, `fast_dit.SparsePlan`): the refine
+#: steps that run dense (None: every one), and the Sol `tau` of the sparse ones. A sparse step's every
+#: block is sparse, its text and audio rows exact; the token refiner stays dense.
+PRESETS: dict[str, tuple[int | None, float]] = {
+    "quality": (None, 1.0),  # `standard`
+    "balanced": (1, 1.0),  # `sol_engine`
+    "fast": (0, 1.75),  # `sol_engine_fast`
+}
 #: The VAE posterior sample `infer.py --input-video` draws (`--vae-seed`).
 POSTERIOR_SEED = 42
 VIDEO_TAG, TEXT_TAG, AUDIO_TAG = 0, 1, 2
@@ -158,6 +166,7 @@ def refine(
     audio: torch.Tensor,
     schedule: Schedule,
     seed: int,
+    preset: str,
     on_step: Callable[[int], None],
 ) -> torch.Tensor:
     """Refine normalized `(1, 24, T, H, W)` latents at their size over `spans` (`plan_windows`),
@@ -209,7 +218,8 @@ def refine(
         )
         for timestep in schedule.video_timesteps
     ]
-    view = SimpleNamespace(denoiser_input_fields=fields, num_condition_video_rows=0)
+    dense, tau = PRESETS[preset]
+    dense = len(plan) if dense is None else dense
     denoise_refine(
         transformer,
         overlay,
@@ -221,7 +231,13 @@ def refine(
         sigmas=torch.tensor(schedule.video_sigmas, dtype=torch.float32, device=device),
         windows=[(first * rows_per_frame, length * rows_per_frame) for first, _ in spans],
         weights=blend(spans, latent_frames, rows_per_frame, device),
-        layout_at=lambda step: _attention_layout(view, step, sol_dense_steps=0),
+        dense_steps=dense,
+        layout_at=lambda step: AttentionLayout(
+            live_tokens=int(fields["token_tags"].numel()),
+            protected_prefix=int(fields["text_indices"].numel()) + int(fields["audio_indices"].numel()),
+            step=step, dense_until_step=dense, dense_paths=("token_refiner",),
+            exact_paths=_EXACT_ATTENTION_PATHS, tau=tau,
+        ),  # fmt: skip
         on_step=on_step,
     )
     return unpatchify(video, latent_frames, height, width)
