@@ -1698,10 +1698,15 @@ _WORLD_STATE_EDGE = 512
 #: up the carried frames as they are, the camera still doing what it did, and starts nothing new
 #: for its first two seconds (MiniMax's extend and the ComfyUI chainers restate the incoming state;
 #: one that holds the camera against a moving shot, or restages a beat, reframes: se-087, 24525). It
-#: names nothing a shot may not have: "the same people" put people into a test pattern (se-089, 25176).
+#: names people only when the shot has a character: "the same people" put people into a test pattern
+#: (se-089, 25176), and without them a character shot went back to its opening place (25229, 25467).
 _ONE_SHOT = "One continuous shot with no cuts."
-_CONTINUED = ("The same unbroken take goes on from its last moment: everything stays where it was, the camera still "
-              "moving as it was. For its first two seconds everything carries on exactly as it is.")
+_CONTINUED = {
+    True: ("The same unbroken take goes on from its last moment: the same people in the same places, the camera "
+           "still moving as it was. For its first two seconds everything carries on exactly as it is."),
+    False: ("The same unbroken take goes on from its last moment: everything stays where it was, the camera still "
+            "moving as it was. For its first two seconds everything carries on exactly as it is."),
+}
 #: A pinned head delays a new action about 2.4 s, so no beat starts from 2 s before a piece's
 #: edge to 2.5 s after it, where the pieces can avoid it.
 _BEFORE_EDGE_S, _AFTER_EDGE_S = 2.0, 2.5
@@ -1750,12 +1755,19 @@ def plan_pieces(duration_s: float, beats: Iterable[float]) -> list[int]:
     return max(plans)[-1]
 
 
-def piece_texts(prompt: str, beats: Sequence[Beat], starts: Sequence[float]) -> list[str]:
+def _has_people(payload: ShotRequest) -> bool:
+    """Whether a shot's text may name people: it has a character picture. Read from the request's
+    types, never from its prose (se-089)."""
+    return any(asset.kind == "character" for asset in payload.assets)
+
+
+def piece_texts(prompt: str, beats: Sequence[Beat], starts: Sequence[float], *, people: bool) -> list[str]:
     """Each piece's text, one `[Shot 1]` paragraph with no cut times (H3's `[Shot N] At
     MM:SS.mmm` marks a cut; its guide writes in-shot change as plain English). The first piece:
     the shot's text, the beat it is in and the beats it reaches, in order, ending that it is one
     continuous shot. A later one describes the state where it starts, never the opening again:
-    the carried frames as they are (`_CONTINUED`), the beat in force (already under way, when it
+    the carried frames as they are (`_CONTINUED`, naming people when the shot has a character:
+    `people`), the beat in force (already under way, when it
     began before the piece) and the beats it reaches. Restating the opening pulls a shot that has
     moved on back to it, with a cut (0.2.4 gate, runs 24980/24981: back in the food cart).
     `starts` are the pieces' start times. The text ends the prompt's description, ahead of any
@@ -1768,7 +1780,7 @@ def piece_texts(prompt: str, beats: Sequence[Beat], starts: Sequence[float]) -> 
     timed = sorted(((beat.at, beat.prompt.strip()) for beat in beats), key=lambda beat: beat[0])
     texts = []
     for index, (start, end) in enumerate(zip(starts, [*starts[1:], math.inf], strict=True)):
-        parts = [_CONTINUED] if index else [body]
+        parts = [_CONTINUED[people]] if index else [body]
         if current := [beat for beat in timed if beat[0] <= start]:
             at, text = current[-1]
             parts.append(f"Already under way, not begun again: {_lower(text)}" if at < start else text)
@@ -1903,14 +1915,17 @@ async def shot(ctx: Context, payload: ShotRequest, out: Outputs, tel: Telemetry)
     forced = frozenset(ref.name for ref in [*references, *plates])
     files: dict[str, File | None] = {ref.name: getattr(ref, FILE[ref.kind]) for ref in voices([*references, *plates])[0]}
     calls: list[PieceCall] = []
-    for index, text in enumerate(piece_texts(payload.prompt, payload.beats, [start / FPS for start in starts])):
+    people = _has_people(payload)
+    here = "who and what" if people else "what"
+    texts = piece_texts(payload.prompt, payload.beats, [start / FPS for start in starts], people=people)
+    for index, text in enumerate(texts):
         own = [ref for ref in references if ref.kind not in CLIPS or ref.name in windows[index]]
         # A continued piece with no place to carry starts from the previous piece's last frame as a world state,
-        # after the request's own pictures so their <Picture N> keep their numbers: what is where now. Every
+        # after the request's own pictures so their <Picture N> keep their numbers: who and what is where now. Every
         # continued piece that saw one joined cleanly (se-087: 9 of 9 seams); those without, character-only and
         # footage shots, reframed or cut (24525, 24603).
         anchor = [StoryReference(name=f"Piece {index} end", kind="world_state",
-                                 description="This piece starts from it: what is where now.")
+                                 description=f"This piece starts from it: {here} is where now.")
                   ] if index and not places else []  # fmt: skip
         call = piece_call(text, [*own, *plates, *anchor] if index else own, style=style,
                           soundscape=sound, music=music, index=index,
@@ -2019,7 +2034,7 @@ def _upscale_prompt(payload: ShotRequest) -> str:
     defined = [(asset.name, asset.description) for asset in payload.assets]
     defined += [(state.name, state.layout) for state in payload.world_state]
     lines = " ".join(f"{name}: {text.strip().rstrip('.')}." for name, text in defined if text.strip())
-    text = piece_texts(payload.prompt, payload.beats, [0.0])[0]
+    text = piece_texts(payload.prompt, payload.beats, [0.0], people=_has_people(payload))[0]
     if lines:
         text = text.replace("[Shot 1] ", f"{lines} [Shot 1] ", 1)
     return re.sub(r"<([^<>]+)>", r"\1", _fl2va_text(text, payload))
