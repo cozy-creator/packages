@@ -13,8 +13,8 @@ dependencies = [
     "pillow>=12",
     "rotary-embedding-torch>=0.5.3",
     "tensorfs>=0.16",
-    "torch>=2.4",
-    "torchvision>=0.19",
+    "torch>=2.6",
+    "torchvision>=0.21",
 ]
 
 [project.entry-points."cozy.application"]
