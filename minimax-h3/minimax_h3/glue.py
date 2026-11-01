@@ -811,6 +811,7 @@ class H3AttnProcessor(MiniMaxH3AttnProcessor):  # type: ignore[misc]
 
 class FusedMiniMaxH3AttnProcessor(H3AttnProcessor):
     _glue: Launch
+    _producer_stats: Launch
 
     def qkv(self, attn: Any, hidden_states: Any, rotary_emb: tuple[Any, Any] | None) -> Any:
         query = attn.to_q(hidden_states).unflatten(-1, (attn.heads, -1))
@@ -1248,7 +1249,7 @@ def _validate_transformer(transformer: Any, root: str) -> None:
 
 
 def _install_transformer(
-    transformer: Any, root: str, glue: Launch
+    transformer: Any, root: str, glue: Launch, producer_stats: Launch | None = None
 ) -> tuple[list[tuple[str, str, str]], int]:
     substitutions: list[tuple[str, str, str]] = []
     fp8_sites = 0
@@ -1268,6 +1269,8 @@ def _install_transformer(
             next(entry for entry in GLUE.entries if entry.kernel is _rope_norm_kernel),
             next(entry for entry in GLUE.entries if entry.kernel is _key_sum_kernel),
         )
+        if producer_stats is not None:
+            processor._producer_stats = producer_stats
         substitutions.append(
             (f"{path}.attn.processor", _type_name(attn.processor), _type_name(processor))
         )
@@ -1345,6 +1348,17 @@ def install(model: object, pipe: Any, plan: Plan) -> str:
         if not transformers:
             return _eager(model, plan, "fusion_no_transformer", "no MiniMax-H3 transformer to fuse")
         glue = plan.load(kernels(device))
+        producer_stats = None
+        from cozy_runtime.author import kernels as declared
+
+        if getattr(declared, "SparseProjectedHeads", None) is not None and any(
+            all(getattr(leaf, "provider", None) == declared.INT8_CONVROT
+                for leaf in (block.attn.to_q, block.attn.to_k, block.attn.to_v))
+            for _, transformer in transformers for block in transformer.transformer_blocks
+        ):
+            from .producer_kernels import STATS
+
+            producer_stats = plan.load(STATS)
     except KernelsUnavailable as exc:
         if exc.code == "kernels_corrupt":
             raise GlueRefusal("fusion_kernels_corrupt", str(exc)) from exc
@@ -1359,7 +1373,7 @@ def install(model: object, pipe: Any, plan: Plan) -> str:
     warm_ms = 0.0
     for name, transformer in transformers:
         before = _tensor_census(transformer)
-        installed, sites = _install_transformer(transformer, name, glue)
+        installed, sites = _install_transformer(transformer, name, glue, producer_stats)
         if _tensor_census(transformer) != before:
             raise GlueRefusal(
                 "fusion_tensor_schema_changed",
