@@ -309,8 +309,9 @@ def producing(layout: AttentionLayout, path: str) -> bool:
 
 
 def sparse_step(layout: AttentionLayout, path: str) -> bool:
-    """A call this producer serves: a sparse step at a site it produces for."""
-    return layout.step >= layout.dense_until_step and producing(layout, path)
+    """A call this producer serves: a sparse step (`AttentionLayout.sparse`: a plate's prefix
+    makes every step dense) at a site it produces for."""
+    return layout.sparse and producing(layout, path)
 
 
 def produce(
