@@ -69,7 +69,7 @@ from cozy_runtime.rows import Rows, rows
 
 from .adaln_pruned import AdaLNPrunedMiniMaxH3Transformer
 
-CONTRACT = "h3-glue-call-and-topology/2"
+CONTRACT = "h3-glue-call-and-topology/3"
 
 
 @dataclass(slots=True)
@@ -933,7 +933,9 @@ class FusedMiniMaxH3TransformerBlock(MiniMaxH3TransformerBlock):  # type: ignore
         )
         tail = _Tail(self, hidden_states, adaln_indices, gate_msa, scale_mlp, shift_mlp, gate_mlp)
         # The tail writes its rows in place: a view that does not flatten would take a copy.
-        return split(tail.run, tail, Cut(1), out=attn_output.contiguous())
+        return split(
+            tail.run, tail, Cut(1), out=attn_output.contiguous(), intent=tail.intent()
+        )
 
 
 class _Tail:
@@ -957,6 +959,28 @@ class _Tail:
 
     def __getitem__(self, index: tuple[slice, ...]) -> slice:
         return index[1]
+
+    def intent(self) -> Any:
+        """Declare this exact materialized BF16 tail; the Runtime decides memory/chunks.
+
+        The attention output is consumed exclusively by this call and then returned.
+        Unsupported providers/hooks/layouts still use the original run before execution.
+        """
+        block = self.block
+        act = block.ff.net[0]
+        if not isinstance(act, FusedSwiGLU) or act._fusion_fp8 or block._fusion_ff_fp8:
+            return None
+        from cozy_runtime.author.kernels import ResidualFFN
+
+        norm_mod, swiglu_entry, gate_add_entry = block._residual_ffn_entries
+        gate_msa, scale, shift, gate = self.gates
+        return ResidualFFN(
+            up=act.proj, down=block.ff.net[2], launch=block._glue,
+            norm_mod=norm_mod, swiglu=swiglu_entry, gate_add=gate_add_entry,
+            residual=self.residual, index=self.index, norm_weight=block.norm2.weight,
+            gate_msa=gate_msa, scale_mlp=scale, shift_mlp=shift, gate_mlp=gate,
+            eps=block.norm2.eps, exclusive_out=True,
+        )
 
     def run(self, rows: _Tail | slice, out: Any) -> None:
         """The tail over token `rows`, written into `out` (those rows of the attention output).
@@ -1228,6 +1252,13 @@ def _install_transformer(
         block._fusion_attn_fp8 = attn_fp8
         block._fusion_ff_fp8 = ff_fp8
         block._glue = glue
+        # Existing entries and compiled launcher; no new shader or allocating callback.
+        block._residual_ffn_entries = (
+            next(entry for entry in GLUE.entries if entry.kernel is _norm_mod_kernel
+                 and entry.constexprs["RESIDUAL"] == 1),
+            next(entry for entry in GLUE.entries if entry.kernel is _swiglu_kernel),
+            next(entry for entry in GLUE.entries if entry.kernel is _gate_add_kernel),
+        )
     return substitutions, fp8_sites
 
 
