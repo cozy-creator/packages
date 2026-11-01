@@ -11,7 +11,7 @@ dependencies = [
     "pillow>=12",
     "tensorfs>=0.17.6",
     "tokenizers>=0.23.1",
-    "torch>=2.14",
+    "torch>=2.6",
     "transformers>=5.17",
 ]
 

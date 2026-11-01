@@ -9,8 +9,8 @@ dependencies = [
     "msgspec>=0.19",
     "numpy>=1.26",
     "pillow>=12",
-    "torch>=2.13",
-    "torchvision>=0.28",
+    "torch>=2.6",
+    "torchvision>=0.21",
     "transformers>=5.17",
 ]
 

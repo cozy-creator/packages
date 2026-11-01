@@ -13,8 +13,8 @@ dependencies = [
     # Tencent's code targets Transformers 4.57 (its requirements pin 4.57.1): the tokenizer and the
     # SigLIP2 image processor are Transformers'.
     "tokenizers>=0.22,<0.23",
-    "torch>=2.13",
-    "torchvision>=0.28",
+    "torch>=2.2",
+    "torchvision>=0.17",
     "transformers>=4.57.1,<4.58",
 ]
 
