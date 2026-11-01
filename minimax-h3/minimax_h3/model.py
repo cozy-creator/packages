@@ -5,6 +5,7 @@ from __future__ import annotations
 import math
 import time
 from collections.abc import Callable, Mapping
+from dataclasses import dataclass
 from functools import partial
 from typing import Any, Literal
 
@@ -101,8 +102,24 @@ def condition_references(model: H3Model, task: Task, state: Any, *, tel: Telemet
     tel.log("h3 conditioning", wall_ms=round((time.perf_counter() - started) * 1000, 1))
 
 
-#: The DiT's block stack for step caching (`stepcache`): the full model's `preset` (`FULL_CACHE`).
+#: The DiT's block stack for step caching (`stepcache`): the full model's `preset` (`FullRecipe`).
 STACK = stepcache.Stack(MiniMaxH3Transformer3DModel, blocks="transformer_blocks", carried=(0,))
+
+
+@dataclass(frozen=True)
+class FullRecipe:
+    """The full model's sampling for a `preset` (h3.py `FULL_RECIPES`): its first `dense_steps`
+    dense, the rest sparse at Sol `tau`, and its DiT stack under `cache`, if any."""
+
+    dense_steps: int = 10
+    tau: float = 1.0
+    cache: stepcache.Policy | None = None
+
+    def denoise(self) -> dict[str, Any]:
+        return {"sol_dense_steps": self.dense_steps, "tau": self.tau, "cache": self.cache}
+
+
+FULL_BALANCED = FullRecipe()
 
 
 @placeable("text_encoder")
@@ -226,15 +243,15 @@ class H3Model(
 
     @uses_components("transformer")
     def sample_fl2va(
-        self, state: Any, *, on_step: Any, cancel: Any, cache: stepcache.Policy | None = None
+        self, state: Any, *, on_step: Any, cancel: Any, recipe: FullRecipe = FULL_BALANCED
     ) -> ScheduleFacts:
-        return self.pipe.denoise("fl2va", state, on_step=on_step, cancel=cancel, cache=cache)
+        return self.pipe.denoise("fl2va", state, on_step=on_step, cancel=cancel, **recipe.denoise())
 
     @uses_components("transformer_ref")
     def sample_ref2va(
-        self, state: Any, *, on_step: Any, cancel: Any, cache: stepcache.Policy | None = None
+        self, state: Any, *, on_step: Any, cancel: Any, recipe: FullRecipe = FULL_BALANCED
     ) -> ScheduleFacts:
-        return self.pipe.denoise("ref2va", state, on_step=on_step, cancel=cancel, cache=cache)
+        return self.pipe.denoise("ref2va", state, on_step=on_step, cancel=cancel, **recipe.denoise())
 
 
 class H3TurboBase(H3Model, encoded_leaves="accept"):

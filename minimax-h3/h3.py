@@ -78,6 +78,8 @@ from minimax_h3.continuation import (
 )
 from minimax_h3.guide_rows import GuideClip
 from minimax_h3.model import (
+    FULL_BALANCED,
+    FullRecipe,
     H3LatentUpscaler as H3LatentUpscaler,
     H3Model as H3Model,
     H3RegenerateLoRA as H3RegenerateLoRA,
@@ -871,15 +873,16 @@ RegenerateResolution = Annotated[Resolution, Shape(pixels=_REGENERATE_PIXELS)]
 #: refine forwards (`regenerate.PRESETS`).
 Preset = Literal["quality", "balanced", "fast"]
 #: Turbo's dense steps of eight: all (NVIDIA HyperFlow's `quality`), four, and one (Sol-Engine's
-#: `sol_bsa`). The full model has one recipe, ten dense steps.
+#: `sol_bsa`), the rest sparse at tau 1.0.
 TURBO_DENSE_STEPS: dict[Preset, int] = {"quality": 8, "balanced": 4, "fast": 1}
-#: The full model's step cache (`stepcache`, NVIDIA sol-engine's 30-step tiers): `quality` H100's
-#: EasyCache, `fast` H100 `aggressive` / GB200 `fullopt`'s FirstBlockCache; `balanced` none.
-#: Turbo's eight distilled steps never cache (NVIDIA keeps cache reuse off on distilled paths).
-FULL_CACHE: dict[Preset, stepcache.Policy | None] = {
-    "quality": stepcache.EasyCache(0.30, retain=10, cooldown=4, max_hits=1),
-    "balanced": None,
-    "fast": stepcache.FirstBlockCache(0.08),
+#: The full model's recipes, NVIDIA sol-engine's tiers (forward indices, as theirs): `quality` H100's
+#: 15 dense steps, tau 0.5 and EasyCache; `balanced` its RTX `sol` arm, 10 dense at tau 1.0;
+#: `fast` that plus H100 `aggressive` / GB200 `fullopt`'s FirstBlockCache. Turbo's eight distilled
+#: steps never cache (NVIDIA keeps cache reuse off on distilled paths).
+FULL_RECIPES: dict[Preset, FullRecipe] = {
+    "quality": FullRecipe(15, 0.5, stepcache.EasyCache(0.30, retain=10, cooldown=4, max_hits=1)),
+    "balanced": FULL_BALANCED,
+    "fast": FullRecipe(10, 1.0, stepcache.FirstBlockCache(0.08)),
 }
 #: A shot's latents (`shot_latents`): `ShotResult.latents`, `UpscaleInput.latents`.
 Latents = Annotated[File, FileBound(max_bytes=1 << 30, media_types=("application/octet-stream",))]
@@ -1057,7 +1060,7 @@ def _render_keyframes(
         with tel.stage("condition_media", overall_range=(0.08, 0.15)):
             model.condition_fl2va_media(task, state)
     if turbo_lora is None:
-        sample = partial(model.sample_fl2va, cache=FULL_CACHE[preset])
+        sample = partial(model.sample_fl2va, recipe=FULL_RECIPES[preset])
     else:
         assert isinstance(model, H3TurboBase)
         sample = partial(model.sample_fl2va_turbo, turbo_lora=turbo_lora, sol_dense_steps=TURBO_DENSE_STEPS[preset])
@@ -1153,7 +1156,7 @@ def _references_to_video(
     with tel.stage("condition", overall_range=(0.03, 0.15)):
         condition_references(model, task, state, tel=tel)
     if turbo_lora is None:
-        sample = partial(model.sample_ref2va, cache=FULL_CACHE[payload.preset])
+        sample = partial(model.sample_ref2va, recipe=FULL_RECIPES[payload.preset])
     else:
         assert isinstance(model, H3TurboBase)
         sample = partial(model.sample_ref2va_turbo, turbo_lora=turbo_lora, sol_dense_steps=TURBO_DENSE_STEPS[payload.preset])
