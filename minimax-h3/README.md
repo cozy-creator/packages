@@ -30,6 +30,7 @@ world_state: [{name: Stage, image: ./stage.png, layout: Theo by the hut, left; J
 keyframes: {first: ./open.png}                # and/or last
 writes: [last, 12.5]                          # frames to return
 turbo: true                                   # false: the full model at steps 30, 40 or 50
+preset: balanced                              # quality | balanced | fast
 ```
 
 - **Pieces.** A shot renders in the fewest pieces that reach its length: the first up to
@@ -69,6 +70,9 @@ turbo: true                                   # false: the full model at steps 3
   next piece goes on from where the shot is (its last frame, and the take restated), not from
   the clip's moment (run 24603 cut there; 24964 did not).
   `keyframes` anchor the first and last frames.
+- **Presets.** `preset` trades speed for fidelity. Turbo runs its eight steps with 8, 4 or 1 dense
+  (quality, balanced, fast: NVIDIA's HyperFlow quality and Sol-Engine `sol_bsa`), the rest sparse.
+  The full model has one recipe, 10 dense steps. Above 768p it also picks the upscale's.
 - **Result.** `video` (768p mp4), `frames` (one per `writes` entry) and `warnings`. A piece
   renders whole seconds on H3's 17n+5 frame grid, so the video can run up to a second past
   `duration_s`; the edit trims it.
