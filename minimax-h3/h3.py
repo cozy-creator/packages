@@ -1313,7 +1313,7 @@ async def ref2va_piece(
                        handed.file("latents"))  # fmt: skip
 
 
-app.entrypoint(internal=True)(ref2va_piece)
+app.child_task(ref2va_piece)
 
 
 def log_prompt(tel: Telemetry, event: str, prompt: str, **fields: str | int) -> None:
@@ -1412,7 +1412,7 @@ async def fl2va_piece(
                        handed.file("latents"))  # fmt: skip
 
 
-app.entrypoint(internal=True)(fl2va_piece)
+app.child_task(fl2va_piece)
 
 
 @invocable(
@@ -1494,7 +1494,7 @@ async def regenerate_shot(
     return RegenerateOutput(saved.video, warnings)
 
 
-app.entrypoint(internal=True)(regenerate_shot)
+app.child_task(regenerate_shot)
 
 
 # --- shot: one continuous take of any length (`video/shot`) ------------------------------

@@ -35,7 +35,6 @@ from torch.nn import functional as F
 from cozy_runtime import lora
 from cozy_runtime.author import ConformanceError
 
-from .fit import release_if_tight
 from .overlay import (
     ATTENTION_KWARG,
     LORA_FAMILIES,
@@ -353,8 +352,6 @@ class AdaLNPrunedMiniMaxH3Transformer(MiniMaxH3Transformer3DModel):  # type: ign
             audio = self.audio_proj_in(audio_hidden_states.to(get_parameter_dtype(self.audio_proj_in)))
             rows.index_copy_(1, audio_indices, audio.to(rows.dtype))
             del audio
-            # The packing's float32 video rows (2.2 GB at 15 s) leave the cache before the blocks.
-            release_if_tight(rows, self.transformer_blocks[0].attn)
             temb = self.time_proj(timestep)
             temb = self.time_embedder(temb.to(get_parameter_dtype(self.time_embedder)))
             adaln_indices = timestep_indices * MINIMAX_H3_MODALITY_NUM + token_tags

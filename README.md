@@ -102,7 +102,7 @@ transformer's; every other component inherits unchanged.
 
 `minimax-h3` exposes two node functions for Cozy Creator's projects, `shot` and `upscale`
 ([minimax-h3/README.md](minimax-h3/README.md), [UPSCALE.md](minimax-h3/UPSCALE.md)). A shot renders
-in pieces of at most 15 s, each an internal serving child on one of H3's official trunks: FL2VA
+in pieces of at most 15 s, each a child task (`app.child_task`) on one of H3's official trunks: FL2VA
 (text and keyframes) when it attaches no reference, else Ref2VA, which also carries the previous
 piece's latents ([continuation](minimax-h3/docs/continuation.md)).
 
