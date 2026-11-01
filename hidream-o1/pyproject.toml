@@ -1,10 +1,10 @@
 [project]
 name = "hidream-o1"
-version = "0.1.2"
+version = "0.2.0"
 description = "Cozy text-to-image and reference editing with HiDream-O1-Image, full and Dev"
 requires-python = ">=3.12"
 dependencies = [
-    "cozy-runtime[media]>=0.36.0",
+    "cozy-runtime[media]>=0.37.0",
     "diffusers>=0.40",
     "msgspec>=0.19",
     "numpy>=1.26",

@@ -10,7 +10,7 @@ from cozy_runtime.author import (
     Adjustments,
     App,
     Context,
-    PictureAsset,
+    Picture,
     ImageRequest,
     InvalidRequest,
     ImageResult,
@@ -45,7 +45,7 @@ UNCONDITIONAL = " "
 class GenerateInput(ImageRequest):
     #: Given, the image edits them, or composes them in order. HiDream-O1 has no words of its own
     #: for them, so a `<name>` mention reads as the name.
-    assets: Annotated[list[PictureAsset], msgspec.Meta(max_length=10)] = msgspec.field(
+    pictures: Annotated[list[Picture], msgspec.Meta(max_length=10)] = msgspec.field(
         default_factory=list
     )
     #: CFG over the first 80% of the steps only (limited-interval guidance): with CFG to the end,
@@ -78,10 +78,10 @@ def layout(
     pixel_boxes = [None if box is None else canvas_box(box, width, height) for box in boxes]
     for index, (box, drawn) in enumerate(zip(boxes, pixel_boxes, strict=True)):
         if box is not None and drawn is None:
-            raise InvalidRequest(f"assets.{index}.box is under a pixel on the {width}x{height} output",
-                                 code="invalid_box", fields=(f"assets.{index}.box",))
+            raise InvalidRequest(f"pictures.{index}.box is under a pixel on the {width}x{height} output",
+                                 code="invalid_box", fields=(f"pictures.{index}.box",))
     if sum(box is not None for box in pixel_boxes) > MAX_BOXES:
-        adj.warn("assets", f"HiDream-O1 draws only the {MAX_BOXES} largest boxes, as upstream")
+        adj.warn("pictures", f"HiDream-O1 draws only the {MAX_BOXES} largest boxes, as upstream")
     side = reference_size(max(width, height), len(images) + 1)
     return (width, height), placed(images, pixel_boxes, width, height, side)
 
@@ -120,8 +120,8 @@ def generate(ctx: Context, payload: GenerateInput, model: HiDreamO1, out: Output
              tel: Telemetry, adj: Adjustments) -> ImageResult:
     """HiDream-O1-Image: 50 UniPC steps with CFG 5.0 over the first 40. The model HiDream recommends
     for editing."""
-    boxed = any(asset.box is not None for asset in payload.assets)
-    shift = SUBJECT_SHIFT if len(payload.assets) > 1 or boxed else FULL_SHIFT
+    boxed = any(picture.box is not None for picture in payload.pictures)
+    shift = SUBJECT_SHIFT if len(payload.pictures) > 1 or boxed else FULL_SHIFT
     guidance = held(adj, "guidance", GUIDANCE if payload.guidance is None else payload.guidance, 1.0, 20.0)
     cfg = guidance > 1.0
     negative = (payload.negative_prompt if payload.negative_prompt is not None else UNCONDITIONAL) if cfg else None
@@ -134,12 +134,12 @@ def generate(ctx: Context, payload: GenerateInput, model: HiDreamO1, out: Output
                 memo_dependencies=_MEMO)
 def generate_turbo(ctx: Context, payload: GenerateInput, model: HiDreamO1, out: Outputs,
                    tel: Telemetry, adj: Adjustments) -> ImageResult:
-    """HiDream-O1-Image-Dev: 28 distilled steps, no CFG. A one-asset edit samples flow-match Euler."""
+    """HiDream-O1-Image-Dev: 28 distilled steps, no CFG. A one-picture edit samples flow-match Euler."""
     if payload.steps not in (None, DEV_STEPS):
         adj.clamp("steps", payload.steps, DEV_STEPS, "the Dev model's distilled schedule")
     payload.ignored(adj, "guidance", "negative_prompt", reason="HiDream-O1-Dev samples without CFG")
     if not payload.guidance_interval:
         adj.warn("guidance_interval", "ignored: HiDream-O1-Dev samples without CFG")
-    recipe = Recipe("euler") if len(payload.assets) == 1 else DEV_FLASH
+    recipe = Recipe("euler") if len(payload.pictures) == 1 else DEV_FLASH
     return _generate(ctx, model, out, tel, adj, payload=payload, recipe=recipe, steps=DEV_STEPS,
                      guidance=0.0, negative=None)

@@ -2,7 +2,7 @@
 
 Black Forest Labs' FLUX.2 open weights in one package: [dev] (32B, Mistral-Small-3.2 text encoder), fal's
 [dev] Turbo LoRA, and [klein] 9B and 4B (Qwen3 text encoders), each distilled or Base. One function per
-speed generates an image, or edits when `assets` are given (up to ten, in order).
+speed generates an image, or edits when `pictures` are given (up to ten, in order).
 
 | function | default model | other models (`model.model=`) |
 | --- | --- | --- |
@@ -30,19 +30,19 @@ Inline inputs work too, and override the file's:
 cozy run flux-2/generate_turbo model.model=flux-2-klein-4b \
   prompt='A lighthouse on a basalt cliff in a winter storm' aspect_ratio=16:9
 cozy run flux-2/generate_turbo model.model=flux-2-klein-9b \
-  prompt='Make <Lighthouse> night, the lamp lit' assets:='[{"name": "Lighthouse", "image": "lighthouse.png"}]'
+  prompt='Make <Lighthouse> night, the lamp lit' pictures:='[{"name": "Lighthouse", "image": "lighthouse.png"}]'
 cozy run flux-2/generate model.model=flux-2-klein-4b-base prompt='...' negative_prompt='blurry'
 cozy run flux-2/generate prompt='...'          # [dev]
 cozy run flux-2/generate_turbo prompt='...'    # [dev] Turbo
 ```
 
-Inputs are the shared image request, the same in every image package: `prompt`, `assets`, `aspect_ratio` (any W:H), `megapixels` (any size, 1024² pixels each), `steps`, `guidance`, `negative_prompt`, `seed` and `prompt_upsampling`. Left out, each is the checkpoint's default: steps as above (Turbo always runs its 8),
+Inputs are the shared image request, the same in every image package: `prompt`, `pictures`, `aspect_ratio` (any W:H), `megapixels` (any size, 1024² pixels each), `steps`, `guidance`, `negative_prompt`, `seed` and `prompt_upsampling`. Left out, each is the checkpoint's default: steps as above (Turbo always runs its 8),
 guidance 4 ([dev]'s embedded guidance, 2.5 with Turbo; [klein] Base's CFG scale), no negative prompt
 ([klein] Base only), no upsampling, a random seed. Steps 1–100, guidance 1–20; a knob the checkpoint
 has no use for is ignored with a warning, and unknown fields are dropped with one. A `<Name>` mention
-of an asset reads as "image N", the wording of BFL's prompting guide ("subject from image 1, style
-from image 2"; [assets](../docs/assets.md)); the text encoder sees no image, so the assets
-bind by order. With assets, a size input you leave out is the first asset's; an asset's
+of a picture reads as "image N", the wording of BFL's prompting guide ("subject from image 1, style
+from image 2"; [references](../docs/references.md)); the text encoder sees no image, so the pictures
+bind by order. With pictures, a size input you leave out is the first picture's; a picture's
 `box` is ignored with a warning (no layout control). The result is `image`, `width`, `height`, `seed`
 and `prompt`, the prompt actually used.
 
