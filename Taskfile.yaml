@@ -4,7 +4,6 @@ silent: true
 vars:
   LOCK_HUB: https://tensorhub.com # committed locks resolve against production
   HUBS: https://tensorhub.com http://127.0.0.1:8819
-  RUNTIME: cozy-runtime # the Runtime machines run, which keys its fused kernels: the newest release
 
 tasks:
   # First-party packages publish at the root namespace (`--root`, Hub admins). Locks pin first-party callees exactly, so each release of X is followed by one of every package
@@ -55,7 +54,8 @@ tasks:
         shipped=
         # The Triton sets the package's import declares, compiled on this CPU for every card row, ship in the release: each
         # into `_triton` beside the module that declares it (its home, where machines look), which need not be the object's
-        # (minimax-h3: object h3, sets in minimax_h3).
+        # (minimax-h3: object h3, sets in minimax_h3). They compile with the Runtime the package's lock pins, which keys them
+        # and is the one machines run it on.
         prebuild='import importlib, sys
         from pathlib import Path
         importlib.import_module(sys.argv[1])
@@ -68,7 +68,6 @@ tasks:
                 triton_prebuild.build(Path(sys.argv[2], module.relative_to(here), triton_kernels.SHIPPED), None, home)'
         kernels() { m=$(sed -n 's/^object = "\([A-Za-z0-9_]*\).*/\1/p' "$1/package.toml"); e=$work/.env-$1
           (cd "$1" && UV_PROJECT_ENVIRONMENT=$e uv sync -q --frozen --no-dev --python 3.12)
-          VIRTUAL_ENV=$e uv pip install -q --no-deps --upgrade --reinstall-package cozy-runtime "{{.RUNTIME}}"
           (cd "$1" && nice -n 19 "$e/bin/python" -I -c "$prebuild" "$m" "$work/.kernels/$1") >/dev/null; }
         ship() {
           on=$(held "$1"); [ -z "$on" ] || { echo "$1 $(ver "$1") already exists on $on: not published, not yanked" >&2; exit 1; }
