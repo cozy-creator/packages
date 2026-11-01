@@ -1716,6 +1716,9 @@ def shot_windows(
         for window, (start, frames) in zip(windows, spans, strict=True):
             if min(start + frames, length) - start >= least:
                 window[ref.name] = start
+        if ref.kind == "video" and (span := sum(ref.name in window for window in windows)) > 1:
+            warnings.append(f"<{ref.name}> guides {span} pieces, each from its own span: put each beat where the clip "
+                            "shows it, or the shot runs ahead of the clip")  # fmt: skip
         if length < total:
             warnings.append(f"<{ref.name}> ends {length / FPS:.1f} s into this {total / FPS:.1f} s shot, "
                             "which runs on without it")  # fmt: skip

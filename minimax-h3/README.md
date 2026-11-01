@@ -64,7 +64,10 @@ turbo: true                                   # false: the full model at steps 3
   the shot comes back close to the clip (run 21018). A clip can be as long as the shot: each piece
   reads its own span of it, second for second with the shot, its carried head included, so a
   plate stays frame-aligned across an edge. A shorter clip guides the shot to its end (a piece
-  left with under 2 s of it skips it), and a longer one's excess is unused; both warn.
+  left with under 2 s of it skips it), and a longer one's excess is unused; both warn. Put each
+  beat where the footage shows it: a beat ahead of the clip runs the shot ahead of it, and the
+  next piece goes on from where the shot is (the previous piece's last frame), not from the
+  clip's moment (run 24603 cut there; 24800 with that frame did not).
   `keyframes` anchor the first and last frames.
 - **Result.** `video` (768p mp4), `frames` (one per `writes` entry) and `warnings`. A piece
   renders whole seconds on H3's 17n+5 frame grid, so the video can run up to a second past
