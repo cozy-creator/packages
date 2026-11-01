@@ -68,7 +68,28 @@ def denoise_fl2va(
         video_rows, audio_rows = state.num_condition_video_rows, state.num_condition_audio_rows
         video_sigmas, audio_sigmas = schedulers.scheduler.sigmas, schedulers.audio_scheduler.sigmas
 
-        def step(i: torch.Tensor, video: Any, audio: Any, *means: Any, phase: Phase) -> None:
+        # Read-only values of this call are explicit bindings, never captured through state/fields.
+        inputs = (
+            state.prompt_embeds, timesteps, indices, tags, position_ids,
+            fields["video_indices"], fields["audio_indices"], fields["text_indices"],
+            state.timesteps, state.audio_timesteps, video_sigmas, audio_sigmas,
+        )
+        site_layout = tuple(
+            (site.component, site.path, site.producer.name, site.producer.base, int(site.module.heads))
+            for site in sites
+        )
+        phase_key = (
+            "minimax-h3.fl2va-phase/1", video_rows, audio_rows,
+            phases, layouts[False], layouts[True], site_layout,
+        )
+
+        def step(i: torch.Tensor, video: Any, audio: Any, *bound: Any, phase: Phase) -> None:
+            means = bound[: len(keys)]
+            (
+                prompt_embeds, denoiser_times, denoiser_indices, token_tags, positions,
+                video_indices, audio_indices, text_indices, video_times, audio_times,
+                video_sigma_table, audio_sigma_table,
+            ) = bound[len(keys) :]
             carry = producer.Carry(
                 dict(zip(keys, means, strict=True)), phase.rolling, phase.seeding
             )
@@ -76,20 +97,20 @@ def denoise_fl2va(
                 velocity, audio_velocity = transformer(
                     hidden_states=video[None],
                     audio_hidden_states=audio[None],
-                    encoder_hidden_states=state.prompt_embeds,
-                    timestep=timesteps.index_select(0, i)[0, : phase.rows],
-                    timestep_indices=indices.index_select(0, i)[0],
-                    token_tags=tags,
-                    position_ids=position_ids,
-                    video_indices=fields["video_indices"],
-                    audio_indices=fields["audio_indices"],
-                    text_indices=fields["text_indices"],
+                    encoder_hidden_states=prompt_embeds,
+                    timestep=denoiser_times.index_select(0, i)[0, : phase.rows],
+                    timestep_indices=denoiser_indices.index_select(0, i)[0],
+                    token_tags=token_tags,
+                    position_ids=positions,
+                    video_indices=video_indices,
+                    audio_indices=audio_indices,
+                    text_indices=text_indices,
                     return_dict=False,
                 )
             velocity, audio_velocity = velocity[0, video_rows:], audio_velocity[0, audio_rows:]
-            euler(video[video_rows:], velocity.float(), i, state.timesteps, video_sigmas)
+            euler(video[video_rows:], velocity.float(), i, video_times, video_sigma_table)
             euler(
-                audio[audio_rows:], audio_velocity.float(), i, state.audio_timesteps, audio_sigmas
+                audio[audio_rows:], audio_velocity.float(), i, audio_times, audio_sigma_table
             )
 
         denoise_loop(
@@ -97,6 +118,8 @@ def denoise_fl2va(
             range(len(plan)),
             state=(state.latents, state.audio_latents),
             carried=slots,
+            inputs=inputs,
+            key=phase_key,
             phases=phases,
             on_step=on_step,
         )
