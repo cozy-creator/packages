@@ -368,10 +368,10 @@ def _piece_call(
         elif ref.kind == "world_state":
             definitions.append(
                 f"<{ref.name}> is the world state shown in {slot}: how the set is arranged and "
-                "where each person and object stands."
+                "where everything in it stands."
             )
-            default = (f"attribute_transfer - keep the set's arrangement and each person's and "
-                       f"object's position from {slot}, not its exact frame, framing or moment.")
+            default = (f"attribute_transfer - keep the set's arrangement and where everything in it stands "
+                       f"from {slot}, not its exact frame, framing or moment.")
             line_label = f"<{ref.name}>"
         else:
             moves = [f"<{clip.name}>" if not _MEDIA.fullmatch(clip.name) else label(clip)

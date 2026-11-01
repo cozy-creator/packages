@@ -16,7 +16,7 @@ beats:                                        # each holds until the next
   - {at: 0, prompt: They circle each other.}
   - {at: 13, prompt: <Juno> sweeps <Theo>'s legs.}
   - {at: 27, prompt: <Theo> rolls and stands.}
-style: 35 mm film, warm grade
+style: 35 mm film, warm grade; no crowd    # holds in every piece; prompt is only the opening
 soundscape: gulls, surf, wind
 music: N/A
 assets:                                       # every one is used, named or not
@@ -45,8 +45,8 @@ preset: balanced                              # quality | balanced | fast
 - **Text.** Each piece is one `[Shot 1]` paragraph. The first: the shot's `prompt`, the beat it
   is in and each later beat ("Then …"), ending "One continuous shot with no cuts.". A later one
   describes where it starts, never the opening again (restating it pulls the shot back there,
-  with a cut): the carried frames as they are (the same people in the same places, the camera
-  still moving, nothing new for two seconds), the beat in force ("Already under way, not begun
+  with a cut): the carried frames as they are (everything where it was, the camera still
+  moving, nothing new for two seconds), the beat in force ("Already under way, not begun
   again: …" when it began earlier) and each later beat; it sees the previous piece's last frame
   as a picture after the shot's own (a place takes that frame instead). Beats carry no times: H3 marks cuts with timed
   `[Shot N]`. A prompt with its own `integrated_multimodal_description:`/`audio:`/
@@ -72,7 +72,9 @@ preset: balanced                              # quality | balanced | fast
   `keyframes` anchor the first and last frames.
 - **Presets.** `preset` trades speed for fidelity. Turbo runs its eight steps with 8, 4 or 1 dense
   (quality, balanced, fast: NVIDIA's HyperFlow quality and Sol-Engine `sol_bsa`), the rest sparse.
-  The full model has one recipe, 10 dense steps. Above 768p it also picks the upscale's.
+  The full model runs NVIDIA's 30-step tiers: quality 15 dense steps, the rest sparse at tau 0.5,
+  with EasyCache; balanced 10 dense at tau 1.0; fast that with FirstBlockCache. Above 768p it
+  also picks the upscale's.
 - **Result.** `video` (768p mp4), `frames` (one per `writes` entry) and `warnings`. A piece
   renders whole seconds on H3's 17n+5 frame grid, so the video can run up to a second past
   `duration_s`; the edit trims it.
