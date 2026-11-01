@@ -1611,15 +1611,13 @@ _MAX_NEXT_S = (MAX_FRAMES - _CARRY.head_frames) // FPS
 #: copy of it (run 20661, first-frame SSIM 0.871), 256 px keeps the set but not who stands
 #: where (run 20689); its `layout` line carries the positions.
 _WORLD_STATE_EDGE = 512
-#: The first piece's closing sentence, and each later piece's opening one. A pinned head
-#: repeats a camera move in every piece it continues, so later pieces hold the framing.
+#: The first piece's closing sentence, and each later piece's opening one: a continued piece picks
+#: up the carried frames as they are, the camera still doing what it did, and starts nothing new
+#: for its first two seconds (MiniMax's extend and the ComfyUI chainers restate the incoming state;
+#: one that holds the camera against a moving shot, or restages a beat, reframes: se-087, 24525).
 _ONE_SHOT = "One continuous shot with no cuts."
-_CONTINUED = "The same shot continues without a cut; the camera holds its framing."
-#: A sentence that moves the camera, left out of a continued piece.
-_CAMERA_MOVE = re.compile(
-    r"\b(?:camera|pans?|panning|tilts?|tilting|zooms?|zooming|dolly|dollies|crane|orbits?|push(?:es)? in|pulls? (?:back|out))\b",
-    re.I,
-)
+_CONTINUED = ("The same unbroken take goes on from its last moment: the same people in the same places, the camera "
+              "still moving as it was. For its first two seconds everything carries on exactly as it is.")
 #: A pinned head delays a new action about 2.4 s, so no beat starts from 2 s before a piece's
 #: edge to 2.5 s after it, where the pieces can avoid it.
 _BEFORE_EDGE_S, _AFTER_EDGE_S = 2.0, 2.5
@@ -1687,10 +1685,10 @@ def piece_texts(prompt: str, beats: Sequence[Beat], starts: Sequence[float]) -> 
         parts = [body]
         if current := [beat for beat in timed if beat[0] <= start]:
             at, text = current[-1]
-            parts.append(f"Continuing: {text}" if at < start else text)
+            parts.append(f"Already under way, not begun again: {_lower(text)}" if at < start else text)
         parts += [f"Then {_lower(text)}" for at, text in timed if start < at < end]
         if index:
-            parts = [_CONTINUED, *(" ".join(_sentences(part, still=True)) for part in parts)]
+            parts = [_CONTINUED, *parts]
         else:
             parts.append(_ONE_SHOT)
         text = head + "[Shot 1] " + " ".join(part for part in parts if part)
@@ -1727,12 +1725,6 @@ def shot_windows(
         elif length > total:
             warnings.append(f"<{ref.name}> is {length / FPS:.1f} s long; the shot uses its first {total / FPS:.1f} s")
     return windows, warnings
-
-
-def _sentences(text: str, *, still: bool) -> list[str]:
-    """`text`'s sentences; with `still`, those that move the camera are left out."""
-    found = re.findall(r"[^.!?]+[.!?]*", text)
-    return [s.strip() for s in found if s.strip() and not (still and _CAMERA_MOVE.search(s))]
 
 
 def _lower(text: str) -> str:
@@ -1828,19 +1820,15 @@ async def shot(ctx: Context, payload: ShotRequest, out: Outputs, tel: Telemetry)
     calls: list[PieceCall] = []
     for index, text in enumerate(piece_texts(payload.prompt, payload.beats, [start / FPS for start in starts])):
         own = [ref for ref in references if ref.kind not in CLIPS or ref.name in windows[index]]
-        # A continued piece a clip guides, with no place to carry it, starts from the previous piece's last frame
-        # as a world state: the clip's motion goes on from there, never cutting back to the clip's own moment
-        # (run 24603 cut where it had run ahead of its clip).
+        # A continued piece with no place to carry starts from the previous piece's last frame as a world state,
+        # after the request's own pictures so their <Picture N> keep their numbers: who and what is where now. Every
+        # continued piece that saw one joined cleanly (se-087: 9 of 9 seams); those without, character-only and
+        # footage shots, reframed or cut (24525, 24603).
         anchor = [StoryReference(name=f"Piece {index} end", kind="world_state",
                                  description="This piece starts from it: who and what is where now.")
-                  ] if index and not places and any(ref.kind == "video" for ref in own) else []  # fmt: skip
+                  ] if index and not places else []  # fmt: skip
         call = piece_call(text, [*own, *plates, *anchor] if index else own, style=style, soundscape=sound,
                           music=music, index=index, forced=forced | {ref.name for ref in anchor})  # fmt: skip
-        if not call.references and index:
-            # Ref2VA carries the picture and needs a picture: the previous piece's last frame.
-            end = StoryReference(name=f"Piece {index} end", kind="world_state")
-            call = piece_call(text, [end], style=style, soundscape=sound, music=music, index=index,
-                              forced=frozenset({end.name}))  # fmt: skip
         calls.append(call if call.references else PieceCall(_fl2va_text(text, payload), [], call.warnings))
         warnings += call.warnings
     for edge in starts[1:]:
