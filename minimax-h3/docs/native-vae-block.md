@@ -15,3 +15,10 @@ refuses the native block while that parent scope is uncommitted, so this declara
 alone does not claim full-H3 adoption. The actual standalone block consumer can be
 qualified while the outer convolution/projection/assembly contract is migrated.
 No package kernel source changed; GPU numerical, allocation and lifetime proof is pending.
+
+
+The unchanged `VAE_BLOCK` declaration now lives beside `_BlockRows` in `vae_tiles`;
+`model.VAE_BLOCK` remains the same imported object. This lets the actual standalone
+consumer and its kernel build import the producer without importing the complete H3
+model/tools stack. Kernel entry bodies and identities are unchanged; the origin module
+metadata now names `minimax_h3.vae_tiles` and is recorded with the new package source.

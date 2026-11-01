@@ -23,15 +23,47 @@ h3a-006 owns the lossy decode variants.
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
+from typing import Any
 
 import torch
 from diffusers import AutoencoderKLMiniMaxH3
 from diffusers.models.autoencoders.vae import DiagonalGaussianDistribution
+from diffusers.models.autoencoders.autoencoder_kl_minimax_h3 import MiniMaxH3VideoTransformerBlock
 from diffusers.models.modeling_utils import get_parameter_dtype
 
+from cozy_runtime import fusion
 from cozy_runtime.author import Cut, split, spread
 from cozy_runtime.author import device as placed_device
+
+
+def _layer_scales(block: Any, arguments: Mapping[str, Any]) -> fusion.Modulation:
+    """A video decoder block's layer scales: the gates of one row every token reads."""
+    row = block.scale1.new_zeros(1, dtype=torch.long)
+    return fusion.Modulation(row, gate_msa=block.scale1[None], gate_mlp=block.scale2[None])
+
+
+#: The video VAE's ViT decoder block as Runtime fuses it: fp16 autocast over an fp32 residual
+#: stream, torch RMSNorms, weightless q/k norms, split-half RoPE on 48 of 64 channels in fp16,
+#: Diffusers' value-first SwiGLU, `h + branch * scale` layer scales. The attention is composed
+#: (its processor upcasts q and k to fp32 around the norms; the kernel reads them as fp16).
+VAE_BLOCK = fusion.DiTBlock(
+    MiniMaxH3VideoTransformerBlock,
+    width=2048,
+    head_dim=64,
+    modulation=_layer_scales,
+    norms=("norm1", "norm2"),
+    norm="rms",
+    attention="attn",
+    arguments=("rotary_emb",),
+    mlp=fusion.GatedMLP("ff", gate="net.0.proj", down="net.2", value_first=True),
+    rope=fusion.Rope("rotary_emb", interleaved=False, rotary=48, rounding="product"),
+    scale=False,
+    rows="fp16",
+    rms_rounding="once",
+    qk_affine=False,
+    compose=True,
+)
 
 
 class TileBatchedVideoVAE(AutoencoderKLMiniMaxH3):  # type: ignore[misc]
