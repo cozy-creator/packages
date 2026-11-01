@@ -235,12 +235,9 @@ class _BlockRows:
 
     def run(self, hidden: torch.Tensor) -> torch.Tensor:
         """Declare this complete layer-scale block before its outer batch chooser."""
-        from cozy_runtime.author import kernels
+        from cozy_runtime.author.kernels import LayerScaleBlock
 
-        declaration = getattr(kernels, "LayerScaleBlock", None)
-        if declaration is None:
-            return split(self, hidden, Cut(0))
-        intent = declaration(self.block, hidden, self.rotary, "scale1", "scale2")
+        intent = LayerScaleBlock(self.block, hidden, self.rotary, "scale1", "scale2")
         return split(self, hidden, Cut(0), intent=intent)
 
 

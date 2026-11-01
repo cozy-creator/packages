@@ -2,8 +2,8 @@
 
 `_BlockRows.run` is the real producer seam. It supplies the actual block, hidden state,
 shared rotary table and the two direct layer-scale parameter slots. Runtime owns the
-complete allocation menu and batch choice. Older Runtime versions keep the ordinary
-call before any native acceptance; accepted failures never retry that call.
+complete allocation menu and batch choice. The pre-launch cohort requires the new declaration API. Unsupported execution routes
+may keep their ordinary call before acceptance; accepted failures never retry it.
 
 The first Runtime executor targets the existing fused2048-wide FP16-autocast layout,
 FP32 residual/norm/gate math, six biased dense projections and selected Kitchen INT8.
