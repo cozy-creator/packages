@@ -11,7 +11,8 @@ from typing import Any, Literal
 import torch
 from diffusers.models.autoencoders.autoencoder_kl_minimax_h3 import MiniMaxH3VideoTransformerBlock
 
-from cozy_runtime import fusion
+from cozy_runtime import fusion, stepcache
+from diffusers import MiniMaxH3Transformer3DModel
 from cozy_runtime.author import (
     AdapterCompatibility,
     DerivedCache,
@@ -100,6 +101,10 @@ def condition_references(model: H3Model, task: Task, state: Any, *, tel: Telemet
     tel.log("h3 conditioning", wall_ms=round((time.perf_counter() - started) * 1000, 1))
 
 
+#: The DiT's block stack for step caching (`stepcache`): the full model's `preset` (`FULL_CACHE`).
+STACK = stepcache.Stack(MiniMaxH3Transformer3DModel, blocks="transformer_blocks", carried=(0,))
+
+
 @placeable("text_encoder")
 @sequence_parallel(degrees=(2, 4, 7, 8))
 class H3Model(
@@ -146,13 +151,16 @@ class H3Model(
         return None
 
     def execution_plan(self, plan: Plan) -> str:
-        """The fused glue on every filled H3 DiT, the fused video VAE decoder blocks, and the CP
-        producer's rotary hook."""
+        """The fused glue on every filled H3 DiT, the fused video VAE decoder blocks, the CP
+        producer's rotary hook, and each DiT's cacheable block stack (`STACK`)."""
         for component in self.pipe.components.values():
             producer.retain_rotary(component)
+        components = self.pipe.components
+        dits = [components[name] for name in ("transformer", "transformer_ref") if name in components]
         plans = (
             glue.install(self, self.pipe, plan),
             fusion.install(plan, VAE_BLOCK, self.pipe.components["vae"]),
+            *(stepcache.install(plan, STACK, dit) for dit in dits),
         )
         return "+".join(identity for identity in plans if identity)
 
@@ -217,12 +225,16 @@ class H3Model(
         return self.pipe.silence_rows(frames).cpu()
 
     @uses_components("transformer")
-    def sample_fl2va(self, state: Any, *, on_step: Any, cancel: Any) -> ScheduleFacts:
-        return self.pipe.denoise("fl2va", state, on_step=on_step, cancel=cancel)
+    def sample_fl2va(
+        self, state: Any, *, on_step: Any, cancel: Any, cache: stepcache.Policy | None = None
+    ) -> ScheduleFacts:
+        return self.pipe.denoise("fl2va", state, on_step=on_step, cancel=cancel, cache=cache)
 
     @uses_components("transformer_ref")
-    def sample_ref2va(self, state: Any, *, on_step: Any, cancel: Any) -> ScheduleFacts:
-        return self.pipe.denoise("ref2va", state, on_step=on_step, cancel=cancel)
+    def sample_ref2va(
+        self, state: Any, *, on_step: Any, cancel: Any, cache: stepcache.Policy | None = None
+    ) -> ScheduleFacts:
+        return self.pipe.denoise("ref2va", state, on_step=on_step, cancel=cancel, cache=cache)
 
 
 class H3TurboBase(H3Model, encoded_leaves="accept"):

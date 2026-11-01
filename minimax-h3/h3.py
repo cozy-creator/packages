@@ -25,6 +25,7 @@ from typing import Annotated, Any, Literal, cast
 import msgspec
 import numpy as np
 import torch
+from cozy_runtime import stepcache
 from cozy_runtime.author import (
     App,
     AudioFile,
@@ -872,6 +873,14 @@ Preset = Literal["quality", "balanced", "fast"]
 #: Turbo's dense steps of eight: all (NVIDIA HyperFlow's `quality`), four, and one (Sol-Engine's
 #: `sol_bsa`). The full model has one recipe, ten dense steps.
 TURBO_DENSE_STEPS: dict[Preset, int] = {"quality": 8, "balanced": 4, "fast": 1}
+#: The full model's step cache (`stepcache`, NVIDIA sol-engine's 30-step tiers): `quality` H100's
+#: EasyCache, `fast` H100 `aggressive` / GB200 `fullopt`'s FirstBlockCache; `balanced` none.
+#: Turbo's eight distilled steps never cache (NVIDIA keeps cache reuse off on distilled paths).
+FULL_CACHE: dict[Preset, stepcache.Policy | None] = {
+    "quality": stepcache.EasyCache(0.30, retain=10, cooldown=4, max_hits=1),
+    "balanced": None,
+    "fast": stepcache.FirstBlockCache(0.08),
+}
 #: A shot's latents (`shot_latents`): `ShotResult.latents`, `UpscaleInput.latents`.
 Latents = Annotated[File, FileBound(max_bytes=1 << 30, media_types=("application/octet-stream",))]
 
@@ -1048,7 +1057,7 @@ def _render_keyframes(
         with tel.stage("condition_media", overall_range=(0.08, 0.15)):
             model.condition_fl2va_media(task, state)
     if turbo_lora is None:
-        sample = model.sample_fl2va
+        sample = partial(model.sample_fl2va, cache=FULL_CACHE[preset])
     else:
         assert isinstance(model, H3TurboBase)
         sample = partial(model.sample_fl2va_turbo, turbo_lora=turbo_lora, sol_dense_steps=TURBO_DENSE_STEPS[preset])
@@ -1144,7 +1153,7 @@ def _references_to_video(
     with tel.stage("condition", overall_range=(0.03, 0.15)):
         condition_references(model, task, state, tel=tel)
     if turbo_lora is None:
-        sample = model.sample_ref2va
+        sample = partial(model.sample_ref2va, cache=FULL_CACHE[payload.preset])
     else:
         assert isinstance(model, H3TurboBase)
         sample = partial(model.sample_ref2va_turbo, turbo_lora=turbo_lora, sol_dense_steps=TURBO_DENSE_STEPS[payload.preset])
@@ -1861,9 +1870,6 @@ async def shot(ctx: Context, payload: ShotRequest, out: Outputs, tel: Telemetry)
     references, warnings = _shot_references(payload)
     if payload.turbo and payload.steps is not None:
         warnings.append(f"turbo runs its LoRA's 8 steps; steps {payload.steps} ignored")
-    if not payload.turbo and payload.preset != "balanced":
-        warnings.append(f"the full model renders its one recipe (10 dense steps); preset {payload.preset} "
-                        "sets Turbo's and the upscale's")  # fmt: skip
     steps = None if payload.turbo else payload.steps
     count = len(pieces)
     plans = [ContinuationPlan(length, _CARRY if index else Carry(), _CARRY if index + 1 < count else Carry())
