@@ -50,6 +50,7 @@ from cozy_runtime.author.kernels import ROWWISE_FP8, PreQuantized, quantize_once
 from cozy_runtime.rows import Rows
 from cozy_runtime.rows import rows as columns
 
+from . import producer_kernels
 from .glue import KEY_MEAN, FusedMiniMaxH3AttnProcessor, H3AttnProcessor, KeyMean, Owned, take
 
 FAST = "kitchen-sol-producer-fast-shared-qkv"
@@ -362,7 +363,9 @@ def produce(
         f"comfy_kitchen.sol_attn_chunked(int8, stats={statistics}, vmargin=1.1, "
         f"prefix=int8, qkv=one-operand{',v=once' if reuse and not parallel else ''})"
     )
-    out = attn.to_out[1](split(attn.to_out[0], output.flatten(2, 3), Cut(1)))
+    from .glue import output_projection
+
+    out = attn.to_out[1](output_projection(attn.to_out[0], output.flatten(2, 3)))
     del output
     return out
 
@@ -374,7 +377,7 @@ class _Means:
     `denoise_loop`, else `RequestState.statistics` under the call's key, after the whole call:
     a split the Runtime retries in smaller windows reads the same prior."""
 
-    __slots__ = ("call", "carry", "geometry", "key", "mean", "prior")
+    __slots__ = ("call", "carry", "geometry", "key", "mean", "native_slot", "prior")
 
     def __init__(
         self, call: ProducerCall, key: tuple[object, ...], name: str, geometry: tuple[int, ...]
@@ -382,6 +385,7 @@ class _Means:
         attn, state = call.module, call.state
         self.call, self.key, self.geometry, self.carry = call, key, geometry, _CARRY.get()
         self.mean: torch.Tensor | None = None
+        self.native_slot: torch.Tensor | None = None
         if self.carry is None:
             self.prior, _ = previous_statistics(
                 state, key, call.layout.step, geometry, replay_safe=PRODUCERS[name].context_parallel
@@ -400,7 +404,12 @@ class _Means:
         if self.carry is None:
             state.statistics[self.key] = (self.call.layout.step, self.geometry, self.mean, None)
         else:
-            self.carry.slots[id(attn)].copy_(self.mean)
+            if self.mean is not None:
+                self.carry.slots[id(attn)].copy_(self.mean)
+            elif self.native_slot is not self.carry.slots[id(attn)]:
+                raise RuntimeError("the sparse call did not produce its next key mean")
+            # A native operation already copied the complete private result to this
+            # exact carried slot. The original callable always publishes through keep.
             state.carried.add(id(attn))
 
 
@@ -452,6 +461,37 @@ class _Heads:
 
     def __getitem__(self, index: tuple[slice, ...]) -> slice:
         return index[2]
+
+    def intent(self) -> Any:
+        from cozy_runtime.author import kernels as declared
+
+        operation = getattr(declared, "SparseProjectedHeads", None)
+        attn, layout = self.call.module, self.call.layout
+        processor = getattr(attn.processor, "original", attn.processor)
+        if (
+            operation is None or self.means.carry is None
+            or isinstance(self.hidden, PreQuantized)
+            or type(processor) is not FusedMiniMaxH3AttnProcessor
+            or not hasattr(processor, "_producer_stats")
+        ):
+            return None
+        backend = sys.modules.get("comfy_kitchen.backends.cuda")
+        pack_rotary = getattr(backend, "_packed_rope_fab", None)
+        if not callable(pack_rotary):
+            return None
+        # present() prepares this actual tensor-identity cache before the Loop. The
+        # ordinary first-call path may prepare it here, before native admission.
+        rotary = pack_rotary(self.freqs, layout.live_tokens, 96)
+        self.means.native_slot = self.means.carry.slots[id(attn)]
+        return operation(
+            hidden=self.hidden, query=attn.to_q, key=attn.to_k, value=attn.to_v,
+            heads=attn.heads, backend=processor._attention_backend,
+            launch=processor._producer_stats, value_absmax=producer_kernels.VALUE_ABSMAX,
+            key_sum=producer_kernels.KEY_SUM,
+            norm_q=attn.norm_q.weight, norm_k=attn.norm_k.weight, eps=attn.norm_q.eps,
+            rotary=rotary, prior_mean=self.means.prior, next_mean=self.means.native_slot,
+            protected_prefix=layout.protected_prefix, tau=layout.tau,
+        )
 
     def __call__(self, heads: _Heads | slice) -> torch.Tensor:
         attn, layout = self.call.module, self.call.layout
@@ -511,7 +551,7 @@ def _attend(
         else:
             # Kitchen's call holds the whole document's K/V codes and its whole output: an exact
             # split by query heads, which the Runtime sizes beside the DiT's weights.
-            output = split(heads, heads, Cut(2))
+            output = split(heads, heads, Cut(2), intent=heads.intent())
         means.close()
         reuse = means.prior is not None
     return output, reuse
