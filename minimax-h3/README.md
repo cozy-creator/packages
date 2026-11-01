@@ -45,8 +45,9 @@ preset: balanced                              # quality | balanced | fast
 - **Text.** Each piece is one `[Shot 1]` paragraph. The first: the shot's `prompt`, the beat it
   is in and each later beat ("Then …"), ending "One continuous shot with no cuts.". A later one
   describes where it starts, never the opening again (restating it pulls the shot back there,
-  with a cut): the carried frames as they are (everything where it was, the camera still
-  moving, nothing new for two seconds), the beat in force ("Already under way, not begun
+  with a cut): the carried frames as they are (the same people in the same places when the shot
+  has a character picture, else everything where it was; the camera still moving, nothing new for
+  two seconds), the beat in force ("Already under way, not begun
   again: …" when it began earlier) and each later beat; it sees the previous piece's last frame
   as a picture after the shot's own (a place takes that frame instead). Beats carry no times: H3 marks cuts with timed
   `[Shot N]`. A prompt with its own `integrated_multimodal_description:`/`audio:`/
