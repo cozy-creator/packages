@@ -69,7 +69,7 @@ from cozy_runtime.rows import Rows, rows
 
 from .adaln_pruned import AdaLNPrunedMiniMaxH3Transformer
 
-CONTRACT = "h3-glue-call-and-topology/2"
+CONTRACT = "h3-glue-call-and-topology/3"
 
 
 @dataclass(slots=True)
@@ -739,6 +739,15 @@ class FusedSwiGLU(SwiGLU):  # type: ignore[misc]
         return swiglu(self._glue, self.proj(hidden_states), fp8=self._fusion_fp8)
 
 
+def output_projection(module: Any, value: Any) -> Any:
+    """This attention producer owns its result through its one output projection."""
+    from cozy_runtime.author import kernels
+
+    declare = getattr(kernels, "SingleUseProjection", None)
+    intent = None if declare is None else declare(module, value, exclusive_input=True)
+    return split(module, value, Cut(1), intent=intent)
+
+
 class H3AttnProcessor(MiniMaxH3AttnProcessor):  # type: ignore[misc]
     """Diffusers' H3 attention, declared as an exact split by query heads: each window computes
     its own rows of the projections (`cozy_runtime.rows`), per-head norms and RoPE, and the out
@@ -758,11 +767,14 @@ class H3AttnProcessor(MiniMaxH3AttnProcessor):  # type: ignore[misc]
         heads = _Heads.of(self, attn, hidden_states, rotary_emb, attention_mask)
         if heads is None:
             hidden_states = self.whole(attn, hidden_states, rotary_emb, attention_mask)
-            return attn.to_out[1](attn.to_out[0](hidden_states.flatten(2, 3)))
-        attended = split(heads, heads, Cut(2))
-        del heads, hidden_states  # an owned input goes before the out projection's output comes
-        out = attn.to_out[1](split(attn.to_out[0], attended.flatten(2, 3), Cut(1)))
-        del attended
+            out = attn.to_out[1](attn.to_out[0](hidden_states.flatten(2, 3)))
+        else:
+            attended = split(heads, heads, Cut(2), intent=heads.intent())
+            del heads, hidden_states  # an owned input goes before the out projection's output comes
+            out = attn.to_out[1](output_projection(attn.to_out[0], attended.flatten(2, 3)))
+            del attended
+        if (seed := KEY_MEAN.get()) is not None:
+            seed.heads += attn.heads  # this complete call submitted every head's seed
         return out
 
     def whole(
@@ -808,6 +820,7 @@ class H3AttnProcessor(MiniMaxH3AttnProcessor):  # type: ignore[misc]
 
 class FusedMiniMaxH3AttnProcessor(H3AttnProcessor):
     _glue: Launch
+    _producer_stats: Launch
 
     def qkv(self, attn: Any, hidden_states: Any, rotary_emb: tuple[Any, Any] | None) -> Any:
         query = attn.to_q(hidden_states).unflatten(-1, (attn.heads, -1))
@@ -833,7 +846,6 @@ def seed_key_mean(launch: Launch | None, key: Any, heads: slice) -> None:
         found = key[0].sum(0, dtype=torch.float32) if launch is None else key_sums(launch, key)
         found /= key.shape[1]
         target.slot[heads].copy_(found)
-        target.heads += found.shape[0]
 
 
 class _Heads:
@@ -885,6 +897,31 @@ class _Heads:
     def __getitem__(self, index: tuple[slice, ...]) -> slice:
         return index[2]
 
+    def intent(self) -> Any:
+        """Declare the complete known head operation before any legacy head sizing."""
+        from cozy_runtime.author import kernels
+
+        declared = getattr(kernels, "ProjectedHeads", None)
+        processor, attn = self.processor, self.attn
+        if (
+            declared is None
+            or type(processor) is not FusedMiniMaxH3AttnProcessor
+            or isinstance(self.hidden, PreQuantized)
+            or self.rotary is None
+            or not hasattr(processor, "_projected_head_entries")
+        ):
+            return None
+        rope, key_sum = processor._projected_head_entries
+        seed = KEY_MEAN.get()
+        return declared(
+            hidden=self.hidden, query=attn.to_q, key=attn.to_k, value=attn.to_v,
+            heads=attn.heads, backend=processor._attention_backend,
+            launch=processor._glue, rope=rope, key_sum=key_sum,
+            norm_q=attn.norm_q.weight, norm_k=attn.norm_k.weight,
+            eps_q=attn.norm_q.eps, eps_k=attn.norm_k.eps,
+            cos=self.rotary[0], sin=self.rotary[1], seed=None if seed is None else seed.slot,
+        )
+
     def __call__(self, heads: _Heads | slice) -> Any:
         window = slice(0, self.attn.heads) if heads is self else heads
         assert isinstance(window, slice)
@@ -933,7 +970,9 @@ class FusedMiniMaxH3TransformerBlock(MiniMaxH3TransformerBlock):  # type: ignore
         )
         tail = _Tail(self, hidden_states, adaln_indices, gate_msa, scale_mlp, shift_mlp, gate_mlp)
         # The tail writes its rows in place: a view that does not flatten would take a copy.
-        return split(tail.run, tail, Cut(1), out=attn_output.contiguous())
+        return split(
+            tail.run, tail, Cut(1), out=attn_output.contiguous(), intent=tail.intent()
+        )
 
 
 class _Tail:
@@ -957,6 +996,28 @@ class _Tail:
 
     def __getitem__(self, index: tuple[slice, ...]) -> slice:
         return index[1]
+
+    def intent(self) -> Any:
+        """Declare this exact materialized BF16 tail; the Runtime decides memory/chunks.
+
+        The attention output is consumed exclusively by this call and then returned.
+        Unsupported providers/hooks/layouts still use the original run before execution.
+        """
+        block = self.block
+        act = block.ff.net[0]
+        if not isinstance(act, FusedSwiGLU) or act._fusion_fp8 or block._fusion_ff_fp8:
+            return None
+        from cozy_runtime.author.kernels import ResidualFFN
+
+        norm_mod, swiglu_entry, gate_add_entry = block._residual_ffn_entries
+        gate_msa, scale, shift, gate = self.gates
+        return ResidualFFN(
+            up=act.proj, down=block.ff.net[2], launch=block._glue,
+            norm_mod=norm_mod, swiglu=swiglu_entry, gate_add=gate_add_entry,
+            residual=self.residual, index=self.index, norm_weight=block.norm2.weight,
+            gate_msa=gate_msa, scale_mlp=scale, shift_mlp=shift, gate_mlp=gate,
+            eps=block.norm2.eps, exclusive_out=True,
+        )
 
     def run(self, rows: _Tail | slice, out: Any) -> None:
         """The tail over token `rows`, written into `out` (those rows of the attention output).
@@ -1197,7 +1258,7 @@ def _validate_transformer(transformer: Any, root: str) -> None:
 
 
 def _install_transformer(
-    transformer: Any, root: str, glue: Launch
+    transformer: Any, root: str, glue: Launch, producer_stats: Launch | None = None
 ) -> tuple[list[tuple[str, str, str]], int]:
     substitutions: list[tuple[str, str, str]] = []
     fp8_sites = 0
@@ -1213,6 +1274,12 @@ def _install_transformer(
         processor._attention_backend = attn.processor._attention_backend
         processor._parallel_config = attn.processor._parallel_config
         processor._glue = glue
+        processor._projected_head_entries = (
+            next(entry for entry in GLUE.entries if entry.kernel is _rope_norm_kernel),
+            next(entry for entry in GLUE.entries if entry.kernel is _key_sum_kernel),
+        )
+        if producer_stats is not None:
+            processor._producer_stats = producer_stats
         substitutions.append(
             (f"{path}.attn.processor", _type_name(attn.processor), _type_name(processor))
         )
@@ -1228,6 +1295,13 @@ def _install_transformer(
         block._fusion_attn_fp8 = attn_fp8
         block._fusion_ff_fp8 = ff_fp8
         block._glue = glue
+        # Existing entries and compiled launcher; no new shader or allocating callback.
+        block._residual_ffn_entries = (
+            next(entry for entry in GLUE.entries if entry.kernel is _norm_mod_kernel
+                 and entry.constexprs["RESIDUAL"] == 1),
+            next(entry for entry in GLUE.entries if entry.kernel is _swiglu_kernel),
+            next(entry for entry in GLUE.entries if entry.kernel is _gate_add_kernel),
+        )
     return substitutions, fp8_sites
 
 
@@ -1283,6 +1357,17 @@ def install(model: object, pipe: Any, plan: Plan) -> str:
         if not transformers:
             return _eager(model, plan, "fusion_no_transformer", "no MiniMax-H3 transformer to fuse")
         glue = plan.load(kernels(device))
+        producer_stats = None
+        from cozy_runtime.author import kernels as declared
+
+        if getattr(declared, "SparseProjectedHeads", None) is not None and any(
+            all(getattr(leaf, "provider", None) == declared.INT8_CONVROT
+                for leaf in (block.attn.to_q, block.attn.to_k, block.attn.to_v))
+            for _, transformer in transformers for block in transformer.transformer_blocks
+        ):
+            from .producer_kernels import STATS
+
+            producer_stats = plan.load(STATS)
     except KernelsUnavailable as exc:
         if exc.code == "kernels_corrupt":
             raise GlueRefusal("fusion_kernels_corrupt", str(exc)) from exc
@@ -1297,7 +1382,7 @@ def install(model: object, pipe: Any, plan: Plan) -> str:
     warm_ms = 0.0
     for name, transformer in transformers:
         before = _tensor_census(transformer)
-        installed, sites = _install_transformer(transformer, name, glue)
+        installed, sites = _install_transformer(transformer, name, glue, producer_stats)
         if _tensor_census(transformer) != before:
             raise GlueRefusal(
                 "fusion_tensor_schema_changed",
