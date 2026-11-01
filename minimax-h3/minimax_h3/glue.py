@@ -36,6 +36,7 @@ import json
 import sys
 import time
 from collections.abc import Callable, Iterator, Mapping
+from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, replace
 from typing import Any
@@ -54,7 +55,7 @@ from diffusers.models.transformers.transformer_minimax_h3 import (
 )
 from triton.language.extra import libdevice
 
-from cozy_runtime.author import CapabilityError, Cut, plain_forward, split
+from cozy_runtime.author import CapabilityError, Cut, Telemetry, plain_forward, split
 from cozy_runtime.author.kernels import (
     ROWWISE_FP8,
     KernelsUnavailable,
@@ -83,6 +84,11 @@ class KeyMean:
 
 
 KEY_MEAN: ContextVar[KeyMean | None] = ContextVar("minimax_h3_key_mean", default=None)
+#: The denoise's telemetry and the (site, reason) pairs it has warned of: an attention call that
+#: runs all its heads at once is not sized beside the DiT's weights, so its record says why.
+_WHOLE: ContextVar[tuple[Telemetry, set[tuple[str, str]]] | None] = ContextVar(
+    "minimax_h3_whole", default=None
+)
 #: The widths compiled: a transformer with others is not installable.
 HIDDEN, FFN, HEAD_DIM, ROTARY = 5376, 14336, 128, 96
 _ROW_WARPS = 16
@@ -806,6 +812,34 @@ def seed_key_mean(launch: Launch | None, key: Any, heads: slice) -> None:
         target.heads += found.shape[0]
 
 
+@contextmanager
+def warn_whole(tel: Telemetry) -> Iterator[None]:
+    """Within it, each site and reason an attention call runs its heads whole warns once."""
+    token = _WHOLE.set((tel, set()))
+    try:
+        yield
+    finally:
+        _WHOLE.reset(token)
+
+
+def ran_whole(site: str, reason: str) -> None:
+    held = _WHOLE.get()
+    if held is not None and (site, reason) not in held[1]:
+        held[1].add((site, reason))
+        held[0].log("h3 attention heads whole", level="warn", site=site, reason=reason)
+
+
+def refused(attn: Any, found: tuple[Rows | None, ...]) -> str | None:
+    """The first projection that does not cut by rows (`cozy_runtime.rows`): its type and hooks."""
+    for name, cut in zip(("to_q", "to_k", "to_v"), found, strict=True):
+        if cut is None:
+            module = getattr(attn, name)
+            hooks = (*module._forward_pre_hooks.values(), *module._forward_hooks.values())
+            kind = f"{type(module).__module__}.{type(module).__qualname__}"
+            return f"{name} {kind}" + "".join(f" hook {type(h).__qualname__}" for h in hooks)
+    return None
+
+
 class _Heads:
     """One attention call as `split` cuts it by query heads: its shape is the call's
     [batch, tokens, heads, head_dim] output, a window of it a slice of heads, and calling it on a
@@ -838,11 +872,18 @@ class _Heads:
         rotary: tuple[Any, Any] | None,
         mask: Any | None,
     ) -> _Heads | None:
-        """The call cut by heads, or None where it runs them whole."""
-        if attn.fused_projections or mask is not None or processor._parallel_config is not None:
-            return None
-        found = tuple(rows(m) for m in (attn.to_q, attn.to_k, attn.to_v))
-        if any(r is None for r in found):
+        """The call cut by heads, or None where it runs them whole (and warns why)."""
+        reason = (
+            "fused projections" if attn.fused_projections
+            else "mask" if mask is not None
+            else "sequence parallel" if processor._parallel_config is not None
+            else None
+        )  # fmt: skip
+        if reason is None:
+            found = tuple(rows(m) for m in (attn.to_q, attn.to_k, attn.to_v))
+            reason = refused(attn, found)
+        if reason is not None:
+            ran_whole("dense", reason)
             return None
         return cls(processor, attn, hidden, rotary, found)  # type: ignore[arg-type]
 

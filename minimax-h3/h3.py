@@ -74,6 +74,7 @@ from minimax_h3.continuation import (
     provenance,
     video_tokens,
 )
+from minimax_h3.glue import warn_whole
 from minimax_h3.guide_rows import GuideClip
 from minimax_h3.model import (
     H3LatentUpscaler as H3LatentUpscaler,
@@ -1003,7 +1004,7 @@ def _render_keyframes(
     else:
         assert isinstance(model, H3TurboBase)
         sample = partial(model.sample_fl2va_turbo, turbo_lora=turbo_lora)
-    with tel.stage("denoise", overall_range=(0.15, 0.85)):
+    with tel.stage("denoise", overall_range=(0.15, 0.85)), warn_whole(tel):
         schedule = sample(
             state,
             on_step=tel.step_callback(steps, stage="denoise", overall_range=(0.15, 0.85)),
@@ -1099,7 +1100,7 @@ def _references_to_video(
     else:
         assert isinstance(model, H3TurboBase)
         sample = partial(model.sample_ref2va_turbo, turbo_lora=turbo_lora)
-    with tel.stage("denoise", overall_range=(0.15, 0.85)):
+    with tel.stage("denoise", overall_range=(0.15, 0.85)), warn_whole(tel):
         schedule = sample(
             state,
             on_step=tel.step_callback(steps, stage="denoise", overall_range=(0.15, 0.85)),
@@ -1455,7 +1456,7 @@ async def regenerate_shot(
     tel.log("h3 regenerate", resolution=resolution, strength=payload.strength, start_sigma=schedule.start,
             transformer_evaluations=steps, latent="x".join(str(int(value)) for value in latents.shape[2:]),
             windows=len(spans), window_latent_frames=spans[0][1])  # fmt: skip
-    with tel.stage("refine", overall_range=(0.14, 0.85)):
+    with tel.stage("refine", overall_range=(0.14, 0.85)), warn_whole(tel):
         refined = base_model.refine(
             latents, overlay=regenerate_lora, prompt_embeds=text[0], text_tags=text[1], spans=spans,
             audio=base_model.silence(refine_math.frames_of(spans[0][1])), schedule=schedule, seed=seed,
