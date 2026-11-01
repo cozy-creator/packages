@@ -42,10 +42,11 @@ turbo: true                                   # false: the full model at steps 3
   latents as one video, so no join steps the picture. An 8 s shot with beats at 0 and 5 is
   one generation; the 40 s shot above is pieces of 15, 14 and 11 s.
 - **Text.** Each piece is one `[Shot 1]` paragraph: the shot's `prompt`, the beat it is in
-  ("Continuing: …" when that beat began earlier) and each later beat ("Then …"). The first
-  piece ends "One continuous shot with no cuts."; a later one opens "The same shot continues
-  without a cut; the camera holds its framing." and leaves out sentences that move the
-  camera, which a carried head would repeat. Beats carry no times: H3 marks cuts with timed
+  ("Already under way, not begun again: …" when that beat began earlier) and each later beat
+  ("Then …"). The first piece ends "One continuous shot with no cuts."; a later one opens on
+  the carried frames as they are (the same people in the same places, the camera still moving,
+  nothing new for two seconds) and keeps the whole text, and its first picture is the previous
+  piece's last frame (a place takes that frame instead). Beats carry no times: H3 marks cuts with timed
   `[Shot N]`. A prompt with its own `integrated_multimodal_description:`/`audio:`/
   `non_diegetic_music:` fields keeps them.
 - **Pictures.** Characters, props and the environment (`<Dock>`) are definitions in every
