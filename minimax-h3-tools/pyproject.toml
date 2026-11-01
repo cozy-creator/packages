@@ -7,7 +7,7 @@ dependencies = [
     "tensorfs>=0.16",
     "msgspec>=0.19",
     "numpy>=1.26",
-    "torch>=2.14",
+    "torch>=2.0",
 ]
 
 [project.entry-points."cozy.application"]
