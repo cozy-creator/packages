@@ -11,7 +11,7 @@ from cozy_runtime.author import (
     App,
     Context,
     ImageFrame,
-    PictureAsset,
+    Picture,
     ImageRequest,
     ImageResult,
     Memoize,
@@ -55,7 +55,7 @@ CARD_NEGATIVE = (
 
 class GenerateInput(ImageRequest):
     #: Anima makes images from text only.
-    assets: Annotated[list[PictureAsset], msgspec.Meta(max_length=0)] = msgspec.field(
+    pictures: Annotated[list[Picture], msgspec.Meta(max_length=0)] = msgspec.field(
         default_factory=list
     )
     #: CFG interval (cr-086 arm 1, Kynkäänniemi et al., NeurIPS 2024): guidance helps only
