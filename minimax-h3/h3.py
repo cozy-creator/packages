@@ -1651,6 +1651,8 @@ class ShotRequest(msgspec.Struct, kw_only=True):
     )]  # fmt: skip
     beats: list[Beat] = []
     seed: int | None = None
+    #: What holds for the whole shot, in every piece: its look, and what must or must not appear ("no
+    #: person appears"). `prompt` is how the shot opens and is left out of later pieces (se-087).
     style: str = ""
     soundscape: str = ""
     music: str = "N/A"
@@ -1692,10 +1694,11 @@ _WORLD_STATE_EDGE = 512
 #: The first piece's closing sentence, and each later piece's opening one: a continued piece picks
 #: up the carried frames as they are, the camera still doing what it did, and starts nothing new
 #: for its first two seconds (MiniMax's extend and the ComfyUI chainers restate the incoming state;
-#: one that holds the camera against a moving shot, or restages a beat, reframes: se-087, 24525).
+#: one that holds the camera against a moving shot, or restages a beat, reframes: se-087, 24525). It
+#: names nothing a shot may not have: "the same people" put people into a test pattern (se-089, 25176).
 _ONE_SHOT = "One continuous shot with no cuts."
-_CONTINUED = ("The same unbroken take goes on from its last moment: the same people in the same places, the camera "
-              "still moving as it was. For its first two seconds everything carries on exactly as it is.")
+_CONTINUED = ("The same unbroken take goes on from its last moment: everything stays where it was, the camera still "
+              "moving as it was. For its first two seconds everything carries on exactly as it is.")
 #: A pinned head delays a new action about 2.4 s, so no beat starts from 2 s before a piece's
 #: edge to 2.5 s after it, where the pieces can avoid it.
 _BEFORE_EDGE_S, _AFTER_EDGE_S = 2.0, 2.5
@@ -1900,11 +1903,11 @@ async def shot(ctx: Context, payload: ShotRequest, out: Outputs, tel: Telemetry)
     for index, text in enumerate(piece_texts(payload.prompt, payload.beats, [start / FPS for start in starts])):
         own = [ref for ref in references if ref.kind not in CLIPS or ref.name in windows[index]]
         # A continued piece with no place to carry starts from the previous piece's last frame as a world state,
-        # after the request's own pictures so their <Picture N> keep their numbers: who and what is where now. Every
+        # after the request's own pictures so their <Picture N> keep their numbers: what is where now. Every
         # continued piece that saw one joined cleanly (se-087: 9 of 9 seams); those without, character-only and
         # footage shots, reframed or cut (24525, 24603).
         anchor = [StoryReference(name=f"Piece {index} end", kind="world_state",
-                                 description="This piece starts from it: who and what is where now.")
+                                 description="This piece starts from it: what is where now.")
                   ] if index and not places else []  # fmt: skip
         call = piece_call(text, [*own, *plates, *anchor] if index else own, style=style,
                           soundscape=sound, music=music, index=index,
