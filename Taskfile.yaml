@@ -4,7 +4,6 @@ silent: true
 vars:
   LOCK_HUB: https://tensorhub.com # committed locks resolve against production
   HUBS: https://tensorhub.com http://127.0.0.1:8819
-  IMAGE_TORCH: torch==2.14.0 torchvision==0.29.0 # what the Hub's current worker image carries (its tag): a lock carries none (cl-715)
 
 tasks:
   # First-party packages publish at the root namespace (`--root`, Hub admins). Locks pin first-party callees exactly, so each release of X is followed by one of every package
@@ -67,10 +66,16 @@ tasks:
             module = Path(sys.modules[home].__file__).resolve().parent
             if module.is_relative_to(here):
                 triton_prebuild.build(Path(sys.argv[2], module.relative_to(here), triton_kernels.SHIPPED), None, home)'
+        # Once per (torch, Triton) the locked Runtime serves (its `torch-triton.txt`, at most two): the lock's environment
+        # with that torch installed (a lock carries none), the Runtime writing each Triton's sets into `_triton/<Triton>/`.
         kernels() { m=$(sed -n 's/^object = "\([A-Za-z0-9_]*\).*/\1/p' "$1/package.toml"); e=$work/.env-$1
           (cd "$1" && UV_PROJECT_ENVIRONMENT=$e uv sync -q --frozen --no-dev --python 3.12)
-          VIRTUAL_ENV=$e uv pip install -q {{.IMAGE_TORCH}}
-          (cd "$1" && nice -n 19 "$e/bin/python" -I -c "$prebuild" "$m" "$work/.kernels/$1") >/dev/null; }
+          served=$("$e/bin/python" -I -c 'import cozy_runtime, pathlib; print((pathlib.Path(cozy_runtime.__file__).parent / "torch-triton.txt").read_text())' | grep -v '^#' | grep .) ||
+            { echo "$1: its locked Runtime ships no torch-triton.txt: lock a Runtime that does" >&2; exit 1; }
+          while read -r torch triton; do
+            VIRTUAL_ENV=$e uv pip install -q "$torch" "$triton" torchvision
+            (cd "$1" && nice -n 19 "$e/bin/python" -I -c "$prebuild" "$m" "$work/.kernels/$1") >/dev/null
+          done <<< "$served"; }
         ship() {
           on=$(held "$1"); [ -z "$on" ] || { echo "$1 $(ver "$1") already exists on $on: not published, not yanked" >&2; exit 1; }
           kernels "$1"
