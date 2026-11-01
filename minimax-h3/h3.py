@@ -1825,8 +1825,14 @@ async def shot(ctx: Context, payload: ShotRequest, out: Outputs, tel: Telemetry)
     calls: list[PieceCall] = []
     for index, text in enumerate(piece_texts(payload.prompt, payload.beats, [start / FPS for start in starts])):
         own = [ref for ref in references if ref.kind not in CLIPS or ref.name in windows[index]]
-        call = piece_call(text, [*own, *plates] if index else own, style=style, soundscape=sound,
-                          music=music, index=index, forced=forced)  # fmt: skip
+        # A continued piece a clip guides, with no place to carry it, starts from the previous piece's last frame
+        # as a world state: the clip's motion goes on from there, never cutting back to the clip's own moment
+        # (run 24603 cut where it had run ahead of its clip).
+        anchor = [StoryReference(name=f"Piece {index} end", kind="world_state",
+                                 description="This piece starts from it: who and what is where now.")
+                  ] if index and not places and any(ref.kind == "video" for ref in own) else []  # fmt: skip
+        call = piece_call(text, [*own, *plates, *anchor] if index else own, style=style, soundscape=sound,
+                          music=music, index=index, forced=forced | {ref.name for ref in anchor})  # fmt: skip
         if not call.references and index:
             # Ref2VA carries the picture and needs a picture: the previous piece's last frame.
             end = StoryReference(name=f"Piece {index} end", kind="world_state")
