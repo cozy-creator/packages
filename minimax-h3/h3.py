@@ -12,7 +12,7 @@ import hashlib
 import math
 import queue
 import re
-from collections.abc import Awaitable, Callable, Iterable, Iterator, Sequence
+from collections.abc import Awaitable, Callable, Iterable, Iterator, Mapping, Sequence
 from concurrent.futures import Future
 from contextlib import suppress
 from dataclasses import dataclass
@@ -25,6 +25,7 @@ from typing import Annotated, Any, Literal, cast
 import msgspec
 import numpy as np
 import torch
+from cozy_runtime import stepcache
 from cozy_runtime.author import (
     App,
     AudioFile,
@@ -63,6 +64,7 @@ from safetensors.torch import save as save_tensors
 
 from gates import MediaFacts, refuse_before_encode
 from minimax_h3 import regenerate as refine_math
+from minimax_h3 import shot_latents
 from minimax_h3.continuation import (
     AVContext,
     Carry,
@@ -93,6 +95,7 @@ from minimax_h3.official import (
     MAX_REFERENCES,
     MAX_VIDEO_REFERENCES,
     REFERENCE_IMAGE_SHORT_EDGE,
+    VAE_SPATIAL_RATIO,
     OfficialH3Pipeline,
     ReferencePolicyFacts,
     ScheduleFacts,
@@ -112,6 +115,7 @@ from seedvr2 import UpscaleOutput as RestorationOutput
 from seedvr2 import upscale as restore_video
 from story import (
     AUDIO_READ_BYTES,
+    CLIPS,
     FILE,
     IMAGE_READ_BYTES,
     REFERENCE_AUDIO,
@@ -159,18 +163,20 @@ ReferenceFiles = Annotated[
 
 
 class VideoUse(msgspec.Struct, frozen=True):
-    """How a call uses one of its videos: its sound (`use_audio`), and whether its frames are
-    anchored in the output (`anchor_video`)."""
+    """How a call uses one of its videos: its sound (`use_audio`), whether its frames are
+    anchored in the output (`anchor_video`), and the frame of it, on the 24-fps clock, the
+    call's window starts at (`shot_windows`)."""
 
     audio: bool = False
     anchor: bool = False
+    start: Annotated[int, msgspec.Meta(ge=0)] = 0
 
 
-def video_uses(references: Sequence[StoryReference]) -> tuple[VideoUse, ...]:
-    """Each of a call's videos, in packed order."""
+def video_uses(references: Sequence[StoryReference], starts: Mapping[str, int]) -> tuple[VideoUse, ...]:
+    """Each of a call's videos, in packed order, from its window's `starts`."""
     return tuple(
-        VideoUse(ref.use_audio, ref.kind == "anchor_video")
-        for ref in references if ref.kind in ("video", "anchor_video")
+        VideoUse(ref.use_audio, ref.kind == "anchor_video", starts[ref.name])
+        for ref in references if ref.kind in CLIPS
     )
 
 
@@ -234,6 +240,9 @@ class Resolution(Enum):
 
 #: The refine starts the Regenerate overlay serves (`efficient-large-model/open-h3-regenerate-2k@0.1.0`'s plan).
 REGENERATE_STRENGTHS = (0.7, 0.8, 0.909)
+#: The default start (Paul, 10-31): NVIDIA's 0.909 redraws a face as another person's, its hat and sunglasses, and a
+#: painted look as a photograph; 0.7 keeps them (fidelity test, runs 24518-24554).
+REGENERATE_STRENGTH = 0.7
 _SEEDVR2_FIELDS = (
     "color_correction", "input_noise_scale", "latent_noise_scale", "batch_size",
     "uniform_batch_size", "temporal_overlap", "prepend_frames",
@@ -253,7 +262,7 @@ class Upscale(msgspec.Struct, kw_only=True):
       letterboxes. At `768p` it is a refine-only pass at the native size.
 
     `strength` (regenerate-2k): how much of the source the refine redraws, as its start noise:
-    0.909 (default, NVIDIA's), 0.8 or 0.7. Lower keeps more of the source (faces, on-screen text)
+    0.7 (default), 0.8 or 0.909 (NVIDIA's). Lower keeps more of the source (faces, on-screen text)
     and is faster; higher invents more detail. Small text is redrawn at every strength and can
     become other letters; SeedVR2 keeps it.
     """
@@ -289,7 +298,7 @@ class Upscale(msgspec.Struct, kw_only=True):
 
     @property
     def start(self) -> float:
-        return REGENERATE_STRENGTHS[-1] if self.strength is None else self.strength
+        return REGENERATE_STRENGTH if self.strength is None else self.strength
 
 
 class H3VideoOutput(msgspec.Struct):
@@ -383,12 +392,11 @@ def assets_to_h3_refs(
 ) -> tuple[list[Any], ReferenceSizing, GuideClip | None]:
     """Check every reference from its header and size the vision budget, then read each.
 
-    Durations are Runtime's (`REFERENCE_VIDEO`/`REFERENCE_AUDIO`): `probe().duration` is the
-    length a read returns, so a truncated clip is budgeted at 15 s. A video streams straight to
-    the size it is used at on the 24-fps clock (`read_reference_video`), keeping only the
-    call's `frames`, which is all the official pipeline keeps of it; its soundtrack is decoded
-    only where its `videos` entry (per video in packed order) says so. An anchor video is not a
-    reference (`guide_rows`): Qwen never sees it.
+    A video is read over its window: from its `videos` entry's `start` (per video in packed
+    order), the call's `frames` at most, which is all the official pipeline keeps of it, and
+    budgeted at that length. It streams straight to the size it is used at on the 24-fps clock
+    (`read_reference_video`); its soundtrack is decoded only where its entry says so. An anchor
+    video is not a reference (`guide_rows`): Qwen never sees it.
     """
     audio_duration = Fraction(0)
     video_tokens = 0
@@ -424,9 +432,8 @@ def assets_to_h3_refs(
             keeps[index] = keeps[index] and video.soundtrack is not None
             _validate_video(video, field, sound=keeps[index])
             if not uses[index].anchor:
-                video_tokens += reference_video_vision_tokens(
-                    video.width, video.height, video.duration
-                )
+                window = min(Fraction(frames, FPS), video.duration - Fraction(uses[index].start, FPS))
+                video_tokens += reference_video_vision_tokens(video.width, video.height, window)
         else:
             audio = reference.probe()
             _validate_audio(audio, field)
@@ -435,14 +442,15 @@ def assets_to_h3_refs(
     sizing = resolve_reference_sizing(
         images, default=DEFAULT_REFERENCE_IMAGE_SHORT_EDGE, video_tokens=video_tokens
     )
-    window = Fraction(frames, FPS)
     prepared = []
     guide = None
     for index, reference in enumerate(references):
         if isinstance(reference, ImageFile):
             prepared.append(pipe.image_reference(reference.read()))
         elif isinstance(reference, VideoFile):
-            with reference.stream(end=window, audio=keeps[index]) as events:
+            start = uses[index].start
+            with reference.stream(start=Fraction(start, FPS), end=Fraction(start + frames, FPS),
+                                  audio=keeps[index]) as events:  # fmt: skip
                 clip = read_reference_video(
                     events, frames=frames, audio=keeps[index], guide=uses[index].anchor
                 )
@@ -859,16 +867,39 @@ _REGENERATE_PIXELS = {
 RegenerateResolution = Annotated[Resolution, Shape(pixels=_REGENERATE_PIXELS)]
 
 
+#: The video interfaces' `preset`: Turbo's dense steps (`TURBO_DENSE_STEPS`) and Regenerate's
+#: refine forwards (`regenerate.PRESETS`).
+Preset = Literal["quality", "balanced", "fast"]
+#: Turbo's dense steps of eight: all (NVIDIA HyperFlow's `quality`), four, and one (Sol-Engine's
+#: `sol_bsa`). The full model has one recipe, ten dense steps.
+TURBO_DENSE_STEPS: dict[Preset, int] = {"quality": 8, "balanced": 4, "fast": 1}
+#: The full model's step cache (`stepcache`, NVIDIA sol-engine's 30-step tiers): `quality` H100's
+#: EasyCache, `fast` H100 `aggressive` / GB200 `fullopt`'s FirstBlockCache; `balanced` none.
+#: Turbo's eight distilled steps never cache (NVIDIA keeps cache reuse off on distilled paths).
+FULL_CACHE: dict[Preset, stepcache.Policy | None] = {
+    "quality": stepcache.EasyCache(0.30, retain=10, cooldown=4, max_hits=1),
+    "balanced": None,
+    "fast": stepcache.FirstBlockCache(0.08),
+}
+#: A shot's latents (`shot_latents`): `ShotResult.latents`, `UpscaleInput.latents`.
+Latents = Annotated[File, FileBound(max_bytes=1 << 30, media_types=("application/octet-stream",))]
+
+
 class RegenerateInput(msgspec.Struct, kw_only=True):
-    """`upscale`'s Regenerate route (`regenerate_shot`): the video's 768p frames encoded,
-    upscaled in latent space and refined by H3 at `resolution` from `prompt`, its soundtrack
-    kept. The 7:4 frame fills 16:9, stretched 1.6% horizontally; `768p` refines only."""
+    """`upscale`'s Regenerate route (`regenerate_shot`): the shot's 768p latents (`latents`, its
+    own, as NVIDIA's `--input-latents`), else its video's frames encoded, upscaled in latent space
+    and refined by H3 at `resolution` from `prompt`, the video's soundtrack kept. The 7:4 frame
+    fills 16:9, stretched 1.6% horizontally; `768p` refines only."""
 
     video: Annotated[VideoFile, FileBound(max_bytes=1 << 30, max_decoded_bytes=2 << 30)]
+    latents: Latents | None = None
     prompt: str
     resolution: RegenerateResolution = Resolution.QHD
-    strength: float = 0.909
+    strength: float = REGENERATE_STRENGTH
     seed: int | None = None
+    #: NVIDIA's refine forwards (`regenerate.PRESETS`): `quality` dense (`standard`), `balanced`
+    #: step 0 dense then sparse at tau 1.0 (`sol_engine`), `fast` all sparse at tau 1.75.
+    preset: Preset = "balanced"
 
     def __post_init__(self) -> None:
         if round(self.strength, 3) not in REGENERATE_STRENGTHS:
@@ -884,6 +915,8 @@ class RegenerateOutput(msgspec.Struct):
 
 #: The canvas the refine's latent is encoded at: H3's native 1344x768.
 _DRAFT_SIZE = (768, 1344)
+#: The draft's latent grid: `_DRAFT_SIZE` over the VAE's 16 px.
+_DRAFT_LATENT = (_DRAFT_SIZE[0] // VAE_SPATIAL_RATIO, _DRAFT_SIZE[1] // VAE_SPATIAL_RATIO)
 
 
 def _read_draft(video: VideoFile) -> tuple[Any, Any | None, int, int, list[str]]:
@@ -932,6 +965,30 @@ def _read_draft(video: VideoFile) -> tuple[Any, Any | None, int, int, list[str]]
     return pixels, waveform, rate, count, warnings
 
 
+def _read_soundtrack(video: VideoFile, frames: int) -> tuple[Any | None, int]:
+    """The `(channels, samples)` soundtrack of a video its latents stand for (`frames` frames at
+    24 fps), and its sample rate; its pictures are not decoded."""
+    probe = video.probe()
+    if probe.frame_rate != FPS:
+        raise InvalidRequest(f"regenerate takes 24 fps video, not {probe.frame_rate}", fields=["video"])
+    if abs(round(probe.duration * FPS) - frames) > 1:
+        raise InvalidRequest(f"the latents are {frames} frames and the video {round(probe.duration * FPS)}: "
+                             "they are not the same shot", fields=["latents"])  # fmt: skip
+    pcm: list[list[Any]] = []
+    rate = 0
+    with video.stream(pictures=False) as stream:
+        for event in stream:
+            if isinstance(event, DecodedAudioChunk):
+                rate = event.sample_rate
+                pcm.append([np.frombuffer(data, dtype=np.float32) for data in event.pcm_f32le])
+    if not pcm:
+        return None, rate
+    waveform = torch.from_numpy(np.stack([np.concatenate(c) for c in zip(*pcm, strict=True)]))
+    if int(waveform.shape[0]) not in _AUDIO_LAYOUTS:
+        raise InvalidRequest("regenerate keeps mono or stereo soundtracks", fields=["video"])
+    return waveform, rate
+
+
 def _cover(frame: Any) -> Any:
     """One `(h, w, 3)` uint8 frame cover-scaled (bilinear) and centre-cropped to 1344x768."""
     height, width = (int(value) for value in frame.shape[:2])
@@ -966,6 +1023,7 @@ def _render_keyframes(
     first: Image | None,
     last: Image | None,
     turbo_lora: H3TurboLoRA | None = None,
+    preset: Preset = "balanced",
     delivery: ContinuationPlan | None = None,
     completed: Callable[[Any], None] | None = None,
     ended: Callable[[Any], None] | None = None,
@@ -999,10 +1057,10 @@ def _render_keyframes(
         with tel.stage("condition_media", overall_range=(0.08, 0.15)):
             model.condition_fl2va_media(task, state)
     if turbo_lora is None:
-        sample = model.sample_fl2va
+        sample = partial(model.sample_fl2va, cache=FULL_CACHE[preset])
     else:
         assert isinstance(model, H3TurboBase)
-        sample = partial(model.sample_fl2va_turbo, turbo_lora=turbo_lora)
+        sample = partial(model.sample_fl2va_turbo, turbo_lora=turbo_lora, sol_dense_steps=TURBO_DENSE_STEPS[preset])
     with tel.stage("denoise", overall_range=(0.15, 0.85)):
         schedule = sample(
             state,
@@ -1095,10 +1153,10 @@ def _references_to_video(
     with tel.stage("condition", overall_range=(0.03, 0.15)):
         condition_references(model, task, state, tel=tel)
     if turbo_lora is None:
-        sample = model.sample_ref2va
+        sample = partial(model.sample_ref2va, cache=FULL_CACHE[payload.preset])
     else:
         assert isinstance(model, H3TurboBase)
-        sample = partial(model.sample_ref2va_turbo, turbo_lora=turbo_lora)
+        sample = partial(model.sample_ref2va_turbo, turbo_lora=turbo_lora, sol_dense_steps=TURBO_DENSE_STEPS[payload.preset])
     with tel.stage("denoise", overall_range=(0.15, 0.85)):
         schedule = sample(
             state,
@@ -1181,6 +1239,7 @@ class Ref2VAInput(msgspec.Struct):
     #: A shot's last piece: the earlier pieces' latents and videos, decoded with it as one.
     earlier_latents: tuple[LatentFile, ...] = ()
     earlier_videos: tuple[PieceVideo, ...] = ()
+    preset: Preset = "balanced"
 
 
 class PieceOutput(msgspec.Struct):
@@ -1245,7 +1304,8 @@ class _Pieces:
             # previous piece's latents in phase.
             head = video_tokens(self.plan.carried.frames) if self.plan.carried.frames else 0
             delivered = state.latents[:, :, head:].detach().float().cpu().contiguous()
-            self.saved["latents"] = self.out.save_bytes(save_tensors({"latents": delivered}),
+            space = self.model.latent_space()
+            self.saved["latents"] = self.out.save_bytes(save_tensors({"latents": delivered}, {"vae_space": space}),
                                                        media_type="application/octet-stream")  # fmt: skip
 
     @property
@@ -1345,6 +1405,7 @@ class FL2VAInput(msgspec.Struct, kw_only=True):
     duration_s: DurationSeconds
     steps: int | None
     turbo: bool
+    preset: Preset = "balanced"
     first_frame: FrameImage = None
     last_frame: FrameImage = None
     next_context_frames: ContextFrames = 0
@@ -1404,7 +1465,7 @@ async def fl2va_piece(
         prompt=encoder_prompt("fl2va", payload.prompt), seed=payload.seed,
         duration_s=payload.duration_s, steps=payload.steps,
         first=_frame(payload.first_frame, "first_frame"), last=_frame(payload.last_frame, "last_frame"),
-        turbo_lora=lora, delivery=plan if plan.successor else None,
+        turbo_lora=lora, preset=payload.preset, delivery=plan if plan.successor else None,
         completed=handed if handed.wanted else None,
         ended=partial(_keep_frames, out, payload.exports, ended, exported),
     )  # fmt: skip
@@ -1433,13 +1494,22 @@ async def regenerate_shot(
     """`upscale.model: regenerate-2k` over a whole shot: its 768p latent upscaled, refined at
     `resolution` in overlapping windows where the card needs them, and decoded with its
     soundtrack."""
-    ctx.plan("vae", "text_encoder", "audio_vae", "upscaler", {"transformer", "fl2va_regenerate"}, "vae")
+    # In the order they run; the shot's own latents skip the encode.
+    encode = () if payload.latents is not None else ("vae",)
+    ctx.plan(*encode, "upscaler", "text_encoder", "audio_vae", {"transformer", "fl2va_regenerate"}, "vae")
     cancel = ctx.raise_if_cancelled
-    with tel.stage("read_video", overall_range=(0.00, 0.03)):
-        pixels, waveform, sample_rate, frames, warnings = _read_draft(payload.video)
-    with tel.stage("encode_video", overall_range=(0.03, 0.08)):
-        latents = base_model.encode_clip(pixels)
-    del pixels
+    if payload.latents is not None:
+        # The shot's own latent: no encode, and no decode-and-encode loss (NVIDIA's `--input-latents`).
+        with tel.stage("read_video", overall_range=(0.00, 0.08)):
+            latents, frames = shot_latents.load(payload.latents.read_bytes(), base_model.latent_space(), _DRAFT_LATENT)
+            waveform, sample_rate = _read_soundtrack(payload.video, frames)
+            warnings: list[str] = []
+    else:
+        with tel.stage("read_video", overall_range=(0.00, 0.03)):
+            pixels, waveform, sample_rate, frames, warnings = _read_draft(payload.video)
+        with tel.stage("encode_video", overall_range=(0.03, 0.08)):
+            latents = base_model.encode_clip(pixels)
+        del pixels
     resolution = payload.resolution.value
     with tel.stage("upscale_latent", overall_range=(0.08, 0.10)):
         for height, width in refine_math.upscale_passes(resolution):
@@ -1452,13 +1522,14 @@ async def regenerate_shot(
     steps = schedule.transformer_evaluations
     seed = payload.seed if payload.seed is not None else int.from_bytes(
         hashlib.sha256(f"{ctx.request_id}/h3/regenerate".encode()).digest()[:4], "big")  # fmt: skip
-    tel.log("h3 regenerate", resolution=resolution, strength=payload.strength, start_sigma=schedule.start,
+    tel.log("h3 regenerate", resolution=resolution, strength=payload.strength, preset=payload.preset, start_sigma=schedule.start,
             transformer_evaluations=steps, latent="x".join(str(int(value)) for value in latents.shape[2:]),
             windows=len(spans), window_latent_frames=spans[0][1])  # fmt: skip
     with tel.stage("refine", overall_range=(0.14, 0.85)):
         refined = base_model.refine(
             latents, overlay=regenerate_lora, prompt_embeds=text[0], text_tags=text[1], spans=spans,
             audio=base_model.silence(refine_math.frames_of(spans[0][1])), schedule=schedule, seed=seed,
+            preset=payload.preset,
             on_step=tel.step_callback(steps, stage="refine", overall_range=(0.14, 0.85)),
         )  # fmt: skip
     cancel()
@@ -1540,7 +1611,8 @@ class ShotAudio(msgspec.Struct):
 
 
 class ReferenceFootage(msgspec.Struct, kw_only=True):
-    """A clip whose motion and camera the shot performs; its sound only with `use_audio`."""
+    """A clip whose motion and camera the shot performs, second for second; its sound only
+    with `use_audio`."""
 
     name: str
     video: ShotFootage
@@ -1548,7 +1620,7 @@ class ReferenceFootage(msgspec.Struct, kw_only=True):
 
 
 class Plate(msgspec.Struct):
-    """A clip the shot follows frame by frame (Add Guide rows), no longer than the shot."""
+    """A clip the shot follows frame by frame (Add Guide rows), across all its pieces."""
 
     video: ShotFootage
 
@@ -1591,13 +1663,22 @@ class ShotRequest(msgspec.Struct, kw_only=True):
     writes: list[Literal["first", "last"] | Annotated[float, msgspec.Meta(ge=0)]] = []
     turbo: bool = True
     steps: FullSteps | None = None
+    #: `768p` is H3's own size. Above it the finished shot is upscaled whole by `upscale.model`
+    #: (UPSCALE.md); Regenerate starts from the shot's own latents.
+    resolution: RegenerateResolution = Resolution.NATIVE
+    upscale: Upscale | None = None
+    #: Speed against fidelity, for the whole shot: Turbo's dense steps (`TURBO_DENSE_STEPS`) and,
+    #: above 768p, the upscale's (`UpscaleInput.preset`).
+    preset: Preset = "balanced"
 
 
 class ShotResult(msgspec.Struct):
     video: Annotated[VideoFile, FileBound(max_bytes=1 << 30, media_types=("video/mp4",))]
-    #: One per `writes` entry, in order.
+    #: One per `writes` entry, in order, from the 768p render.
     frames: list[ImageFile]
     warnings: list[str]
+    #: The 768p shot's own latents (`shot_latents`), for a later `upscale` to start from.
+    latents: Latents | None = None
 
 
 #: What each later piece carries from the one before: 22 frames of picture and one second of sound.
@@ -1693,6 +1774,37 @@ def piece_texts(prompt: str, beats: Sequence[Beat], starts: Sequence[float]) -> 
     return texts
 
 
+def shot_windows(
+    references: Sequence[StoryReference], spans: Sequence[tuple[int, int]]
+) -> tuple[list[dict[str, int]], list[str]]:
+    """Where each piece's window of each clip starts, and the warnings. A piece reads the shot
+    frames it samples, its carried head included (`spans`: first frame, count), 1:1 from the
+    clip's first frame on the 24-fps clock, so a plate stays frame-aligned across an edge. A
+    piece takes the tail of a clip that ends in its window, and none of one that leaves it
+    less than `REFERENCE_VIDEO`'s minimum."""
+    least = math.ceil(Fraction(REFERENCE_VIDEO.min_seconds or 0) * FPS)
+    windows: list[dict[str, int]] = [{} for _ in spans]
+    total = spans[-1][0] + spans[-1][1]
+    warnings = []
+    for ref in references:
+        if ref.kind not in CLIPS:
+            continue
+        assert ref.video is not None
+        length = math.floor(ref.video.probe().duration * FPS + Fraction(1, 2))
+        for window, (start, frames) in zip(windows, spans, strict=True):
+            if min(start + frames, length) - start >= least:
+                window[ref.name] = start
+        if ref.kind == "video" and (span := sum(ref.name in window for window in windows)) > 1:
+            warnings.append(f"<{ref.name}> guides {span} pieces, each from its own span: put each beat where the clip "
+                            "shows it, or the shot runs ahead of the clip")  # fmt: skip
+        if length < total:
+            warnings.append(f"<{ref.name}> ends {length / FPS:.1f} s into this {total / FPS:.1f} s shot, "
+                            "which runs on without it")  # fmt: skip
+        elif length > total:
+            warnings.append(f"<{ref.name}> is {length / FPS:.1f} s long; the shot uses its first {total / FPS:.1f} s")
+    return windows, warnings
+
+
 def _lower(text: str) -> str:
     """A sentence continuing another: its first letter lower-cased, unless it opens a name."""
     return text[:1].lower() + text[1:] if text[:1].isupper() and not text[1:2].isupper() and not text.startswith("<") else text
@@ -1731,11 +1843,6 @@ def _shot_references(payload: ShotRequest) -> tuple[list[StoryReference], list[s
     if payload.plate is not None:
         refs.append(StoryReference(name="Plate", kind="anchor_video", video=payload.plate.video))
     validate_references(refs)
-    for ref in refs:
-        probe = None if ref.video is None else ref.video.probe()
-        if probe is not None and probe.source_duration > probe.duration:
-            warnings.append(f"<{ref.name}> is {float(probe.source_duration):.1f} s long; "
-                            f"H3 used its first {float(probe.duration):g} s.")  # fmt: skip
     return refs, warnings
 
 
@@ -1760,9 +1867,6 @@ async def shot(ctx: Context, payload: ShotRequest, out: Outputs, tel: Telemetry)
     keyframes = payload.keyframes or Keyframes()
     if payload.plate is not None and keyframes.first is not None:
         raise InvalidRequest("a plate sets the shot's opening; it takes no first keyframe", fields=["keyframes.first"])
-    if payload.plate is not None and len(pieces) > 1:
-        raise InvalidRequest(f"a plate is followed within one piece of at most {MAX_DURATION_S} s; "
-                             f"this shot is {payload.duration_s:g} s", fields=["plate"])  # fmt: skip
     references, warnings = _shot_references(payload)
     if payload.turbo and payload.steps is not None:
         warnings.append(f"turbo runs its LoRA's 8 steps; steps {payload.steps} ignored")
@@ -1771,6 +1875,9 @@ async def shot(ctx: Context, payload: ShotRequest, out: Outputs, tel: Telemetry)
     plans = [ContinuationPlan(length, _CARRY if index else Carry(), _CARRY if index + 1 < count else Carry())
              for index, length in enumerate(pieces)]  # fmt: skip
     *starts, total = accumulate((plan.delivered_frames for plan in plans), initial=0)
+    windows, notes = shot_windows(references, [(start - plan.prefix_frames, plan.sample_frames)
+                                               for start, plan in zip(starts, plans, strict=True)])  # fmt: skip
+    warnings += notes
     exports: dict[int, list[int]] = {}
     order: list[tuple[int, int]] = []
     for write in payload.writes:
@@ -1790,6 +1897,7 @@ async def shot(ctx: Context, payload: ShotRequest, out: Outputs, tel: Telemetry)
     files: dict[str, File | None] = {ref.name: getattr(ref, FILE[ref.kind]) for ref in voices([*references, *plates])[0]}
     calls: list[PieceCall] = []
     for index, text in enumerate(piece_texts(payload.prompt, payload.beats, [start / FPS for start in starts])):
+        own = [ref for ref in references if ref.kind not in CLIPS or ref.name in windows[index]]
         # A continued piece with no place to carry starts from the previous piece's last frame as a world state,
         # after the request's own pictures so their <Picture N> keep their numbers: who and what is where now. Every
         # continued piece that saw one joined cleanly (se-087: 9 of 9 seams); those without, character-only and
@@ -1797,7 +1905,7 @@ async def shot(ctx: Context, payload: ShotRequest, out: Outputs, tel: Telemetry)
         anchor = [StoryReference(name=f"Piece {index} end", kind="world_state",
                                  description="This piece starts from it: who and what is where now.")
                   ] if index and not places else []  # fmt: skip
-        call = piece_call(text, [*references, *plates, *anchor] if index else references, style=style,
+        call = piece_call(text, [*own, *plates, *anchor] if index else own, style=style,
                           soundscape=sound, music=music, index=index,
                           forced=forced | {ref.name for ref in anchor})  # fmt: skip
         calls.append(call if call.references else PieceCall(_fl2va_text(text, payload), [], call.warnings))
@@ -1808,7 +1916,8 @@ async def shot(ctx: Context, payload: ShotRequest, out: Outputs, tel: Telemetry)
             warnings.append(f"a piece starts at {edge / FPS:.1f} s, near the beat at {late[0]:g} s, which may start "
                             "about 2 s late; spacing the beats further apart avoids it")  # fmt: skip
     tel.log("h3 shot pieces", pieces=count, seconds=",".join(map(str, pieces)),
-            boundaries_s=",".join(f"{start / FPS:.2f}" for start in starts[1:]), delivered_frames=total)  # fmt: skip
+            boundaries_s=",".join(f"{start / FPS:.2f}" for start in starts[1:]), delivered_frames=total,
+            clip_windows=";".join(",".join(f"{name}@{at}" for name, at in w.items()) for w in windows))  # fmt: skip
     if not calls[0].references and any(call.references for call in calls[1:]):
         # Only a text-only first piece (FL2VA) runs ahead of a Ref2VA one. A hint the shot never
         # uses loads on after it ends and holds the GPU from the next run (0.2.0 gate 41159884913:
@@ -1829,17 +1938,17 @@ async def shot(ctx: Context, payload: ShotRequest, out: Outputs, tel: Telemetry)
                 log_prompt(tel, "h3 piece prompt", call.prompt, piece=index + 1,
                            references=", ".join(ref.name for ref in call.references))  # fmt: skip
                 if call.references:
-                    uses = video_uses(call.references)
+                    uses = video_uses(call.references, windows[index])
                     result = await ref2va_piece(  # type: ignore[call-arg]
                         payload=Ref2VAInput(
                             prompt=call.prompt, seed=seeds[index], duration_s=pieces[index], steps=steps,
-                            turbo=payload.turbo, frames=held_frames(plan, uses), videos=uses,
+                            turbo=payload.turbo, preset=payload.preset, frames=held_frames(plan, uses), videos=uses,
                             previous_provenance=expected, context=context if plan.carried else None,
                             context_frames=cast(ContextFrames, plan.carried.frames),
                             context_audio=plan.carried.audio,
                             next_context_frames=cast(ContextFrames, plan.successor.frames),
                             next_context_audio=plan.successor.audio, first_frame=first, last_frame=last,
-                            exports=tuple(exports.get(index, ())), latents=several and index + 1 < count,
+                            exports=tuple(exports.get(index, ())), latents=True,
                             earlier_latents=tuple(r.latents for r in returned) if several and index + 1 == count else (),
                             earlier_videos=tuple(r.video for r in returned) if several and index + 1 == count else (),
                             picture_edges=tuple(_WORLD_STATE_EDGE if ref.kind == "world_state" else 0
@@ -1851,10 +1960,10 @@ async def shot(ctx: Context, payload: ShotRequest, out: Outputs, tel: Telemetry)
                     result = await fl2va_piece(  # type: ignore[call-arg]
                         payload=FL2VAInput(
                             prompt=call.prompt, seed=seeds[index], duration_s=pieces[index], steps=steps,
-                            turbo=payload.turbo, first_frame=first, last_frame=last,
+                            turbo=payload.turbo, preset=payload.preset, first_frame=first, last_frame=last,
                             next_context_frames=cast(ContextFrames, plan.successor.frames),
                             next_context_audio=plan.successor.audio, exports=tuple(exports.get(index, ())),
-                            latents=several,
+                            latents=True,
                         ),
                     )  # fmt: skip
         except ChildCallError as failure:
@@ -1868,10 +1977,45 @@ async def shot(ctx: Context, payload: ShotRequest, out: Outputs, tel: Telemetry)
         warnings += result.warnings
         files[f"Piece {index + 1} end"] = result.last_frame
         out.publish("video", result.video, label="Video" if index + 1 == count else f"Piece {index + 1} of {count}")
+    latents = _shot_latents(out, returned, total, _upscale_prompt(payload))
+    video = returned[-1].video
+    if payload.resolution is not Resolution.NATIVE:
+        # Through `upscale`, as every caller: the shot's own latents, so Regenerate encodes nothing.
+        request = UpscaleInput(video=video, resolution=payload.resolution, upscale=payload.upscale,
+                               prompt=_upscale_prompt(payload), seed=piece_seed(payload.seed, ctx.request_id, count),
+                               latents=latents, preset=payload.preset)  # fmt: skip
+        video = (await upscale(ctx, request, out, tel)).video
+        out.publish("video", video, label=f"Video at {payload.resolution.value}")
     ctx.release_gpus()
-    tel.log("h3 shot", pieces=count, delivered_frames=total, turbo=payload.turbo)
-    return ShotResult(video=returned[-1].video, frames=[returned[piece].frames[slot] for piece, slot in order],
-                      warnings=list(dict.fromkeys(warnings)))  # fmt: skip
+    tel.log("h3 shot", pieces=count, delivered_frames=total, turbo=payload.turbo, preset=payload.preset)
+    return ShotResult(video=video, frames=[returned[piece].frames[slot] for piece, slot in order],
+                      warnings=list(dict.fromkeys(warnings)), latents=latents)  # fmt: skip
+
+
+def _shot_latents(out: Outputs, pieces: Sequence[PieceOutput], frames: int, text: str) -> File:
+    """The whole shot's latents: each piece's delivered latents end to end (each piece cuts its
+    carried head, whole VAE cycles, so they join in phase), in the latent space they name, with
+    the text the shot was made from."""
+    parts = [piece.latents.read_bytes() for piece in pieces]
+    spaces = {shot_latents.metadata(data).get("vae_space", "") for data in parts}
+    if len(spaces) != 1 or "" in spaces:
+        raise OutputError("the shot's pieces name no single latent space", code="output_integrity")
+    latents = torch.cat([load_tensors(data)["latents"] for data in parts], dim=2)
+    return out.save_bytes(shot_latents.save(latents, frames, spaces.pop(), text), media_type="application/octet-stream")
+
+
+def _upscale_prompt(payload: ShotRequest) -> str:
+    """The text a shot was made from, for an upscale that re-renders it (Paul, 10-31): the whole
+    shot as one piece's text (`piece_texts`) after each asset's description and world state's
+    layout, opening with the style and closing with the soundscape and music as its pieces do
+    (`_fl2va_text`). Names lose their brackets: the re-render attaches no reference."""
+    defined = [(asset.name, asset.description) for asset in payload.assets]
+    defined += [(state.name, state.layout) for state in payload.world_state]
+    lines = " ".join(f"{name}: {text.strip().rstrip('.')}." for name, text in defined if text.strip())
+    text = piece_texts(payload.prompt, payload.beats, [0.0])[0]
+    if lines:
+        text = text.replace("[Shot 1] ", f"{lines} [Shot 1] ", 1)
+    return re.sub(r"<([^<>]+)>", r"\1", _fl2va_text(text, payload))
 
 
 # --- upscale: one whole shot (`video/upscale`) ---------------------------------------------
@@ -1885,8 +2029,15 @@ class UpscaleInput(msgspec.Struct, kw_only=True):
     video: Annotated[VideoFile, FileBound(max_bytes=1 << 30, max_decoded_bytes=2 << 30)]
     resolution: RegenerateResolution = Resolution.QHD
     upscale: Upscale | None = None
+    #: regenerate-2k's text; absent, the text `latents` carry (the shot's whole text).
     prompt: str = ""
     seed: int | None = None
+    #: The shot's latents (`ShotResult.latents`): regenerate-2k starts from them instead of
+    #: encoding `video`. SeedVR2 restores pixels and reads `video` alone.
+    latents: Latents | None = None
+    #: regenerate-2k's refine, as NVIDIA's forwards (UPSCALE.md): `quality` (`standard`, dense),
+    #: `balanced` (`sol_engine`), `fast` (`sol_engine_fast`). SeedVR2 has one.
+    preset: Preset = "balanced"
 
 
 class UpscaleOutput(msgspec.Struct):
@@ -1894,17 +2045,22 @@ class UpscaleOutput(msgspec.Struct):
 
 
 async def upscale(ctx: Context, payload: UpscaleInput, out: Outputs, tel: Telemetry) -> UpscaleOutput:
-    """One whole shot upscaled; the fields its model ignores are logged."""
-    method = payload.upscale or Upscale()
-    warnings = method.ignored()
+    """One whole shot upscaled, the one way in for every caller (`shot` above 768p, projects,
+    `cozy run`): regenerate-2k from its latents when given, else its video; SeedVR2 from its
+    video. The fields its model ignores are logged."""
     seed = payload.seed if payload.seed is not None else int.from_bytes(
         hashlib.sha256(f"{ctx.request_id}/h3/upscale".encode()).digest()[:4], "big")  # fmt: skip
+    method = payload.upscale or Upscale()
+    warnings = method.ignored()
     if method.model == "regenerate-2k":
-        if not payload.prompt.strip():
-            raise InvalidRequest("regenerate-2k re-renders the video from the prompt it was made from",
-                                 fields=["prompt"])  # fmt: skip
-        call = RegenerateInput(video=payload.video, prompt=payload.prompt, resolution=payload.resolution,
-                               strength=method.start, seed=seed)  # fmt: skip
+        # The text the shot was made from: given, else the one its latents carry.
+        prompt = payload.prompt.strip() or (shot_latents.text(payload.latents.read_bytes()) if payload.latents else "")
+        if not prompt:
+            raise InvalidRequest("regenerate-2k re-renders the video from the text it was made from: give "
+                                 "prompt, or the shot's latents", fields=["prompt"])  # fmt: skip
+        call = RegenerateInput(video=payload.video, latents=payload.latents, prompt=prompt,
+                               resolution=payload.resolution, strength=method.start, seed=seed,
+                               preset=payload.preset)  # fmt: skip
         with tel.scope(f"Regenerate at {payload.resolution.value}"):
             result = await cast(Callable[..., Awaitable[RegenerateOutput]], regenerate_shot)(payload=call)
         tel.log("h3 upscale", model=method.model, warnings="; ".join(warnings + result.warnings))

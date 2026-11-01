@@ -5,7 +5,9 @@ its DiTs' attention may run at 4 bits, the video VAE decoder's at 8 (Kitchen INT
 ComfyUI's int8 decoder), and the audio VAE and text encoder keep exact attention. The
 package names no GPU and no kernel. Runtime serves each site with the first kernel of the GPU
 family's cell at that level ([precision tiers §2.4](https://github.com/cozy-creator/tracker/blob/master/design/precision-tiers.md)):
-FP4 Sage3 dense rows on RTX 50-class cards, the 8-bit cell elsewhere (Sage2 on Hopper, FA4 FP8
+FP4 Sage3 dense rows on RTX 50-class cards, Kitchen int4-QK dense rows on RTX 30/40-class cards
+(Ampere and Ada: Q·Kᵀ in int4, P·V in INT8; 1.10x end to end on H3 Turbo 15 s on an RTX 4090), the
+8-bit cell elsewhere (Sage2 on Hopper, FA4 FP8
 with rotated Q/K on datacenter Blackwell), and Sol on sparse steps. `--lane bf16` serves every site
 exactly.
 
@@ -21,7 +23,10 @@ exactly.
   there, Kitchen INT8 0.008–0.030; FP8 0.10–0.42 on B200).
 
 On the RTX 5090 the approved hybrid is Sage3 FP4 dense rows plus Kitchen INT8 Sol; all-dense FP4
-showed visible artifacts and stays an explicit experiment.
+showed visible artifacts and stays an explicit experiment. On Ampere and Ada it is int4-QK dense rows
+plus the same Kitchen INT8 Sol (`kitchen-sol-producer-int4qk-shared-qkv`); the owner compared it with
+8-bit and saw no difference (2026-10-31). `transformer=kitchen-sol-producer-fast-shared-qkv` keeps
+8-bit dense rows there.
 
 ## Explicit overrides
 

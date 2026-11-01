@@ -37,7 +37,7 @@ import sys
 import time
 from collections.abc import Callable, Iterator, Mapping
 from contextvars import ContextVar
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from typing import Any
 
 import torch
@@ -83,6 +83,25 @@ class KeyMean:
 
 
 KEY_MEAN: ContextVar[KeyMean | None] = ContextVar("minimax_h3_key_mean", default=None)
+
+
+class Owned:
+    """An argument whose only reference the callee takes (`take`): a caller's frame keeps
+    every argument it passes until the call returns, so a tensor it passes plainly outlives its
+    last use inside."""
+
+    __slots__ = ("value",)
+
+    def __init__(self, value: Any) -> None:
+        self.value = value
+
+
+def take(value: Any) -> Any:
+    """`value`, or the tensor an `Owned` passed, which then holds it no more."""
+    if not isinstance(value, Owned):
+        return value
+    taken, value.value = value.value, None
+    return taken
 #: The widths compiled: a transformer with others is not installable.
 HIDDEN, FFN, HEAD_DIM, ROTARY = 5376, 14336, 128, 96
 _ROW_WARPS = 16
@@ -490,12 +509,16 @@ def _launch_norm_mod(
     index: Any,
     eps: float,
     fp8: bool,
+    hidden_out: Any | None = None,
 ) -> tuple[Any, Any, Any]:
     _require(x)
     width = int(x.shape[-1])
     rows = _rows(x, width)
     n = int(rows.shape[0])
-    hidden = torch.empty_like(rows) if branch is not None else rows
+    if branch is None:
+        hidden = rows
+    else:  # a row is read whole before it is written: `hidden_out` may be `branch`'s own rows
+        hidden = torch.empty_like(rows) if hidden_out is None else _rows(hidden_out, width)
     branch_rows = _rows(branch, width) if branch is not None else rows
     gate = _table(gate) if gate is not None else scale
     scale, shift = _table(scale), _table(shift)
@@ -566,26 +589,31 @@ def gate_add_rmsnorm_modulate(
     eps: float,
     *,
     fp8: bool = False,
+    hidden_out: Any | None = None,
 ) -> tuple[Any, Any]:
     """`hidden = residual + gate[index] * branch`, then `rmsnorm_modulate(hidden)`.
 
     Returns `(hidden, normed)`: the new residual stream and the next GEMM's input, from
-    one pass over the registers that already hold the row.
+    one pass over the registers that already hold the row. `hidden` is written into
+    `hidden_out` where given (`branch` itself may be it).
     """
     hidden, out, row_scale = _launch_norm_mod(
-        launch, residual, branch, gate, weight, scale, shift, index, eps, fp8
+        launch, residual, branch, gate, weight, scale, shift, index, eps, fp8, hidden_out
     )
     normed = PreQuantized(out, row_scale, tuple(residual.shape)) if fp8 else out.view_as(residual)
     return hidden.view_as(residual), normed
 
 
-def gate_add(launch: Launch, residual: Any, gate: Any, branch: Any, index: Any) -> Any:
-    """`residual + gate[index] * branch`, one pass (eager: a gather, a mul and an add)."""
+def gate_add(
+    launch: Launch, residual: Any, gate: Any, branch: Any, index: Any, out: Any | None = None
+) -> Any:
+    """`residual + gate[index] * branch`, one pass (eager: a gather, a mul and an add), into
+    `out` where given (`residual` itself may be it: a row is read whole before it is written)."""
     _require(residual)
     width = int(residual.shape[-1])
     rows, branch_rows = _rows(residual, width), _rows(branch, width)
     gate = _table(gate)
-    out = torch.empty_like(rows)
+    out = torch.empty_like(rows) if out is None else _rows(out, width)
     block = _next_pow2(width)
     launch(
         _gate_add_kernel,
@@ -726,11 +754,13 @@ class H3AttnProcessor(MiniMaxH3AttnProcessor):  # type: ignore[misc]
         rotary_emb: tuple[Any, Any] | None = None,
         attention_mask: Any | None = None,
     ) -> Any:
+        hidden_states = take(hidden_states)
         heads = _Heads.of(self, attn, hidden_states, rotary_emb, attention_mask)
         if heads is None:
             hidden_states = self.whole(attn, hidden_states, rotary_emb, attention_mask)
             return attn.to_out[1](attn.to_out[0](hidden_states.flatten(2, 3)))
         attended = split(heads, heads, Cut(2))
+        del heads, hidden_states  # an owned input goes before the out projection's output comes
         out = attn.to_out[1](split(attn.to_out[0], attended.flatten(2, 3), Cut(1)))
         del attended
         return out
@@ -882,49 +912,79 @@ class FusedMiniMaxH3TransformerBlock(MiniMaxH3TransformerBlock):  # type: ignore
         attention_mask: Any | None = None,
     ) -> Any:
         shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = self.adaln_proj(temb)
-        normed = rmsnorm_modulate(
-            self._glue,
-            hidden_states,
-            self.norm1.weight,
-            scale_msa,
-            shift_msa,
-            adaln_indices,
-            self.norm1.eps,
-            fp8=self._fusion_attn_fp8,
+        # The attention owns its normed input (no name here holds it), so it goes at its last
+        # use, before the out projection's output (1.2 GB each at 15 s); the caller holds this
+        # block's input throughout.
+        attn_output = self.attn(
+            Owned(
+                rmsnorm_modulate(
+                    self._glue,
+                    hidden_states,
+                    self.norm1.weight,
+                    scale_msa,
+                    shift_msa,
+                    adaln_indices,
+                    self.norm1.eps,
+                    fp8=self._fusion_attn_fp8,
+                )
+            ),
+            rotary_emb,
+            attention_mask,
         )
-        attn_output = self.attn(normed, rotary_emb, attention_mask)
-        # Each [tokens, 5376] row set goes at its last use (1.2 GB each at 15 s); the caller
-        # holds this block's input throughout.
-        del normed
-        hidden_states, normed = gate_add_rmsnorm_modulate(
-            self._glue,
-            hidden_states,
+        tail = _Tail(self, hidden_states, adaln_indices, gate_msa, scale_mlp, shift_mlp, gate_mlp)
+        # The tail writes its rows in place: a view that does not flatten would take a copy.
+        return split(tail.run, tail, Cut(1), out=attn_output.contiguous())
+
+
+class _Tail:
+    """A block after its attention, as `split` cuts it by tokens: `hidden = residual + gate_msa *
+    attention`, the FFN of its modulated norm, and `hidden + gate_mlp * ffn`, each window written
+    into the attention output's own rows (their last use). Beside the block's input only that
+    output lives whole; a window's normed rows and FFN are its own (xs-141: three [tokens, 5376]
+    row sets, 3.3 GB at 15 s, were whole at once). Every op is per row, so windows are exact."""
+
+    __slots__ = ("block", "device", "dtype", "gates", "index", "residual", "shape")
+
+    def __init__(self, block: Any, residual: Any, index: Any, *gates: Any) -> None:
+        self.block, self.residual, self.index, self.gates = block, residual, index, gates
+        self.shape, self.dtype, self.device = residual.shape, residual.dtype, residual.device
+
+    def dim(self) -> int:
+        return len(self.shape)
+
+    def element_size(self) -> int:
+        return int(self.dtype.itemsize)
+
+    def __getitem__(self, index: tuple[slice, ...]) -> slice:
+        return index[1]
+
+    def run(self, rows: _Tail | slice, out: Any) -> None:
+        """The tail over token `rows`, written into `out` (those rows of the attention output).
+        Called on itself (`split` running whole), every row."""
+        rows = slice(None) if rows is self else rows
+        assert isinstance(rows, slice)
+        block, (gate_msa, scale, shift, gate) = self.block, self.gates
+        residual, index = self.residual[:, rows], self.index[rows]
+        hidden, normed = gate_add_rmsnorm_modulate(
+            block._glue,
+            residual,
             gate_msa,
-            attn_output,
-            adaln_indices,
-            self.norm2.weight,
-            scale_mlp,
-            shift_mlp,
-            self.norm2.eps,
-            fp8=self._fusion_ff_fp8,
+            out,
+            index,
+            block.norm2.weight,
+            scale,
+            shift,
+            block.norm2.eps,
+            fp8=block._fusion_ff_fp8,
+            hidden_out=out,
         )
-        del attn_output
-        ff_output = feed_forward(self.ff, normed)
+        ffn = _FFN(block.ff)(normed)
         del normed
-        return gate_add(self._glue, hidden_states, gate_mlp, ff_output, adaln_indices)
-
-
-def feed_forward(ff: Any, normed: Any) -> Any:
-    """H3's FFN, [SwiGLU, Dropout(0.0), Linear], through `split` by tokens: whole while the
-    device holds it, else in the token windows the memory picks, so the [tokens, 2 x ffn]
-    intermediate (6.4 GB at 15 s) is never whole on a small card. Each token's output reads
-    only its own row, an fp8 operand's per-row scale with it."""
-    tokens = _Tokens(normed) if isinstance(normed, PreQuantized) else normed
-    return split(_FFN(ff), tokens, Cut(1))
+        gate_add(block._glue, hidden, gate, ffn, index, out=out)
 
 
 class _FFN:
-    """`split`'s function: the FFN over a window of tokens, its identity dropout skipped."""
+    """The FFN over a window of tokens (`_Tail`), its identity dropout skipped."""
 
     __slots__ = ("ff",)
 
@@ -932,8 +992,6 @@ class _FFN:
         self.ff = ff
 
     def __call__(self, normed: Any) -> Any:
-        if isinstance(normed, _Tokens):
-            normed = normed.operand
         act, down = self.ff.net[0], self.ff.net[2]
         if not isinstance(act, FusedSwiGLU) or act._fusion_fp8:
             return down(act(normed))
@@ -942,33 +1000,6 @@ class _FFN:
         both = act.proj(normed)
         rows = int8_rows(both, (down,), activation="swiglu")
         return down(swiglu(act._glue, both) if rows is None else rows)
-
-
-class _Tokens:
-    """A row-quantized FFN input as `split` sees it: the bf16 activation's [batch, tokens,
-    channels], a window of tokens being those rows' payload and scales."""
-
-    __slots__ = ("device", "dtype", "operand", "shape")
-
-    def __init__(self, operand: PreQuantized) -> None:
-        self.operand, self.shape = operand, operand.shape
-        self.dtype, self.device = operand.payload.dtype, operand.payload.device
-
-    def dim(self) -> int:
-        return len(self.shape)
-
-    def element_size(self) -> int:
-        """The bf16 activation's, as `split` sizes the window's output."""
-        return torch.bfloat16.itemsize
-
-    def __getitem__(self, index: tuple[slice, ...]) -> PreQuantized:
-        batch, tokens = self.shape[0], self.shape[1]
-        payload, scale = (
-            t.view(batch, tokens, -1)[:, index[1]].flatten(0, 1)
-            for t in (self.operand.payload, self.operand.scale)
-        )
-        window = (batch, payload.shape[0] // batch, *self.shape[2:])
-        return replace(self.operand, payload=payload, scale=scale, shape=window)
 
 
 # ------------------------------------------------------------------------ install

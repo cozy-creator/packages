@@ -39,11 +39,11 @@ _HEADER = re.compile(
 )
 _MEDIA = re.compile(r"\s*(picture|audio|video)\s+(\d+)\s*", re.IGNORECASE)
 _SHOT = re.compile(r"\[Shot\s*(\d+)\]", re.IGNORECASE)
-#: Reference clips: a video longer than 15 s is truncated to its first 15 s (Runtime records the
-#: adjustment); audio outside 2-15 s refuses. Every input that carries a reference declares these.
-REFERENCE_VIDEO = VideoPreparation(min_seconds=2, max_seconds=15, excess="truncate")
+#: Reference clips: a video of any length from 2 s, of which each piece reads its own window
+#: (`shot`); audio outside 2-15 s refuses. Every input that carries a reference declares these.
+REFERENCE_VIDEO = VideoPreparation(min_seconds=2)
 REFERENCE_AUDIO = AudioPreparation(min_seconds=2, max_seconds=15, excess="refuse")
-#: A reference video's upload: a source of any length is admitted and truncated, not refused.
+#: A reference video's upload.
 VIDEO_MAX_BYTES = 1 << 30
 #: Read bounds. A video streams, one decoded frame at a time, straight to its motion size
 #: (`read_reference_video`), so a frame of any real source fits. A prepared image is at most

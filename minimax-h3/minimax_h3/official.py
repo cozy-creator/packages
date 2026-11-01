@@ -17,7 +17,7 @@ import sys
 import threading
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from concurrent.futures import CancelledError, Future
-from contextlib import contextmanager, suppress
+from contextlib import contextmanager, nullcontext, suppress
 from dataclasses import dataclass, replace
 from fractions import Fraction
 from itertools import pairwise
@@ -51,7 +51,7 @@ from diffusers.modular_pipelines.modular_pipeline import PipelineState
 from diffusers.utils.torch_utils import randn_tensor
 from torch.nn.utils.weight_norm import WeightNorm
 
-from cozy_runtime import vlm
+from cozy_runtime import stepcache, vlm
 from cozy_runtime.author import (
     AttentionLayout,
     Config,
@@ -1491,6 +1491,7 @@ class OfficialH3Pipeline:
         on_step: Callable[[int], None],
         cancel: Callable[[], None],
         sol_dense_steps: int = 10,
+        cache: stepcache.Policy | None = None,
     ) -> ScheduleFacts:
         _validate_sol_dense_steps(sol_dense_steps)
         _settle_intake(state)
@@ -1551,11 +1552,15 @@ class OfficialH3Pipeline:
                 lambda step: _attention_layout(block_state, step, sol_dense_steps=sol_dense_steps),
                 sol_dense_steps,
                 on_step,
+                cache=cache,
             )
         else:
-            with step_invariants():
+            caching = stepcache.running(cache, len(block_state.timesteps)) if cache else nullcontext()
+            with step_invariants(), caching as run:
                 for index, timestep in enumerate(block_state.timesteps):
                     cancel()
+                    if run is not None:
+                        run.begin(index)
                     if clips is not None and index == sol_dense_steps:
                         clips.release(block_state)
                     with attention_scope(
