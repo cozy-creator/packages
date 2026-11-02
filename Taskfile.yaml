@@ -56,14 +56,21 @@ tasks:
         # The Triton sets the package's import declares, compiled on this CPU for every card row, ship in the release: each
         # into `_triton` beside the module that declares it (its home, where machines look), which need not be the object's
         # (minimax-h3: object h3, sets in minimax_h3). They compile with the Runtime the package's lock pins, which keys them
-        # and is the one machines run it on.
+        # and is the one machines run it on. A package with no sets of its own skips this: its lock may pin a Runtime older
+        # than the prebuild, so nothing it would not need is imported first.
         prebuild='import importlib, sys
         from pathlib import Path
         importlib.import_module(sys.argv[1])
-        from cozy_runtime.author.kernels import _SETS
-        from cozy_runtime.internal import triton_kernels, triton_prebuild
         here = Path.cwd().resolve()
-        for home in sorted({triton_kernels.home(k) for k in _SETS.values() if k.entries}):
+        def own(k):
+            declarer = getattr(k, "origin", None) or k.entries[0].kernel.fn.__module__
+            return Path(sys.modules[declarer.partition(".")[0]].__file__).resolve().is_relative_to(here)
+        sets = getattr(sys.modules.get("cozy_runtime.author.kernels"), "_SETS", {})
+        if not any(k.entries and own(k) for k in sets.values()):
+            print(f"{sys.argv[1]}: no Triton sets to prebuild", file=sys.stderr)
+            sys.exit()
+        from cozy_runtime.internal import triton_kernels, triton_prebuild
+        for home in sorted({triton_kernels.home(k) for k in sets.values() if k.entries}):
             module = Path(sys.modules[home].__file__).resolve().parent
             if module.is_relative_to(here):
                 triton_prebuild.build(Path(sys.argv[2], module.relative_to(here), triton_kernels.SHIPPED), None, home)'
