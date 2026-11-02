@@ -1491,6 +1491,31 @@ async def fl2va_piece(
 app.child_task(fl2va_piece)
 
 
+class ResumeFrameInput(msgspec.Struct, kw_only=True):
+    """A continued video, and the frames it resumes after."""
+
+    video: Annotated[VideoFile, FileBound(max_bytes=1 << 30, max_decoded_bytes=512 << 20)]
+    frames: Annotated[int, msgspec.Meta(ge=1)]
+
+
+class ResumeFrame(msgspec.Struct):
+    #: A child's result is a granted input of the parent, so it may feed a piece; a picture the
+    #: parent saved itself may not (run 20651; h3a-098's first proof, 25980).
+    image: ImageFile
+
+
+@invocable(memoize=True)
+async def resume_frame(ctx: Context, *, payload: ResumeFrameInput, out: Outputs, tel: Telemetry) -> ResumeFrame:
+    """A continued video's last frame before `frames`: the one its next piece starts from."""
+    start = Fraction(max(payload.frames - 6, 0), FPS)
+    decoded = payload.video.read(start=start, end=Fraction(payload.frames, FPS), audio=False)
+    image = PILImage.frombytes("RGB", (decoded.width, decoded.height), decoded.frames_rgb[-1])
+    return ResumeFrame(out.save_image(image))
+
+
+app.child_task(resume_frame)
+
+
 @invocable(
     defaults={"base_model": _MODEL, "regenerate_lora": _REGENERATE_LORA, "latent_upscaler": _LATENT_UPSCALER},
     components={"base_model": _FL2VA, "regenerate_lora": ("fl2va_regenerate",), "latent_upscaler": ("upscaler",)},
@@ -1938,19 +1963,23 @@ async def generate(ctx: Context, payload: GenerateInput, out: Outputs, tel: Tele
         # A continued piece with no place to carry starts from the previous piece's last frame as a world state,
         # after the request's own pictures so their <Picture N> keep their numbers: who and what is where now. Every
         # continued piece that saw one joined cleanly (se-087: 9 of 9 seams); those without, character-only and
-        # footage shots, reframed or cut (24525, 24603). A resumed video's first piece has no previous piece.
+        # footage shots, reframed or cut (24525, 24603).
         anchor = [StoryReference(name=f"Piece {index} end", kind="world_state",
                                  description=f"This piece starts from it: {here} is where now.")
-                  ] if index and not places else []  # fmt: skip
+                  ] if not places else []  # fmt: skip
         if index:
             own = [*own, *plates, *anchor]
         elif resumed is not None:
             own = [*(ref for ref in own if ref.kind != "background"), *plates]
         call = piece_call(text, own, style=style, soundscape=sound, music=music, index=index,
-                          forced=forced | {ref.name for ref in anchor})  # fmt: skip
+                          forced=forced | ({ref.name for ref in anchor} if index else set()))  # fmt: skip
         if not call.references and resumed is not None:
-            raise InvalidRequest("continue_from carries into Ref2VA, which needs a picture: give a reference "
-                                 "picture", fields=["references"])  # fmt: skip
+            # A resumed video's first piece carries into Ref2VA, which needs a picture: with none of the request's
+            # own, it starts from the continued video's last frame as the same world state (h3a-098, run 25881).
+            frame = await resume_frame(payload=ResumeFrameInput(video=resumed.video, frames=done))  # type: ignore[call-arg]
+            files[anchor[0].name] = frame.image
+            call = piece_call(text, [*own, *anchor], style=style, soundscape=sound, music=music, index=index,
+                              forced=forced | {anchor[0].name})  # fmt: skip
         calls.append(call if call.references else PieceCall(_fl2va_text(text, payload), [], call.warnings))
         warnings += call.warnings
     edges = [*starts[1:], *([done] if resumed is not None else [])]
