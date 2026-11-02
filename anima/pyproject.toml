@@ -1,6 +1,6 @@
 [project]
 name = "anima"
-version = "0.2.0"
+version = "0.2.1"
 description = "Anima anime text-to-image package for Cozy"
 requires-python = ">=3.12,<3.15"
 dependencies = [
@@ -15,8 +15,8 @@ dependencies = [
     "shellingham>=1.5.4",
     "tensorfs>=0.16",
     "tokenizers>=0.23.1",
-    "torch>=2.14",
-    "torchvision>=0.29",
+    "torch>=2.6",
+    "torchvision>=0.21",
     "transformers>=5.16.1",
 ]
 
