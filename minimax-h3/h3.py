@@ -19,8 +19,8 @@ from dataclasses import dataclass
 from enum import Enum
 from fractions import Fraction
 from functools import partial
-from itertools import accumulate
-from typing import Annotated, Any, Literal, cast
+from itertools import accumulate, pairwise
+from typing import Annotated, Any, Literal, NamedTuple, cast
 
 import msgspec
 import numpy as np
@@ -28,14 +28,14 @@ import torch
 from cozy_runtime import stepcache
 from cozy_runtime.author import (
     App,
+    AspectRatio,
     AudioReference,
-    Beat,
     CharacterReference,
     ContinueFrom,
     EnvironmentReference,
     Plate,
     PropReference,
-    ShotRequest,
+    Seed,
     ShotResult,
     VideoReference,
     AudioFile,
@@ -66,6 +66,7 @@ from cozy_runtime.author import (
     VideoProbe,
     invocable,
     prefetch,
+    name_key,
 )
 from msgspec.structs import replace
 from PIL import Image as PILImage
@@ -137,6 +138,7 @@ from story import (
     PieceCall,
     StoryReference,
     description_span,
+    own_retention,
     encoder_prompt,
     piece_call,
     validate_references,
@@ -1674,17 +1676,22 @@ class Continue(ContinueFrom, kw_only=True):
     latents: Latents | None = None
 
 
-class GenerateInput(ShotRequest, kw_only=True):
-    """One continuous video of any length (README.md), on the shot contract. `turbo` (the
-    default) runs the turbo LoRA's 8 steps; `turbo: false` the full model at `steps`. `style` holds
-    in every piece, with what must or must not appear ("no person appears"); `prompt` is how the
-    video opens and is left out of later pieces (se-087)."""
+class GenerateInput(msgspec.Struct, kw_only=True):
+    """One continuous video of any length (README.md), on the shot contract less its `beats`: `prompt` says what happens
+    and when, its timestamps at line starts (`_TIMED`). `turbo` (the default) runs the turbo LoRA's 8 steps; `turbo: false`
+    the full model at `steps`. `style` holds in every piece, with what must or must not appear ("no person appears")."""
 
+    prompt: str
     duration_s: Annotated[float, msgspec.Meta(
         gt=0, extra={"max_piece_s": MAX_DURATION_S, "min_piece_s": MIN_DURATION_S},
         description="Any length; rendered in pieces of at most 15 s (max_piece_s), so a longer video needs "
-                    "beats. With continue_from, its whole length.",
+                    "timestamps in its prompt, or it renders 15 s and warns. With continue_from, its whole length.",
     )]  # fmt: skip
+    style: str = ""
+    soundscape: str = ""
+    aspect_ratio: AspectRatio | None = None
+    seed: Seed | None = None
+    preset: Preset = "balanced"
     references: list[Character | Prop | Environment | Clip | Sound] = msgspec.field(default_factory=list)
     plate: EditPlate | None = None
     first_frame: FrameImage = None
@@ -1707,30 +1714,20 @@ _MAX_NEXT_S = (MAX_FRAMES - _CARRY.head_frames) // FPS
 #: opens the shot on a copy of it (run 20661, first-frame SSIM 0.871), 256 px keeps the set but not
 #: who stands where (run 20689); its description carries the positions.
 _LOOSE_EDGE = 512
-#: The first piece's closing sentence, and each later piece's opening one: a continued piece picks
-#: up the carried frames as they are, the camera still doing what it did, and starts nothing new
-#: for its first two seconds (MiniMax's extend and the ComfyUI chainers restate the incoming state;
-#: one that holds the camera against a moving shot, or restages a beat, reframes: se-087, 24525). It
-#: names people only when the shot has a character: "the same people" put people into a test pattern
-#: (se-089, 25176), and without them a character shot went back to its opening place (25229, 25467).
-_ONE_SHOT = "One continuous shot with no cuts."
-_CONTINUED = {
-    True: ("The same unbroken take goes on from its last moment: the same people in the same places, the camera "
-           "still moving as it was. For its first two seconds everything carries on exactly as it is."),
-    False: ("The same unbroken take goes on from its last moment: everything stays where it was, the camera still "
-            "moving as it was. For its first two seconds everything carries on exactly as it is."),
-}
-#: A pinned head delays a new action about 2.4 s, so no beat starts from 2 s before a piece's
-#: edge to 2.5 s after it, where the pieces can avoid it.
-_BEFORE_EDGE_S, _AFTER_EDGE_S = 2.0, 2.5
 #: A field that ends a text's description (MiniMax's FL2VA lines, Ref2VA's sections), and a
 #: description's own heading.
 _AFTER = re.compile(r"^[ \t]*(?:audio|overall[ _-]*soundscape|non[ _-]*diegetic[ _-]*music)[ \t]*:", re.I | re.M)
 _DESCRIPTION = re.compile(r"^[ \t]*(?:integrated[ _-]*multimodal|detailed)[ _-]*description[ \t]*:[ \t]*\n?", re.I | re.M)
-#: A text in MiniMax's own form is used as written: it marks its own shots in its description (`[Shot N]`, a cut
-#: `At MM:SS.mmm`, which a shot with no time shares with the one before it) or carries its own sections. An added
-#: `[Shot 1]` takes a header off its line start, and the one-shot line contradicts its cuts.
-_OWN_SHOT = re.compile(r"\[Shot[ \t]*\d+\][ \t]*(?:At[ \t]+(\d+):(\d+(?:\.\d+)?)[ \t]*,?[ \t]*)?", re.I)
+#: A timestamp: at a line's start, after an optional `[Shot N]`; a time mid-sentence is plain text. It says when, and the
+#: model reads the words for what: cozy never takes one for a cut.
+_TIMED = re.compile(r"^[ \t]*(\[Shot[ \t]*\d+\][ \t]*)?At[ \t]+(\d+):(\d+(?:\.\d+)?)[ \t]*,?[ \t]*", re.I | re.M)
+#: Its shot markers, which a later piece renumbers from 1.
+_OWN_SHOT = re.compile(r"\[Shot[ \t]*\d+\]", re.I)
+_FIRST_SHOT = re.compile(r"\[Shot[ \t]*1\]", re.I)
+#: A join lands on H3's 17-frame grid, so a video continued (`continue_from`) can end just short of the timestamp the next
+#: call opens on: within this, that block opens it, and the earlier ones stay history.
+_JOIN_S = 17 / FPS
+_SOUNDSCAPE = re.compile(r"^[ \t]*(?:audio|overall[ _-]*soundscape)[ \t]*:", re.I | re.M)
 _OWN_SECTION = re.compile(r"^[ \t]*(?:subject[ _-]+definitions|summary|style|retention[ _-]+analysis"
                           r"|(?:integrated[ _-]*multimodal|detailed)[ _-]*description)[ \t]*:", re.I | re.M)  # fmt: skip
 
@@ -1740,41 +1737,58 @@ def _delivered(seconds: int, first: bool) -> int:
     return ContinuationPlan(seconds, Carry() if first else _CARRY).delivered_frames
 
 
-def plan_pieces(duration_s: float, beats: Iterable[float], carried: bool = False) -> list[int]:
-    """A shot's pieces in whole seconds: the fewest that reach `duration_s` (the first at most
-    15 s, or 14 when it is `carried` from a video it continues, each later one at most 14, none
-    under 5). Within that count: the fewest edges in a
-    beat's window (`_BEFORE_EDGE_S` before it to `_AFTER_EDGE_S` after it), so each piece cuts
-    between beats; then the least overshoot, in whole seconds; then each piece as long as it
-    can be (Paul, 10-30: a longer generation is more consistent); then the least overshoot in
-    frames."""
-    target = max(1, math.ceil(duration_s * FPS - 1e-6))
+class ShotPlan(NamedTuple):
+    """A shot's pieces: each one's whole seconds and the time on the shot's clock it opens on (0, or a timestamp)."""
+
+    seconds: list[int]
+    opens: list[float]
+    warnings: list[str]
+
+
+def plan_pieces(duration_s: float, marks: Iterable[float], carried: bool = False) -> ShotPlan:
+    """A shot's pieces: whole blocks of its text (from one of `marks`, its timestamps, to the next), as many as fit each
+    piece, so the fewest, and each later piece opens on a timestamp. A piece holds 15 s, or 14 when it continues a video:
+    `carried`, or any but the first. A block longer than that renders that long and warns; what follows comes straight
+    after it, so the video is shorter than asked. Lengths are H3's whole seconds on its 17n+5 grid, each the nearest to
+    the next timestamp from what is delivered so far, and at least 5 s; the last reaches the end."""
     fresh = not carried
-    first_s = MAX_DURATION_S if fresh else _MAX_NEXT_S
-    count = 1 + max(0, math.ceil((target - _delivered(first_s, fresh)) / _delivered(_MAX_NEXT_S, False)))
-    marks = [at * FPS for at in beats]
-    # Each end, in frames, the pieces before the last reach: its score (minus the edges in a
-    # beat's window, the lengths) and those lengths.
-    best: dict[int, tuple[int, list[int]]] = {0: (0, [])}
-    for index in range(count - 1):
-        reached: dict[int, tuple[int, list[int]]] = {}
-        for start, (clear, lengths) in best.items():
-            for length in range(MIN_DURATION_S, (first_s if index == 0 else _MAX_NEXT_S) + 1):
-                end = start + _delivered(length, index == 0 and fresh)
-                hit = any(end - _BEFORE_EDGE_S * FPS <= mark <= end + _AFTER_EDGE_S * FPS for mark in marks)
-                score = (clear - hit, [*lengths, length])
-                if end < target and (end not in reached or score > reached[end]):
-                    reached[end] = score
-        best = reached
-    longest, alone = (first_s, fresh) if count == 1 else (_MAX_NEXT_S, False)
-    plans = [
-        (clear, -math.ceil((end - target) / FPS), lengths, -end, [*lengths, length])
-        for start, (clear, lengths) in best.items()
-        for length in range(MIN_DURATION_S, longest + 1)
-        if (end := start + _delivered(length, alone)) >= target
-        and all(start + _delivered(shorter, alone) < target for shorter in range(MIN_DURATION_S, length))
-    ]
-    return max(plans)[-1]
+
+    def limit(index: int) -> int:
+        return _delivered(MAX_DURATION_S, True) if index == 0 and fresh else _delivered(_MAX_NEXT_S, False)
+
+    edges = sorted({mark for mark in marks if 0 < mark < duration_s})
+    groups: list[list[float]] = []
+    for start, end in pairwise([0.0, *edges, duration_s]):
+        if groups and math.ceil((end - groups[-1][0]) * FPS - 1e-6) <= limit(len(groups) - 1):
+            groups[-1][1] = end
+        else:
+            groups.append([start, end])
+    seconds: list[int] = []
+    warnings: list[str] = []
+    past = 0  # the frames delivered beyond the last timestamp reached
+    for index, (start, end) in enumerate(groups):
+        first = index == 0 and fresh
+        most = MAX_DURATION_S if first else _MAX_NEXT_S
+        asked = math.ceil((end - start) * FPS - 1e-6)
+        wanted = min(asked - past, _delivered(most, first))
+        lengths = range(MIN_DURATION_S, most + 1)
+        if asked > _delivered(most, first):
+            length, past = most, 0
+            held = f"{_delivered(most, first) / FPS:.1f} s, the most one segment holds"
+            warnings.append(f"the text at {_clock(start)} runs {end - start:g} s and renders {held}: update its timing. "
+                            "What follows comes straight after it, so the video is shorter than duration_s."
+                            if edges else f"this {duration_s:g} s video has no timestamps, so it renders {held}. Longer "
+                            "video needs `At MM:SS.mmm` at the start of a line.")  # fmt: skip
+        elif index == len(groups) - 1:
+            length = next((n for n in lengths if _delivered(n, first) >= wanted), most)
+        else:
+            length = min(lengths, key=lambda n: (abs(_delivered(n, first) - wanted), n))
+            past = _delivered(length, first) - wanted
+            if past > FPS:
+                warnings.append(f"a segment renders at least {MIN_DURATION_S} s, so the text at {_clock(end)} starts about "
+                                f"{past / FPS:.1f} s late: update its timing.")  # fmt: skip
+        seconds.append(length)
+    return ShotPlan(seconds, [start for start, _ in groups], warnings)
 
 
 def _has_people(payload: GenerateInput) -> bool:
@@ -1783,79 +1797,77 @@ def _has_people(payload: GenerateInput) -> bool:
     return any(isinstance(ref, Character) for ref in payload.references)
 
 
-def _shot_cuts(prompt: str) -> list[float]:
-    """The times a prompt in MiniMax's own form cuts at, past its opening shot: they say what happens when, as beats do."""
-    prompt = prompt.strip()
-    head = found.end() if (found := _DESCRIPTION.match(prompt)) else 0
-    after = _AFTER.search(prompt, head)
-    return [at for at, _, _ in _own_shots(prompt[head : after.start() if after else None]) if at > 0]
+def _clock(seconds: float) -> str:
+    """H3's `MM:SS.mmm`."""
+    minutes, rest = divmod(seconds, 60)
+    return f"{int(minutes):02d}:{rest:06.3f}"
 
 
-def _own_shots(body: str) -> list[tuple[float, int, int]]:
-    """The shots a text's description marks: each one's cut time, and where its marker and its text start."""
-    shots: list[tuple[float, int, int]] = []
-    for found in _OWN_SHOT.finditer(body, *description_span(body)):
-        at = int(found[1]) * 60 + float(found[2]) if found[1] else shots[-1][0] if shots else 0.0
-        shots.append((at, found.start(), found.end()))
-    return shots
-
-
-def _continued_shots(body: str, shots: Sequence[tuple[float, int, int]], opening: str, start: float, end: float) -> str:
-    """A later piece of a text that marks its own shots. It opens as the text does, less the summary and retention that
-    tell the whole video's flow (`story` writes each piece's retention). The carried frames are its `[Shot 1]`, never
-    restating a shot already under way (se-087); each shot that cuts in this piece follows, numbered and timed on the
-    piece's own clock, whose head is the carried frames."""
-    lines = [f"[Shot 1] {opening}"]
-    stops = [marker for _, marker, _ in shots[1:]] + [description_span(body)[1]]
-    for (at, _, begin), stop in zip(shots, stops, strict=True):
-        if start <= at < end:
-            minutes, seconds = divmod(at - start + _CARRY.head_frames / FPS, 60)
-            lines.append(f"[Shot {len(lines) + 1}] At {int(minutes):02d}:{seconds:06.3f}, {body[begin:stop].strip()}")
-    return without_sections(body[: shots[0][1]], ("summary", "retention_analysis")) + "\n".join(lines)
-
-
-def piece_texts(
-    prompt: str, beats: Sequence[Beat], starts: Sequence[float], *, people: bool, continued: bool = False
-) -> list[str]:
-    """Each piece's text, one `[Shot 1]` paragraph with no cut times (H3's `[Shot N] At
-    MM:SS.mmm` marks a cut; its guide writes in-shot change as plain English). The first piece:
-    the shot's text, the beat it is in and the beats it reaches, in order, ending that it is one
-    continuous shot. A later one describes the state where it starts, never the opening again:
-    the carried frames as they are (`_CONTINUED`, naming people when the shot has a character:
-    `people`), the beat in force (already under way, when it
-    began before the piece) and the beats it reaches. Restating the opening pulls a shot that has
-    moved on back to it, with a cut (0.2.4 gate, runs 24980/24981: back in the food cart).
-    `starts` are the pieces' start times; with `continued`, the first one continues a video too.
-    The text ends the prompt's description, ahead of any audio or music field it has.
-
-    A prompt in MiniMax's own form (`_OWN_SHOT`, `_OWN_SECTION`) is its first piece as written, past 15 s without the
-    shots that cut after that piece, with no marker or one-shot line added; `_continued_shots` gives its later ones."""
+def _prompt_parts(prompt: str) -> tuple[str, str, str]:
+    """A prompt's heading (T2VA's), its body, and the audio and music fields that hold on every piece."""
     prompt = prompt.strip()
     head = found.group(0) if (found := _DESCRIPTION.match(prompt)) else ""
     after = _AFTER.search(prompt, len(head))
-    body = prompt[len(head) : after.start() if after else None].strip()
-    tail = prompt[after.start() :].strip() if after else ""
-    timed = sorted(((beat.at, beat.prompt.strip()) for beat in beats), key=lambda beat: beat[0])
-    shots = _own_shots(body)
-    own_form = bool(shots or _OWN_SECTION.search(prompt))
+    return head, prompt[len(head) : after.start() if after else None].strip(), prompt[after.start() :].strip() if after else ""
+
+
+class _Block(NamedTuple):
+    """A timed block of a text's description: its time, whether its line marks a shot, and where its line and its words
+    start. The text before the first is the opening block."""
+
+    at: float
+    marked: bool
+    line: int
+    words: int
+
+
+def _blocks(body: str, duration_s: float) -> tuple[list[_Block], list[str]]:
+    """The timed blocks of a text's description. A time out of order or past the end stays plain text, with a warning."""
+    blocks: list[_Block] = []
+    warnings: list[str] = []
+    last = 0.0
+    for found in _TIMED.finditer(body, *description_span(body)):
+        at = int(found[2]) * 60 + float(found[3])
+        if at > last and at < duration_s:
+            blocks.append(_Block(at, bool(found[1]), found.start(), found.end()))
+            last = at
+        elif at > 0:
+            why = "out of order" if at <= last else f"past the end of this {duration_s:g} s video"
+            warnings.append(f"the time {_clock(at)} is {why}: it stays plain text. Update its timing.")
+    return blocks, warnings
+
+
+def piece_texts(prompt: str, starts: Sequence[float], *, continued: bool = False, duration_s: float = math.inf) -> list[str]:
+    """Each piece's text: the prompt's, with nothing added, and only its own blocks (`plan_pieces` and `starts`: what opens
+    each), so no piece redraws what an earlier one set up (0.2.4 gate, runs 24980/24981: back in the food cart). The first
+    is as written, past 15 s without what comes after it. A later one keeps the text's sections, less the summary and
+    retention that tell the whole video's flow (`story` restores each reference's own retention line): the block it opens
+    on, with no time, then the rest with their times on its clock, whose head is the carried frames, and its `[Shot N]`
+    renumbered from 1. With `continued`, the first piece continues a video too, on the block in force at its start. The
+    audio and music fields close every piece."""
+    head, body, tail = _prompt_parts(prompt)
+    blocks, _ = _blocks(body, duration_s)
+    begin, stop = description_span(body)
+    ends = [*(block.line for block in blocks[1:]), stop][: len(blocks)]
+    timed = [(0.0, False, body[begin : blocks[0].line if blocks else stop].strip()),
+             *((block.at, block.marked, body[block.words : end].strip()) for block, end in zip(blocks, ends, strict=True))]  # fmt: skip
     texts = []
     for index, (start, end) in enumerate(zip(starts, [*starts[1:], math.inf], strict=True)):
-        later = bool(index or continued)
-        parts = [_CONTINUED[people]] if later else [body]
-        if own_form and not later:
-            cut = next((marker for at, marker, _ in shots if at >= end), None)
-            parts = [body if cut is None else (body[:cut].rstrip() + body[description_span(body)[1] :]).rstrip()]
-        if current := [beat for beat in timed if beat[0] <= start]:
-            at, text = current[-1]
-            parts.append(f"Already under way, not begun again: {_lower(text)}" if at < start else text)
-        parts += [f"Then {_lower(text)}" for at, text in timed if start < at < end]
-        if not later and not own_form:
-            parts.append(_ONE_SHOT)
-        written = " ".join(part for part in parts if part)
-        if later and shots:
-            text = head + _continued_shots(body, shots, written, start, end)
+        if not index and not continued:
+            cut = next((block.line for block in blocks if block.at >= end), None)
+            text = body if cut is None else (body[:cut].rstrip() + "\n" + body[stop:].lstrip()).rstrip()
         else:
-            text = head + ("" if own_form and not later else "[Shot 1] ") + written
+            opens = max(at for at, _, _ in timed if at <= start + (_JOIN_S if not index else 0))
+            lines = []
+            for at, marked, said in timed:
+                if at == opens or start < at < end:
+                    time = f"At {_clock(at - start + _CARRY.head_frames / FPS)}, " if at > max(opens, start) else ""
+                    lines.append(f"{'[Shot 1] ' if marked else ''}{time}{said if time else said[:1].upper() + said[1:]}")
+            number = iter(range(1, len(body) + 2))
+            description = _OWN_SHOT.sub(lambda _: f"[Shot {next(number)}]", "\n".join(line for line in lines if line))
+            text = "\n\n".join(filter(None, (body[:begin].rstrip() + ("\n" if begin else "") + description, body[stop:].strip())))
+            text = without_sections(text, ("summary", "retention_analysis"))
+        text = head + text
         texts.append(f"{text}\n\n{tail}" if tail else text)
     return texts
 
@@ -1881,7 +1893,7 @@ def shot_windows(
             if min(start + frames, length) - start >= least:
                 window[ref.name] = start
         if ref.kind == "video" and (span := sum(ref.name in window for window in windows)) > 1:
-            warnings.append(f"<{ref.name}> guides {span} pieces, each from its own span: put each beat where the clip "
+            warnings.append(f"<{ref.name}> guides {span} pieces, each from its own span: put each timestamp where the clip "
                             "shows it, or the shot runs ahead of the clip")  # fmt: skip
         if length < total:
             warnings.append(f"<{ref.name}> ends {length / FPS:.1f} s into this {total / FPS:.1f} s shot, "
@@ -1889,11 +1901,6 @@ def shot_windows(
         elif length > total:
             warnings.append(f"<{ref.name}> is {length / FPS:.1f} s long; the shot uses its first {total / FPS:.1f} s")
     return windows, warnings
-
-
-def _lower(text: str) -> str:
-    """A sentence continuing another: its first letter lower-cased, unless it opens a name."""
-    return text[:1].lower() + text[1:] if text[:1].isupper() and not text[1:2].isupper() and not text.startswith("<") else text
 
 
 def _fl2va_text(text: str, payload: GenerateInput) -> str:
@@ -1905,8 +1912,8 @@ def _fl2va_text(text: str, payload: GenerateInput) -> str:
         between = "\n" if not found and _OWN_SECTION.match(text) else " "  # a header keeps its line start
         text = f"{text[:at]}{style.rstrip('.')}.{between}{text[at:].lstrip()}"
     lines = []
-    if payload.soundscape.strip() and not re.search(r"^\s*audio\s*:", text, re.I | re.M):
-        lines.append(f"audio: {payload.soundscape.strip()}")
+    if not _SOUNDSCAPE.search(text):
+        lines.append(f"audio: {payload.soundscape.strip() or 'N/A'}")
     if "non_diegetic_music" not in text.casefold():
         lines.append(f"non_diegetic_music: {payload.music.strip() or 'N/A'}")
     return "\n\n".join([text.rstrip(), *lines])
@@ -1975,12 +1982,19 @@ async def generate(ctx: Context, payload: GenerateInput, out: Outputs, tel: Tele
             raise InvalidRequest(f"duration_s {payload.duration_s:g} is not past the {done / FPS:.2f} s "
                                  "continue_from already has", fields=["duration_s"])  # fmt: skip
     begun = done / FPS
-    later = [at - begun for at in [*(beat.at for beat in payload.beats), *_shot_cuts(payload.prompt)] if at > begun]
-    pieces = plan_pieces(payload.duration_s - begun, later, carried=resumed is not None)
-    if len(pieces) > 1 and not later:
-        raise InvalidRequest(f"a video longer than {MAX_DURATION_S} s needs beats: say what happens when "
-                             f"in this {payload.duration_s:g} s video", fields=["beats"])  # fmt: skip
+    blocks, timing = _blocks(_prompt_parts(payload.prompt)[1], payload.duration_s)
+    pieces, opens, planned = plan_pieces(payload.duration_s - begun, [block.at - begun for block in blocks if block.at > begun + _JOIN_S],
+                                         carried=resumed is not None)  # fmt: skip
     references, warnings = _shot_references(payload)
+    warnings += [*timing, *planned]
+    retained = own_retention(payload.prompt)
+    if not payload.soundscape.strip() and not _SOUNDSCAPE.search(payload.prompt):
+        warnings.append("this prompt has no overall_soundscape and no soundscape, so it goes as N/A, which H3 reads as silence")
+    if not _FIRST_SHOT.search(payload.prompt):
+        warnings.append("this prompt has no `[Shot 1]`, which MiniMax's guide opens a shot with; it goes as written")
+    if unkept := [f"<{ref.name}>" for ref in references if name_key(ref.name) not in retained]:
+        warnings.append(f"retention_analysis has no line for {', '.join(unkept)}: MiniMax's guide gives each reference "
+                        "one, saying what to keep")  # fmt: skip
     if payload.aspect_ratio is not None:
         w, h = (int(side) for side in payload.aspect_ratio.split(":"))
         if abs(w / h - 1344 / 768) > 0.05:
@@ -2009,9 +2023,7 @@ async def generate(ctx: Context, payload: GenerateInput, out: Outputs, tel: Tele
     calls: list[PieceCall] = []
     people = _has_people(payload)
     here = "who and what" if people else "what"
-    texts = piece_texts(
-        payload.prompt, payload.beats, [start / FPS for start in starts], people=people, continued=resumed is not None
-    )
+    texts = piece_texts(payload.prompt, [begun + at for at in opens], continued=resumed is not None, duration_s=payload.duration_s)
     for index, text in enumerate(texts):
         own = [ref for ref in references if ref.kind not in CLIPS or ref.name in windows[index]]
         # A continued piece with no place to carry starts from the previous piece's last frame as a world state,
@@ -2025,23 +2037,20 @@ async def generate(ctx: Context, payload: GenerateInput, out: Outputs, tel: Tele
             own = [*own, *plates, *anchor]
         elif resumed is not None:
             own = [*(ref for ref in own if ref.kind != "background"), *plates]
-        call = piece_call(text, own, style=style, soundscape=sound, music=music, index=index,
-                          forced=forced | ({ref.name for ref in anchor} if index else set()))  # fmt: skip
+        added = frozenset(ref.name for ref in [*plates, *anchor])
+        role = {"keyframes": bool(index == 0 and payload.first_frame or index + 1 == count and payload.last_frame),
+                "continues": index == 0 and resumed is not None}  # fmt: skip
+        call = piece_call(text, own, style=style, soundscape=sound, music=music, index=index, retained=retained, added=added,
+                          forced=forced | ({ref.name for ref in anchor} if index else set()), **role)  # fmt: skip
         if not call.references and resumed is not None:
             # A resumed video's first piece carries into Ref2VA, which needs a picture: with none of the request's
             # own, it starts from the continued video's last frame as the same world state (h3a-098, run 25881).
             frame = await resume_frame(payload=ResumeFrameInput(video=resumed.video, frames=done))  # type: ignore[call-arg]
             files[anchor[0].name] = frame.image
             call = piece_call(text, [*own, *anchor], style=style, soundscape=sound, music=music, index=index,
-                              forced=forced | {anchor[0].name})  # fmt: skip
+                              retained=retained, added=added, forced=forced | {anchor[0].name}, **role)  # fmt: skip
         calls.append(call if call.references else PieceCall(_fl2va_text(text, payload), [], call.warnings))
         warnings += call.warnings
-    edges = [*starts[1:], *([done] if resumed is not None else [])]
-    for edge in edges:
-        late = [beat.at for beat in payload.beats if edge / FPS - _BEFORE_EDGE_S <= beat.at <= edge / FPS + _AFTER_EDGE_S]
-        if late:
-            warnings.append(f"a piece starts at {edge / FPS:.1f} s, near the beat at {late[0]:g} s, which may start "
-                            "about 2 s late; spacing the beats further apart avoids it")  # fmt: skip
     tel.log("h3 shot pieces", pieces=count, seconds=",".join(map(str, pieces)), resumed_at=done,
             boundaries_s=",".join(f"{start / FPS:.2f}" for start in starts[1:]), delivered_frames=total,
             clip_windows=";".join(",".join(f"{name}@{at}" for name, at in w.items()) for w in windows))  # fmt: skip
@@ -2142,7 +2151,7 @@ def _upscale_prompt(payload: GenerateInput) -> str:
     brackets: the re-render attaches no reference."""
     defined = [(ref.name, ref.description) for ref in payload.references if not isinstance(ref, Clip | Sound)]
     lines = " ".join(f"{name}: {text.strip().rstrip('.')}." for name, text in defined if text.strip())
-    text = piece_texts(payload.prompt, payload.beats, [0.0], people=_has_people(payload))[0]
+    text = piece_texts(payload.prompt, [0.0])[0]
     if lines:
         text = text.replace("[Shot 1] ", f"{lines} [Shot 1] ", 1) if "[Shot 1] " in text else f"{lines}\n{text}"
     return re.sub(r"<([^<>]+)>", r"\1", _fl2va_text(text, payload))

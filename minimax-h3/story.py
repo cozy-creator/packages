@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from itertools import pairwise
 from typing import Literal, NamedTuple
 
@@ -61,20 +61,19 @@ _POLICY = {"character": "image", "prop": "image", "background": "image", "audio"
 #: The kinds read from a clip.
 CLIPS = ("video", "anchor_video")
 _SPEAKER = re.compile(r"\s*\((S\d+)\)")
+#: A text's own retention line: its reference, then what it keeps.
+_OWN_RETENTION = re.compile(r"[ \t*-]*<([^<>]+)>(?:[ \t]*\(appears in [^)]*\))?[ \t]*:(.+)", re.I)
 _PREFIX = re.compile(r"\s*\[([^\]\n]*)\]")
 #: The summary's task types (ref guide 3); a summary without one opens with the first.
-TASKS = ("reference generation", "keyframe completion", "video editing", "video continuation",
+TASKS = ("video editing", "video continuation", "keyframe completion", "reference generation",
          "audio reuse", "audio reference")
-#: A clip guides a description shorter than this (the guide asks 350-500 words): H3 then fills
-#: the gaps from the clip and copies its people and setting (runs 10706, 10783 vs 10707).
-SHORT_DESCRIPTION = 150
 
 
 class StoryReference(Reference, kw_only=True):
     """One reference file (`FILE[kind]`) a piece attaches.
 
     - `background`: the environment, the shot's setup plate.
-    - `video`: reference footage, its motion and camera (or the source of a `[video editing]`).
+    - `video`: reference footage, its motion and camera.
     - `anchor_video`: a plate, followed frame by frame (Alissonerdx's head swap and style
       transfer; ComfyUI's Add Guide): every latent frame at the render's own canvas, on every
       step, and the render takes its canvas (`guide_rows`). Never named in a prompt, one per call,
@@ -156,11 +155,16 @@ def piece_call(
     music: str,
     index: int,
     forced: frozenset[str],
+    retained: Mapping[str, str] = {},
+    added: frozenset[str] = frozenset(),
+    keyframes: bool = False,
+    continues: bool = False,
 ) -> PieceCall:
-    """A Ref2VA piece's text and references: `text` with its music section, then MiniMax's
-    reference sections (`_piece_call`)."""
+    """A Ref2VA piece's text and references: `text` with its music section, then what only cozy knows or a field set
+    (`_piece_call`). `retained`: `own_retention` of the shot's text. `added`: the references cozy adds at a join.
+    `keyframes`: it has a first or last frame. `continues`: it continues a source video."""
     text = _fill(text, {"non_diegetic_music": music.strip() or "N/A"})
-    return _piece_call(text, references, style.strip(), soundscape.strip(), index, forced)
+    return _piece_call(text, references, style.strip(), soundscape.strip(), index, forced, retained, added, keyframes, continues)
 
 
 def _numbering(references: Sequence[StoryReference]) -> dict[tuple[str, int], StoryReference]:
@@ -182,6 +186,10 @@ def _piece_call(
     soundscape: str,
     index: int,
     forced: frozenset[str] = frozenset(),
+    author: Mapping[str, str] = {},
+    added: frozenset[str] = frozenset(),
+    keyframes: bool = False,
+    continues: bool = False,
 ) -> PieceCall:
     """Backgrounds and `forced` always; characters, world states, audio and videos only where
     the text names them, all in request order, as H3 packs and labels them. With no references
@@ -189,9 +197,12 @@ def _piece_call(
 
     A token names a reference by its name first (any case, `_`, `-` and space alike), else as
     the global `<Picture N>`/`<Audio N>`/`<Video N>`; these are renumbered for the call. A
-    character's voice follows the character. The prompt takes MiniMax's full-reference form
-    (ref guide): a summary task type, each clip bound to the characters who perform it, and
-    `style` as the description's opening sentence.
+    character's voice follows the character. To the text as written go only what cozy alone
+    knows or a field set: each name's `<Picture N>` in `subject_definitions` (its own line
+    replaces that), each clip bound to the characters who perform it, `style` as the description's
+    opening sentence, the soundscape, and the `summary`'s task tag, computed from the request (ref guide 3), replacing a
+    different one with a warning, in a section of its own when the text has none. Retention is the writer's: a reference's own line from
+    `author` on a piece that lost it, and one line for each reference cozy `added` at a join.
     """
     pool, owners = voices(references)
     if not pool:
@@ -199,7 +210,6 @@ def _piece_call(
     by_key = {name_key(ref.name): ref for ref in pool}
     by_slot = _numbering(pool)
     text, style = _open_with_style(text, style)
-    words = len(_body(text, "detailed_description").split()) - len(style.split())
 
     def lookup(token: re.Match[str]) -> StoryReference | None:
         named = by_key.get(name_key(token.group(1)))
@@ -269,8 +279,7 @@ def _piece_call(
         for line in text[start:end].splitlines()
         if (first := MENTION.match(line.lstrip(" \t-*"))) and (ref := lookup(first))
     }
-    given = _tasks(text)
-    editing = bool({"video editing", "video continuation"} & {task.casefold() for task in given})
+    editing = any(ref.kind == "anchor_video" for ref in used)
 
     def speaker(owner: StoryReference, span: str) -> str:
         """The `(Sx)` the text gives the voice's character, never a new one (guide §5.4)."""
@@ -296,7 +305,6 @@ def _piece_call(
         return ", ".join(tokens[:-1]) + " and " + tokens[-1] if len(tokens) > 1 else "".join(tokens)
 
     characters = [ref for ref in used if ref.kind == "character"]
-    places = [ref for ref in used if ref.kind == "background"]
     clips = [ref for ref in used if ref.kind == "video"]
 
     def performers(clip: StoryReference) -> list[StoryReference]:
@@ -328,19 +336,20 @@ def _piece_call(
     text = MENTION.sub(renumber, text)
     definitions: list[str] = []
     retention: list[str] = []
-    tasks = set()
+    tasks = {"video editing"} if editing else set()
+    tasks |= {"video continuation"} if continues else set()
+    tasks |= {"keyframe completion"} if keyframes else set()
+    tasks |= {"reference generation"} if any(ref.kind not in ("audio", "anchor_video") for ref in used) else set()
     for ref in used:
         slot = label(ref)
-        line_label = slot
         defined = len(definitions)
         if ref.name in owners:
             owner = f"<{owners[ref.name].name}>"
             definitions.append(f"{slot} is the voice-timbre reference for {owner}{voiced[ref.name]}.")
-            default = (f"reference - {owner}'s voice follows {slot}'s timbre and delivery without "
-                       "copying the original signal.")
+            tasks.add("audio reference")
         elif ref.kind == "audio":
             definitions.append(f"{slot} is the supplied audio reference for <{ref.name}>.")
-            default = f"partially_copy - {slot} is copied into the target audio, with other sounds around it."
+            tasks.add("audio reuse")
         elif ref.kind in CLIPS:
             source = editing or ref.kind == "anchor_video"
             role = "source video" if source else "motion and camera reference"
@@ -352,19 +361,7 @@ def _piece_call(
                 if (ref.name, "audio") not in own:
                     definitions.append(f"{sound} is the synchronized audio track of {slot}.")
                 if (ref.name, "audio") not in retained:
-                    retention.append(f"{sound}: partially_copy - the synchronized audio track of {slot} "
-                                     "is copied into the target audio, with other sounds around it.")
                     tasks.add("audio reuse")
-            if source:
-                line_label = f"{slot} (source video editing)"
-                default = ("fully_preserved - its framing, setting and subjects are kept except where "
-                           "the description changes them.")
-            else:
-                line_label = f"{slot} (motion, choreography and camera movement)"
-                cast = names(motion[ref.name]) or "the target video's subjects"
-                where = f" in {names(places)}" if places else ""
-                default = (f"attribute_transfer - its movements, timing and camera work are performed "
-                           f"by {cast}{where}.")
         elif ref.kind == "world_state":
             # People are named only where the call has a character (se-089): a world state of a test pattern
             # that said "each person" grew people (25176).
@@ -372,42 +369,30 @@ def _piece_call(
                 f"<{ref.name}> is the world state shown in {slot}: how the set is arranged and "
                 + ("where each person and object stands." if characters else "where everything in it stands.")
             )
-            kept = "each person's and object's position" if characters else "where everything in it stands"
-            default = (f"attribute_transfer - keep the set's arrangement and {kept} "
-                       f"from {slot}, not its exact frame, framing or moment.")
-            line_label = f"<{ref.name}>"
+            if ref.name in added:
+                kept = "each person's and object's position" if characters else "where everything in it stands"
+                retention.append(f"<{ref.name}>: attribute_transfer - keep the set's arrangement and {kept} "
+                                 f"from {slot}, not its exact frame, framing or moment.")
         else:
             moves = [f"<{clip.name}>" if not _MEDIA.fullmatch(clip.name) else label(clip)
                      for clip in clips
                      if ref in motion.get(clip.name, ()) and (ref.name, clip.name) not in bound]
             binding = f", whose movements come from {' and '.join(moves)}" if moves else ""
             definitions.append(f"<{ref.name}> is the {ref.kind} shown in {slot}{binding}.")
-            preserved = {
-                "character": "keep the face, hair, and outfit of the referenced character. Ignore the white background",
-                "prop": "keep the shape, materials and markings of the referenced object",
-            }.get(ref.kind, "the architecture, materials and defining features of the referenced environment")
-            default = f"fully_preserved - {preserved}."
-            appears = [f"[Shot {n}]" for n, found in shots if ref.name in found]
-            line_label = f"<{ref.name}>" + (f" (appears in {', '.join(appears)})" if appears else "")
         if (ref.name, _SLOT[ref.kind]) in own:
             del definitions[defined]
         elif ref.description:
             definitions[defined] += f" {ref.description}"
-        if ref.kind == "audio":
-            tasks.add("audio reuse" if default.split(" ", 1)[0] in ("fully_copy", "partially_copy")
-                      else "audio reference")
-        if (ref.name, _SLOT[ref.kind]) not in retained:
-            retention.append(f"{line_label}: {default}")
-    if clips and not editing and words < SHORT_DESCRIPTION:
-        warnings.append(
-            f"Piece {index + 1}: {names(clips)} guide{'s' * (len(clips) == 1)} a description of "
-            f"{words} words. H3 copies a clip's own people and setting unless the description "
-            "establishes each character, the background and the beats in order; MiniMax's guide "
-            "asks 350-500 words."
-        )
-    if "summary" in (sections := _sections(text)):
+        if (ref.name, _SLOT[ref.kind]) not in retained and (line := author.get(name_key(ref.name))):
+            retention.append(f"<{ref.name}>: {line}")
+    tag = " + ".join(task for task in TASKS if task in tasks)
+    given = _tasks(text)
+    if given and {task.casefold() for task in given} != tasks:
+        warnings.append(f"Piece {index + 1}: the summary's [{' + '.join(given)}] is not what its references are, so it "
+                        f"goes as [{tag}]")  # fmt: skip
+    sections = _sections(text)
+    if "summary" in sections:
         _, start, end = sections["summary"]
-        tag = " + ".join([*(given or ["reference generation"]), *sorted(tasks - set(given))])
         if prefix := _PREFIX.match(text, start, end) if given else None:
             text = text[: prefix.start(1)] + tag + text[prefix.end(1):]
         elif body := text[start:end].lstrip():
@@ -416,8 +401,9 @@ def _piece_call(
             text = text[:start] + f"\n[{tag}]" + text[start:]
     additions = {
         "subject_definitions": "\n".join(definitions),
+        "summary": "" if "summary" in sections else f"[{tag}]",
         "retention_analysis": "\n".join(retention),
-        "overall_soundscape": soundscape,
+        "overall_soundscape": soundscape or "N/A",
     }
     return PieceCall(_fill(text, additions), used, warnings)
 
@@ -427,11 +413,6 @@ def _tasks(text: str) -> list[str]:
     prefix = _PREFIX.match(text, start, end)
     given = [task.strip() for task in prefix.group(1).split("+")] if prefix else []
     return given if all(task.casefold() in TASKS for task in given) else []
-
-
-def _body(text: str, name: str) -> str:
-    _, start, end = _sections(text).get(name, (0, 0, 0))
-    return text[start:end]
 
 
 def _open_with_style(text: str, style: str) -> tuple[str, str]:
@@ -476,6 +457,15 @@ def description_span(text: str) -> tuple[int, int]:
     the first header when none names one."""
     _, start, end = _sections(text).get("detailed_description", (0, 0, 0))
     return start, end
+
+
+def own_retention(text: str) -> dict[str, str]:
+    """What a text's own retention lines keep, by reference name (`name_key`), each without its `(appears in ...)`: a
+    later piece has its own shots. Its first piece has these lines as written; `_piece_call` writes them on the others,
+    only for the references that piece uses."""
+    _, start, end = _sections(text).get("retention_analysis", (0, 0, 0))
+    found = (_OWN_RETENTION.match(line) for line in text[start:end].splitlines())
+    return {name_key(line.group(1)): line.group(2).strip() for line in found if line}
 
 
 def without_sections(text: str, names: Sequence[str]) -> str:
