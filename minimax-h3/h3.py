@@ -1938,19 +1938,22 @@ async def generate(ctx: Context, payload: GenerateInput, out: Outputs, tel: Tele
         # A continued piece with no place to carry starts from the previous piece's last frame as a world state,
         # after the request's own pictures so their <Picture N> keep their numbers: who and what is where now. Every
         # continued piece that saw one joined cleanly (se-087: 9 of 9 seams); those without, character-only and
-        # footage shots, reframed or cut (24525, 24603). A resumed video's first piece has no previous piece.
+        # footage shots, reframed or cut (24525, 24603).
         anchor = [StoryReference(name=f"Piece {index} end", kind="world_state",
                                  description=f"This piece starts from it: {here} is where now.")
-                  ] if index and not places else []  # fmt: skip
+                  ] if not places else []  # fmt: skip
         if index:
             own = [*own, *plates, *anchor]
         elif resumed is not None:
             own = [*(ref for ref in own if ref.kind != "background"), *plates]
         call = piece_call(text, own, style=style, soundscape=sound, music=music, index=index,
-                          forced=forced | {ref.name for ref in anchor})  # fmt: skip
+                          forced=forced | ({ref.name for ref in anchor} if index else set()))  # fmt: skip
         if not call.references and resumed is not None:
-            raise InvalidRequest("continue_from carries into Ref2VA, which needs a picture: give a reference "
-                                 "picture", fields=["references"])  # fmt: skip
+            # A resumed video's first piece carries into Ref2VA, which needs a picture: with none of the request's
+            # own, it starts from the continued video's last frame as the same world state (h3a-098, run 25881).
+            files[anchor[0].name] = _last_frame(out, resumed.video, done)
+            call = piece_call(text, [*own, *anchor], style=style, soundscape=sound, music=music, index=index,
+                              forced=forced | {anchor[0].name})  # fmt: skip
         calls.append(call if call.references else PieceCall(_fl2va_text(text, payload), [], call.warnings))
         warnings += call.warnings
     edges = [*starts[1:], *([done] if resumed is not None else [])]
@@ -2037,6 +2040,12 @@ async def generate(ctx: Context, payload: GenerateInput, out: Outputs, tel: Tele
     ctx.release_gpus()
     tel.log("h3 shot", pieces=count, delivered_frames=total, turbo=payload.turbo, preset=payload.preset)
     return ShotResult(video=video, warnings=list(dict.fromkeys(warnings)), latents=latents)
+
+
+def _last_frame(out: Outputs, video: VideoFile, frames: int) -> ImageFile:
+    """A continued video's last frame before `frames`: the one its next piece starts from."""
+    decoded = video.read(start=Fraction(max(frames - FPS, 0), FPS), end=Fraction(frames, FPS), audio=False)
+    return out.save_image(PILImage.frombytes("RGB", (decoded.width, decoded.height), decoded.frames_rgb[-1]))
 
 
 def _shot_latents(out: Outputs, parts: Sequence[File], frames: int, context: File, text: str) -> File:
