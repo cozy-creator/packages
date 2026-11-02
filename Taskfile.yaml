@@ -4,6 +4,7 @@ silent: true
 vars:
   LOCK_HUB: https://tensorhub.com # committed locks resolve against production
   HUBS: https://tensorhub.com http://127.0.0.1:8819
+  IMAGE_TORCH: torch==2.14.0 torchvision==0.29.0 # what the Hub's current worker image carries (its tag): a lock carries none (cl-715)
 
 tasks:
   # First-party packages publish at the root namespace (`--root`, Hub admins). Locks pin first-party callees exactly, so each release of X is followed by one of every package
@@ -68,6 +69,7 @@ tasks:
                 triton_prebuild.build(Path(sys.argv[2], module.relative_to(here), triton_kernels.SHIPPED), None, home)'
         kernels() { m=$(sed -n 's/^object = "\([A-Za-z0-9_]*\).*/\1/p' "$1/package.toml"); e=$work/.env-$1
           (cd "$1" && UV_PROJECT_ENVIRONMENT=$e uv sync -q --frozen --no-dev --python 3.12)
+          VIRTUAL_ENV=$e uv pip install -q {{.IMAGE_TORCH}}
           (cd "$1" && nice -n 19 "$e/bin/python" -I -c "$prebuild" "$m" "$work/.kernels/$1") >/dev/null; }
         ship() {
           on=$(held "$1"); [ -z "$on" ] || { echo "$1 $(ver "$1") already exists on $on: not published, not yanked" >&2; exit 1; }
