@@ -154,7 +154,9 @@ class NaDiT(nn.Module):
         vid_shape: torch.LongTensor,  # b 3
         txt_shape: torch.LongTensor,  # b 1
         timestep: Union[int, float, torch.IntTensor, torch.FloatTensor],  # b
-        disable_cache: bool = True,  # for test
+        # The window and concat index plans are the same in every block of one forward; uncached, each block
+        # rebuilds them through host syncs (run 23829: 14k syncs a step).
+        disable_cache: bool = False,
     ):
         # Text input.
         if txt_shape.size(-1) == 1 and self.need_txt_repeat:

@@ -78,7 +78,11 @@ class NaSwinAttention(MMWindowAttention):
         `GROUP` video tokens, from the shape alone): each window attends to its own tokens and the
         text, so a group's projections, norms, rotary and attention are the whole call's for those
         rows, and the text output is the same mean over every window. No tensor spans all video
-        tokens but the input and the output."""
+        tokens but the input and the output.
+
+        The layout orders the windows by length (cached for the forward), so a group is runs of
+        equal windows: a run is one batch of `[window rows | text rows]`, built by one concat each
+        for q, k and v, with no index plan, gather or host sync per group."""
         txt_qkv = rearrange(self.proj_qkv.txt(txt), "l (o h d) -> l o h d", o=3, d=self.head_dim)
         txt_q, txt_k, txt_v = txt_qkv.unbind(1)
         txt_q, txt_k = self.norm_q.txt(txt_q), self.norm_k.txt(txt_k)
@@ -92,12 +96,14 @@ class NaSwinAttention(MMWindowAttention):
         def layout():
             rows = torch.arange(int(vid_shape.prod(-1).sum()), device=vid_shape.device)[:, None]
             rows, shapes, count = na.window(rows, vid_shape, make_window)
-            return rows[:, 0], shapes, count
+            lengths = shapes.prod(-1).tolist()
+            order = sorted(range(len(lengths)), key=lengths.__getitem__)
+            spans = rows[:, 0].split(lengths)
+            return torch.cat([spans[w] for w in order]), shapes[order], [lengths[w] for w in order], int(count.sum())
 
-        rows, window_shape, window_count = cache_win("win_rows", layout)
-        lengths = cache_win("vid_len", lambda: window_shape.prod(-1)).tolist()
-        freqs = cache_win("rope_freqs_3d", lambda: self.rope.get_freqs(window_shape)) if self.rope else None
-        txt_len = cache("txt_len", lambda: txt_shape.prod(-1))
+        rows, window_shape, lengths, windows = cache_win("win_rows_by_length", layout)
+        freqs = cache_win("rope_freqs_3d_by_length", lambda: self.rope.get_freqs(window_shape)) if self.rope else None
+        txt_rows = txt_q.shape[0]
         out = None
         txt_sum = None
         first = 0
@@ -109,19 +115,25 @@ class NaSwinAttention(MMWindowAttention):
             q, k = self.norm_q.vid(q), self.norm_k.vid(k)
             if freqs is not None:
                 q, k = (_rotary(freqs[first:last], x) for x in (q, k))
-            concat, unconcat, runs = na.repeat_concat_idx(
-                window_shape[group[0]:group[-1] + 1].prod(-1), txt_len, torch.tensor([len(group)], device=txt_len.device)
-            )
-            o = self.attn(concat(q, txt_q), concat(k, txt_k), concat(v, txt_v), runs).type_as(q)
-            o_vid, o_txt = unconcat(o)
-            o_vid = self.proj_out.vid(rearrange(o_vid, "l h d -> l (h d)"))
+            o_vid, start = [], 0
+            for count, length in _runs(lengths[w] for w in group):
+                rows_ = slice(start, start + count * length)
+                batch = [
+                    torch.cat([x[rows_].view(count, length, *x.shape[1:]), t.expand(count, *t.shape)], dim=1)
+                    for x, t in ((q, txt_q), (k, txt_k), (v, txt_v))
+                ]
+                o = self.attn(*(x.flatten(0, 1) for x in batch), [(0, count, length + txt_rows)])
+                o = o.unflatten(0, (count, length + txt_rows)).type_as(q)
+                o_vid.append(o[:, :length].flatten(0, 1))
+                o_txt = o[:, length:].float().sum(0)
+                txt_sum = o_txt if txt_sum is None else txt_sum + o_txt
+                start += count * length
+            o_vid = self.proj_out.vid(rearrange(torch.cat(o_vid) if len(o_vid) > 1 else o_vid[0], "l h d -> l (h d)"))
             out = o_vid.new_empty((vid.shape[0], o_vid.shape[1])) if out is None else out
             out.index_copy_(0, at, o_vid)
-            o_txt = o_txt.float() * len(group)
-            txt_sum = o_txt if txt_sum is None else txt_sum + o_txt
             first = last
         assert out is not None and txt_sum is not None
-        txt_out = (txt_sum / int(window_count.sum())).type_as(txt_q)
+        txt_out = (txt_sum / windows).type_as(txt_q)
         return out, self.proj_out.txt(rearrange(txt_out, "l h d -> l (h d)"))
 
 
@@ -140,6 +152,17 @@ def _groups(lengths, most):
         size += n
     if group:
         yield group
+
+
+def _runs(lengths):
+    """Consecutive equal lengths as (count, length)."""
+    runs = []
+    for n in lengths:
+        if runs and runs[-1][1] == n:
+            runs[-1][0] += 1
+        else:
+            runs.append([1, n])
+    return runs
 
 
 def _rotary(freqs: torch.Tensor, x: torch.Tensor) -> torch.Tensor:
