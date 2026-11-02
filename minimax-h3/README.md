@@ -61,6 +61,13 @@ LoRA's trigger (`body_swap:`). The latents also carry the text the video was mad
   as a picture after the shot's own (a place takes that frame instead). Beats carry no times: H3 marks cuts with timed
   `[Shot N]`. A prompt with its own `integrated_multimodal_description:`/`audio:`/
   `non_diegetic_music:` fields keeps them.
+- **A prompt in MiniMax's own form.** Text that marks its own shots (`[Shot 1] … [Shot 2] At 00:03.000, …`) or carries
+  its own sections (`subject_definitions:`, `summary:`, `retention_analysis:`, `detailed_description:`) is the first
+  piece as written, with no `[Shot 1]` or one-shot line added; references, style, soundscape and music are still added.
+  Its cuts count as beats, so a long one needs no `beats`. Past 15 s, each shot goes to the piece its cut time falls
+  in: that piece opens with the carried frames as its `[Shot 1]` and the shot follows, renumbered and timed on the
+  piece's clock. A shot already under way is not restated, and a later piece drops the `summary` and
+  `retention_analysis` written for the whole video.
 - **Pictures.** Characters, props and the environment (`<Dock>`) are definitions in every
   piece's text, each with its `description` when given. A project cleans character and prop
   pictures (background removal) before they reach `shot`, so a direct call should pass clean
