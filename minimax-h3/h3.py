@@ -1504,6 +1504,7 @@ class ResumeFrame(msgspec.Struct):
     image: ImageFile
 
 
+@invocable(memoize=True)
 async def resume_frame(ctx: Context, *, payload: ResumeFrameInput, out: Outputs, tel: Telemetry) -> ResumeFrame:
     """A continued video's last frame before `frames`: the one its next piece starts from."""
     start = Fraction(max(payload.frames - 6, 0), FPS)
