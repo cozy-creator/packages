@@ -10,13 +10,13 @@ fields:
 
 ```yaml
 # video.yaml — cozy run minimax-h3/generate --input video.yaml
-prompt: <Theo> and <Juno> spar on <Dock>.     # holds throughout; <Name> names a reference
-duration_s: 40                                # any length; past 15 s it needs beats
-beats:                                        # each holds until the next
-  - {at: 0, prompt: They circle each other.}
-  - {at: 13, prompt: <Juno> sweeps <Theo>'s legs.}
-  - {at: 27, prompt: <Theo> rolls and stands.}
-style: 35 mm film, warm grade; no crowd    # holds in every piece; prompt is only the opening
+prompt: |                                     # as written, in MiniMax's form; <Name> names a reference
+  [Shot 1] <Theo> and <Juno> circle each other on <Dock>.
+  At 00:06.000, <Juno> feints left.
+  [Shot 2] At 00:13.000, the shot cuts to a low angle as she sweeps <Theo>'s legs.
+  At 00:27.000, <Theo> rolls and stands.
+duration_s: 40                                # any length; past 15 s it needs timestamps
+style: 35 mm film, warm grade; no crowd       # holds in every piece
 soundscape: gulls, surf, wind
 music: N/A
 references:                                   # in this order H3 numbers them; every one is used
@@ -37,37 +37,40 @@ turbo: true
 The result is `video` (768p mp4), `latents` (its own, for `upscale` and `continue_from`) and
 `warnings`. `follow: loose` keeps a picture's arrangement, not its frame (read at 512 px: a world
 state). `continue_from` puts the request on that video's timeline: `duration_s` is the whole length,
-beats before its end are history, and the result is the whole video, decoded as one. With a plate,
+text before its end is history, and the result is the whole video, decoded as one. With a plate,
 add its edit LoRA (`--lora alissonerdx/minimax-h3-character-swap`, …) and start the prompt with that
 LoRA's trigger (`body_swap:`). The latents also carry the text the video was made from, which
 `upscale` uses when given no prompt.
 
-- **Pieces.** A shot renders in the fewest pieces that reach its length: the first up to
-  15 s, each later one up to 14 s new (the 22 frames it carries from the last share H3's 15 s
-  window), so 1 + ⌈(d − 15) / 14⌉ for d > 15. Each piece continues the last from its carried
-  latents. Edges go between beats: no beat starts from 2 s before an edge to 2.5 s after it,
-  because a carried head delays a new action (run 20751: beats on an edge started about 6 s
-  late). Where that can't hold, the shot warns. Within that, each piece is as long as it can
-  be, since a longer generation is more consistent. A shot of several pieces decodes their
-  latents as one video, so no join steps the picture. An 8 s shot with beats at 0 and 5 is
-  one generation; the 40 s shot above is pieces of 15, 14 and 11 s.
-- **Text.** Each piece is one `[Shot 1]` paragraph. The first: the shot's `prompt`, the beat it
-  is in and each later beat ("Then …"), ending "One continuous shot with no cuts.". A later one
-  describes where it starts, never the opening again (restating it pulls the shot back there,
-  with a cut): the carried frames as they are (the same people in the same places when the shot
-  has a character picture, else everything where it was; the camera still moving, nothing new for
-  two seconds), the beat in force ("Already under way, not begun
-  again: …" when it began earlier) and each later beat; it sees the previous piece's last frame
-  as a picture after the shot's own (a place takes that frame instead). Beats carry no times: H3 marks cuts with timed
-  `[Shot N]`. A prompt with its own `integrated_multimodal_description:`/`audio:`/
-  `non_diegetic_music:` fields keeps them.
-- **A prompt in MiniMax's own form.** Text that marks its own shots (`[Shot 1] … [Shot 2] At 00:03.000, …`) or carries
-  its own sections (`subject_definitions:`, `summary:`, `retention_analysis:`, `detailed_description:`) is the first
-  piece as written, with no `[Shot 1]` or one-shot line added; references, style, soundscape and music are still added.
-  Its cuts count as beats, so a long one needs no `beats`. Past 15 s, each shot goes to the piece its cut time falls
-  in: that piece opens with the carried frames as its `[Shot 1]` and the shot follows, renumbered and timed on the
-  piece's clock. A shot already under way is not restated, and a later piece drops the `summary` and
-  `retention_analysis` written for the whole video.
+- **Text.** The prompt goes as written, in [MiniMax's form](https://huggingface.co/MiniMaxAI/MiniMax-H3/blob/main/docs/VIDEO_PROMPT_WRITING_GUIDE_ref_en.md):
+  open with `[Shot 1]` and write `retention_analysis` lines yourself, or get a warning. Added only: each name's
+  `<Picture N>` in `subject_definitions`, the `summary`'s task tag, `style` from its field, `non_diegetic_music: N/A` when none is written, since H3
+  otherwise invents score and speech, and `overall_soundscape` from the `soundscape` field, or `N/A` with a warning,
+  since the guide reads that as silence. Your own line replaces any of these.
+- **Sections.** With a `detailed_description:`, timestamps are read only inside it. `summary:` goes on the first piece
+  only; `overall_soundscape:` and `non_diegetic_music:` go on every piece.
+- **Task tag.** With references, every piece's `summary` opens with its `[task + task]` from the guide, computed from the
+  request: a plate is `video editing`, `continue_from` `video continuation`, a first or last frame `keyframe completion`,
+  a picture or reference video `reference generation`, an audio reference or a clip's own sound `audio reuse`, a voice
+  `audio reference`. A different tag you wrote is replaced, with a warning; with no `summary`, one holds just the tag.
+  A later piece's is just its tag. Text alone has none.
+- **Timestamps.** `At MM:SS.mmm` or `At MM:SS`, any case, at the start of a line, after an optional `[Shot N]`. A time
+  mid-sentence is plain text. Write `[Shot N] At …, the shot cuts to …` for a cut, as the guide does, and a plain `At …`
+  for a change inside a take (a second marker made run 26176 jump; run 26187, a plain time, did not). The model reads
+  what a timestamp means: cozy never decides it is a cut. A time out of order or past the end stays plain text, with a warning.
+- **Pieces.** The text from one timestamp to the next is a block, and the text before the first is the opening block. A
+  shot renders in the fewest pieces of whole blocks: the first up to 15 s, each later one up to 14 s new (340 frames, run
+  25217; the 22 frames it carries from the last share H3's 15 s window). Each later piece starts on a block's timestamp,
+  carrying the last piece's frames. A piece's text is only its own blocks: the one that opens it loses its time, the
+  rest are timed on its clock, whose head is the carried frames, and its `[Shot N]` renumber from 1. So nothing redraws
+  the scene at a join (restating an opening pulled runs 24980/24981 back there, with a cut), and each block says only
+  what happens then: the carried frames and pictures hold the rest. A later piece drops the `summary`, and takes each
+  reference's own `retention_analysis` line without its `(appears in …)`. It sees the previous piece's last frame as a
+  picture after the shot's own (a place takes that frame instead). A shot of several pieces decodes their latents as one
+  video, so no join steps the picture.
+- **Timing that doesn't fit.** Nothing is refused. With no timestamps a video past 15 s renders 15 s and warns. A block too
+  long for a piece renders at the limit and warns with its time: what follows comes straight after it, so the video is
+  shorter than `duration_s`. A join lands on H3's whole-second grid, within about 0.7 s of its timestamp.
 - **Pictures.** Characters, props and the environment (`<Dock>`) are definitions in every
   piece's text, each with its `description` when given. A project cleans character and prop
   pictures (background removal) before they reach `shot`, so a direct call should pass clean
@@ -83,9 +86,9 @@ LoRA's trigger (`body_swap:`). The latents also carry the text the video was mad
   reads its own span of it, second for second with the shot, its carried head included, so a
   plate stays frame-aligned across an edge. A shorter clip guides the shot to its end (a piece
   left with under 2 s of it skips it), and a longer one's excess is unused; both warn. Put each
-  beat where the footage shows it: a beat ahead of the clip runs the shot ahead of it, and the
-  next piece goes on from where the shot is (its last frame, and the take restated), not from
-  the clip's moment (run 24603 cut there; 24964 did not).
+  timestamp where the footage shows it: one ahead of the clip runs the shot ahead of it, and the
+  next piece goes on from where the shot is (its last frame), not from the clip's moment (run
+  24603 cut there; 24964 did not).
   `keyframes` anchor the first and last frames.
 - **Presets.** `preset` trades speed for fidelity. Turbo runs its eight steps with 8, 4 or 1 dense
   (quality, balanced, fast: NVIDIA's HyperFlow quality and Sol-Engine `sol_bsa`), the rest sparse.
