@@ -14,6 +14,9 @@ camera (h3a-094, owner's choice 2026-10-17):
 - The clip's remaining latent rows guide only the dense steps, where staging and motion are
   decided, and leave before the first sparse one, which then runs at no-reference length.
 
+- Over a continued piece's carried picture head the clip has no rows: the carried rows hold the
+  head, and the clip guides from the first frame after it.
+
 Image references, standalone audio and a continuation's carried rows are untouched. A guide
 video is never a reference (`guide_rows`).
 """
@@ -81,9 +84,14 @@ class ClipRows:
         if next(latents, None) is not None or offset != block_state.num_condition_video_rows:
             raise ValueError("video reference rows disagree with the packed layout")
 
-    def thin(self, block_state: Any) -> None:
-        """Before the first evaluation: keep every `FRAME_STRIDE`-th latent frame of each clip."""
-        self._drop(block_state, lambda frame: frame % FRAME_STRIDE != 0)
+    def thin(self, block_state: Any, head: int = 0) -> None:
+        """Before the first evaluation: keep every `FRAME_STRIDE`-th latent frame of each clip, past
+        a continued piece's carried picture head (its first `head` latent frames). There the carried
+        rows, on the target's own positions, are the picture: a clip frame there pulled the
+        regenerated head to the clip's phase whenever the previous piece ended out of it, and the
+        delivered frames cut away from the previous piece's (h3a-097, runs 25838 and 25471). The
+        kept frames hold their positions, so the clip stays 1:1 with the frames after the head."""
+        self._drop(block_state, lambda frame: (frame % FRAME_STRIDE != 0) | (frame < head))
 
     def release(self, block_state: Any) -> None:
         """Before the first sparse evaluation: every clip's latent rows leave."""
