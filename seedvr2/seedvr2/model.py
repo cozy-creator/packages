@@ -10,12 +10,15 @@ import numpy as np
 import torch
 from omegaconf import OmegaConf
 from PIL import Image, ImageOps
+from cozy_runtime import fusion
 from cozy_runtime.author import Config, Cut, Loader, Model, Telemetry, split, uses_components
+from cozy_runtime.author.kernels import Plan
 
 from .color import Correction, correct
 from .frames import extend
 from .upstream.infer import VideoDiffusionInfer
 from .upstream.models.dit.nadit import NaDiT
+from .upstream.models.dit.nablocks.mmsr_block import ADA_ROWS, QK_ROPE
 from .upstream.models.video_vae_v3.modules.attn_video_vae import VideoAutoencoderKLWrapper
 
 # SeedVR's configs_7b/main.yaml: separate text/video weights throughout.
@@ -112,6 +115,22 @@ class RestorationModel(
 
     def load(self, loader: Loader) -> None:
         self.graph = loader.construct(Graph, factory=build)
+
+    def execution_plan(self, plan: Plan) -> str:
+        """The video stream's adaLN row chains (`ADA_ROWS`) and its q/k norms' fused RMSNorm + RoPE
+        (`QK_ROPE`, by the norms' weight dtype)."""
+        blocks = list(self.graph.components["dit"].blocks)
+        rows = fusion.install_rows(plan, ADA_ROWS)
+        for block in blocks:
+            block._cozy_rows = rows
+        dtype = blocks[0].attn.norm_q.vid.weight.dtype
+        layout = QK_ROPE.get(dtype)
+        if layout is None:
+            plan.report("seedvr2.qk-rope", {"applied": False, "reason": f"norm weights {dtype}"})
+            return "ada-rows" if rows else ""
+        norms = [n for b in blocks for n in (b.attn.norm_q.vid, b.attn.norm_k.vid)]
+        identity = fusion.install_head_norms(plan, layout, norms)
+        return "+".join(i for i in ("ada-rows" if rows else "", identity) if i)
 
     @uses_components("vae")
     def encode(self, pixels: torch.Tensor) -> torch.Tensor:
