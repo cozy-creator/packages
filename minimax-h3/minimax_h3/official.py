@@ -1541,7 +1541,8 @@ class OfficialH3Pipeline:
         if _TRUNK[task] == "ref2va":
             references, latents = state.normalized_references, state.condition_latents
             clips = ClipRows(block_state, references, latents, scoped.patch_size, start=guided)
-            clips.thin(block_state)
+            head = 0 if context is None or context.video is None else int(context.video.shape[2])
+            clips.thin(block_state, head)
         if (
             task == "fl2va"
             and clips is None
