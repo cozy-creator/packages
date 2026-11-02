@@ -5,27 +5,23 @@ the fused forwards on the filled H3 transformers as this model's execution plan.
 the ones the eager composition already produces, so nothing moves a parameter, a buffer or a
 state-dict key (re-censused after the swap).
 
-Numerics are the EAGER composition's, not "better": every intermediate eager rounds to bf16 is
-rounded here too (`_rb`, in the integer domain so the compiler cannot fold the round-trip
-away), and the fp8 epilogue is the rowwise leaf's own quantizer run on the same registers.
-Measured on sm89 against torch 2.13 eager: the modulate, gate-add, SwiGLU and RoPE chains are
-bit-identical; the RMSNorm differs from torch's fused kernel by one bf16 ulp on ~4e-6 of
-elements (fp32 reduction order of the row variance), and those elements are the whole distance
-between fused and eager.
+Numerics are the EAGER composition's: every intermediate eager rounds to bf16 is rounded here too
+(`_rb`, in the integer domain so the compiler cannot fold the round-trip away), and the fp8 epilogue
+is the rowwise leaf's own quantizer on the same registers. Measured on sm89 against torch 2.13 eager:
+the modulate, gate-add, SwiGLU and RoPE chains are bit-identical; the RMSNorm differs from torch's
+fused kernel by one bf16 ulp on ~4e-6 of elements (fp32 reduction order of the row variance).
 
-The `@triton.jit` functions are the kernel SOURCES (`GLUE`): the Runtime compiles them on the
-machine that runs them when the executor starts and `plan.load` waits for that build; a request
-never compiles. An fp8 epilogue is chosen per site from what the fill installed: a site whose
-every consumer is an `fp8.rowwise` encoded leaf hands it a `PreQuantized` operand; any other
-consumer gets bf16.
+The `@triton.jit` functions are the kernel SOURCES (`GLUE`): the Runtime compiles them on the machine
+that runs them when the executor starts and `plan.load` waits for that build; no request compiles.
+An fp8 epilogue is chosen per site from what the fill installed: a site whose every consumer is an
+`fp8.rowwise` encoded leaf hands it a `PreQuantized` operand; any other consumer gets bf16.
 
-Not installable (eager serves, the code is reported): no CUDA sm80+, kernels absent or failed,
-an unmatched Diffusers topology. A build that does not load, or a failure after substitution
+Not installable (eager serves, the code is reported): no CUDA sm80+, no Triton, kernels absent or
+failed, an unmatched Diffusers topology. A build that does not load, or a failure after substitution
 began, refuses the construction: there is no eager left.
 
-Adapted from NVlabs/Sana `sol-engine` `models/minimax_h3/{GB200,GB10}/fusions.py`
-(Apache-2.0): the per-row program shape, the table-row gather inside the kernel, the
-partner-channel RoPE and the integer-domain bf16 rounding are theirs.
+Adapted from NVlabs/Sana `sol-engine` `models/minimax_h3/{GB200,GB10}/fusions.py` (Apache-2.0): the
+per-row program, table-row gather, partner-channel RoPE and integer-domain bf16 rounding are theirs.
 """
 
 from __future__ import annotations
@@ -41,8 +37,6 @@ from dataclasses import dataclass
 from typing import Any
 
 import torch
-import triton
-import triton.language as tl
 from diffusers.models.activations import SwiGLU
 from diffusers.models.attention import FeedForward
 from diffusers.models.attention_dispatch import dispatch_attention_fn
@@ -52,7 +46,6 @@ from diffusers.models.transformers.transformer_minimax_h3 import (
     MiniMaxH3TransformerBlock,
     _apply_rotary_emb,
 )
-from triton.language.extra import libdevice
 
 from cozy_runtime.author import CapabilityError, Cut, plain_forward, split
 from cozy_runtime.author.kernels import (
@@ -69,7 +62,14 @@ from cozy_runtime.rows import Rows, rows
 
 from .adaln_pruned import AdaLNPrunedMiniMaxH3Transformer
 
-CONTRACT = "h3-glue-call-and-topology/2"
+try:
+    import triton
+    import triton.language as tl
+    from triton.language.extra import libdevice
+except ImportError as _absent:  # pragma: no cover - a CPU-only or non-Linux environment
+    TRITON_ABSENT = f"triton does not import ({_absent})"
+else:
+    TRITON_ABSENT = ""
 
 
 @dataclass(slots=True)
@@ -131,207 +131,207 @@ class GlueRefusal(CapabilityError):
         super().__init__(detail, code=code)
 
 
-# ------------------------------------------------------------------- kernel sources
+# ------- kernel sources (Triton hashes each one's line: a moved one rebuilds its set everywhere)
+if not TRITON_ABSENT:
+
+    @triton.jit
+    def _rb(x):  # type: ignore[no-untyped-def]
+        # fp32 -> bf16 -> fp32 round-to-nearest-even in the integer domain: the compiler
+        # folds `x.to(bf16).to(f32)` to identity and would keep fp32 precision eager lacks.
+        bits = x.to(tl.int32, bitcast=True)
+        bits = bits + 0x7FFF + ((bits >> 16) & 1)
+        return (bits & -65536).to(tl.float32, bitcast=True)
 
 
-@triton.jit
-def _rb(x):  # type: ignore[no-untyped-def]
-    # fp32 -> bf16 -> fp32 round-to-nearest-even in the integer domain: the compiler
-    # folds `x.to(bf16).to(f32)` to identity and would keep fp32 precision eager lacks.
-    bits = x.to(tl.int32, bitcast=True)
-    bits = bits + 0x7FFF + ((bits >> 16) & 1)
-    return (bits & -65536).to(tl.float32, bitcast=True)
+    @triton.jit
+    def _e4m3(value, scale):  # type: ignore[no-untyped-def]
+        # Exactly `leaves._triton_rowwise_kernel`'s cast: IEEE divide, clamp, RTNE.
+        return tl.clamp(tl.div_rn(value, scale), -448.0, 448.0).to(
+            tl.float8e4nv, fp_downcast_rounding="rtne"
+        )
 
 
-@triton.jit
-def _e4m3(value, scale):  # type: ignore[no-untyped-def]
-    # Exactly `leaves._triton_rowwise_kernel`'s cast: IEEE divide, clamp, RTNE.
-    return tl.clamp(tl.div_rn(value, scale), -448.0, 448.0).to(
-        tl.float8e4nv, fp_downcast_rounding="rtne"
-    )
+    @triton.jit  # type: ignore[untyped-decorator]
+    def _norm_mod_kernel(  # type: ignore[no-untyped-def]
+        x_ptr,
+        branch_ptr,
+        gate_ptr,
+        hidden_ptr,
+        out_ptr,
+        scale_out_ptr,
+        weight_ptr,
+        scale_ptr,
+        shift_ptr,
+        index_ptr,
+        n_cols,
+        n_index,
+        stride_x,
+        stride_table,
+        eps,
+        RESIDUAL: tl.constexpr,
+        FP8: tl.constexpr,
+        BLOCK: tl.constexpr,
+    ):
+        row = tl.program_id(0).to(tl.int64)
+        cols = tl.arange(0, BLOCK)
+        mask = cols < n_cols
+        offset = row * stride_x + cols
+        # One table row per SEQUENCE row; a batch axis wraps (eager broadcasts the index).
+        table = tl.load(index_ptr + row % n_index).to(tl.int64) * stride_table + cols
+        x = tl.load(x_ptr + offset, mask=mask, other=0.0).to(tl.float32)
+        if RESIDUAL:
+            branch = tl.load(branch_ptr + offset, mask=mask, other=0.0).to(tl.float32)
+            gate = tl.load(gate_ptr + table, mask=mask, other=0.0).to(tl.float32)
+            x = _rb(x + _rb(gate * branch))
+            tl.store(hidden_ptr + offset, x.to(tl.bfloat16), mask=mask)
+        variance = tl.sum(x * x, axis=0) / n_cols
+        weight = tl.load(weight_ptr + cols, mask=mask, other=0.0).to(tl.float32)
+        normed = _rb(x * tl.math.rsqrt(variance + eps) * weight)
+        scale = tl.load(scale_ptr + table, mask=mask, other=0.0).to(tl.float32)
+        shift = tl.load(shift_ptr + table, mask=mask, other=0.0).to(tl.float32)
+        out = _rb(_rb(normed * _rb(1.0 + scale)) + shift)
+        if FP8:
+            amax = tl.max(tl.abs(out), axis=0)
+            row_scale = tl.maximum(amax / 448.0, 1e-12)
+            tl.store(scale_out_ptr + row, row_scale)
+            tl.store(out_ptr + offset, _e4m3(out, row_scale), mask=mask)
+        else:
+            tl.store(out_ptr + offset, out.to(tl.bfloat16), mask=mask)
 
 
-@triton.jit  # type: ignore[untyped-decorator]
-def _norm_mod_kernel(  # type: ignore[no-untyped-def]
-    x_ptr,
-    branch_ptr,
-    gate_ptr,
-    hidden_ptr,
-    out_ptr,
-    scale_out_ptr,
-    weight_ptr,
-    scale_ptr,
-    shift_ptr,
-    index_ptr,
-    n_cols,
-    n_index,
-    stride_x,
-    stride_table,
-    eps,
-    RESIDUAL: tl.constexpr,
-    FP8: tl.constexpr,
-    BLOCK: tl.constexpr,
-):
-    row = tl.program_id(0).to(tl.int64)
-    cols = tl.arange(0, BLOCK)
-    mask = cols < n_cols
-    offset = row * stride_x + cols
-    # One table row per SEQUENCE row; a batch axis wraps (eager broadcasts the index).
-    table = tl.load(index_ptr + row % n_index).to(tl.int64) * stride_table + cols
-    x = tl.load(x_ptr + offset, mask=mask, other=0.0).to(tl.float32)
-    if RESIDUAL:
+    @triton.jit  # type: ignore[untyped-decorator]
+    def _gate_add_kernel(  # type: ignore[no-untyped-def]
+        x_ptr,
+        branch_ptr,
+        gate_ptr,
+        out_ptr,
+        index_ptr,
+        n_cols,
+        n_index,
+        stride_x,
+        stride_table,
+        BLOCK: tl.constexpr,
+    ):
+        row = tl.program_id(0).to(tl.int64)
+        cols = tl.arange(0, BLOCK)
+        mask = cols < n_cols
+        offset = row * stride_x + cols
+        table = tl.load(index_ptr + row % n_index).to(tl.int64) * stride_table + cols
+        x = tl.load(x_ptr + offset, mask=mask, other=0.0).to(tl.float32)
         branch = tl.load(branch_ptr + offset, mask=mask, other=0.0).to(tl.float32)
         gate = tl.load(gate_ptr + table, mask=mask, other=0.0).to(tl.float32)
-        x = _rb(x + _rb(gate * branch))
-        tl.store(hidden_ptr + offset, x.to(tl.bfloat16), mask=mask)
-    variance = tl.sum(x * x, axis=0) / n_cols
-    weight = tl.load(weight_ptr + cols, mask=mask, other=0.0).to(tl.float32)
-    normed = _rb(x * tl.math.rsqrt(variance + eps) * weight)
-    scale = tl.load(scale_ptr + table, mask=mask, other=0.0).to(tl.float32)
-    shift = tl.load(shift_ptr + table, mask=mask, other=0.0).to(tl.float32)
-    out = _rb(_rb(normed * _rb(1.0 + scale)) + shift)
-    if FP8:
-        amax = tl.max(tl.abs(out), axis=0)
-        row_scale = tl.maximum(amax / 448.0, 1e-12)
-        tl.store(scale_out_ptr + row, row_scale)
-        tl.store(out_ptr + offset, _e4m3(out, row_scale), mask=mask)
-    else:
-        tl.store(out_ptr + offset, out.to(tl.bfloat16), mask=mask)
+        tl.store(out_ptr + offset, _rb(x + _rb(gate * branch)).to(tl.bfloat16), mask=mask)
 
 
-@triton.jit  # type: ignore[untyped-decorator]
-def _gate_add_kernel(  # type: ignore[no-untyped-def]
-    x_ptr,
-    branch_ptr,
-    gate_ptr,
-    out_ptr,
-    index_ptr,
-    n_cols,
-    n_index,
-    stride_x,
-    stride_table,
-    BLOCK: tl.constexpr,
-):
-    row = tl.program_id(0).to(tl.int64)
-    cols = tl.arange(0, BLOCK)
-    mask = cols < n_cols
-    offset = row * stride_x + cols
-    table = tl.load(index_ptr + row % n_index).to(tl.int64) * stride_table + cols
-    x = tl.load(x_ptr + offset, mask=mask, other=0.0).to(tl.float32)
-    branch = tl.load(branch_ptr + offset, mask=mask, other=0.0).to(tl.float32)
-    gate = tl.load(gate_ptr + table, mask=mask, other=0.0).to(tl.float32)
-    tl.store(out_ptr + offset, _rb(x + _rb(gate * branch)).to(tl.bfloat16), mask=mask)
+    @triton.jit
+    def _silu_product(x_ptr, base, cols, mask, half):  # type: ignore[no-untyped-def]
+        value = tl.load(x_ptr + base + cols, mask=mask, other=0.0).to(tl.float32)
+        gate = tl.load(x_ptr + base + half + cols, mask=mask, other=0.0).to(tl.float32)
+        # torch's silu: `x / (1 + exp(-x))` in fp32 with IEEE divide and an exact exp.
+        activated = _rb(tl.div_rn(gate, 1.0 + libdevice.exp(-gate)))
+        return _rb(value * activated)
 
 
-@triton.jit
-def _silu_product(x_ptr, base, cols, mask, half):  # type: ignore[no-untyped-def]
-    value = tl.load(x_ptr + base + cols, mask=mask, other=0.0).to(tl.float32)
-    gate = tl.load(x_ptr + base + half + cols, mask=mask, other=0.0).to(tl.float32)
-    # torch's silu: `x / (1 + exp(-x))` in fp32 with IEEE divide and an exact exp.
-    activated = _rb(tl.div_rn(gate, 1.0 + libdevice.exp(-gate)))
-    return _rb(value * activated)
+    @triton.jit  # type: ignore[untyped-decorator]
+    def _swiglu_kernel(  # type: ignore[no-untyped-def]
+        x_ptr,
+        out_ptr,
+        scale_out_ptr,
+        half,
+        stride_x,
+        stride_out,
+        FP8: tl.constexpr,
+        BLOCK: tl.constexpr,
+    ):
+        # One row per program, chunked: a 14336-wide product held twice would spill. The
+        # fp8 epilogue needs the row amax first, so it recomputes the chunk on a second
+        # sweep from a row that is by then L2-resident.
+        row = tl.program_id(0).to(tl.int64)
+        base = row * stride_x
+        offsets = tl.arange(0, BLOCK)
+        if FP8:
+            amax = tl.zeros((BLOCK,), dtype=tl.float32)
+            for start in range(0, half, BLOCK):
+                cols = start + offsets
+                amax = tl.maximum(amax, tl.abs(_silu_product(x_ptr, base, cols, cols < half, half)))
+            row_scale = tl.maximum(tl.max(amax, axis=0) / 448.0, 1e-12)
+            tl.store(scale_out_ptr + row, row_scale)
+            for start in range(0, half, BLOCK):
+                cols = start + offsets
+                product = _silu_product(x_ptr, base, cols, cols < half, half)
+                tl.store(out_ptr + row * stride_out + cols, _e4m3(product, row_scale), mask=cols < half)
+        else:
+            for start in range(0, half, BLOCK):
+                cols = start + offsets
+                product = _silu_product(x_ptr, base, cols, cols < half, half)
+                tl.store(out_ptr + row * stride_out + cols, product.to(tl.bfloat16), mask=cols < half)
 
 
-@triton.jit  # type: ignore[untyped-decorator]
-def _swiglu_kernel(  # type: ignore[no-untyped-def]
-    x_ptr,
-    out_ptr,
-    scale_out_ptr,
-    half,
-    stride_x,
-    stride_out,
-    FP8: tl.constexpr,
-    BLOCK: tl.constexpr,
-):
-    # One row per program, chunked: a 14336-wide product held twice would spill. The
-    # fp8 epilogue needs the row amax first, so it recomputes the chunk on a second
-    # sweep from a row that is by then L2-resident.
-    row = tl.program_id(0).to(tl.int64)
-    base = row * stride_x
-    offsets = tl.arange(0, BLOCK)
-    if FP8:
-        amax = tl.zeros((BLOCK,), dtype=tl.float32)
-        for start in range(0, half, BLOCK):
-            cols = start + offsets
-            amax = tl.maximum(amax, tl.abs(_silu_product(x_ptr, base, cols, cols < half, half)))
-        row_scale = tl.maximum(tl.max(amax, axis=0) / 448.0, 1e-12)
-        tl.store(scale_out_ptr + row, row_scale)
-        for start in range(0, half, BLOCK):
-            cols = start + offsets
-            product = _silu_product(x_ptr, base, cols, cols < half, half)
-            tl.store(out_ptr + row * stride_out + cols, _e4m3(product, row_scale), mask=cols < half)
-    else:
-        for start in range(0, half, BLOCK):
-            cols = start + offsets
-            product = _silu_product(x_ptr, base, cols, cols < half, half)
-            tl.store(out_ptr + row * stride_out + cols, product.to(tl.bfloat16), mask=cols < half)
+    @triton.jit  # type: ignore[untyped-decorator]
+    def _rope_norm_kernel(  # type: ignore[no-untyped-def]
+        x_ptr,
+        out_ptr,
+        weight_ptr,
+        cos_ptr,
+        sin_ptr,
+        seq,
+        heads,
+        eps,
+        HEAD_DIM: tl.constexpr,
+        ROTARY: tl.constexpr,
+        HEADS: tl.constexpr,
+    ):
+        # One program per (row, HEADS heads): the RMS is per head, the rotation pairs
+        # channel j with j +/- ROTARY/2 inside the rotary span, and cos/sin are per
+        # sequence position (a batch axis wraps).
+        row = tl.program_id(0).to(tl.int64)
+        head0 = tl.program_id(1) * HEADS
+        token = row % seq
+        head = head0 + tl.arange(0, HEADS)[:, None]
+        chan = tl.arange(0, HEAD_DIM)[None, :]
+        mask = head < heads
+        base = (row * heads + head) * HEAD_DIM
+        x = tl.load(x_ptr + base + chan, mask=mask, other=0.0).to(tl.float32)
+        inv = tl.math.rsqrt(tl.sum(x * x, axis=1)[:, None] / HEAD_DIM + eps)
+        weight = tl.load(weight_ptr + chan).to(tl.float32)
+        normed = _rb(x * inv * weight)
+        half = ROTARY // 2
+        rotating = chan < ROTARY
+        low = chan < half
+        partner = tl.where(low, chan + half, chan - half)
+        paired = tl.load(x_ptr + base + partner, mask=mask & rotating, other=0.0).to(tl.float32)
+        paired_weight = tl.load(weight_ptr + partner, mask=rotating, other=0.0).to(tl.float32)
+        rotated = _rb(paired * inv * paired_weight)
+        rotated = tl.where(low, -rotated, rotated)
+        # Eager casts the fp32 tables to bf16 BEFORE multiplying.
+        cos = _rb(tl.load(cos_ptr + token * ROTARY + chan, mask=rotating, other=1.0))
+        sin = _rb(tl.load(sin_ptr + token * ROTARY + chan, mask=rotating, other=0.0))
+        turned = _rb(_rb(normed * cos) + _rb(rotated * sin))
+        out = tl.where(rotating, turned, normed)
+        tl.store(out_ptr + base + chan, out.to(tl.bfloat16), mask=mask)
 
 
-@triton.jit  # type: ignore[untyped-decorator]
-def _rope_norm_kernel(  # type: ignore[no-untyped-def]
-    x_ptr,
-    out_ptr,
-    weight_ptr,
-    cos_ptr,
-    sin_ptr,
-    seq,
-    heads,
-    eps,
-    HEAD_DIM: tl.constexpr,
-    ROTARY: tl.constexpr,
-    HEADS: tl.constexpr,
-):
-    # One program per (row, HEADS heads): the RMS is per head, the rotation pairs
-    # channel j with j +/- ROTARY/2 inside the rotary span, and cos/sin are per
-    # sequence position (a batch axis wraps).
-    row = tl.program_id(0).to(tl.int64)
-    head0 = tl.program_id(1) * HEADS
-    token = row % seq
-    head = head0 + tl.arange(0, HEADS)[:, None]
-    chan = tl.arange(0, HEAD_DIM)[None, :]
-    mask = head < heads
-    base = (row * heads + head) * HEAD_DIM
-    x = tl.load(x_ptr + base + chan, mask=mask, other=0.0).to(tl.float32)
-    inv = tl.math.rsqrt(tl.sum(x * x, axis=1)[:, None] / HEAD_DIM + eps)
-    weight = tl.load(weight_ptr + chan).to(tl.float32)
-    normed = _rb(x * inv * weight)
-    half = ROTARY // 2
-    rotating = chan < ROTARY
-    low = chan < half
-    partner = tl.where(low, chan + half, chan - half)
-    paired = tl.load(x_ptr + base + partner, mask=mask & rotating, other=0.0).to(tl.float32)
-    paired_weight = tl.load(weight_ptr + partner, mask=rotating, other=0.0).to(tl.float32)
-    rotated = _rb(paired * inv * paired_weight)
-    rotated = tl.where(low, -rotated, rotated)
-    # Eager casts the fp32 tables to bf16 BEFORE multiplying.
-    cos = _rb(tl.load(cos_ptr + token * ROTARY + chan, mask=rotating, other=1.0))
-    sin = _rb(tl.load(sin_ptr + token * ROTARY + chan, mask=rotating, other=0.0))
-    turned = _rb(_rb(normed * cos) + _rb(rotated * sin))
-    out = tl.where(rotating, turned, normed)
-    tl.store(out_ptr + base + chan, out.to(tl.bfloat16), mask=mask)
-
-
-@triton.jit  # type: ignore[untyped-decorator]
-def _key_sum_kernel(  # type: ignore[no-untyped-def]
-    key_ptr,
-    out_ptr,
-    tokens,
-    stride_t,
-    HEAD_DIM: tl.constexpr,
-    BLOCK_T: tl.constexpr,
-):
-    # One head's F32 key sum over its tokens, tile after tile in token order: the same additions
-    # whatever heads the call holds. torch's sum regroups them by its output count, so a head
-    # window's key mean differed from the whole call's (xs-089 diagnostic run 23636).
-    head = tl.program_id(0)
-    chan = tl.arange(0, HEAD_DIM)
-    acc = tl.zeros((HEAD_DIM,), dtype=tl.float32)
-    for start in range(0, tokens, BLOCK_T):
-        row = start + tl.arange(0, BLOCK_T)
-        offset = row[:, None].to(tl.int64) * stride_t + head * HEAD_DIM + chan[None, :]
-        tile = tl.load(key_ptr + offset, mask=(row < tokens)[:, None], other=0.0)
-        acc += tl.sum(tile.to(tl.float32), axis=0)
-    tl.store(out_ptr + head * HEAD_DIM + chan, acc)
+    @triton.jit  # type: ignore[untyped-decorator]
+    def _key_sum_kernel(  # type: ignore[no-untyped-def]
+        key_ptr,
+        out_ptr,
+        tokens,
+        stride_t,
+        HEAD_DIM: tl.constexpr,
+        BLOCK_T: tl.constexpr,
+    ):
+        # One head's F32 key sum over its tokens, tile after tile in token order: the same additions
+        # whatever heads the call holds. torch's sum regroups them by its output count, so a head
+        # window's key mean differed from the whole call's (xs-089 diagnostic run 23636).
+        head = tl.program_id(0)
+        chan = tl.arange(0, HEAD_DIM)
+        acc = tl.zeros((HEAD_DIM,), dtype=tl.float32)
+        for start in range(0, tokens, BLOCK_T):
+            row = start + tl.arange(0, BLOCK_T)
+            offset = row[:, None].to(tl.int64) * stride_t + head * HEAD_DIM + chan[None, :]
+            tile = tl.load(key_ptr + offset, mask=(row < tokens)[:, None], other=0.0)
+            acc += tl.sum(tile.to(tl.float32), axis=0)
+        tl.store(out_ptr + head * HEAD_DIM + chan, acc)
 
 
 def _next_pow2(n: int) -> int:
@@ -464,11 +464,12 @@ def _entries(fp8s: tuple[int, ...]) -> Iterator[TritonEntry]:
 
 
 #: Every sm80+ card's set: the bf16 epilogues.
-GLUE = TritonKernels("minimax-h3-glue", _entries((0,)))
+GLUE = TritonKernels("minimax-h3-glue", () if TRITON_ABSENT else _entries((0,)))
 #: With the fp8 epilogues, for cards that have fp8 (sm89+). Triton has no e4m3 below: on an
 #: sm86 the fp8 entries do not build, and one failed entry refuses its whole set, so an RTX 3070
 #: served the eager blocks, which do not fit 15 s in 8 GB.
-GLUE_FP8 = TritonKernels("minimax-h3-glue-fp8", _entries((0, 1)))
+GLUE_FP8 = TritonKernels("minimax-h3-glue-fp8", () if TRITON_ABSENT else _entries((0, 1)))
+CONTRACT = "h3-glue-call-and-topology/2"
 
 
 def kernels(device: Any) -> TritonKernels:
@@ -1274,6 +1275,8 @@ def install(model: object, pipe: Any, plan: Plan) -> str:
             "fusion_device_incapable",
             f"fused glue needs bf16 tensor cores (sm80+); this device is sm{major}x",
         )
+    if TRITON_ABSENT:
+        return _eager(model, plan, "fusion_kernels_absent", TRITON_ABSENT)
     try:
         _require_calls()
         transformers = tuple(_transformers(pipe))
