@@ -1,6 +1,6 @@
 [project]
 name = "minimax-h3"
-version = "0.3.0"
+version = "0.3.1"
 description = "MiniMax H3 video with sound: one continuous shot of any length, and its upscale"
 requires-python = ">=3.12"
 dependencies = [
