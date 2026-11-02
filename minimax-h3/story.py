@@ -471,6 +471,21 @@ def _sections(text: str) -> dict[str, tuple[int, int, int]]:
     return found
 
 
+def description_span(text: str) -> tuple[int, int]:
+    """Where a text's description is (`_sections`): its body under its heading, or the text before
+    the first header when none names one."""
+    _, start, end = _sections(text).get("detailed_description", (0, 0, 0))
+    return start, end
+
+
+def without_sections(text: str, names: Sequence[str]) -> str:
+    """`text` with the named sections, headers and all, taken out."""
+    found = _sections(text)
+    for start, end in sorted(((found[name][0], found[name][2]) for name in names if name in found), reverse=True):
+        text = text[:start] + text[end:]
+    return text
+
+
 def _fill(text: str, additions: dict[str, str]) -> str:
     """Append each addition inside its section, or add the section in canonical order.
 
