@@ -1956,7 +1956,7 @@ async def generate(ctx: Context, payload: GenerateInput, out: Outputs, tel: Tele
         warnings.append("continue_from has no latents, so this is a new video opening on its last frame, and it comes "
                         "back alone; the join may show")  # fmt: skip
         last = math.ceil(resumed.video.probe().duration * FPS)
-        opening = (await resume_frame(payload=ResumeFrameInput(video=resumed.video, frames=last))).image  # type: ignore[call-arg]
+        opening = _resume_frame(resumed.video, last, out)
         resumed = None
     duration_s = payload.duration_s
     if resumed is not None:
@@ -2034,12 +2034,11 @@ async def generate(ctx: Context, payload: GenerateInput, out: Outputs, tel: Tele
         ):
             # H3's Ref2VA needs a picture beside the plate: its own first frame, as a world state (se-101).
             warnings.append("a plate with no picture beside it uses its own first frame as the picture")
-            opening = StoryReference(name="Plate opening", kind="world_state",
-                                     description=f"This segment starts from it: {here} is where now.")  # fmt: skip
-            frame = await resume_frame(payload=ResumeFrameInput(video=payload.plate.video, frames=1))  # type: ignore[call-arg]
-            files[opening.name] = frame.image
-            call = segment_call(text, [*own, opening], style=style, soundscape=sound, music=music, index=index,
-                                retained=retained, added=added | {opening.name}, forced=forced | {opening.name}, **role)  # fmt: skip
+            start = StoryReference(name="Plate opening", kind="world_state",
+                                   description=f"This segment starts from it: {here} is where now.")  # fmt: skip
+            files[start.name] = _resume_frame(payload.plate.video, 1, out)
+            call = segment_call(text, [*own, start], style=style, soundscape=sound, music=music, index=index,
+                                retained=retained, added=added | {start.name}, forced=forced | {start.name}, **role)  # fmt: skip
         if not call.references and resumed is not None:
             # A resumed video's first segment carries into Ref2VA, which needs a picture: with none of the request's
             # own, it starts from the continued video's last frame as the same world state (h3a-098, run 25881).
