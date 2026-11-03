@@ -217,17 +217,25 @@ def _picture_call(function: str, prompt: str, pictures: list[ProjectPicture], as
 
 @app.project_adapter("entity")
 def adapt_entity(payload: ProjectEntity) -> Invocation:
-    """A project's character or prop as its description says, on a transparent background, in the words of Qwen's model
-    card, or an establishing view of the empty set."""
-    description = payload.description.strip()
+    """A project's character, prop or place: a sheet on a transparent background, in the words of Qwen's model card, or an
+    establishing view of the empty set."""
+    name, description = payload.name, payload.description.strip()
     if payload.kind == "environment":
         prompt = _styled(f"{description}\n\nAn establishing view of the empty set, no people.", payload.style)
         return _picture_call(payload.function, prompt, payload.pictures, payload.aspect_ratio)
-    # What it shows is the description's to say (Paul, 11-03): no sheet or layout is assumed. Only the background is ours,
-    # since a reference needs its subject alone.
-    prompt = (f"This is an RGBA image with transparency. {_styled(description, payload.style)}\n\n"
+    # Front and back only (Paul, 11-03); a description can ask for more. At 3:2 each view has 3:4: a tall lantern and a
+    # wide chest both fill it. "From behind and turned slightly" drew the front twice; a half turn draws the back (11-03,
+    # chest 0/3 vs 2/2).
+    aspect_ratio = "3:2"
+    sheet, whole, same, bare = ("prop", "object", "object", "")
+    if payload.kind == "character":
+        sheet, whole, same, bare = ("character", "body", "character", ", with nothing added to the body described and no ground under it")
+    shown = (f"The image is a {sheet} sheet of {name}, in two separate views with no text.\n\n{description}\n\n"
+             f"On the left, the whole {whole} is seen from the front{bare}. On the right, the same {same} has been spun a half "
+             "turn, at the same size, so its back faces the viewer and nothing on its front can be seen.")  # fmt: skip
+    prompt = (f"This is an RGBA image with transparency. {_styled(shown, payload.style)}\n\n"
               "The image has alpha channel and the background is transparent.")  # fmt: skip
-    return _picture_call(payload.function, prompt, payload.pictures, payload.aspect_ratio)
+    return _picture_call(payload.function, prompt, payload.pictures, aspect_ratio)
 
 
 @app.project_adapter("setup")
