@@ -74,6 +74,7 @@ from cozy_runtime.author import (
 from h3_tables.table_layout import TableLayout
 
 from .adaln_pruned import AdaLNPrunedMiniMaxH3Transformer, step_invariants
+from .cell_texture import CellEqualizer
 from .conditioner import FinalHiddenState, PresentationLength, build_text_conditioner
 from .continuation import (
     AVContext,
@@ -1649,6 +1650,7 @@ class OfficialH3Pipeline:
         frames = 0
         delivery = state.get("continuation_delivery")
         tail = DeliveredFrames(delivery) if delivery is not None else None
+        equalize = CellEqualizer(VAE_SPATIAL_RATIO)
         with torch.no_grad():
             chunks = vae.decode_chunks(state.latents * latents_std + latents_mean)
             while True:
@@ -1660,7 +1662,7 @@ class OfficialH3Pipeline:
                     return frames if tail is None else tail.finish()
                 video = chunk.float() * pixel_std + pixel_mean
                 frames += int(video.shape[2])
-                selected = video[0].permute(1, 0, 2, 3)
+                selected = equalize(video[0].permute(1, 0, 2, 3))
                 if tail is not None:
                     selected = tail.push(selected)
                 if selected.shape[0]:
