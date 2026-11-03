@@ -1496,29 +1496,10 @@ async def fl2va_segment(
 app.child_task(fl2va_segment)
 
 
-class ResumeFrameInput(msgspec.Struct, kw_only=True):
-    """A continued video, and the frames it resumes after."""
-
-    video: Annotated[VideoFile, FileBound(max_bytes=1 << 30, max_decoded_bytes=512 << 20)]
-    frames: Annotated[int, msgspec.Meta(ge=1)]
-
-
-class ResumeFrame(msgspec.Struct):
-    #: A child's result is a granted input of the parent, so it may feed a segment; a picture the
-    #: parent saved itself may not (run 20651; h3a-098's first proof, 25980).
-    image: ImageFile
-
-
-@invocable(memoize=True)
-async def resume_frame(ctx: Context, *, payload: ResumeFrameInput, out: Outputs, tel: Telemetry) -> ResumeFrame:
+def _resume_frame(video: VideoFile, frames: int, out: Outputs) -> ImageFile:
     """A continued video's last frame before `frames`: the one its next segment starts from."""
-    start = Fraction(max(payload.frames - 6, 0), FPS)
-    decoded = payload.video.read(start=start, end=Fraction(payload.frames, FPS), audio=False)
-    image = PILImage.frombytes("RGB", (decoded.width, decoded.height), decoded.frames_rgb[-1])
-    return ResumeFrame(out.save_image(image))
-
-
-app.child_task(resume_frame)
+    decoded = video.read(start=Fraction(max(frames - 6, 0), FPS), end=Fraction(frames, FPS), audio=False)
+    return out.save_image(PILImage.frombytes("RGB", (decoded.width, decoded.height), decoded.frames_rgb[-1]))
 
 
 @invocable(
@@ -2046,8 +2027,7 @@ async def generate(ctx: Context, payload: GenerateInput, out: Outputs, tel: Tele
         if not call.references and resumed is not None:
             # A resumed video's first segment carries into Ref2VA, which needs a picture: with none of the request's
             # own, it starts from the continued video's last frame as the same world state (h3a-098, run 25881).
-            frame = await resume_frame(payload=ResumeFrameInput(video=resumed.video, frames=done))  # type: ignore[call-arg]
-            files[anchor[0].name] = frame.image
+            files[anchor[0].name] = _resume_frame(resumed.video, done, out)
             call = segment_call(text, [*own, *anchor], style=style, soundscape=sound, music=music, index=index,
                               retained=retained, added=added, forced=forced | {anchor[0].name}, **role)  # fmt: skip
         calls.append(call if call.references else SegmentCall(_fl2va_text(text, payload), [], call.warnings))
