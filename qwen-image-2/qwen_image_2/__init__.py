@@ -245,8 +245,11 @@ def adapt_environment(op: PictureOperation) -> list[Invocation]:
 
 @app.project_adapter("storyboard")
 def adapt_storyboard(op: PictureOperation) -> list[Invocation]:
-    """The pictures it mentions, composed into one scene, as written: it is a character and a place together."""
-    return _picture(op, op.fields, _said(op.fields))
+    """The pictures it mentions, composed into one scene, as written: it is a character and a place together. Each picture's own
+    description follows, since a mention reads as `<image3>` alone: with no words for it, a third picture was dropped in 3 of 3
+    seeds (runs 27130, 27161, 27174), and with them kept (27200)."""
+    described = [f"<{read.name}>: {text}" for read in op.reads if (text := str(read.fields.get("description", "")).strip())]
+    return _picture(op, op.fields, "\n\n".join(filter(None, (_said(op.fields), "\n".join(described)))))
 
 
 @app.project_adapter("setup")
