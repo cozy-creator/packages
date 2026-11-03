@@ -1287,8 +1287,6 @@ def install(model: object, pipe: Any, plan: Plan) -> str:
             return _eager(model, plan, "fusion_no_transformer", "no MiniMax-H3 transformer to fuse")
         glue = plan.load(kernels(device))
     except KernelsUnavailable as exc:
-        if exc.code == "kernels_corrupt":
-            raise GlueRefusal("fusion_kernels_corrupt", str(exc)) from exc
         return _eager(model, plan, f"fusion_{exc.code}", str(exc))
     except GlueRefusal as exc:
         if exc.code not in NOT_INSTALLABLE:

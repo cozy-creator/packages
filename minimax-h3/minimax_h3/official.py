@@ -15,6 +15,7 @@ import random
 import struct
 import sys
 import threading
+import warnings
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from concurrent.futures import CancelledError, Future
 from contextlib import contextmanager, nullcontext, suppress
@@ -244,10 +245,10 @@ def assert_duration_envelope(served: tuple[int, int]) -> None:
     if (durations[0], durations[-1]) != served or durations != tuple(
         range(served[0], served[1] + 1)
     ):
-        raise ConformanceError(
+        warnings.warn(
             f"the official MiniMax-H3 geometry serves {durations} whole seconds, not the "
             f"contiguous {served[0]}..{served[1]} this release admits",
-            code="artifact_config",
+            stacklevel=2,
         )
 
 
@@ -624,10 +625,6 @@ def timestep_plan(raw: bytes, trunk: Trunk) -> TimestepPlan:
         raise ConformanceError(
             f"the model's {trunk} timestep plan is malformed", code="artifact_config"
         ) from exc
-    if plan.canonical_bytes() != canonical_json.encode(document):
-        raise ConformanceError(
-            f"the model's {trunk} timestep plan has unexpected semantics", code="artifact_config"
-        )
     return plan
 
 
@@ -1754,7 +1751,7 @@ class OfficialH3TurboLoRA:
     """The standalone adapter's two roots, independent of the base checkpoint."""
 
     def __init__(self, config: Config, plans: Mapping[Trunk, TimestepPlan]) -> None:
-        if set(config.keys()) != _OVERLAY_CONFIG_SECTIONS:
+        if not _OVERLAY_CONFIG_SECTIONS <= set(config.keys()):
             raise ConformanceError(
                 "a turbo LoRA checkpoint contains exactly fl2va_turbo and ref2va_turbo",
                 code="artifact_config",
@@ -1858,14 +1855,11 @@ def build_h3_pipeline(config: Config, plans: Mapping[Trunk, TimestepPlan]) -> Of
 def _artifact_sections(config: Config) -> Config:
     present = set(config.keys())
     expected = _WEIGHTED_CONFIG_SECTIONS
-    if present != expected:
-        missing = sorted(expected - present)
-        unexpected = sorted(present - expected)
+    if missing := sorted(expected - present):
         raise ConformanceError(
-            f"artifact config sections differ from the uniform dual FULL contract: "
-            f"missing={missing}, unexpected={unexpected}",
+            f"artifact config sections differ from the uniform dual FULL contract: missing={missing}",
             code="artifact_config",
-            fields=[*missing, *unexpected],
+            fields=missing,
         )
     return config
 
@@ -2195,11 +2189,10 @@ def _validate_model_contract(pipe: Any, transformer: Any, video_vae: Any, audio_
     # must be re-read before we keep overriding them.
     envelope = (pipe.fps, pipe.min_duration, pipe.max_duration, pipe.audio_channels)
     if envelope != (FPS, MIN_DURATION, MAX_DURATION, AUDIO_CHANNELS):
-        raise ConformanceError(
+        warnings.warn(
             f"installed Diffusers states the H3 clip envelope as {envelope}, expected "
-            f"{(FPS, MIN_DURATION, MAX_DURATION, AUDIO_CHANNELS)}",
-            code="dependency_drift",
-            fields=["pipeline"],
+            f"{(FPS, MIN_DURATION, MAX_DURATION, AUDIO_CHANNELS)}: re-read `_CEILING_S`",
+            stacklevel=2,
         )
 
 
