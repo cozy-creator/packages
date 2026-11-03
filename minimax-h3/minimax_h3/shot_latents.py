@@ -3,8 +3,8 @@ the shot's own latent, as NVIDIA's `infer.py --input-latents` does, instead of r
 decoded video) and `continue_from` resumes.
 
 The file is safetensors: `latents`, the normalized `(1, 24, T, h, w)` video latents in float16 on
-the VAE's `5n + 2` grid; `context`, its last piece's carry (encoded `AVContext`), which a
-continuation's first piece carries in; and metadata naming the format, the latent space
+the VAE's `5n + 2` grid; `context`, its last segment's carry (encoded `AVContext`), which a
+continuation's first segment carries in; and metadata naming the format, the latent space
 (`vae_space`), the frames the shot delivered (the grid's `17n + 5` frames, or fewer when its
 duration was trimmed) and the text it was made from (`text`), which an upscale re-renders it from."""
 
@@ -36,8 +36,8 @@ def vae_space(vae: Any) -> str:
 
 
 def save(latents: torch.Tensor, frames: int, space: str, context: bytes, text: str) -> bytes:
-    """A shot's latents, with its last piece's carry (`context`, encoded `AVContext`), what a
-    `continue_from` of it carries into its first piece, and the text it was made from (`text`),
+    """A shot's latents, with its last segment's carry (`context`, encoded `AVContext`), what a
+    `continue_from` of it carries into its first segment, and the text it was made from (`text`),
     which an upscale that re-renders it reads when given none."""
     carry = torch.frombuffer(bytearray(context), dtype=torch.uint8) if context else torch.zeros(0, dtype=torch.uint8)
     return save_tensors(
@@ -47,8 +47,8 @@ def save(latents: torch.Tensor, frames: int, space: str, context: bytes, text: s
 
 
 def context(data: bytes) -> bytes:
-    """The carry a piece continues from: a shot latents file's `context`, else `data` itself (a
-    piece's own exported context)."""
+    """The carry a segment continues from: a shot latents file's `context`, else `data` itself (a
+    segment's own exported context)."""
     if metadata_or_none(data).get("format") != FORMAT:
         return data
     return bytes(load_tensors(data)["context"].numpy().tobytes())

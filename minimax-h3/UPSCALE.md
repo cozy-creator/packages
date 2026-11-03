@@ -2,7 +2,7 @@
 
 `upscale` takes one whole shot, of any length, to `resolution`: `1080p`, `1440p` (default) or `2160p`.
 `upscale.model` picks how. Audio and frame timing are kept either way. A project upscales
-each approved shot, whole, before the edit: per-piece upscaling shows a change of detail at
+each approved shot, whole, before the edit: per-segment upscaling shows a change of detail at
 the joins (run 20682).
 
 ```yaml
