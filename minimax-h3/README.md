@@ -37,7 +37,9 @@ turbo: true
 The result is `video` (768p mp4), `latents` (its own, for `upscale` and `continue_from`) and
 `warnings`. `follow: loose` keeps a picture's arrangement, not its frame (read at 512 px: a world
 state). `continue_from` puts the request on that video's timeline: `duration_s` is the whole length,
-text before its end is history, and the result is the whole video, decoded as one. With a plate,
+text before its end is history, and the result is the whole video, decoded as one. A caller that makes
+a longer video in consecutive calls gives each earlier call `shot_duration_s`, the whole length: text
+timed from that call's `duration_s` on is left for the later calls, with no warning. With a plate,
 add its edit LoRA (`--lora alissonerdx/minimax-h3-character-swap`, …) and start the prompt with that
 LoRA's trigger (`body_swap:`). The latents also carry the text the video was made from, which
 `upscale` uses when given no prompt.

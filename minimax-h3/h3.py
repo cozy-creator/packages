@@ -1697,6 +1697,10 @@ class GenerateInput(msgspec.Struct, kw_only=True):
     first_frame: FrameImage = None
     last_frame: FrameImage = None
     continue_from: Continue | None = None
+    shot_duration_s: Annotated[float | None, msgspec.Meta(
+        description="The whole video's length, when this call makes only its start and later calls continue it "
+                    "(`continue_from`). Text timed from `duration_s` on is theirs: it is left out of this call, with no warning.",
+    )] = None  # fmt: skip
     music: str = "N/A"
     turbo: bool = True
     steps: FullSteps | None = None
@@ -1821,8 +1825,9 @@ class _Block(NamedTuple):
     words: int
 
 
-def _blocks(body: str, duration_s: float) -> tuple[list[_Block], list[str]]:
-    """The timed blocks of a text's description. A time out of order or past the end stays plain text, with a warning."""
+def _blocks(body: str, duration_s: float, shot_s: float | None = None) -> tuple[list[_Block], list[str]]:
+    """The timed blocks of a text's description. A time out of order or past the end stays plain text, with a warning
+    that names the whole video's length (`shot_s`, when this call makes only its start)."""
     blocks: list[_Block] = []
     warnings: list[str] = []
     last = 0.0
@@ -1832,9 +1837,25 @@ def _blocks(body: str, duration_s: float) -> tuple[list[_Block], list[str]]:
             blocks.append(_Block(at, bool(found[1]), found.start(), found.end()))
             last = at
         elif at > 0:
-            why = "out of order" if at <= last else f"past the end of this {duration_s:g} s video"
+            why = "out of order" if at <= last else f"past the end of this {max(duration_s, shot_s or 0):g} s video"
             warnings.append(f"the time {_clock(at)} is {why}: it stays plain text. Update its timing.")
     return blocks, warnings
+
+
+def _this_call(prompt: str, duration_s: float, shot_s: float) -> str:
+    """`prompt` without what later calls of its video render: its description from the first time at or past this call's
+    end and inside the video (`shot_s`). Their text would otherwise reach this call and be acted on early (se-100)."""
+    head, body, tail = _prompt_parts(prompt)
+    begin, stop = description_span(body)
+    last = 0.0
+    for found in _TIMED.finditer(body, begin, stop):
+        at = int(found[2]) * 60 + float(found[3])
+        if at > last and duration_s <= at < shot_s:
+            kept = "\n\n".join(filter(None, (body[:found.start()].rstrip(), body[stop:].strip())))
+            return "\n\n".join(filter(None, (head + kept, tail)))
+        if last < at < duration_s:
+            last = at
+    return prompt
 
 
 def piece_texts(prompt: str, starts: Sequence[float], *, continued: bool = False, duration_s: float = math.inf) -> list[str]:
@@ -1965,6 +1986,8 @@ async def generate(ctx: Context, payload: GenerateInput, out: Outputs, tel: Tele
     (`--lora`, `model.base_model`) serves every piece. Returns the video and its latents, whose
     carry a later `continue_from` resumes."""
     ctx.raise_if_cancelled()
+    if payload.shot_duration_s is not None:
+        payload = replace(payload, prompt=_this_call(payload.prompt, payload.duration_s, payload.shot_duration_s))
     if payload.turbo and payload.steps is not None:
         raise InvalidRequest(f"turbo runs its LoRA's 8 steps; steps {payload.steps} needs turbo: false",
                              fields=["steps"])  # fmt: skip
@@ -1982,7 +2005,7 @@ async def generate(ctx: Context, payload: GenerateInput, out: Outputs, tel: Tele
             raise InvalidRequest(f"duration_s {payload.duration_s:g} is not past the {done / FPS:.2f} s "
                                  "continue_from already has", fields=["duration_s"])  # fmt: skip
     begun = done / FPS
-    blocks, timing = _blocks(_prompt_parts(payload.prompt)[1], payload.duration_s)
+    blocks, timing = _blocks(_prompt_parts(payload.prompt)[1], payload.duration_s, payload.shot_duration_s)
     pieces, opens, planned = plan_pieces(payload.duration_s - begun, [block.at - begun for block in blocks if block.at > begun + _JOIN_S],
                                          carried=resumed is not None)  # fmt: skip
     references, warnings = _shot_references(payload)
