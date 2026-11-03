@@ -1810,8 +1810,8 @@ def plan_segments(duration_s: float, marks: Iterable[float], carried: bool = Fal
 def place_writes(writes: Sequence[WorldWrite], opens: Sequence[float], starts: Sequence[int], total: int) -> tuple[list[tuple[int, int, int]], list[str]]:
     """Which frame each write takes, oldest first: (its position in `writes`, its segment, the frame in that segment's delivery).
     A segment's text runs on from the time it opens (`opens`) at its first frame (`starts`), so that is what a time counts from;
-    a time that opens a segment is the last frame of the one before, which that segment reads. Segment -1 is a continued video's
-    kept part, on that video's clock. A write adds no segment."""
+    a time that opens a segment belongs to the one before, so that segment reads it. Segment -1 is a continued video's kept part,
+    on that video's clock. A write adds no segment."""
     ends = [*starts[1:], total]
     landed, warnings = [], []
     for position, write in enumerate(writes):
