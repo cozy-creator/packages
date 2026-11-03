@@ -96,14 +96,10 @@ def windows(latent_frames: int, rows_per_frame: int, capacity: int) -> list[tupl
     latent frames 5/3 x (1, 4, 4, 4, 4) from a clip's start, so a window off the grid gives each
     chunk's one-frame latent a four-frame step: it flickers at every chunk (run 22567, the middle
     of three windows, starting at 32)."""
-    fit = min(max(0, capacity - _BESIDE) // _ROW_BYTES, _MOST_ROWS) // rows_per_frame
+    # A card that can't hold the smallest window still gets it: the Runtime pages what doesn't fit.
+    fit = max(min(max(0, capacity - _BESIDE) // _ROW_BYTES, _MOST_ROWS) // rows_per_frame, 2 * OVERLAP + 2)
     if latent_frames <= fit:
         return [(0, latent_frames)]
-    if fit < 2 * OVERLAP + 2:
-        raise MemoryError(
-            f"one {rows_per_frame}-row latent frame needs {_ROW_BYTES * rows_per_frame} bytes; "
-            f"this card holds windows of {fit} frames, too few to refine in overlapping windows"
-        )
     count = 2
     while True:
         need = math.ceil((latent_frames + (count - 1) * OVERLAP) / count)

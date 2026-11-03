@@ -297,15 +297,17 @@ class Upscale(msgspec.Struct, kw_only=True):
     temporal_overlap: Annotated[int, msgspec.Meta(ge=0, le=16)] | None = None
     prepend_frames: Annotated[int, msgspec.Meta(ge=0, le=32)] | None = None
 
-    def __post_init__(self) -> None:
-        if self.batch_size is not None and self.batch_size % 4 != 1:
-            raise ValueError(
-                f"batch_size must be 4n+1 (1, 5, 9, 13, 17, 21, ...), got {self.batch_size}"
-            )
-        if self.strength is not None and round(self.strength, 3) not in REGENERATE_STRENGTHS:
-            raise ValueError(
-                f"strength is one of {', '.join(map(str, REGENERATE_STRENGTHS))}, got {self.strength}"
-            )
+    def fitted(self) -> tuple[Upscale, list[str]]:
+        """This method on values it serves, and a warning for each that moved: `strength` to the
+        nearest of `REGENERATE_STRENGTHS`, `batch_size` up to the next 4n+1."""
+        strength, batch_size, notes = self.strength, self.batch_size, []
+        if strength is not None and round(strength, 3) not in REGENERATE_STRENGTHS:
+            strength = min(REGENERATE_STRENGTHS, key=lambda served: abs(served - self.strength))
+            notes.append(f"upscale.strength {self.strength} runs at {strength}, the nearest served")
+        if batch_size is not None and batch_size % 4 != 1:
+            batch_size += (1 - batch_size) % 4
+            notes.append(f"upscale.batch_size {self.batch_size} runs at {batch_size}: it takes 4n+1")
+        return msgspec.structs.replace(self, strength=strength, batch_size=batch_size), notes
 
     def ignored(self) -> list[str]:
         """Warnings for the fields the chosen method does not read."""
@@ -897,12 +899,6 @@ class RegenerateInput(msgspec.Struct, kw_only=True):
     #: step 0 dense then sparse at tau 1.0 (`sol_engine`), `fast` all sparse at tau 1.75.
     preset: Preset = "balanced"
 
-    def __post_init__(self) -> None:
-        if round(self.strength, 3) not in REGENERATE_STRENGTHS:
-            raise ValueError(
-                f"strength is one of {', '.join(map(str, REGENERATE_STRENGTHS))}, got {self.strength}"
-            )
-
 
 class RegenerateOutput(msgspec.Struct):
     video: Annotated[VideoFile, FileBound(max_bytes=1 << 30, media_types=("video/mp4",))]
@@ -921,12 +917,10 @@ def _read_draft(video: VideoFile) -> tuple[Any, Any | None, int, int, list[str]]
     last frame held up to the grid; its `(channels, samples)` soundtrack or None, the sample
     rate, and how many frames it delivers."""
     probe = video.probe()
-    if probe.frame_rate != FPS:
-        raise InvalidRequest(f"regenerate takes 24 fps video, not {probe.frame_rate}", fields=["video"])
-    expected = round(probe.duration * FPS)
-    pixels = torch.empty((expected + 17, *_DRAFT_SIZE, 3), dtype=torch.uint8)
+    pixels = torch.empty((round(probe.duration * FPS) + 17, *_DRAFT_SIZE, 3), dtype=torch.uint8)
     pcm: list[list[Any]] = []
     count = width = height = rate = 0
+    origin: Fraction | None = None
     with video.stream() as stream:
         for event in stream:
             if isinstance(event, DecodedMediaHeader):
@@ -934,18 +928,21 @@ def _read_draft(video: VideoFile) -> tuple[Any, Any | None, int, int, list[str]]
                     raise InvalidRequest("regenerate needs a video stream", fields=["video"])
                 width, height = event.video.width, event.video.height
             elif isinstance(event, DecodedVideoFrame):
-                if count == len(pixels):
-                    raise InvalidRequest(f"the video decodes past its header's {expected} frames", fields=["video"])
+                # Onto the 24-fps clock: a faster source's extra frames go, a slower one's hold.
+                origin = event.start_time if origin is None else origin
+                slot = round((event.start_time - origin) * FPS)
+                if slot < count:
+                    continue
+                if slot >= len(pixels):
+                    pixels = torch.cat([pixels, torch.empty((slot + 17 - len(pixels), *_DRAFT_SIZE, 3), dtype=torch.uint8)])
                 frame = torch.frombuffer(bytearray(event.rgb), dtype=torch.uint8)
-                pixels[count] = _cover(frame.reshape(height, width, 3))
-                count += 1
+                pixels[count : slot + 1] = _cover(frame.reshape(height, width, 3))
+                count = slot + 1
             else:
                 rate = event.sample_rate
                 pcm.append([np.frombuffer(data, dtype=np.float32) for data in event.pcm_f32le])
-    if count < MIN_FRAMES:
-        raise InvalidRequest(f"regenerate takes at least {MIN_FRAMES} frames (5 s at 24 fps), not {count}",
-                             fields=["video"])  # fmt: skip
-    grid = count + (-(count - 5)) % 17
+    # Under 5 s the refine runs on its last frame held to 5 s, and the result is cut back.
+    grid = max(count + (-(count - 5)) % 17, MIN_FRAMES)
     if grid > len(pixels):
         pixels = torch.cat([pixels, pixels[-1:].expand(grid - len(pixels), -1, -1, -1)])
     pixels = pixels[:grid]
@@ -953,6 +950,8 @@ def _read_draft(video: VideoFile) -> tuple[Any, Any | None, int, int, list[str]]
     warnings = [] if (height, width) == _DRAFT_SIZE else [
         f"the {width}x{height} video was cover-scaled to 1344x768 for the refine"
     ]  # fmt: skip
+    if probe.frame_rate != FPS:
+        warnings.append(f"the {float(probe.frame_rate):g} fps video was read at 24 fps for the refine")
     waveform = None
     if pcm:
         waveform = torch.from_numpy(np.stack([np.concatenate(c) for c in zip(*pcm, strict=True)]))
@@ -965,8 +964,6 @@ def _read_soundtrack(video: VideoFile, frames: int) -> tuple[Any | None, int]:
     """The `(channels, samples)` soundtrack of a video its latents stand for (`frames` frames at
     24 fps), and its sample rate; its pictures are not decoded."""
     probe = video.probe()
-    if probe.frame_rate != FPS:
-        raise InvalidRequest(f"regenerate takes 24 fps video, not {probe.frame_rate}", fields=["video"])
     if abs(round(probe.duration * FPS) - frames) > 1:
         raise InvalidRequest(f"the latents are {frames} frames and the video {round(probe.duration * FPS)}: "
                              "they are not the same shot", fields=["latents"])  # fmt: skip
@@ -1502,19 +1499,25 @@ async def regenerate_shot(
     """`upscale.model: regenerate-2k` over a whole shot: its 768p latent upscaled, refined at
     `resolution` in overlapping windows where the card needs them, and decoded with its
     soundtrack."""
-    # In the order they run; the shot's own latents skip the encode.
-    encode = () if payload.latents is not None else ("vae",)
-    ctx.plan(*encode, "upscaler", "text_encoder", "audio_vae", {"transformer", "fl2va_regenerate"}, "vae")
-    cancel = ctx.raise_if_cancelled
+    # The shot's own latent: no encode, and no decode-and-encode loss (NVIDIA's `--input-latents`).
+    # Latents it can't use, the video stands for them.
+    warnings: list[str] = []
+    latents = None
     if payload.latents is not None:
-        # The shot's own latent: no encode, and no decode-and-encode loss (NVIDIA's `--input-latents`).
-        with tel.stage("read_video", overall_range=(0.00, 0.08)):
+        try:
             latents, frames = shot_latents.load(payload.latents.read_bytes(), base_model.latent_space(), _DRAFT_LATENT)
             waveform, sample_rate = _read_soundtrack(payload.video, frames)
-            warnings: list[str] = []
-    else:
+        except InvalidRequest as refused:
+            latents = None
+            warnings.append(f"these latents can't be used, so it works from the video: {refused.message}")
+    # In the order they run; the shot's own latents skip the encode.
+    encode = () if latents is not None else ("vae",)
+    ctx.plan(*encode, "upscaler", "text_encoder", "audio_vae", {"transformer", "fl2va_regenerate"}, "vae")
+    cancel = ctx.raise_if_cancelled
+    if latents is None:
         with tel.stage("read_video", overall_range=(0.00, 0.03)):
-            pixels, waveform, sample_rate, frames, warnings = _read_draft(payload.video)
+            pixels, waveform, sample_rate, frames, read = _read_draft(payload.video)
+            warnings += read
         with tel.stage("encode_video", overall_range=(0.03, 0.08)):
             latents = base_model.encode_clip(pixels)
         del pixels
@@ -1969,7 +1972,7 @@ async def generate(ctx: Context, payload: GenerateInput, out: Outputs, tel: Tele
                                          carried=resumed is not None)  # fmt: skip
     references, reading = _shot_references(payload)
     warnings += [*reading, *timing, *planned]
-    for name, keyframe in (("first_frame", opening), ("last_frame", payload.last_frame)):
+    for name, keyframe in (("first_frame", payload.first_frame), ("last_frame", payload.last_frame)):
         if keyframe is not None:
             shape = (keyframe.probe().width, keyframe.probe().height)
             if within_ratio(*shape) != shape:
@@ -2118,7 +2121,9 @@ async def generate(ctx: Context, payload: GenerateInput, out: Outputs, tel: Tele
         request = UpscaleInput(video=video, resolution=payload.resolution, upscale=payload.upscale,
                                prompt=_upscale_prompt(payload), seed=segment_seed(payload.seed, ctx.request_id, count),
                                latents=latents, preset=payload.preset)  # fmt: skip
-        video = (await upscale(ctx, request, out, tel)).video
+        upscaled = await upscale(ctx, request, out, tel)
+        video = upscaled.video
+        warnings += upscaled.warnings
         out.publish("video", video, label=f"Video at {payload.resolution.value}")
     ctx.release_gpus()
     tel.log("h3 shot", segments=count, delivered_frames=total, turbo=turbo, preset=payload.preset)
@@ -2175,6 +2180,7 @@ class UpscaleInput(msgspec.Struct, kw_only=True):
 
 class UpscaleOutput(msgspec.Struct):
     video: Annotated[VideoFile, FileBound(max_bytes=1 << 30, media_types=("video/mp4",))]
+    warnings: list[str] = msgspec.field(default_factory=list)
 
 
 async def upscale(ctx: Context, payload: UpscaleInput, out: Outputs, tel: Telemetry) -> UpscaleOutput:
@@ -2185,13 +2191,9 @@ async def upscale(ctx: Context, payload: UpscaleInput, out: Outputs, tel: Teleme
     are logged."""
     seed = payload.seed if payload.seed is not None else int.from_bytes(
         hashlib.sha256(f"{ctx.request_id}/h3/upscale".encode()).digest()[:4], "big")  # fmt: skip
-    method = payload.upscale or Upscale()
-    warnings = method.ignored()
+    method, warnings = (payload.upscale or Upscale()).fitted()
+    warnings += method.ignored()
     if method.model == "regenerate-2k":
-        probe = payload.video.probe()
-        if (probe.width, probe.height) != (1344, 768):
-            raise InvalidRequest(f"regenerate-2k refines H3's own 1344x768; this video is {probe.width}x{probe.height}: "
-                                 "upscale it with seedvr2", fields=["video"])  # fmt: skip
         # The text the video was made from: given, else the one its latents carry.
         prompt = payload.prompt.strip() or (shot_latents.text(payload.latents.read_bytes()) if payload.latents else "")
         if not prompt:
@@ -2202,12 +2204,13 @@ async def upscale(ctx: Context, payload: UpscaleInput, out: Outputs, tel: Teleme
                                preset=payload.preset)  # fmt: skip
         with tel.scope(f"Regenerate at {payload.resolution.value}"):
             result = await cast(Callable[..., Awaitable[RegenerateOutput]], regenerate_shot)(payload=call)
-        tel.log("h3 upscale", model=method.model, warnings="; ".join(warnings + result.warnings))
-        return UpscaleOutput(result.video)
+        warnings += result.warnings
+        tel.log("h3 upscale", model=method.model, warnings="; ".join(warnings))
+        return UpscaleOutput(result.video, warnings)
     if payload.resolution is Resolution.NATIVE:
-        raise InvalidRequest("seedvr2 restores above 768p; 768p is regenerate-2k's refine-only pass",
-                             fields=["resolution"])  # fmt: skip
-    probe = payload.video.probe()
+        warnings.append("seedvr2 restores above 768p, so at 768p the video comes back as it is")
+        with payload.video.stream() as events:
+            return UpscaleOutput(out.save_video_stream(iter(events)).video, warnings)
     restore = cast(Callable[..., Awaitable[RestorationOutput]], restore_video)
     with tel.scope(f"SeedVR2 upscale to {payload.resolution.value}"):
         restored = await restore(
@@ -2216,8 +2219,9 @@ async def upscale(ctx: Context, payload: UpscaleInput, out: Outputs, tel: Teleme
             aspect_ratio="source",
             **{k: getattr(method, k) for k in _SEEDVR2_FIELDS if getattr(method, k) is not None},
         )  # fmt: skip
+    warnings += getattr(restored, "warnings", [])
     tel.log("h3 upscale", model=method.model, warnings="; ".join(warnings))
-    return UpscaleOutput(restored.video)
+    return UpscaleOutput(restored.video, warnings)
 
 
 app.entrypoint(generate, emits_media=True, accelerator=False)
