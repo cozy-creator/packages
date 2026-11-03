@@ -1097,6 +1097,9 @@ def _references_to_video(
     ctx.raise_if_cancelled()
     view = model.for_request(ctx, seed=payload.seed)
     notes = _retargeted(view.adapters, "transformer_ref")
+    if context is not None and context.provenance != expected_context_provenance:
+        # The carry is latents, the same for every lane and release that share the VAE (`shot_latents.vae_space`).
+        notes.append("this continues a video made with another model release, lane or turbo setting; the join may show")
     if payload.frames != held_frames(delivery, payload.videos):
         raise InvalidRequest(
             f"a {payload.duration_s} s segment with these references holds "
@@ -1127,7 +1130,6 @@ def _references_to_video(
             frames=frames,
             context=context,
             delivery=delivery,
-            expected_context_provenance=expected_context_provenance,
             reference_image_short_edges=sizing.edges,
             task=task,
             plan=plan,

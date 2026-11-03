@@ -1082,7 +1082,6 @@ class OfficialH3Pipeline:
         plan: TimestepPlan | None = None,
         context: AVContext | None = None,
         delivery: ContinuationPlan | None = None,
-        expected_context_provenance: str | None = None,
         guide: GuideClip | None = None,
         anchors: Sequence[tuple[Any, Literal["first", "last"]]] = (),
     ) -> Any:
@@ -1095,10 +1094,6 @@ class OfficialH3Pipeline:
             context.validate()
             if delivery is None or delivery.carried != context.carry:
                 raise InvalidRequest("context and delivery plan disagree", code="h3_continuation")
-            if expected_context_provenance != context.provenance:
-                raise InvalidRequest(
-                    "continuation renderer provenance differs", code="h3_continuation"
-                )
         elif delivery is not None and delivery.carried:
             raise InvalidRequest(
                 "a carried picture or sound requires a completed context", code="h3_continuation"
