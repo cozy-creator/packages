@@ -7,10 +7,26 @@ on:
   pull_request:
   merge_group:
   workflow_dispatch:
+    inputs:
+      base:
+        description: Comparison commit for the affected source suites
+        type: string
+        required: true
+      creator_ref:
+        description: Creator commit for the harness, TensorD and TensorFS
+        type: string
+        required: true
+      runtime_ref:
+        description: Runtime commit for the candidate wheel
+        type: string
+        required: true
 jobs:
   e2e:
     uses: cozy-creator/cozy-creator/.github/workflows/e2e.yaml@master
     with:
       repo: packages
       ref: ${{ github.event.merge_group.head_sha || github.event.pull_request.head.sha || github.sha }}
-      base: ${{ github.event.merge_group.base_sha || github.event.pull_request.base.sha }}
+      base: ${{ github.event.merge_group.base_sha || github.event.pull_request.base.sha || inputs.base }}
+      creator_ref: ${{ inputs.creator_ref }}
+      stack_ref: ${{ inputs.creator_ref || 'master' }}
+      runtime_ref: ${{ inputs.runtime_ref || 'master' }}
