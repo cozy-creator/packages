@@ -2119,11 +2119,10 @@ async def generate(ctx: Context, payload: GenerateInput, out: Outputs, tel: Tele
                             next_context_audio=plan.successor.audio, latents=True,
                         ),
                     )  # fmt: skip
-        except ChildCallError as failure:
+        except ChildCallError:
             # Concurrent caller cancellation must not become a successful partial result.
             ctx.raise_if_cancelled()
-            raise OutputError(f"segment {index + 1} of {count} failed ({failure.code}): {str(failure)[:512]}",
-                              code="segment_failed") from failure  # fmt: skip
+            raise
         expected = result.provenance
         context = result.context
         returned.append(result)
