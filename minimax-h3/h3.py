@@ -143,7 +143,7 @@ from story import (
     own_retention,
     encoder_prompt,
     segment_call,
-    validate_references,
+    unique_names,
     voices,
     without_sections,
     _HEADER,
@@ -1917,8 +1917,7 @@ def _shot_references(payload: GenerateInput) -> tuple[list[StoryReference], list
                 refs.append(StoryReference(name=ref.name, kind="background", image=ref.image, description=ref.description))
     if payload.plate is not None:
         refs.append(StoryReference(name="Plate", kind="anchor_video", video=payload.plate.video))
-    validate_references(refs)
-    return refs, warnings
+    return refs, warnings + unique_names(refs)
 
 
 def segment_seed(seed: int | None, request_id: str, index: int) -> int:

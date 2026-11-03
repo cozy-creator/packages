@@ -12,13 +12,12 @@ from cozy_runtime.author import (
     AudioFile,
     AudioPreparation,
     ImageFile,
-    InvalidRequest,
     Reference,
     VideoFile,
     name_key,
 )
 
-from minimax_h3.official import Task, validate_reference_policy
+from minimax_h3.official import MAX_AUDIO_REFERENCES, MAX_IMAGE_REFERENCES, MAX_REFERENCES, MAX_VIDEO_REFERENCES, Task
 
 #: MiniMax's full-reference sections in their canonical order. A `style` section is read and
 #: moved into the description's opening, where the guide puts it (ref guide 5.2).
@@ -110,24 +109,40 @@ def voices(references: Sequence[StoryReference]) -> tuple[list[StoryReference], 
     return pool, owners
 
 
-def validate_references(references: Sequence[StoryReference]) -> None:
-    """One name per reference, voices only on characters. The H3 limits are per call
-    (`_segment_call`)."""
-    names: set[str] = set()
-    for reference in voices(references)[0]:
-        if (key := name_key(reference.name)) in names:
-            raise InvalidRequest(f"two assets are named <{reference.name}>", code="asset_name", fields=["assets"])
-        names.add(key)
-        if reference.voice is not None and reference.kind != "character":
-            raise InvalidRequest(f"only a character takes a voice, not {reference.kind} <{reference.name}>",
-                                 fields=["assets"])  # fmt: skip
+def unique_names(references: Sequence[StoryReference]) -> list[str]:
+    """One name per reference, and a warning for each that had to move: a second <Bob> is <Bob 2>, so
+    a mention of <Bob> means the first. The H3 limits are per call (`_within_limits`)."""
+    taken: set[str] = set()
+    warnings = []
+    for reference in references:
+        name, number = reference.name, 1
+        while name_key(name) in taken:
+            number += 1
+            name = f"{reference.name} {number}"
+        if number > 1:
+            warnings.append(f"two references are named <{reference.name}>: <{reference.name}> means the first, and the "
+                            f"other is <{name}>")  # fmt: skip
+            reference.name = name
+        taken.add(name_key(name))
+    return warnings
 
 
-def _policy(kinds: list[str], prefix: str = "") -> None:
-    try:
-        validate_reference_policy(kinds)
-    except ValueError as exc:
-        raise InvalidRequest(f"{prefix}{exc}", code="reference_policy", fields=["assets"]) from exc
+def _within_limits(
+    used: Sequence[StoryReference], added: frozenset[str]
+) -> tuple[list[StoryReference], list[StoryReference]]:
+    """A call's references inside what H3 takes, and those left out: what cozy added itself first,
+    then the last named. A plate stays, since it is the render's frames."""
+    limits = {"image": MAX_IMAGE_REFERENCES, "video": MAX_VIDEO_REFERENCES, "audio": MAX_AUDIO_REFERENCES}
+    kept = list(used)
+    left: list[StoryReference] = []
+    ours = [ref for ref in used if ref.name in added]
+    others = [ref for ref in used if ref.name not in added and ref.kind != "anchor_video"]
+    for ref in [*ours, *reversed(others)]:
+        kind = _POLICY[ref.kind]
+        if sum(_POLICY[kept_ref.kind] == kind for kept_ref in kept) > limits[kind] or len(kept) > MAX_REFERENCES:
+            kept.remove(ref)
+            left.append(ref)
+    return kept, left
 
 
 def encoder_prompt(task: Task, prompt: str) -> str:
@@ -247,10 +262,11 @@ def _segment_call(
         (ref for ref in pool if ref.kind == "background" or ref.name in named | forced),
         key=lambda ref: ref.kind == "anchor_video",
     )
-    if sum(ref.kind == "anchor_video" for ref in used) > 1:
-        raise InvalidRequest(
-            f"segment {index + 1} anchors more than one video's frames", fields=["assets"]
-        )
+    used, left = _within_limits(used, added)
+    if left:
+        warnings.append(f"Segment {index + 1}: H3 takes at most {MAX_IMAGE_REFERENCES} pictures, {MAX_VIDEO_REFERENCES} "
+                        f"videos, {MAX_AUDIO_REFERENCES} sounds, so it goes without "
+                        f"{', '.join(f'<{ref.name}>' for ref in left)}.")  # fmt: skip
     if all(ref.kind == "audio" for ref in used):
         # H3's Ref2VA needs a picture: a segment that names none renders from its text and
         # keyframes (FL2VA), which takes no audio reference.
@@ -258,7 +274,6 @@ def _segment_call(
             warnings.append(f"Segment {index + 1} names only audio and no picture, so it renders "
                             "without references.")
         return SegmentCall(text, [], warnings)
-    _policy([_POLICY[ref.kind] for ref in used], f"segment {index + 1}: ")
     sections = _sections(text)
     _, start, end = sections.get("detailed_description", (0, 0, 0))
     markers = list(_SHOT.finditer(text, start, end))
