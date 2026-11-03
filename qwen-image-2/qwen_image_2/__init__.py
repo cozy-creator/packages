@@ -217,15 +217,17 @@ def _picture_call(function: str, prompt: str, pictures: list[ProjectPicture], as
 
 @app.project_adapter("entity")
 def adapt_entity(payload: ProjectEntity) -> Invocation:
-    """A project's character or prop as its description says, on a transparent background, in the words of Qwen's model
-    card, or an establishing view of the empty set."""
-    description = payload.description.strip()
+    """A project's character, prop or place: the style, what it is, then how to draw it (`render: instructions:`). No layout is
+    assumed. A character or prop is on a transparent background, in the words of Qwen's model card, and a place with no
+    instructions is an establishing view of the empty set."""
+    instructions = payload.instructions.strip()
     if payload.kind == "environment":
-        prompt = _styled(f"{description}\n\nAn establishing view of the empty set, no people.", payload.style)
+        how = instructions or "An establishing view of the empty set, no people."
+        prompt = _styled(f"{payload.description.strip()}\n\n{how}", payload.style)
         return _picture_call(payload.function, prompt, payload.pictures, payload.aspect_ratio)
-    # What it shows is the description's to say (Paul, 11-03): no sheet or layout is assumed. Only the background is ours,
-    # since a reference needs its subject alone.
-    prompt = (f"This is an RGBA image with transparency. {_styled(description, payload.style)}\n\n"
+    # Only the background is ours, since a reference needs its subject alone.
+    said = "\n\n".join(filter(None, (payload.description.strip(), instructions)))
+    prompt = (f"This is an RGBA image with transparency. {_styled(said, payload.style)}\n\n"
               "The image has alpha channel and the background is transparent.")  # fmt: skip
     return _picture_call(payload.function, prompt, payload.pictures, payload.aspect_ratio)
 
