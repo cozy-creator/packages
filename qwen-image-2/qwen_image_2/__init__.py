@@ -12,6 +12,7 @@ from cozy_runtime.author import (
     App,
     Context,
     Invocation,
+    Operation,
     Picture,
     ImageRequest,
     ImageResult,
@@ -21,10 +22,12 @@ from cozy_runtime.author import (
     ProjectPicture,
     ProjectSetup,
     ProjectWorldState,
+    Refuse,
     Sizes,
     Telemetry,
     held,
     name_label,
+    spoken,
 )
 from PIL import Image
 
@@ -213,6 +216,56 @@ def _styled(text: str, style: str) -> str:
 def _picture_call(function: str, prompt: str, pictures: list[ProjectPicture], aspect_ratio: str | None) -> Invocation:
     request: dict[str, Any] = {"prompt": prompt, "pictures": [{"name": p.name, "image": p.image} for p in pictures]}
     return Invocation(function=function, input=request | ({"aspect_ratio": aspect_ratio} if aspect_ratio else {}))
+
+
+class PictureFields(msgspec.Struct, kw_only=True):
+    """What `generate`'s adapter reads of an asset. `description` is what it is, which shots read too; `instructions` how to
+    draw this picture, which nothing else reads; `camera` a setup's position; `init` and `blocking` a world state's start."""
+
+    description: str = ""
+    instructions: str = ""
+    style: str = ""
+    aspect_ratio: str | None = None
+    camera: str = ""
+    from_frame: bool = False
+    init: str = ""
+    blocking: str = ""
+
+
+class PictureOperation(Operation, kw_only=True):
+    fields: PictureFields
+
+
+@app.project_adapter("generate", "generate_turbo")
+def adapt(op: PictureOperation) -> Invocation:
+    """An asset's picture, in the words this model was tuned by eye on (cl-726), by `kind`; any other kind says what it says.
+    No layout is assumed. A character or prop is on a transparent background, in the words of Qwen's model card, and a place
+    with no instructions is an establishing view of the empty set. A setup's camera is in screen terms as written: bare
+    camera words return a mirror (environment-angles). A storyboard is its description."""
+    f = op.fields
+    description, how = f.description.strip(), f.instructions.strip()
+    said = "\n\n".join(filter(None, (description, how)))
+    if op.kind == "environment":
+        prompt = _styled(f"{description}\n\n{how or 'An establishing view of the empty set, no people.'}", f.style)
+    elif op.kind in ("character", "prop"):
+        # Only the background is ours, since a reference needs its subject alone.
+        prompt = (f"This is an RGBA image with transparency. {_styled(said, f.style)}\n\n"
+                  "The image has alpha channel and the background is transparent.")  # fmt: skip
+    elif op.kind == "storyboard":
+        prompt = said  # roughly how a shot is laid out: as written, no sheet, no transparency
+    elif op.kind == "setup":
+        if not op.reads:
+            raise Refuse(f"{op.asset} is a setup that names no place")
+        place, kept = op.reads[0].name, "the picture" if f.from_frame else "the image"
+        opening = f"Show the place in this picture, <{place}>, with nobody in it," if f.from_frame else f"Show this exact <{place}>"
+        prompt = (f"{opening} from another camera position: {f.camera.strip().rstrip('.')}. Keep every object, material, the light "
+                  f"and the weather exactly as in {kept}; add nothing new, no people.")  # fmt: skip
+    else:
+        prompt = _styled("\n\n".join(filter(None, (said, f.init.strip(), f.blocking.strip()))), f.style)
+    pictures = [{"name": spoken(f"<{read.name}>")[1:-1], "image": read.files["image"].sha256}
+                for read in op.reads if "image" in read.files]  # fmt: skip
+    request: dict[str, Any] = {"prompt": spoken(prompt), "pictures": pictures}
+    return Invocation(function=op.function, input=request | ({"aspect_ratio": f.aspect_ratio} if f.aspect_ratio else {}))
 
 
 @app.project_adapter("entity")

@@ -399,7 +399,8 @@ def _segment_call(
                 f"<{ref.name}> is the world state shown in {slot}: how the set is arranged and "
                 + ("where each person and object stands." if characters else "where everything in it stands.")
             )
-            if ref.name in added:
+            # Its arrangement, never a look to keep, unless the text's own line says otherwise.
+            if ref.name in added or ((ref.name, "picture") not in retained and not author.get(name_key(ref.name))):
                 kept = "each person's and object's position" if characters else "where everything in it stands"
                 retention.append(f"<{ref.name}>: attribute_transfer - keep the set's arrangement and {kept} "
                                  f"from {slot}, not its exact frame, framing or moment.")
@@ -416,7 +417,7 @@ def _segment_call(
         if (ref.name, _SLOT[ref.kind]) not in retained:
             if line := author.get(name_key(ref.name)):
                 retention.append(f"<{ref.name}>: {line}")
-            elif FILE[ref.kind] == "image" and ref.name not in added:
+            elif FILE[ref.kind] == "image" and ref.kind != "world_state":
                 retention.append(f"<{ref.name}>: {_KEEP_LOOK}")
     tag = " + ".join(task for task in TASKS if task in tasks)
     given = _tasks(text)
