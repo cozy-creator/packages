@@ -161,6 +161,26 @@ class SegmentCall(NamedTuple):
     warnings: list[str]
 
 
+def named_in(text: str, references: Sequence[StoryReference]) -> frozenset[str]:
+    """The names of the references `text` names, as a segment's call reads its tokens: by name, else by global label."""
+    pool = voices(references)[0]
+    by_key = {name_key(ref.name): ref for ref in pool}
+    by_slot = _numbering(pool)
+    return frozenset(ref.name for token in MENTION.finditer(text) if (ref := _named(token, by_key, by_slot)))
+
+
+def _named(
+    token: re.Match[str], by_key: Mapping[str, StoryReference], by_slot: Mapping[tuple[str, int], StoryReference]
+) -> StoryReference | None:
+    """The reference a token names: by its name first (any case, `_`, `-` and space alike), else as `<Picture N>`,
+    `<Audio N>` or `<Video N>`."""
+    named = by_key.get(name_key(token.group(1)))
+    media = _MEDIA.fullmatch(name_key(token.group(1)))
+    if named is not None or media is None:
+        return named
+    return by_slot.get((media.group(1).lower(), int(media.group(2))))
+
+
 def segment_call(
     text: str,
     references: Sequence[StoryReference],
@@ -206,9 +226,9 @@ def _segment_call(
     keyframes: bool = False,
     continues: bool = False,
 ) -> SegmentCall:
-    """Backgrounds and `forced` always; characters, world states, audio and videos only where
-    the text names them, all in request order, as H3 packs and labels them. With no references
-    at all, none: the segment renders from its text and keyframes (FL2VA).
+    """`forced` always; every other reference only where the text names it, its summary included, all in
+    request order, as H3 packs and labels them. With no references left, none: the segment renders from its
+    text and keyframes (FL2VA), and says so if it had some to name.
 
     A token names a reference by its name first (any case, `_`, `-` and space alike), else as
     the global `<Picture N>`/`<Audio N>`/`<Video N>`; these are renumbered for the call. A
@@ -227,11 +247,7 @@ def _segment_call(
     text, style = _open_with_style(text, style)
 
     def lookup(token: re.Match[str]) -> StoryReference | None:
-        named = by_key.get(name_key(token.group(1)))
-        media = _MEDIA.fullmatch(name_key(token.group(1)))
-        if named is not None or media is None:
-            return named
-        return by_slot.get((media.group(1).lower(), int(media.group(2))))
+        return _named(token, by_key, by_slot)
 
     def part(token: re.Match[str], ref: StoryReference) -> tuple[str, str]:
         """The reference and which of its labels a token names: a clip's sound or picture."""
@@ -257,7 +273,7 @@ def _segment_call(
     # An anchored clip packs after every other reference, so when it leaves the packed
     # references (`guide_rows`) every other label stays as H3 numbers it.
     used = sorted(
-        (ref for ref in pool if ref.kind == "background" or ref.name in named | forced),
+        (ref for ref in pool if ref.name in named | forced),
         key=lambda ref: ref.kind == "anchor_video",
     )
     used, left = _within_limits(used, added)
@@ -268,9 +284,8 @@ def _segment_call(
     if all(ref.kind == "audio" for ref in used):
         # H3's Ref2VA needs a picture: a segment that names none renders from its text and
         # keyframes (FL2VA), which takes no audio reference.
-        if used:
-            warnings.append(f"Segment {index + 1} names only audio and no picture, so it renders "
-                            "without references.")
+        warnings.append(f"Segment {index + 1} names only audio and no picture, so it renders without references."
+                        if used else f"Segment {index + 1} names none of the shot's references, so it renders without them.")
         return SegmentCall(text, [], warnings)
     sections = _sections(text)
     _, start, end = sections.get("detailed_description", (0, 0, 0))

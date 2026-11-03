@@ -141,6 +141,7 @@ from story import (
     description_span,
     own_retention,
     encoder_prompt,
+    named_in,
     segment_call,
     unique_names,
     voices,
@@ -2002,22 +2003,31 @@ async def generate(ctx: Context, payload: GenerateInput, out: Outputs, tel: Tele
                                                for start, plan in zip(starts, plans, strict=True)])  # fmt: skip
     warnings += notes
     style, sound, music = payload.style, payload.soundscape, payload.music
-    # A continued segment's place is the previous segment's last frame, with the setup plate beside it as an
-    # attribute_transfer world state: the plate as the place pulls a shot that has moved from its framing back
-    # with a cut (run 20996), and the last frame alone lets the place drift (run 21955). A resumed video's
-    # first segment has no last frame of a segment (its parent cannot hand one on): the plate alone holds the place.
-    places = [ref.name for ref in references if ref.kind == "background"]
-    plates = [StoryReference(name=f"{ref.name} plate", kind="world_state", image=ref.image,
-                             description=f"It is <{ref.name}>'s setup plate: its architecture and materials, not its framing.")
-              for ref in references if ref.kind == "background"]  # fmt: skip
-    forced = frozenset(ref.name for ref in [*references, *plates])
-    files: dict[str, File | None] = {ref.name: getattr(ref, FILE[ref.kind]) for ref in voices([*references, *plates])[0]}
+    # A segment gets what its text names. A continued segment's place, named by the segment before it too, is that
+    # segment's last frame, with the setup plate beside it as an attribute_transfer world state: the plate as the place
+    # pulls a shot that has moved from its framing back with a cut (run 20996), and the last frame alone lets the place
+    # drift (run 21955). A resumed video's first segment has no last frame of a segment (its parent cannot hand one on):
+    # the plate alone holds the place. A place first named later is its own picture.
+    plates = {ref.name: StoryReference(name=f"{ref.name} plate", kind="world_state", image=ref.image,
+                                       description=f"It is <{ref.name}>'s setup plate: its architecture and materials, not its framing.")
+              for ref in references if ref.kind == "background"}  # fmt: skip
+    # Only a plate to follow goes unnamed: the request gave it, and no text can name it.
+    forced = frozenset(ref.name for ref in references if ref.kind == "anchor_video")
+    files: dict[str, File | None] = {ref.name: getattr(ref, FILE[ref.kind])
+                                     for ref in voices([*references, *plates.values()])[0]}  # fmt: skip
     calls: list[SegmentCall] = []
+    carried: list[frozenset[str]] = []
+    named_before: frozenset[str] = frozenset()
     people = _has_people(payload)
     here = "who and what" if people else "what"
     texts = segment_texts(payload.prompt, [begun + at for at in opens], continued=resumed is not None, duration_s=duration_s)
     for index, text in enumerate(texts):
         own = [ref for ref in references if ref.kind not in CLIPS or ref.name in windows[index]]
+        named = named_in(text, references)
+        places = frozenset(name for name in plates if name in named and (index == 0 or name in named_before))
+        named_before = named
+        carried.append(places if index else frozenset())
+        beside = [plates[name] for name in plates if name in places]
         # A continued segment with no place to carry starts from the previous segment's last frame as a world state,
         # after the request's own pictures so their <Picture N> keep their numbers: who and what is where now. Every
         # continued segment that saw one joined cleanly (se-087: 9 of 9 seams); those without, character-only and
@@ -2026,14 +2036,17 @@ async def generate(ctx: Context, payload: GenerateInput, out: Outputs, tel: Tele
                                  description=f"This segment starts from it: {here} is where now.")
                   ] if not places else []  # fmt: skip
         if index:
-            own = [*own, *plates, *anchor]
+            own = [*own, *beside, *anchor]
         elif resumed is not None:
-            own = [*(ref for ref in own if ref.kind != "background"), *plates]
-        added = frozenset(ref.name for ref in [*plates, *anchor])
+            own = [*(ref for ref in own if ref.kind != "background"), *beside]
+        else:
+            beside = []
+        added = frozenset(ref.name for ref in [*beside, *anchor])
+        kept = forced | {ref.name for ref in beside}
         role = {"keyframes": bool(index == 0 and opening or index + 1 == count and payload.last_frame),
                 "continues": index == 0 and resumed is not None}  # fmt: skip
         call = segment_call(text, own, style=style, soundscape=sound, music=music, index=index, retained=retained, added=added,
-                          forced=forced | ({ref.name for ref in anchor} if index else set()), **role)  # fmt: skip
+                          forced=kept | ({ref.name for ref in anchor} if index else set()), **role)  # fmt: skip
         if payload.plate is not None and index == 0 and any(ref.kind == "anchor_video" for ref in call.references) and all(
             ref.kind in ("anchor_video", "audio") for ref in call.references
         ):
@@ -2043,13 +2056,13 @@ async def generate(ctx: Context, payload: GenerateInput, out: Outputs, tel: Tele
                                    description=f"This segment starts from it: {here} is where now.")  # fmt: skip
             files[start.name] = _resume_frame(payload.plate.video, 1, out)
             call = segment_call(text, [*own, start], style=style, soundscape=sound, music=music, index=index,
-                                retained=retained, added=added | {start.name}, forced=forced | {start.name}, **role)  # fmt: skip
+                                retained=retained, added=added | {start.name}, forced=kept | {start.name}, **role)  # fmt: skip
         if not call.references and resumed is not None:
             # A resumed video's first segment carries into Ref2VA, which needs a picture: with none of the request's
             # own, it starts from the continued video's last frame as the same world state (h3a-098, run 25881).
             files[anchor[0].name] = _resume_frame(resumed.video, done, out)
             call = segment_call(text, [*own, *anchor], style=style, soundscape=sound, music=music, index=index,
-                              retained=retained, added=added, forced=forced | {anchor[0].name}, **role)  # fmt: skip
+                              retained=retained, added=added, forced=kept | {anchor[0].name}, **role)  # fmt: skip
         calls.append(call if call.references else SegmentCall(_fl2va_text(text, payload), [], call.warnings))
         warnings += call.warnings
     tel.log("h3 shot segments", segments=count, seconds=",".join(map(str, segments)), resumed_at=done,
@@ -2094,7 +2107,7 @@ async def generate(ctx: Context, payload: GenerateInput, out: Outputs, tel: Tele
                             earlier_videos=(*before[1], *(r.video for r in returned)) if end_segment else (),
                             picture_edges=tuple(_LOOSE_EDGE if ref.kind == "world_state" else 0
                                                 for ref in call.references if FILE[ref.kind] == "image"),
-                        ), assets=_call_assets(files | ({place: returned[-1].last_frame for place in places} if index else {}),
+                        ), assets=_call_assets(files | {place: returned[-1].last_frame for place in carried[index]},
                                                call.references),
                     )  # fmt: skip
                 else:
@@ -2106,11 +2119,10 @@ async def generate(ctx: Context, payload: GenerateInput, out: Outputs, tel: Tele
                             next_context_audio=plan.successor.audio, latents=True,
                         ),
                     )  # fmt: skip
-        except ChildCallError as failure:
+        except ChildCallError:
             # Concurrent caller cancellation must not become a successful partial result.
             ctx.raise_if_cancelled()
-            raise OutputError(f"segment {index + 1} of {count} failed ({failure.code}): {str(failure)[:512]}",
-                              code="segment_failed") from failure  # fmt: skip
+            raise
         expected = result.provenance
         context = result.context
         returned.append(result)
