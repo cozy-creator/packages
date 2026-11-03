@@ -66,7 +66,6 @@ from cozy_runtime.author import (
     VideoProbe,
     invocable,
     prefetch,
-    name_key,
 )
 from msgspec.structs import replace
 from PIL import Image as PILImage
@@ -2015,9 +2014,6 @@ async def generate(ctx: Context, payload: GenerateInput, out: Outputs, tel: Tele
         warnings.append("this prompt has no overall_soundscape and no soundscape, so it goes as N/A, which H3 reads as silence")
     if not _FIRST_SHOT.search(payload.prompt):
         warnings.append("this prompt has no `[Shot 1]`, which MiniMax's guide opens a shot with; it goes as written")
-    if unkept := [f"<{ref.name}>" for ref in references if name_key(ref.name) not in retained]:
-        warnings.append(f"retention_analysis has no line for {', '.join(unkept)}: MiniMax's guide gives each reference "
-                        "one, saying what to keep")  # fmt: skip
     if payload.aspect_ratio is not None:
         w, h = (int(side) for side in payload.aspect_ratio.split(":"))
         if abs(w / h - 1344 / 768) > 0.05:

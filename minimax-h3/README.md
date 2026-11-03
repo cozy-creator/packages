@@ -45,8 +45,8 @@ LoRA's trigger (`body_swap:`). The latents also carry the text the video was mad
 `upscale` uses when given no prompt.
 
 - **Text.** The prompt goes as written, in [MiniMax's form](https://huggingface.co/MiniMaxAI/MiniMax-H3/blob/main/docs/VIDEO_PROMPT_WRITING_GUIDE_ref_en.md):
-  open with `[Shot 1]` and write `retention_analysis` lines yourself, or get a warning. Added only: each name's
-  `<Picture N>` in `subject_definitions`, the `summary`'s task tag, `style` from its field, `non_diegetic_music: N/A` when none is written, since H3
+  open with `[Shot 1]`, or get a warning. Added only: each name's `<Picture N>` in `subject_definitions`, the `summary`'s task tag,
+  a `retention_analysis` line for each picture without one (`<name>: keep the look shown in the reference.`), `style` from its field, `non_diegetic_music: N/A` when none is written, since H3
   otherwise invents score and speech, and `overall_soundscape` from the `soundscape` field, or `N/A` with a warning,
   since the guide reads that as silence. Your own line replaces any of these.
 - **Sections.** With a `detailed_description:`, timestamps are read only inside it. `summary:` goes on the first piece
@@ -67,7 +67,7 @@ LoRA's trigger (`body_swap:`). The latents also carry the text the video was mad
   rest are timed on its clock, whose head is the carried frames, and its `[Shot N]` renumber from 1. So nothing redraws
   the scene at a join (restating an opening pulled runs 24980/24981 back there, with a cut), and each block says only
   what happens then: the carried frames and pictures hold the rest. A later piece drops the `summary`, and takes each
-  reference's own `retention_analysis` line without its `(appears in …)`. It sees the previous piece's last frame as a
+  reference's own `retention_analysis` line without its `(appears in …)`, or the default line for a picture. It sees the previous piece's last frame as a
   picture after the shot's own (a place takes that frame instead). A shot of several pieces decodes their latents as one
   video, so no join steps the picture.
 - **Timing that doesn't fit.** Nothing is refused. With no timestamps a video past 15 s renders 15 s and warns. A block too
