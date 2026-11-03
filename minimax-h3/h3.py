@@ -1744,6 +1744,9 @@ def plan_segments(duration_s: float, marks: Iterable[float], carried: bool = Fal
                             "video needs `At MM:SS.mmm` at the start of a line.")  # fmt: skip
         elif index == len(groups) - 1:
             length = next((n for n in lengths if _delivered(n, first) >= wanted), most)
+            if _delivered(length, first) - wanted > FPS:
+                warnings.append(f"a segment renders at least {MIN_DURATION_S} s, so this runs "
+                                f"{(_delivered(length, first) - wanted) / FPS:.1f} s longer than asked.")  # fmt: skip
         else:
             length = min(lengths, key=lambda n: (abs(_delivered(n, first) - wanted), n))
             past = _delivered(length, first) - wanted
@@ -1935,28 +1938,41 @@ async def generate(ctx: Context, payload: GenerateInput, out: Outputs, tel: Tele
     (`--lora`, `model.base_model`) serves every segment. Returns the video and its latents, whose
     carry a later `continue_from` resumes."""
     ctx.raise_if_cancelled()
-    if payload.turbo and payload.steps is not None:
-        raise InvalidRequest(f"turbo runs its LoRA's 8 steps; steps {payload.steps} needs turbo: false",
-                             fields=["steps"])  # fmt: skip
-    if payload.plate is not None and payload.first_frame is not None:
-        raise InvalidRequest("a plate sets the video's opening; it takes no first_frame", fields=["first_frame"])
-    resumed, done = payload.continue_from, 0
+    warnings: list[str] = []
+    # Asking for steps asks for the full model, the only one that has a choice of them.
+    turbo = payload.turbo and payload.steps is None
+    if payload.turbo and not turbo:
+        warnings.append(f"steps {payload.steps} runs the full model, not turbo's 8 steps")
+    resumed, done, opening = payload.continue_from, 0, payload.first_frame
+    if opening is not None and (payload.plate is not None or resumed is not None):
+        warnings.append(f"{'the plate' if payload.plate is not None else 'continue_from'} sets the opening; first_frame is ignored")
+        opening = None
+    if resumed is not None and resumed.latents is None:
+        # Nothing carries in without latents: a new video opens on the old one's last frame.
+        warnings.append("continue_from has no latents, so this is a new video opening on its last frame, and it comes "
+                        "back alone; the join may show")  # fmt: skip
+        last = math.ceil(resumed.video.probe().duration * FPS)
+        opening = (await resume_frame(payload=ResumeFrameInput(video=resumed.video, frames=last))).image  # type: ignore[call-arg]
+        resumed = None
+    duration_s = payload.duration_s
     if resumed is not None:
-        if resumed.latents is None:
-            raise InvalidRequest("continue_from resumes from the latents this package returned with the video; "
-                                 "a video alone is not continued yet", fields=["continue_from.latents"])  # fmt: skip
-        if payload.first_frame is not None:
-            raise InvalidRequest("continue_from sets the opening; it takes no first_frame", fields=["first_frame"])
+        assert resumed.latents is not None
         done = shot_latents.delivered(resumed.latents.read_bytes())
-        if done >= payload.duration_s * FPS:
-            raise InvalidRequest(f"duration_s {payload.duration_s:g} is not past the {done / FPS:.2f} s "
-                                 "continue_from already has", fields=["duration_s"])  # fmt: skip
+        if done >= duration_s * FPS:
+            duration_s += done / FPS
+            warnings.append(f"duration_s is the whole length with continue_from, and {payload.duration_s:g} s isn't past its "
+                            f"{done / FPS:.2f} s: {payload.duration_s:g} s are added")  # fmt: skip
     begun = done / FPS
-    blocks, timing = _blocks(_prompt_parts(payload.prompt)[1], payload.duration_s)
-    segments, opens, planned = plan_segments(payload.duration_s - begun, [block.at - begun for block in blocks if block.at > begun + _JOIN_S],
+    blocks, timing = _blocks(_prompt_parts(payload.prompt)[1], duration_s)
+    segments, opens, planned = plan_segments(duration_s - begun, [block.at - begun for block in blocks if block.at > begun + _JOIN_S],
                                          carried=resumed is not None)  # fmt: skip
-    references, warnings = _shot_references(payload)
-    warnings += [*timing, *planned]
+    references, reading = _shot_references(payload)
+    warnings += [*reading, *timing, *planned]
+    for name, keyframe in (("first_frame", opening), ("last_frame", payload.last_frame)):
+        if keyframe is not None:
+            shape = (keyframe.probe().width, keyframe.probe().height)
+            if within_ratio(*shape) != shape:
+                warnings.append(f"{name} is past 4:1; its middle is used")
     retained = own_retention(payload.prompt)
     if not payload.soundscape.strip() and not _SOUNDSCAPE.search(payload.prompt):
         warnings.append("this prompt has no overall_soundscape and no soundscape, so it goes as N/A, which H3 reads as silence")
@@ -1966,7 +1982,7 @@ async def generate(ctx: Context, payload: GenerateInput, out: Outputs, tel: Tele
         w, h = (int(side) for side in payload.aspect_ratio.split(":"))
         if abs(w / h - 1344 / 768) > 0.05:
             warnings.append(f"minimax-h3 renders 1344x768 for now, not {payload.aspect_ratio}")
-    steps = None if payload.turbo else payload.steps
+    steps = None if turbo else payload.steps
     count = len(segments)
     # Every segment carries into a successor, its last too: the video's latents keep that carry, which
     # a `continue_from` of it resumes.
@@ -1990,7 +2006,7 @@ async def generate(ctx: Context, payload: GenerateInput, out: Outputs, tel: Tele
     calls: list[SegmentCall] = []
     people = _has_people(payload)
     here = "who and what" if people else "what"
-    texts = segment_texts(payload.prompt, [begun + at for at in opens], continued=resumed is not None, duration_s=payload.duration_s)
+    texts = segment_texts(payload.prompt, [begun + at for at in opens], continued=resumed is not None, duration_s=duration_s)
     for index, text in enumerate(texts):
         own = [ref for ref in references if ref.kind not in CLIPS or ref.name in windows[index]]
         # A continued segment with no place to carry starts from the previous segment's last frame as a world state,
@@ -2005,7 +2021,7 @@ async def generate(ctx: Context, payload: GenerateInput, out: Outputs, tel: Tele
         elif resumed is not None:
             own = [*(ref for ref in own if ref.kind != "background"), *plates]
         added = frozenset(ref.name for ref in [*plates, *anchor])
-        role = {"keyframes": bool(index == 0 and payload.first_frame or index + 1 == count and payload.last_frame),
+        role = {"keyframes": bool(index == 0 and opening or index + 1 == count and payload.last_frame),
                 "continues": index == 0 and resumed is not None}  # fmt: skip
         call = segment_call(text, own, style=style, soundscape=sound, music=music, index=index, retained=retained, added=added,
                           forced=forced | ({ref.name for ref in anchor} if index else set()), **role)  # fmt: skip
@@ -2046,7 +2062,7 @@ async def generate(ctx: Context, payload: GenerateInput, out: Outputs, tel: Tele
     returned: list[SegmentOutput] = []
     for index, (call, plan) in enumerate(zip(calls, plans, strict=True)):
         ctx.raise_if_cancelled()
-        first = payload.first_frame if index == 0 else None
+        first = opening if index == 0 else None
         last = payload.last_frame if index + 1 == count else None
         end_segment = joined and index + 1 == count
         span = (sum(work[:index]) / sum(work), sum(work[: index + 1]) / sum(work))
@@ -2059,7 +2075,7 @@ async def generate(ctx: Context, payload: GenerateInput, out: Outputs, tel: Tele
                     result = await ref2va_segment(  # type: ignore[call-arg]
                         payload=Ref2VAInput(
                             prompt=call.prompt, seed=seeds[index], duration_s=segments[index], steps=steps,
-                            turbo=payload.turbo, preset=payload.preset, frames=held_frames(plan, uses), videos=uses,
+                            turbo=turbo, preset=payload.preset, frames=held_frames(plan, uses), videos=uses,
                             previous_provenance=expected, context=context if plan.carried else None,
                             context_frames=cast(ContextFrames, plan.carried.frames),
                             context_audio=plan.carried.audio,
@@ -2077,7 +2093,7 @@ async def generate(ctx: Context, payload: GenerateInput, out: Outputs, tel: Tele
                     result = await fl2va_segment(  # type: ignore[call-arg]
                         payload=FL2VAInput(
                             prompt=call.prompt, seed=seeds[index], duration_s=segments[index], steps=steps,
-                            turbo=payload.turbo, preset=payload.preset, first_frame=first, last_frame=last,
+                            turbo=turbo, preset=payload.preset, first_frame=first, last_frame=last,
                             next_context_frames=cast(ContextFrames, plan.successor.frames),
                             next_context_audio=plan.successor.audio, latents=True,
                         ),
@@ -2104,7 +2120,7 @@ async def generate(ctx: Context, payload: GenerateInput, out: Outputs, tel: Tele
         video = (await upscale(ctx, request, out, tel)).video
         out.publish("video", video, label=f"Video at {payload.resolution.value}")
     ctx.release_gpus()
-    tel.log("h3 shot", segments=count, delivered_frames=total, turbo=payload.turbo, preset=payload.preset)
+    tel.log("h3 shot", segments=count, delivered_frames=total, turbo=turbo, preset=payload.preset)
     return ShotResult(video=video, warnings=list(dict.fromkeys(warnings)), latents=latents)
 
 
