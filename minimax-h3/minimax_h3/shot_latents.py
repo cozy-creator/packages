@@ -6,13 +6,18 @@ The file is safetensors: `latents`, the normalized `(1, 24, T, h, w)` video late
 the VAE's `5n + 2` grid; `context`, its last segment's carry (encoded `AVContext`), which a
 continuation's first segment carries in; and metadata naming the format, the latent space
 (`vae_space`), the frames the shot delivered (the grid's `17n + 5` frames, or fewer when its
-duration was trimmed) and the text it was made from (`text`), which an upscale re-renders it from."""
+duration was trimmed) and the text it was made from (`text`), which an upscale re-renders it from.
+
+A shot cut at a join (`continue_from.at_s`, `cut`) is the same file: its latents up to there, the carry there from those
+latents, and `sound`, the sound that stays, whose last second the carry takes once encoded: the file holds no audio latents
+before a shot's end."""
 
 from __future__ import annotations
 
 import hashlib
 import json
 import struct
+from fractions import Fraction
 from typing import Any
 
 import torch
@@ -20,9 +25,12 @@ from cozy_runtime.author import InvalidRequest
 from safetensors.torch import load as load_tensors
 from safetensors.torch import save as save_tensors
 
+from .continuation import TICKS_PER_FRAME, AVContext, audio_ticks, decode_context, encode_context, video_tokens
 from .official import FRAMES_PER_CHUNK, LATENTS_PER_CHUNK
 
 FORMAT = "minimax-h3/latents/2"
+#: H3's sound: 32 kHz, 40 audio latents a second.
+SAMPLES_PER_TICK = 800
 #: The config the latent space depends on: what the encoder writes and the decoder reads.
 _SPACE = ("latent_channels", "latents_mean", "latents_std", "spatial_compression_ratio", "temporal_compression_ratio")
 
@@ -52,6 +60,40 @@ def context(data: bytes) -> bytes:
     if metadata_or_none(data).get("format") != FORMAT:
         return data
     return bytes(load_tensors(data)["context"].numpy().tobytes())
+
+
+def nearest_join(frames: float) -> int:
+    """The grid's `17k + 5` frames nearest `frames`, past a carried second of sound."""
+    return FRAMES_PER_CHUNK * max(2, round((frames - 5) / FRAMES_PER_CHUNK)) + 5
+
+
+def cut(data: bytes, frames: int, carried: int, kept_sound: torch.Tensor) -> bytes:
+    """The shot latents file `data` as a shot of `frames` (`nearest_join`) with `kept_sound`, its `(channels, samples)` sound
+    up to `audio_ticks(frames)`: a successor's carry is its last `carried` frames there, its own tokens, in phase, whichever
+    segment made them."""
+    tensors, meta = load_tensors(data), metadata(data)
+    tokens = video_tokens(frames)
+    latents = tensors["latents"][:, :, :tokens]
+    window = latents[:, :, tokens - video_tokens(carried) :].float().contiguous()
+    made = decode_context(context(data)).provenance
+    carry = encode_context(AVContext(window, None, Fraction(0), made))
+    samples = audio_ticks(frames) * SAMPLES_PER_TICK
+    pad = samples - int(kept_sound.shape[1])
+    # A last frame's sound can fall a little short of the video's clock.
+    sound = torch.nn.functional.pad(kept_sound, (0, max(pad, 0)))[:, :samples].contiguous()
+    return save_tensors(
+        {"latents": latents.contiguous(), "context": torch.frombuffer(bytearray(carry), dtype=torch.uint8), "sound": sound},
+        metadata={**meta, "frames": str(frames)},
+    )
+
+
+def sound(data: bytes) -> tuple[torch.Tensor, Fraction] | None:
+    """A cut shot's `sound` and how far past its picture it ends, in ticks; None for anything else."""
+    kept = load_tensors(data).get("sound")
+    if kept is None:
+        return None
+    frames = int(metadata(data)["frames"])
+    return kept, audio_ticks(frames) - TICKS_PER_FRAME * frames
 
 
 def delivered(data: bytes) -> int:
