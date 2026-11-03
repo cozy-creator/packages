@@ -135,7 +135,6 @@ from story import (
     IMAGE_READ_BYTES,
     MIN_CLIP_SECONDS,
     REFERENCE_AUDIO,
-    VIDEO_MAX_BYTES,
     VIDEO_READ_BYTES,
     SegmentCall,
     StoryReference,
@@ -152,6 +151,9 @@ from story import (
 app = App()
 
 _MIB = 1 << 20
+#: An output's or latents' byte bound: TensorD's output allowance reads it (256 MiB where none is
+#: declared), and the disk is the real limit. A long 2160p upscale must not end in a refusal.
+ANY_SIZE = 1 << 40
 #: Standalone audio references share one 15-second budget in a call; past it each is cut to its share.
 _MAX_AUDIO_SECONDS = Fraction(15, 1)
 
@@ -162,7 +164,7 @@ Reference = ImageFile | VideoFile | AudioFile
 _REFERENCE = (
     Annotated[ImageFile, FileBound(max_decoded_bytes=IMAGE_READ_BYTES)]
     | Annotated[
-        VideoFile, FileBound(max_bytes=VIDEO_MAX_BYTES, max_decoded_bytes=VIDEO_READ_BYTES)
+        VideoFile, FileBound(max_decoded_bytes=VIDEO_READ_BYTES)
     ]
     | Annotated[AudioFile, FileBound(max_decoded_bytes=AUDIO_READ_BYTES)]
 )
@@ -325,7 +327,7 @@ class H3VideoOutput(msgspec.Struct):
     """The catalog wire shape. Checkpoint, plan, geometry, and digest facts remain
     attempt observations (se-012): they ride Telemetry, never the customer result."""
 
-    video: Annotated[VideoFile, FileBound(max_bytes=1 << 30, media_types=("video/mp4",))]
+    video: Annotated[VideoFile, FileBound(max_bytes=ANY_SIZE, media_types=("video/mp4",))]
     warnings: list[str]
 
 
@@ -880,7 +882,7 @@ FULL_RECIPES: dict[Preset, FullRecipe] = {
     "fast": FullRecipe(10, 1.0, stepcache.FirstBlockCache(0.08)),
 }
 #: A shot's latents (`shot_latents`): `ShotResult.latents`, `UpscaleInput.latents`.
-Latents = Annotated[File, FileBound(max_bytes=1 << 30, media_types=("application/octet-stream",))]
+Latents = Annotated[File, FileBound(max_bytes=ANY_SIZE, media_types=("application/octet-stream",))]
 
 
 class RegenerateInput(msgspec.Struct, kw_only=True):
@@ -889,7 +891,7 @@ class RegenerateInput(msgspec.Struct, kw_only=True):
     and refined by H3 at `resolution` from `prompt`, the video's soundtrack kept. The 7:4 frame
     fills 16:9, stretched 1.6% horizontally; `768p` refines only."""
 
-    video: Annotated[VideoFile, FileBound(max_bytes=1 << 30, max_decoded_bytes=2 << 30)]
+    video: Annotated[VideoFile, FileBound(max_decoded_bytes=2 << 30)]
     latents: Latents | None = None
     prompt: str
     resolution: RegenerateResolution = Resolution.QHD
@@ -901,7 +903,7 @@ class RegenerateInput(msgspec.Struct, kw_only=True):
 
 
 class RegenerateOutput(msgspec.Struct):
-    video: Annotated[VideoFile, FileBound(max_bytes=1 << 30, media_types=("video/mp4",))]
+    video: Annotated[VideoFile, FileBound(max_bytes=ANY_SIZE, media_types=("video/mp4",))]
     warnings: list[str]
 
 
@@ -1191,11 +1193,11 @@ ContextFrames = Literal[0, 22, 39, 56]
 #: A segment's carry: a predecessor's exported context (~2.7 MB), or a resumed video's whole latents
 #: file, whose carry the segment reads (`shot_latents.context`).
 ContextFile = Annotated[
-    File, FileBound(max_bytes=1 << 30, media_types=("application/octet-stream",))
+    File, FileBound(max_bytes=ANY_SIZE, media_types=("application/octet-stream",))
 ]
 #: A segment's delivered video latents (`_Segments`), about 3 MB a second at 768p.
-LatentFile = Annotated[File, FileBound(max_bytes=1 << 30, media_types=("application/octet-stream",))]
-SegmentVideo = Annotated[VideoFile, FileBound(max_bytes=1 << 30, max_decoded_bytes=32 << 20, media_types=("video/mp4",))]
+LatentFile = Annotated[File, FileBound(max_bytes=ANY_SIZE, media_types=("application/octet-stream",))]
+SegmentVideo = Annotated[VideoFile, FileBound(max_bytes=ANY_SIZE, max_decoded_bytes=32 << 20, media_types=("video/mp4",))]
 
 
 def held_frames(plan: ContinuationPlan, videos: Sequence[VideoUse] = ()) -> int:
@@ -1387,11 +1389,7 @@ FullSteps = Literal[30, 40, 50]
 #: A keyframe the shot supplies (`keyframes.first`/`last`).
 FrameImage = Annotated[
     ImageFile | None,
-    FileBound(
-        max_bytes=64 << 20,
-        max_decoded_bytes=256 << 20,
-        media_types=("image/png", "image/jpeg", "image/webp"),
-    ),
+    FileBound(max_decoded_bytes=256 << 20),
 ]
 
 
@@ -1588,12 +1586,11 @@ app.child_task(regenerate_shot)
 
 ShotImage = Annotated[
     ImageFile,
-    FileBound(max_bytes=64 << 20, max_decoded_bytes=256 << 20,
-              media_types=("image/png", "image/jpeg", "image/webp")),
-]  # fmt: skip
-ShotSound = Annotated[AudioFile, FileBound(max_bytes=256 << 20, max_decoded_bytes=AUDIO_READ_BYTES), REFERENCE_AUDIO]
+    FileBound(max_decoded_bytes=256 << 20),
+]
+ShotSound = Annotated[AudioFile, FileBound(max_decoded_bytes=AUDIO_READ_BYTES), REFERENCE_AUDIO]
 ShotFootage = Annotated[
-    VideoFile, FileBound(max_bytes=VIDEO_MAX_BYTES, max_decoded_bytes=VIDEO_READ_BYTES)
+    VideoFile, FileBound(max_decoded_bytes=VIDEO_READ_BYTES)
 ]
 
 
@@ -2163,7 +2160,7 @@ class UpscaleInput(msgspec.Struct, kw_only=True):
     (default) restores its frames; `regenerate-2k` re-renders it with H3 from `prompt`, the text
     it was made from. Its soundtrack is kept."""
 
-    video: Annotated[VideoFile, FileBound(max_bytes=1 << 30, max_decoded_bytes=2 << 30)]
+    video: Annotated[VideoFile, FileBound(max_decoded_bytes=2 << 30)]
     resolution: RegenerateResolution = Resolution.QHD
     upscale: Upscale | None = None
     #: regenerate-2k's text; absent, the text `latents` carry (the shot's whole text).
@@ -2178,7 +2175,7 @@ class UpscaleInput(msgspec.Struct, kw_only=True):
 
 
 class UpscaleOutput(msgspec.Struct):
-    video: Annotated[VideoFile, FileBound(max_bytes=1 << 30, media_types=("video/mp4",))]
+    video: Annotated[VideoFile, FileBound(max_bytes=ANY_SIZE, media_types=("video/mp4",))]
     warnings: list[str] = msgspec.field(default_factory=list)
 
 

@@ -66,7 +66,7 @@ class Tuning(msgspec.Struct, kw_only=True):
 
 
 class UpscaleInput(Tuning, kw_only=True):
-    video: Annotated[VideoFile, FileBound(max_bytes=1 << 30, max_decoded_bytes=2 << 30)]
+    video: Annotated[VideoFile, FileBound(max_decoded_bytes=2 << 30)]
     resolution: Annotated[Resolution, Shape(pixels=_RESOLUTIONS)] = Resolution.HD
     seed: Annotated[int, msgspec.Meta(ge=0, le=9007199254740991)] = 42
     aspect_ratio: Literal["source", "16:9"] = "source"
@@ -76,7 +76,8 @@ class UpscaleOutput(msgspec.Struct):
     video: Annotated[
         VideoFile,
         FileBound(
-            max_bytes=1 << 30,
+            # TensorD's output allowance reads this (256 MiB where none is declared); the disk is the limit.
+            max_bytes=1 << 40,
             max_decoded_bytes=32 << 30,
             media_types=("video/mp4",),
         ),

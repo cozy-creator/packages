@@ -42,8 +42,6 @@ _SHOT = re.compile(r"\[Shot\s*(\d+)\]", re.IGNORECASE)
 #: Below this a clip has too little to guide a segment, which then goes without it (`shot_windows`).
 MIN_CLIP_SECONDS = 2
 REFERENCE_AUDIO = AudioPreparation(max_seconds=15, excess="truncate")
-#: A reference video's upload.
-VIDEO_MAX_BYTES = 1 << 30
 #: Read bounds. A video streams, one decoded frame at a time, straight to its motion size
 #: (`read_reference_video`), so a frame of any real source fits. A prepared image is at most
 #: 16,777,216 RGB8 pixels; audio is 15 s, mono or stereo.

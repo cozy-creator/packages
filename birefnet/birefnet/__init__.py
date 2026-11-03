@@ -17,11 +17,7 @@ app = App()
 class RemoveBackgroundInput(msgspec.Struct):
     image: Annotated[
         ImageFile,
-        FileBound(
-            max_bytes=64 << 20,
-            max_decoded_bytes=256 << 20,
-            media_types=("image/png", "image/jpeg", "image/webp"),
-        ),
+        FileBound(max_decoded_bytes=256 << 20),
     ]
 
 
