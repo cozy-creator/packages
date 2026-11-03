@@ -223,20 +223,16 @@ def adapt_entity(payload: ProjectEntity) -> Invocation:
     if payload.kind == "environment":
         prompt = _styled(f"{description}\n\nAn establishing view of the empty set, no people.", payload.style)
         return _picture_call(payload.function, prompt, payload.pictures, payload.aspect_ratio)
+    # Front and back only (Paul, 11-03); a description can ask for more. At 3:2 each view has 3:4: a tall lantern and a
+    # wide chest both fill it. "From behind and turned slightly" drew the front twice; a half turn draws the back (11-03,
+    # chest 0/3 vs 2/2).
+    aspect_ratio = "3:2"
+    sheet, whole, same, bare = ("prop", "object", "object", "")
     if payload.kind == "character":
-        aspect_ratio = "16:9"
-        shown = (f"The image is a wide character sheet of {name}, in five separate views with no text.\n\n{description}\n\n"
-                 "On the left, the whole body is seen from the front and turned slightly, with nothing added to the body "
-                 "described and no ground under it. Beside it, the whole body is seen from behind and turned slightly, at the "
-                 "same size. On the right, three close-ups of the head are stacked one above the other: neutral with the mouth "
-                 "closed, joyful with the mouth wide open, and angry with the brow lowered and teeth bared.")  # fmt: skip
-    else:
-        # Front and back only (Paul, 11-03). At 3:2 each view has 3:4: a tall lantern and a wide chest both fill it.
-        # "From behind and turned slightly" drew the front twice; a half turn draws the back (11-03, chest 0/3 vs 2/2).
-        aspect_ratio = "3:2"
-        shown = (f"The image is a prop sheet of {name}, in two separate views with no text.\n\n{description}\n\n"
-                 "On the left, the whole object is seen from the front. On the right, the same object has been spun a half turn, "
-                 "at the same size, so its back faces the viewer and nothing on its front can be seen.")  # fmt: skip
+        sheet, whole, same, bare = ("character", "body", "character", ", with nothing added to the body described and no ground under it")
+    shown = (f"The image is a {sheet} sheet of {name}, in two separate views with no text.\n\n{description}\n\n"
+             f"On the left, the whole {whole} is seen from the front{bare}. On the right, the same {same} has been spun a half "
+             "turn, at the same size, so its back faces the viewer and nothing on its front can be seen.")  # fmt: skip
     prompt = (f"This is an RGBA image with transparency. {_styled(shown, payload.style)}\n\n"
               "The image has alpha channel and the background is transparent.")  # fmt: skip
     return _picture_call(payload.function, prompt, payload.pictures, aspect_ratio)
