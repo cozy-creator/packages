@@ -14,17 +14,17 @@ from cozy_runtime.author import (
     Invocation,
     Operation,
     Picture,
+    PictureFields,
+    PictureOperation,
     ImageRequest,
     ImageResult,
     Memoize,
     Outputs,
-    ProjectEntity,
-    ProjectPicture,
-    ProjectSetup,
-    ProjectWorldState,
     Refuse,
+    SetupOperation,
     Sizes,
     Telemetry,
+    WorldStateOperation,
     held,
     name_label,
     spoken,
@@ -206,100 +206,63 @@ def generate_turbo(
     return _generate(ctx, payload, model, out, tel, adj, TURBO_SIGMAS)
 
 
-# --- project adapters (xs-147): Qwen's words for a project's pictures, tuned by eye on this model (cl-726) ------
+# --- project adapters: Qwen's words for a project's pictures, tuned by eye on this model (cl-726) ------
 
 
 def _styled(text: str, style: str) -> str:
     return f"Style: {style.strip().rstrip('.')}.\n\n{text}" if style.strip() else text
 
 
-def _picture_call(function: str, prompt: str, pictures: list[ProjectPicture], aspect_ratio: str | None) -> Invocation:
-    request: dict[str, Any] = {"prompt": prompt, "pictures": [{"name": p.name, "image": p.image} for p in pictures]}
-    return Invocation(function=function, input=request | ({"aspect_ratio": aspect_ratio} if aspect_ratio else {}))
+def _said(fields: PictureFields) -> str:
+    return "\n\n".join(filter(None, (fields.description.strip(), fields.instructions.strip())))
 
 
-class PictureFields(msgspec.Struct, kw_only=True):
-    """What `generate`'s adapter reads of an asset. `description` is what it is, which shots read too; `instructions` how to
-    draw this picture, which nothing else reads; `camera` a setup's position; `init` and `blocking` a world state's start."""
-
-    description: str = ""
-    instructions: str = ""
-    style: str = ""
-    aspect_ratio: str | None = None
-    camera: str = ""
-    from_frame: bool = False
-    init: str = ""
-    blocking: str = ""
-
-
-class PictureOperation(Operation, kw_only=True):
-    fields: PictureFields
-
-
-@app.project_adapter("generate", "generate_turbo")
-def adapt(op: PictureOperation) -> Invocation:
-    """An asset's picture, in the words this model was tuned by eye on (cl-726), by `kind`; any other kind says what it says.
-    `description` is what it is, which shots read too; `instructions` how to draw this picture, which nothing else reads. No
-    layout is assumed. A character or prop is on a transparent background, in the words of Qwen's model card. A place has no
-    people: with no instructions, an establishing view of the empty set. A storyboard composes the pictures it mentions, as
-    written. A setup's camera is in screen terms as written: bare camera words return a mirror (environment-angles)."""
-    f = op.fields
-    description, how = f.description.strip(), f.instructions.strip()
-    said = "\n\n".join(filter(None, (description, how)))
-    if op.kind == "environment":
-        prompt = _styled(f"{description}\n\n{f'{how}\n\nThe empty set, no people.' if how else 'An establishing view of the empty set, no people.'}", f.style)
-    elif op.kind in ("character", "prop"):
-        # Only the background is ours, since a reference needs its subject alone.
-        prompt = (f"This is an RGBA image with transparency. {_styled(said, f.style)}\n\n"
-                  "The image has alpha channel and the background is transparent.")  # fmt: skip
-    elif op.kind == "storyboard":
-        prompt = said
-    elif op.kind == "setup":
-        if not op.reads:
-            raise Refuse(f"{op.asset} is a setup that names no place")
-        place, kept = op.reads[0].name, "the picture" if f.from_frame else "the image"
-        opening = f"Show the place in this picture, <{place}>, with nobody in it," if f.from_frame else f"Show this exact <{place}>"
-        prompt = (f"{opening} from another camera position: {f.camera.strip().rstrip('.')}. Keep every object, material, the light "
-                  f"and the weather exactly as in {kept}; add nothing new, no people.")  # fmt: skip
-    else:
-        prompt = _styled("\n\n".join(filter(None, (said, f.init.strip(), f.blocking.strip()))), f.style)
+def _picture(op: Operation, fields: PictureFields, prompt: str) -> list[Invocation]:
+    """One picture, from the pictures it reads, by its `turbo` field `generate_turbo`, else `generate`."""
     pictures = [{"name": spoken(f"<{read.name}>")[1:-1], "image": read.files["image"].sha256}
                 for read in op.reads if "image" in read.files]  # fmt: skip
     request: dict[str, Any] = {"prompt": spoken(prompt), "pictures": pictures}
-    return Invocation(function=op.function, input=request | ({"aspect_ratio": f.aspect_ratio} if f.aspect_ratio else {}))
+    if fields.aspect_ratio:
+        request["aspect_ratio"] = fields.aspect_ratio
+    return [Invocation(function="generate_turbo" if fields.turbo else "generate", input=request)]
 
 
-@app.project_adapter("entity")
-def adapt_entity(payload: ProjectEntity) -> Invocation:
-    """A project's character, prop or place: the style, what it is, then how to draw it (`render: instructions:`). No layout is
-    assumed. A character or prop is on a transparent background, in the words of Qwen's model card, and a place with no
-    instructions is an establishing view of the empty set."""
-    instructions = payload.instructions.strip()
-    if payload.kind == "environment":
-        how = instructions or "An establishing view of the empty set, no people."
-        prompt = _styled(f"{payload.description.strip()}\n\n{how}", payload.style)
-        return _picture_call(payload.function, prompt, payload.pictures, payload.aspect_ratio)
-    # Only the background is ours, since a reference needs its subject alone.
-    said = "\n\n".join(filter(None, (payload.description.strip(), instructions)))
-    prompt = (f"This is an RGBA image with transparency. {_styled(said, payload.style)}\n\n"
-              "The image has alpha channel and the background is transparent.")  # fmt: skip
-    return _picture_call(payload.function, prompt, payload.pictures, payload.aspect_ratio)
+@app.project_adapter("character", "prop")
+def adapt_subject(op: PictureOperation) -> list[Invocation]:
+    """On a blank background: the style, what it is, then how to draw it, in the words of Qwen's model card for transparency, since
+    a reference needs its subject alone. No layout is assumed."""
+    return _picture(op, op.fields, f"This is an RGBA image with transparency. {_styled(_said(op.fields), op.fields.style)}\n\n"
+                                   "The image has alpha channel and the background is transparent.")  # fmt: skip
+
+
+@app.project_adapter("environment")
+def adapt_environment(op: PictureOperation) -> list[Invocation]:
+    """A place with no people, instructions or not: with none, an establishing view of the empty set."""
+    f, how = op.fields, op.fields.instructions.strip()
+    last = f"{how}\n\nThe empty set, no people." if how else "An establishing view of the empty set, no people."
+    return _picture(op, f, _styled(f"{f.description.strip()}\n\n{last}", f.style))
+
+
+@app.project_adapter("storyboard")
+def adapt_storyboard(op: PictureOperation) -> list[Invocation]:
+    """The pictures it mentions, composed into one scene, as written: it is a character and a place together."""
+    return _picture(op, op.fields, _said(op.fields))
 
 
 @app.project_adapter("setup")
-def adapt_setup(payload: ProjectSetup) -> Invocation:
-    """A project's camera setup, in screen terms as written: bare camera words return a mirror (environment-angles)."""
-    camera = payload.camera.strip().rstrip(".")
-    opening = (f"Show the place in this picture, <{payload.environment}>, with nobody in it,"
-               if payload.from_frame else f"Show this exact <{payload.environment}>")  # fmt: skip
-    kept = "the picture" if payload.from_frame else "the image"
-    prompt = (f"{opening} from another camera position: {camera}. Keep every object, material, the light and the weather "
-              f"exactly as in {kept}; add nothing new, no people.")  # fmt: skip
-    return _picture_call(payload.function, prompt, payload.pictures, payload.aspect_ratio)
+def adapt_setup(op: SetupOperation) -> list[Invocation]:
+    """A place from a camera position, in screen terms as written: bare camera words return a mirror (environment-angles)."""
+    f = op.fields
+    if not op.reads:
+        raise Refuse(f"{op.asset} is a setup that names no place")
+    place, kept = op.reads[0].name, "the picture" if f.from_frame else "the image"
+    opening = f"Show the place in this picture, <{place}>, with nobody in it," if f.from_frame else f"Show this exact <{place}>"
+    return _picture(op, f, f"{opening} from another camera position: {f.camera.strip().rstrip('.')}. Keep every object, material, "
+                           f"the light and the weather exactly as in {kept}; add nothing new, no people.")  # fmt: skip
 
 
-@app.project_adapter("world_state")
-def adapt_world_state(payload: ProjectWorldState) -> Invocation:
-    """A project's world state: how it starts, and who and what is where."""
-    prompt = _styled("\n\n".join(filter(None, (payload.init.strip(), payload.blocking.strip()))), payload.style)
-    return _picture_call(payload.function, prompt, payload.pictures, payload.aspect_ratio)
+@app.project_adapter("world_state", "image")
+def adapt_image(op: WorldStateOperation) -> list[Invocation]:
+    """What it says, as it says it: a world state's start, and who and what is where."""
+    f = op.fields
+    return _picture(op, f, _styled("\n\n".join(filter(None, (_said(f), f.init.strip(), f.blocking.strip()))), f.style))

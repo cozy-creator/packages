@@ -72,11 +72,10 @@ from cozy_runtime.author import (
     Invocation,
     Keep,
     Operation,
-    ProjectContinue,
-    ProjectReference,
-    ProjectShot,
     Read,
     Refuse,
+    ShotOperation,
+    UpscaleOperation,
     name_key,
     spoken,
 )
@@ -2393,47 +2392,7 @@ def _kept(text: str) -> str:
     return _OURS.sub(lambda line: f"… {line.group(0).lstrip()}", text.strip())
 
 
-def _project_reference(ref: ProjectReference) -> dict[str, Any]:
-    """A project's reference as `generate` takes it: a world state is a loose environment picture."""
-    entry: dict[str, Any] = {**ref.fields, "name": ref.name, "kind": "environment" if ref.kind == "world_state" else ref.kind}
-    if ref.kind == "world_state":
-        entry["follow"] = "loose"
-    if ref.image is not None and ref.description:
-        entry["description"] = ref.description
-    return entry | {field: value for field in ("image", "voice", "video", "audio") if (value := getattr(ref, field)) is not None}
-
-
-class _Continues(ProjectContinue, kw_only=True):
-    """The video a shot continues, and the time to keep it up to, if not its end (`cozy project render --from`)."""
-
-    at_s: float | None = None
-
-
-class _Shot(ProjectShot, kw_only=True):
-    continues: _Continues | None = None
-
-
-@app.project_adapter("shot")
-def adapt_shot(payload: _Shot) -> Invocation:
-    """A project's shot as `generate`: the summary and the beats this call reaches, in H3's sections and times."""
-    beats = sorted((beat for beat in payload.beats if beat.at < payload.end_s), key=lambda beat: beat.at)
-    told = [f"{'' if number else '[Shot 1] '}{f'At {_clock(beat.at)}, ' if beat.at > 0 else ''}{_kept(beat.description)}"
-            for number, beat in enumerate(beats)]  # fmt: skip
-    summary = _kept(payload.summary)
-    prompt = f"[Shot 1] {summary}" if not told else "\n\n".join(
-        filter(None, (summary and f"summary:\n{summary}", "detailed_description:\n" + "\n".join(told))))  # fmt: skip
-    request: dict[str, Any] = {"prompt": prompt, "duration_s": payload.end_s,
-                               "references": [_project_reference(ref) for ref in payload.references]}  # fmt: skip
-    for field in ("style", "soundscape", "music", "aspect_ratio", "plate", "first_frame", "last_frame"):
-        if value := getattr(payload, field):
-            request[field] = value
-    if (continues := payload.continues) is not None:
-        request["continue_from"] = {"video": continues.video} | ({"latents": continues.latents} if continues.latents else {}) | (
-            {"at_s": continues.at_s} if continues.at_s is not None else {})  # fmt: skip
-    return Invocation(function=payload.function, input=request)
-
-
-# --- project adapters (project-graph §3): one per function, reading a general operation -----
+# --- project adapters (project-graph §3): a shot and an upscale, as this package's own calls -----
 
 
 #: Below this a picture's background reads as part of its subject.
@@ -2442,42 +2401,6 @@ _TRANSPARENT = 0.05
 _BEAT_S = 5.0
 #: A kept take reaches its shot's end if less than this is left.
 _REACHES_S = 1.0
-
-
-class BeatWrite(msgspec.Struct, kw_only=True):
-    """A screenshot of the state: `state` is a revision (`coast.1`), `at` seconds into its beat, else the beat's end."""
-
-    state: str
-    at: float | None = None
-
-
-class ShotBeat(msgspec.Struct, kw_only=True):
-    description: str = ""
-    duration: float | None = None
-    writes: list[BeatWrite] = []
-
-
-class ShotPlate(msgspec.Struct, kw_only=True):
-    video: str = ""
-    use_audio: bool = False
-
-
-class ShotFields(msgspec.Struct, kw_only=True):
-    """What `generate`'s adapter reads of a shot. `first_frame`, `last_frame` and `plate`'s `video` mention an asset."""
-
-    summary: str = ""
-    beats: list[ShotBeat] = []
-    style: str = ""
-    soundscape: str = ""
-    music: str = ""
-    aspect_ratio: str | None = None
-    first_frame: str = ""
-    last_frame: str = ""
-    plate: ShotPlate | None = None
-
-
-class ShotOperation(Operation, kw_only=True):
-    fields: ShotFields
 
 
 def _read_named(op: Operation, value: str) -> Read | None:
@@ -2534,8 +2457,8 @@ def _kept_take(op: Operation, keep: Keep, end: float, warned: list[str]) -> dict
     return {"video": keep.video.sha256, "latents": keep.latents.sha256} | ({"at_s": at_s} if at_s is not None else {})
 
 
-@app.project_adapter("generate")
-def adapt_generate(op: ShotOperation) -> Invocation:
+@app.project_adapter("shot")
+def adapt_shot(op: ShotOperation) -> list[Invocation]:
     """A shot: its summary, its beats on one timeline, sound, and what it reads. One call of any length: `generate` plans its
     segments. Its writes go along: `generate` makes those frames and uses them."""
     f, at, told, warned, moments = op.fields, 0.0, [], [], {}
@@ -2566,33 +2489,23 @@ def adapt_generate(op: ShotOperation) -> Invocation:
                               "name": spoken(f"<{write.name}>")[1:-1], "at_s": moments.get(name_key(write.name), write.at_s),
                               "description": write.fields.get("description") or write.fields.get("blocking") or ""}
                              for write in op.writes]  # fmt: skip
+    if f.turbo is not None:
+        request["turbo"] = f.turbo
     if kept is not None:
         request["continue_from"] = kept
-    return Invocation(function=op.function, input=request, warnings=warned)
-
-
-class UpscaleFields(msgspec.Struct, kw_only=True):
-    """What `upscale`'s adapter reads of an upscale: `video` mentions the shot."""
-
-    video: str = ""
-    resolution: str | None = None
-    style: str = ""
-
-
-class UpscaleOperation(Operation, kw_only=True):
-    fields: UpscaleFields
+    return [Invocation(function="generate", input=request, warnings=warned)]
 
 
 @app.project_adapter("upscale")
-def adapt_upscale(op: UpscaleOperation) -> Invocation | None:
+def adapt_upscale(op: UpscaleOperation) -> list[Invocation]:
     """A shot's video taken up to `resolution`, from the text it was made from (Paul, 10-31), its names without brackets: the
-    re-render attaches no reference. None at or above that size: this asset is what it reads."""
+    re-render attaches no reference. No run at or above that size: this asset is what it reads."""
     shot = next((read for read in op.reads if "video" in read.files), None)
     if shot is None:
         raise Refuse(f"{op.asset} reads no video to upscale")
     video, wanted = shot.files["video"], op.fields.resolution
     if wanted and wanted[:-1].isdigit() and video.height and min(video.width or video.height, video.height) >= int(wanted[:-1]):
-        return None
+        return []
     said = [str(shot.fields.get("summary", "")).strip(), *(str(beat.get("description", "")).strip() for beat in shot.fields.get("beats", []))]
     said += [f"{read.name}: {str(read.fields['description']).strip()}" for read in op.reads
              if read is not shot and str(read.fields.get("description", "")).strip()]  # fmt: skip
@@ -2603,4 +2516,4 @@ def adapt_upscale(op: UpscaleOperation) -> Invocation | None:
         request["resolution"] = wanted
     if "latents" in shot.files and _made_here(shot):
         request["latents"] = shot.files["latents"].sha256
-    return Invocation(function=op.function, input=request)
+    return [Invocation(function="upscale", input=request)]
