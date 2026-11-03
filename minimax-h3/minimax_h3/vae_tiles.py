@@ -9,7 +9,7 @@ ViT over `(B, S, C)` tokens whose norms reduce over the last dimension only, who
 register/cls tokens are per-batch replicas and whose RoPE comes from the tile geometry.
 (`MiniMaxH3VideoGroupNorm`, the one batch-mixing module, is encoder-side.) So the tiles
 of one chunk go through `post_quant_conv` and the decoder as one `(tiles, C, T, h, w)`
-batch, or as few as the device holds (the Runtime's `split`), and are stitched by the
+batch, in the immutable windows selected by Runtime native policy, and are stitched by the
 unchanged `_stitch_tiles` in the unchanged order.
 
 The arithmetic per tile is the same; the BYTES are a property of the kernel a larger GEMM
@@ -23,15 +23,50 @@ h3a-006 owns the lossy decode variants.
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
+from typing import Any
 
 import torch
 from diffusers import AutoencoderKLMiniMaxH3
 from diffusers.models.autoencoders.vae import DiagonalGaussianDistribution
+from diffusers.models.autoencoders.autoencoder_kl_minimax_h3 import MiniMaxH3VideoTransformerBlock
 from diffusers.models.modeling_utils import get_parameter_dtype
 
-from cozy_runtime.author import Cut, split, spread
+from cozy_runtime import fusion
+from cozy_runtime.author import decode_vae_tiles, spread
+from cozy_runtime.author.kernels import LayerScaleBlock
+from cozy_runtime.author import Cut, split
 from cozy_runtime.author import device as placed_device
+
+
+
+def _layer_scales(block: Any, arguments: Mapping[str, Any]) -> fusion.Modulation:
+    """A video decoder block's layer scales: the gates of one row every token reads."""
+    row = block.scale1.new_zeros(1, dtype=torch.long)
+    return fusion.Modulation(row, gate_msa=block.scale1[None], gate_mlp=block.scale2[None])
+
+
+#: The video VAE's ViT decoder block as Runtime fuses it: fp16 autocast over an fp32 residual
+#: stream, torch RMSNorms, weightless q/k norms, split-half RoPE on 48 of 64 channels in fp16,
+#: Diffusers' value-first SwiGLU, `h + branch * scale` layer scales. The attention is composed
+#: (its processor upcasts q and k to fp32 around the norms; the kernel reads them as fp16).
+VAE_BLOCK = fusion.DiTBlock(
+    MiniMaxH3VideoTransformerBlock,
+    width=2048,
+    head_dim=64,
+    modulation=_layer_scales,
+    norms=("norm1", "norm2"),
+    norm="rms",
+    attention="attn",
+    arguments=("rotary_emb",),
+    mlp=fusion.GatedMLP("ff", gate="net.0.proj", down="net.2", value_first=True),
+    rope=fusion.Rope("rotary_emb", interleaved=False, rotary=48, rounding="product"),
+    scale=False,
+    rows="fp16",
+    rms_rounding="once",
+    qk_affine=False,
+    compose=True,
+)
 
 
 class TileBatchedVideoVAE(AutoencoderKLMiniMaxH3):  # type: ignore[misc]
@@ -156,7 +191,7 @@ class TileBatchedVideoVAE(AutoencoderKLMiniMaxH3):  # type: ignore[misc]
 
     def _decode_clip(self, z: torch.Tensor) -> torch.Tensor:
         if not self.use_tiling:
-            return self.decoder(self.post_quant_conv(z))
+            raise ValueError("native H3 decoding requires the declared tiled geometry")
 
         ratio = self.spatial_compression_ratio
         y_indices, y_lengths, y_overlaps = self._split_tiles(
@@ -171,43 +206,14 @@ class TileBatchedVideoVAE(AutoencoderKLMiniMaxH3):  # type: ignore[misc]
             for x, x_len in zip(x_indices, x_lengths, strict=True)
         ]
         batch = tiles[0] if len(tiles) == 1 else torch.cat(tiles, dim=0)
-        decoded = split(self._decode_tiles, batch, Cut(0)).split(z.shape[0], dim=0)
+        decoded = self._decode_tiles(batch.contiguous()).split(z.shape[0], dim=0)
         columns = len(x_indices)
         rows = [decoded[row * columns : (row + 1) * columns] for row in range(len(y_indices))]
         return self._stitch_tiles(rows, y_overlaps, x_overlaps)
 
     def _decode_tiles(self, batch: torch.Tensor) -> torch.Tensor:
-        """Upstream's ViT decoder over a batch of tiles, block by block: every tile passes a
-        block before any tile enters the next, and `split` cuts each block's rows to the room.
-        Cutting the whole decoder instead re-read all 36 blocks once per piece: on a 24 GB
-        RTX 4090 a chunk ran in 10 pieces at 3.2-3.5 s against 2.4 s with the weights resident
-        (runs 11220, 11228); block by block it holds 2.36-2.46 s (11325, 11335). The tiles share
-        one geometry, so one rotary table serves them all; every op is upstream's `forward`:
-        uncut, the two orders are bit-identical on the release weights."""
-        decoder = self.decoder
-        x = self.post_quant_conv(batch)
-        tiles, channels, frames, height, width = x.shape
-        hidden = decoder.proj_in(
-            x.permute(0, 2, 3, 4, 1).reshape(tiles, frames * height * width, channels)
-        )
-        patches = hidden.shape[1]
-        registers = decoder.register_tokens.expand(tiles, -1, -1).to(hidden.dtype)
-        hidden = torch.cat([hidden, registers, torch.zeros_like(hidden[:, :1, :])], dim=1)
-        grids = [
-            2.0 * (torch.arange(0.5, size, dtype=torch.float32, device=hidden.device) / size) - 1.0
-            for size in (frames, height, width)
-        ]
-        positions = torch.stack(torch.meshgrid(*grids, indexing="ij"), dim=-1).flatten(0, 2)[None]
-        suffix = positions.new_zeros((1, decoder.num_register_tokens + 1, 3))
-        rotary = decoder.rope(torch.cat([positions, suffix], dim=1))
-        for block in decoder.transformer_blocks:
-            hidden = split(_BlockRows(block, rotary), hidden, Cut(0))
-        hidden = decoder.norm_out(hidden).to(get_parameter_dtype(decoder.proj_out))
-        hidden = decoder.proj_out(hidden)[:, :patches, :]
-        p, pt = decoder.patch_size, decoder.patch_size_t
-        hidden = hidden.view(tiles, frames, height, width, decoder.out_channels, pt, p, p)
-        hidden = hidden.permute(0, 4, 1, 5, 2, 6, 3, 7).contiguous()
-        return hidden.reshape(tiles, decoder.out_channels, frames * pt, height * p, width * p)
+        """The complete declared native sequence; no outer cut or decoder replay."""
+        return decode_vae_tiles(self, batch, block_layout=VAE_BLOCK)
 
     def encode_condition(
         self,
@@ -232,6 +238,11 @@ class _BlockRows:
 
     def __call__(self, hidden: torch.Tensor) -> torch.Tensor:
         return self.block(hidden, self.rotary)
+
+    def run(self, hidden: torch.Tensor) -> torch.Tensor:
+        """Standalone real block comparison entrypoint used by qualification clients."""
+        return split(self, hidden, Cut(0), intent=LayerScaleBlock(
+            self.block, hidden, self.rotary, "scale1", "scale2"))
 
 
 def encode_condition(
