@@ -1,6 +1,6 @@
 [project]
 name = "qwen-image-2"
-version = "0.2.2"
+version = "0.2.3"
 description = "Cozy image generation and reference editing using Qwen-Image-2.1"
 requires-python = ">=3.12"
 dependencies = [
