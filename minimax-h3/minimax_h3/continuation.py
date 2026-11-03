@@ -14,6 +14,7 @@ Reference: NikoDemon80/ComfyUI-H3-Motion-Context and AIMixer/ComfyUI_MiniMaxH3_D
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import math
 import re
@@ -36,6 +37,7 @@ CONTEXT_FRAMES = (22, 39, 56)
 #: One second of sound, 24 frames: exactly 40 ticks, whatever the picture window.
 AUDIO_FRAMES = 24
 AUDIO_TICKS = 40
+AUDIO_TICKS_PER_S = 40
 MAX_FRAMES = 362
 MAX_CONTEXT_BYTES = 16 << 20
 MAX_CONTEXT_PIXELS = 1344 * 768
@@ -167,6 +169,10 @@ class AVContext:
         tokens = None if self.video is None else int(self.video.shape[2])
         frames = next((n for n in CONTEXT_FRAMES if video_tokens(n) == tokens), 0)
         return Carry(frames, self.audio is not None)
+
+    def with_sound(self, rows: torch.Tensor, offset: Fraction) -> AVContext:
+        """This carry, its sound the packed `rows` that end `offset` ticks past the picture join (a cut, `shot_latents.cut`)."""
+        return dataclasses.replace(self, audio=rows, audio_offset=offset)
 
     @property
     def canvas(self) -> tuple[int, int] | None:
