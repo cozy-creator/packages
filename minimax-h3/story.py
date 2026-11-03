@@ -15,7 +15,6 @@ from cozy_runtime.author import (
     InvalidRequest,
     Reference,
     VideoFile,
-    VideoPreparation,
     name_key,
 )
 
@@ -39,10 +38,11 @@ _HEADER = re.compile(
 )
 _MEDIA = re.compile(r"\s*(picture|audio|video)\s+(\d+)\s*", re.IGNORECASE)
 _SHOT = re.compile(r"\[Shot\s*(\d+)\]", re.IGNORECASE)
-#: Reference clips: a video of any length from 2 s, of which each segment reads its own window
-#: (`shot`); audio outside 2-15 s refuses. Every input that carries a reference declares these.
-REFERENCE_VIDEO = VideoPreparation(min_seconds=2)
-REFERENCE_AUDIO = AudioPreparation(min_seconds=2, max_seconds=15, excess="refuse")
+#: Reference clips: a video of any length, of which each segment reads its own window (`shot`); audio
+#: past 15 s is cut with a warning. Every input that carries a reference declares these.
+#: Below this a clip has too little to guide a segment, which then goes without it (`shot_windows`).
+MIN_CLIP_SECONDS = 2
+REFERENCE_AUDIO = AudioPreparation(max_seconds=15, excess="truncate")
 #: A reference video's upload.
 VIDEO_MAX_BYTES = 1 << 30
 #: Read bounds. A video streams, one decoded frame at a time, straight to its motion size

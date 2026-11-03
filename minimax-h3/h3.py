@@ -131,8 +131,8 @@ from story import (
     CLIPS,
     FILE,
     IMAGE_READ_BYTES,
+    MIN_CLIP_SECONDS,
     REFERENCE_AUDIO,
-    REFERENCE_VIDEO,
     VIDEO_MAX_BYTES,
     VIDEO_READ_BYTES,
     SegmentCall,
@@ -150,7 +150,7 @@ from story import (
 app = App()
 
 _MIB = 1 << 20
-#: Standalone audio references share one 15-second budget; each is 2-15 s (`REFERENCE_AUDIO`).
+#: Standalone audio references share one 15-second budget in a call; past it each is cut to its share.
 _MAX_AUDIO_SECONDS = Fraction(15, 1)
 
 Reference = ImageFile | VideoFile | AudioFile
@@ -173,7 +173,6 @@ ReferenceFiles = Annotated[
         total=MAX_REFERENCES,
     ),
     ImagePreparation(max_edge=8192, max_pixels=16_777_216),
-    REFERENCE_VIDEO,
     REFERENCE_AUDIO,
     msgspec.Meta(min_length=1),
 ]
@@ -406,7 +405,7 @@ def assets_to_h3_refs(
     frames: int,
     videos: Sequence[VideoUse] = (),
     edges: Sequence[int] = (),
-) -> tuple[list[Any], ReferenceSizing, GuideClip | None]:
+) -> tuple[list[Any], ReferenceSizing, GuideClip | None, list[str]]:
     """Check every reference from its header and size the vision budget, then read each.
 
     A video is read over its window: from its `videos` entry's `start` (per video in packed
@@ -455,12 +454,16 @@ def assets_to_h3_refs(
             audio = reference.probe()
             _validate_audio(audio, field)
             audio_duration += audio.duration
-            _validate_audio_aggregate(audio_duration)
     sizing = resolve_reference_sizing(
         images, default=DEFAULT_REFERENCE_IMAGE_SHORT_EDGE, video_tokens=video_tokens
     )
     prepared = []
     guide = None
+    notes: list[str] = []
+    share = min(Fraction(1), _MAX_AUDIO_SECONDS / audio_duration) if audio_duration else Fraction(1)
+    if share < 1:
+        notes.append(f"this segment's audio references run {float(audio_duration):.1f} s; each is cut to its share "
+                     "of the 15 s H3 takes")  # fmt: skip
     for index, reference in enumerate(references):
         if isinstance(reference, ImageFile):
             prepared.append(pipe.image_reference(reference.read()))
@@ -476,8 +479,8 @@ def assets_to_h3_refs(
             else:
                 prepared.append(pipe.video_reference(clip))
         else:
-            prepared.append(pipe.audio_reference(reference.read()))
-    return prepared, sizing, guide
+            prepared.append(pipe.audio_reference(reference.read(end=reference.probe().duration * share)))
+    return prepared, sizing, guide, notes
 
 
 def _validate_ratio(width: int, height: int, field: str) -> None:
@@ -504,17 +507,6 @@ def _validate_video(video: VideoProbe, field: str, *, sound: bool) -> None:
     # Frame and soundtrack clock alignment belong to the model's video_reference.
     if sound and video.soundtrack is not None:
         _validate_audio_channels(video.soundtrack.channels, field)
-
-
-def _validate_audio_aggregate(duration: Fraction) -> None:
-    """The standalone-audio modality cap. A video's soundtrack belongs to that video and
-    never consumes this budget; videos have no aggregate cap."""
-    if duration > _MAX_AUDIO_SECONDS:
-        raise InvalidRequest(
-            "standalone audio references total more than 15 seconds",
-            code="reference_policy",
-            fields=["assets"],
-        )
 
 
 def _validate_audio_channels(channels: int, field: str) -> None:
@@ -1127,9 +1119,10 @@ def _references_to_video(
         )
     frames = delivery.sample_frames
     with tel.stage("prepare", overall_range=(0.00, 0.03)):
-        references, sizing, guide = assets_to_h3_refs(
+        references, sizing, guide, read_notes = assets_to_h3_refs(
             assets, pipe=model.pipe, frames=frames, videos=payload.videos, edges=payload.picture_edges
         )
+        notes += read_notes
         tel.log(
             "h3 reference sizing",
             images=sizing.summary,
@@ -1608,7 +1601,7 @@ ShotImage = Annotated[
 ]  # fmt: skip
 ShotSound = Annotated[AudioFile, FileBound(max_bytes=256 << 20, max_decoded_bytes=AUDIO_READ_BYTES), REFERENCE_AUDIO]
 ShotFootage = Annotated[
-    VideoFile, FileBound(max_bytes=VIDEO_MAX_BYTES, max_decoded_bytes=VIDEO_READ_BYTES), REFERENCE_VIDEO
+    VideoFile, FileBound(max_bytes=VIDEO_MAX_BYTES, max_decoded_bytes=VIDEO_READ_BYTES)
 ]
 
 
@@ -1862,8 +1855,8 @@ def shot_windows(
     frames it samples, its carried head included (`spans`: first frame, count), 1:1 from the
     clip's first frame on the 24-fps clock, so a plate stays frame-aligned across an edge. A
     segment takes the tail of a clip that ends in its window, and none of one that leaves it
-    less than `REFERENCE_VIDEO`'s minimum."""
-    least = math.ceil(Fraction(REFERENCE_VIDEO.min_seconds or 0) * FPS)
+    less than `MIN_CLIP_SECONDS`."""
+    least = MIN_CLIP_SECONDS * FPS
     windows: list[dict[str, int]] = [{} for _ in spans]
     total = spans[-1][0] + spans[-1][1]
     warnings = []
