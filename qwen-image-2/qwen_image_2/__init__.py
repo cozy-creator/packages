@@ -239,20 +239,21 @@ class PictureOperation(Operation, kw_only=True):
 @app.project_adapter("generate", "generate_turbo")
 def adapt(op: PictureOperation) -> Invocation:
     """An asset's picture, in the words this model was tuned by eye on (cl-726), by `kind`; any other kind says what it says.
-    No layout is assumed. A character or prop is on a transparent background, in the words of Qwen's model card, and a place
-    with no instructions is an establishing view of the empty set. A setup's camera is in screen terms as written: bare
-    camera words return a mirror (environment-angles). A storyboard is its description."""
+    `description` is what it is, which shots read too; `instructions` how to draw this picture, which nothing else reads. No
+    layout is assumed. A character or prop is on a transparent background, in the words of Qwen's model card. A place has no
+    people: with no instructions, an establishing view of the empty set. A storyboard composes the pictures it mentions, as
+    written. A setup's camera is in screen terms as written: bare camera words return a mirror (environment-angles)."""
     f = op.fields
     description, how = f.description.strip(), f.instructions.strip()
     said = "\n\n".join(filter(None, (description, how)))
     if op.kind == "environment":
-        prompt = _styled(f"{description}\n\n{how or 'An establishing view of the empty set, no people.'}", f.style)
+        prompt = _styled(f"{description}\n\n{f'{how}\n\nThe empty set, no people.' if how else 'An establishing view of the empty set, no people.'}", f.style)
     elif op.kind in ("character", "prop"):
         # Only the background is ours, since a reference needs its subject alone.
         prompt = (f"This is an RGBA image with transparency. {_styled(said, f.style)}\n\n"
                   "The image has alpha channel and the background is transparent.")  # fmt: skip
     elif op.kind == "storyboard":
-        prompt = said  # roughly how a shot is laid out: as written, no sheet, no transparency
+        prompt = said
     elif op.kind == "setup":
         if not op.reads:
             raise Refuse(f"{op.asset} is a setup that names no place")
