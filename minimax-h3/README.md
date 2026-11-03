@@ -31,15 +31,15 @@ references:                                   # in this order H3 numbers them; e
 first_frame: ./open.png                       # and/or last_frame
 # plate: {video: ./take3.mp4}                 # the video being edited (no first_frame with it)
 # continue_from: {video: ./v1.mp4, latents: ./v1.latents}   # resume a video this package made
+# summary: A woman crosses a rooftop at dusk.   # with beats, in place of prompt; see Text
+# beats: [{at: 0, description: "She runs."}, {at: 14, description: "She jumps."}]
 turbo: true
 ```
 
 The result is `video` (768p mp4), `latents` (its own, for `upscale` and `continue_from`) and
 `warnings`. `follow: loose` keeps a picture's arrangement, not its frame (read at 512 px: a world
 state). `continue_from` puts the request on that video's timeline: `duration_s` is the whole length,
-text before its end is history, and the result is the whole video, decoded as one. A caller that makes
-a longer video in consecutive calls gives each earlier call `shot_duration_s`, the whole length: text
-timed from that call's `duration_s` on is left for the later calls, with no warning. With a plate,
+text before its end is history, and the result is the whole video, decoded as one. With a plate,
 add its edit LoRA (`--lora alissonerdx/minimax-h3-character-swap`, …) and start the prompt with that
 LoRA's trigger (`body_swap:`). The latents also carry the text the video was made from, which
 `upscale` uses when given no prompt.
@@ -49,6 +49,9 @@ LoRA's trigger (`body_swap:`). The latents also carry the text the video was mad
   a `retention_analysis` line for each picture without one (`<name>: keep the look shown in the reference.`), `style` from its field, `non_diegetic_music: N/A` when none is written, since H3
   otherwise invents score and speech, and `overall_soundscape` from the `soundscape` field, or `N/A` with a warning,
   since the guide reads that as silence. Your own line replaces any of these.
+- **Beats.** `summary` and `beats` give the same as `prompt`, as data, with times in plain seconds. Every piece gets the
+  summary and its own beats, and nothing in either is read for times or sections. Whole beats share a piece when they
+  fit, as blocks do below. Say the scene in the summary, not the sequence: a piece can act on what it reads.
 - **Sections.** With a `detailed_description:`, timestamps are read only inside it. `summary:` goes on the first piece
   only; `overall_soundscape:` and `non_diegetic_music:` go on every piece.
 - **Task tag.** With references, every piece's `summary` opens with its `[task + task]` from the guide, computed from the
