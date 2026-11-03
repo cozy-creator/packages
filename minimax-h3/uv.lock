@@ -456,7 +456,7 @@ wheels = [
 
 [[package]]
 name = "minimax-h3"
-version = "0.3.4"
+version = "0.3.5"
 source = { editable = "." }
 dependencies = [
     { name = "cozy-runtime", extra = ["adapters", "media"] },
@@ -501,7 +501,7 @@ requires-dist = [
 
 [[package]]
 name = "minimax-h3-tools"
-version = "0.1.3"
+version = "0.1.5"
 source = { registry = "https://tensorhub.com/v1/index/_/simple/" }
 dependencies = [
     { name = "cozy-runtime" },
@@ -510,7 +510,7 @@ dependencies = [
     { name = "tensorfs" },
 ]
 wheels = [
-    { url = "https://tensorhub.com/v1/index/_/minimax-h3-tools/0.1.3/minimax_h3_tools-0.1.3-py3-none-any.whl", hash = "sha256:4118e60ed50f60a37664d8a187bc2d4d8c95abb78ed7ff8057e83eee162fa224" },
+    { url = "https://tensorhub.com/v1/index/_/minimax-h3-tools/0.1.5/minimax_h3_tools-0.1.5-py3-none-any.whl", hash = "sha256:79c73130289cbaa12067cb11d64e6f9c3312615309f300d50851f2e5af08e386" },
 ]
 
 [[package]]
@@ -898,7 +898,7 @@ wheels = [
 
 [[package]]
 name = "seedvr2"
-version = "0.1.8"
+version = "0.1.9"
 source = { registry = "https://tensorhub.com/v1/index/_/simple/" }
 dependencies = [
     { name = "cozy-runtime", extra = ["media"] },
@@ -912,7 +912,7 @@ dependencies = [
     { name = "tensorfs" },
 ]
 wheels = [
-    { url = "https://tensorhub.com/v1/index/_/seedvr2/0.1.8/seedvr2-0.1.8-py3-none-any.whl", hash = "sha256:ce6032519d649a84634ab713828bd2ffab679dfcb2302aa9afb5215bc1401911" },
+    { url = "https://tensorhub.com/v1/index/_/seedvr2/0.1.9/seedvr2-0.1.9-py3-none-any.whl", hash = "sha256:e2d89c74a54282b9e1c9d5fe39dc5052d57c67b272381b29bc0ee346d592e2ce" },
 ]
 
 [[package]]
