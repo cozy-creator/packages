@@ -2265,8 +2265,23 @@ class ReferenceClip:
 def clip_size(width: int, height: int, *, guide: bool) -> tuple[int, int]:
     """The (height, width) a clip is read at: the canvas its aspect resolves to, which the
     target shares, or for a motion clip that canvas's `motion_size`."""
+    width, height = within_ratio(width, height)
     canvas = tuple(int(value) for value in resolve_canvas_size(width, height, *CANVAS))
     return canvas if guide else motion_size(*canvas)
+
+
+#: The widest a canvas goes either way: past it a clip or keyframe keeps its middle.
+MAX_CANVAS_RATIO = 4
+
+
+def within_ratio(width: int, height: int) -> tuple[int, int]:
+    """A frame's size with its long side cut to `MAX_CANVAS_RATIO` times its short one."""
+    return min(width, MAX_CANVAS_RATIO * height), min(height, MAX_CANVAS_RATIO * width)
+
+
+def shown_width(width: int, pixel_aspect_ratio: Fraction) -> int:
+    """A frame's width with its pixels square."""
+    return max(1, round(width * pixel_aspect_ratio))
 
 
 def read_reference_video(
@@ -2310,7 +2325,12 @@ def read_reference_video(
         start = event.start_time
         if first is None:
             first, origin = event, start
-            size = clip_size(event.width, event.height, guide=guide)
+            shown = shown_width(event.width, event.pixel_aspect_ratio)
+            size = clip_size(shown, event.height, guide=guide)
+            # The middle of a frame past 4:1, in its stored pixels.
+            cut_shown, cut_height = within_ratio(shown, event.height)
+            cut_width = max(1, round(event.width * Fraction(cut_shown, shown)))
+            left, top = (event.width - cut_width) // 2, (event.height - cut_height) // 2
             out = np.empty((frames, *size, 3), dtype=np.uint8)
         elif held is not None and start < held[0]:
             raise ConformanceError("reference video presentation time runs backwards",
@@ -2321,6 +2341,7 @@ def read_reference_video(
         if _round_fraction((start - origin) * FPS) < frames:
             assert out is not None
             rgb = torch.frombuffer(bytearray(event.rgb), dtype=torch.uint8).view(event.height, event.width, 3)
+            rgb = rgb[top : top + cut_height, left : left + cut_width]
             if rgb.shape[:2] != out.shape[1:3]:
                 chw = rgb.permute(2, 0, 1)[None]
                 rgb = torch.nn.functional.interpolate(chw, size=out.shape[1:3], mode="bicubic", antialias=True)
@@ -2345,7 +2366,7 @@ def read_reference_video(
                                    code="reference_policy")
         soundtrack = torch.zeros((len(pcm), target), dtype=torch.float32)
         soundtrack[:, lo:hi] = waveform[:, lo - offset : hi - offset]
-    return ReferenceClip(out[:kept], first.width, first.height, end - origin, soundtrack, rate)
+    return ReferenceClip(out[:kept], *within_ratio(shown, first.height), end - origin, soundtrack, rate)
 
 
 def _round_fraction(value: Fraction) -> int:

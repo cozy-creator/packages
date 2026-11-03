@@ -121,7 +121,9 @@ from minimax_h3.official import (
     reference_image_vision_tokens,
     read_reference_video,
     reference_video_vision_tokens,
+    shown_width,
     validate_reference_policy,
+    within_ratio,
 )
 from seedvr2 import Resolution as RestorationResolution
 from seedvr2 import UpscaleOutput as RestorationOutput
@@ -437,7 +439,6 @@ def assets_to_h3_refs(
         field = info.id
         if isinstance(reference, ImageFile):
             image = reference.probe()
-            _validate_ratio(image.width, image.height, field)
             edge = edges[len(images)] if len(images) < len(edges) else 0
             requested = edge or (
                 None if info.fidelity == "auto" else _REFERENCE_FIDELITY_EDGES[info.fidelity]
@@ -449,7 +450,8 @@ def assets_to_h3_refs(
             _validate_video(video, field, sound=keeps[index])
             if not uses[index].anchor:
                 window = min(Fraction(frames, FPS), video.duration - Fraction(uses[index].start, FPS))
-                video_tokens += reference_video_vision_tokens(video.width, video.height, window)
+                shown = shown_width(video.width, video.pixel_aspect_ratio)
+                video_tokens += reference_video_vision_tokens(shown, video.height, window)
         else:
             audio = reference.probe()
             _validate_audio(audio, field)
@@ -483,27 +485,11 @@ def assets_to_h3_refs(
     return prepared, sizing, guide, notes
 
 
-def _validate_ratio(width: int, height: int, field: str) -> None:
-    if width > 4 * height or height > 4 * width:
-        raise UnsupportedInput(
-            f"{field} must have an aspect ratio between 1:4 and 4:1, got {width}x{height}",
-            code="reference_policy",
-            fields=[field],
-        )
-
-
 def _validate_audio(audio: AudioProbe, field: str) -> None:
     _validate_audio_channels(audio.channels, field)
 
 
 def _validate_video(video: VideoProbe, field: str, *, sound: bool) -> None:
-    _validate_ratio(video.width, video.height, field)
-    if video.pixel_aspect_ratio != 1:
-        raise UnsupportedInput(
-            f"{field} must use square pixels, got {video.pixel_aspect_ratio}",
-            code="reference_policy",
-            fields=[field],
-        )
     # Frame and soundtrack clock alignment belong to the model's video_reference.
     if sound and video.soundtrack is not None:
         _validate_audio_channels(video.soundtrack.channels, field)
@@ -1433,8 +1419,9 @@ def _frame(asset: ImageFile | None, field: str) -> Image | None:
     if asset is None:
         return None
     image = asset.read()
-    _validate_ratio(image.width, image.height, field)
-    return image
+    width, height = within_ratio(image.width, image.height)
+    left, top = (image.width - width) // 2, (image.height - height) // 2
+    return image.crop((left, top, left + width, top + height))
 
 
 def _retargeted(adapters: Sequence[Any], dit: str) -> list[str]:
@@ -1864,7 +1851,12 @@ def shot_windows(
         if ref.kind not in CLIPS:
             continue
         assert ref.video is not None
-        length = math.floor(ref.video.probe().duration * FPS + Fraction(1, 2))
+        probe = ref.video.probe()
+        length = math.floor(probe.duration * FPS + Fraction(1, 2))
+        if abs(probe.pixel_aspect_ratio - 1) > Fraction(1, 50):
+            warnings.append(f"<{ref.name}> has {probe.pixel_aspect_ratio} pixels; it's read at its display shape")
+        if within_ratio(shown := shown_width(probe.width, probe.pixel_aspect_ratio), probe.height) != (shown, probe.height):
+            warnings.append(f"<{ref.name}> is past 4:1; its middle is used")
         for window, (start, frames) in zip(windows, spans, strict=True):
             if min(start + frames, length) - start >= least:
                 window[ref.name] = start
@@ -2017,6 +2009,17 @@ async def generate(ctx: Context, payload: GenerateInput, out: Outputs, tel: Tele
                 "continues": index == 0 and resumed is not None}  # fmt: skip
         call = segment_call(text, own, style=style, soundscape=sound, music=music, index=index, retained=retained, added=added,
                           forced=forced | ({ref.name for ref in anchor} if index else set()), **role)  # fmt: skip
+        if payload.plate is not None and index == 0 and any(ref.kind == "anchor_video" for ref in call.references) and all(
+            ref.kind in ("anchor_video", "audio") for ref in call.references
+        ):
+            # H3's Ref2VA needs a picture beside the plate: its own first frame, as a world state (se-101).
+            warnings.append("a plate with no picture beside it uses its own first frame as the picture")
+            opening = StoryReference(name="Plate opening", kind="world_state",
+                                     description=f"This segment starts from it: {here} is where now.")  # fmt: skip
+            frame = await resume_frame(payload=ResumeFrameInput(video=payload.plate.video, frames=1))  # type: ignore[call-arg]
+            files[opening.name] = frame.image
+            call = segment_call(text, [*own, opening], style=style, soundscape=sound, music=music, index=index,
+                                retained=retained, added=added | {opening.name}, forced=forced | {opening.name}, **role)  # fmt: skip
         if not call.references and resumed is not None:
             # A resumed video's first segment carries into Ref2VA, which needs a picture: with none of the request's
             # own, it starts from the continued video's last frame as the same world state (h3a-098, run 25881).

@@ -29,7 +29,7 @@ references:                                   # in this order H3 numbers them; e
   - {name: Walk, kind: video, video: "./walk.mp4#t=0:03,0:09", use_audio: false}
   - {name: Rain, kind: audio, audio: ./rain.wav}
 first_frame: ./open.png                       # and/or last_frame
-# plate: {video: ./take3.mp4}                 # the video being edited (no first_frame with it)
+# plate: {video: ./take3.mp4}                 # the video being edited (a first_frame beside it is ignored)
 # continue_from: {video: ./v1.mp4, latents: ./v1.latents}   # resume a video this package made
 turbo: true
 ```
