@@ -9,7 +9,7 @@ vars:
 tasks:
   # First-party packages publish at the root namespace (`--root`, Hub admins). Locks pin first-party callees exactly, so each release of X is followed by one of every package
   # whose lock holds X: relocked to it, patch-bumped, pushed to master, then published.
-  # Every release is a candidate: published and yanked at once (an exact pin installs it; the unversioned default skips
+  # Every release is a candidate: published yanked, in one Hub call (an exact pin installs it; the unversioned default skips
   # it). The release agent tests it by hand (cozy-creator's release gate, the printed pins) and records the result; then
   # `task promote` un-yanks the gated releases (tracker design ci-v2, pre-release and promotion). Nothing here starts a
   # test. A dependent relocks to a yanked callee only when it pins it with ==. A version any hub already holds is never
@@ -84,9 +84,7 @@ tasks:
           for h in {{.HUBS}}; do
             rm -rf "${work:?}/$1"; git archive HEAD "$1" | tar -x -C "$work"
             [ ! -d "$work/.kernels/$1" ] || cp -r "$work/.kernels/$1/." "$work/$1/"
-            (cd "$work/$1" && COZY_HUB_URL="$h" cozy package publish --root)
-            COZY_HUB_URL="$h" cozy package yank "$1@$(ver "$1")" -y ||
-              { echo "$1 $(ver "$1") is published on $h but NOT yanked: yank it there now" >&2; exit 1; }
+            (cd "$work/$1" && COZY_HUB_URL="$h" cozy package publish --root --yanked)
           done
           shipped="$shipped${shipped:+,}$1@$(ver "$1")"
         }
