@@ -78,7 +78,11 @@ def _generate(ctx: Context, payload: GenerateInput, model: Flux2, turbo: Flux2Tu
     prompt = payload.rendered(adj, label)
     if payload.prompt_upsampling:
         with tel.stage("upsampling prompt", overall_range=(0.0, 0.15)):
-            prompt = upsampler.upsample(prompt, images)
+            caption = upsampler.upsample(prompt, images)
+        if caption:
+            prompt = caption
+        else:
+            adj.warn("prompt_upsampling", "the upsampler returned nothing; the prompt goes as written")
         tel.log("upsampled prompt", caption=prompt[:2000])
     ctx.raise_if_cancelled()
     references = None

@@ -24,7 +24,6 @@ from cozy_runtime.author import (
     Model,
     ModelAssets,
     Telemetry,
-    UnsupportedInput,
     hold_dtype,
     uses_components,
 )
@@ -153,16 +152,17 @@ def schedule(steps: int, tokens: int, sigmas: Sequence[float] | None = None) -> 
 
 
 def prepare_references(images: Sequence[Image.Image]) -> list[Image.Image]:
-    """BFL's `default_prep`: RGB, at least 64 px a side and at most 8:1, capped at 2024² pixels
-    (1024² each of several), centre-cropped to the 16 px grid."""
+    """BFL's `default_prep`: RGB, its middle at most 8:1, scaled up to at least 64 px a side, capped at
+    2024² pixels (1024² each of several), centre-cropped to the 16 px grid."""
     limit = SINGLE_REFERENCE_PIXELS if len(images) == 1 else MULTI_REFERENCE_PIXELS
     prepared = []
-    for index, image in enumerate(images):
+    for image in images:
         image = ImageOps.exif_transpose(image).convert("RGB")
-        try:
-            Flux2ImageProcessor.check_image_input(image)
-        except ValueError as exc:
-            raise UnsupportedInput(f"pictures.{index}.image: {exc}") from None
+        w, h = min(image.width, 8 * image.height), min(image.height, 8 * image.width)
+        image = image.crop(((image.width - w) // 2, (image.height - h) // 2, (image.width + w) // 2, (image.height + h) // 2))
+        if min(image.size) < 64:
+            scale = 64 / min(image.size)
+            image = image.resize((round(image.width * scale), round(image.height * scale)), Image.Resampling.LANCZOS)
         image = Flux2ImageProcessor._resize_if_exceeds_area(image, limit)
         w, h = image.width // PATCH * PATCH, image.height // PATCH * PATCH
         left, top = (image.width - w) // 2, (image.height - h) // 2

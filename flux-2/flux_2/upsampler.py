@@ -10,7 +10,7 @@ from typing import Any
 
 import torch
 from cozy_runtime import lm
-from cozy_runtime.author import Config, Loader, Model, UnsupportedInput, uses_components
+from cozy_runtime.author import Config, Loader, Model, uses_components
 from diffusers.pipelines.flux2.image_processor import Flux2ImageProcessor
 from diffusers.pipelines.flux2.pipeline_flux2 import (
     UPSAMPLING_MAX_IMAGE_SIZE,
@@ -61,7 +61,4 @@ class Flux2Upsampler(Model[UpsamplerGraph], encoded_leaves="accept", min_bits=4,
         tokenizer = processor.tokenizer
         out = lm.generate(model, inputs, max_new_tokens=MAX_NEW_TOKENS, stop=[tokenizer.eos_token_id],
                           pad=tokenizer.pad_token_id)
-        caption = str(tokenizer.decode(out[0], skip_special_tokens=True)).strip()
-        if not caption:
-            raise UnsupportedInput("the prompt upsampler returned an empty caption", code="output_integrity")
-        return caption
+        return str(tokenizer.decode(out[0], skip_special_tokens=True)).strip()

@@ -58,12 +58,6 @@ class Tuning(msgspec.Struct, kw_only=True):
     temporal_overlap: Annotated[int, msgspec.Meta(ge=0, le=16)] = 0
     prepend_frames: Annotated[int, msgspec.Meta(ge=0, le=32)] = 0
 
-    def __post_init__(self) -> None:
-        if self.batch_size is not None and self.batch_size % 4 != 1:
-            raise ValueError(
-                f"batch_size must be 4n+1 (1, 5, 9, 13, 17, 21, ...), got {self.batch_size}"
-            )
-
 
 class UpscaleInput(Tuning, kw_only=True):
     video: Annotated[VideoFile, FileBound(max_decoded_bytes=2 << 30)]
@@ -84,6 +78,7 @@ class UpscaleOutput(msgspec.Struct):
     ]
     frame_count: int
     fps: float
+    warnings: list[str] = msgspec.field(default_factory=list)
 
 
 def output_sizes(
@@ -112,10 +107,12 @@ def upscale(
     The whole clip as one window, or windows of at most `batch_size` frames that share
     `temporal_overlap`. The Runtime cuts the DiT's work to fit the device."""
     size, overlap = payload.batch_size or sys.maxsize, payload.temporal_overlap
+    warnings: list[str] = []
+    if size % 4 != 1 and payload.batch_size:
+        size += (1 - size) % 4
+        warnings.append(f"batch_size {payload.batch_size} runs at {size}: it takes 4n+1")
     if overlap >= size:
-        tel.log(
-            "temporal_overlap is not below batch_size; using 0, as upstream does", level="warning"
-        )
+        warnings.append("temporal_overlap is not below batch_size; using 0, as upstream does")
         overlap = 0
     count = 0
 
@@ -221,4 +218,4 @@ def upscale(
     saved = out.save_video_stream(events())
     if saved.frame_count != count:
         raise RuntimeError("video encoder changed the restored frame count")
-    return UpscaleOutput(saved.video, count, float(saved.frame_rate))
+    return UpscaleOutput(saved.video, count, float(saved.frame_rate), warnings)
