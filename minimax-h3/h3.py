@@ -1677,8 +1677,9 @@ class GenerateResult(ShotResult):
 
 class WorldWrite(msgspec.Struct, kw_only=True):
     """A screenshot to keep as the next state of the series `of`: the frame at `at_s` on the video's clock, or its last. From the
-    next segment on, `<of>` (and `<name>`, this one frame) is that picture as a world state, `description` saying who and what is
-    where. In the segment that holds it, a mention is words only: the model remembers what it drew."""
+    next segment on, `<of>` (and `<name>`, this one frame) is that picture as a scene: the picture is the state, and the text says
+    what's happening. `description`: only what the file says of this revision itself, never its series' words, which may no longer
+    be true. In the segment that holds it, a mention is words only: the model remembers."""
 
     of: str
     name: str = ""
@@ -2117,7 +2118,8 @@ async def generate(ctx: Context, payload: GenerateInput, out: Outputs, tel: Tele
     people = _has_people(payload)
     here = "who and what" if people else "what"
     texts = segment_texts(payload.prompt, [begun + at for at in opens], continued=resumed is not None, duration_s=duration_s)
-    # From the segment after a write, its series and its own name are that frame, as a world state: who and what stands where.
+    # From the segment after a write, its series and its own name are that frame, as a scene. Its series' description may no
+    # longer be true of it, so that isn't sent.
     known = {name_key(ref.name): ref for ref in references}
     series = {name_key(name): write.of for write in payload.writes for name in (write.of, write.name) if name}
     written: dict[int, File] = {}
@@ -2140,8 +2142,7 @@ async def generate(ctx: Context, payload: GenerateInput, out: Outputs, tel: Tele
                 write = payload.writes[position]
                 for name in filter(None, (write.of, write.name)):
                     base = known.get(name_key(name))
-                    states[name_key(name)] = StoryReference(name=base.name if base else name, kind="world_state",
-                                                            description=write.description or (base.description if base else ""))  # fmt: skip
+                    states[name_key(name)] = StoryReference(name=base.name if base else name, kind="world_state", description=write.description)
         own = [states.get(name_key(ref.name), ref) for ref in own] + [state for key, state in states.items() if key not in known]
 
         def words_only(token: re.Match[str]) -> str:
@@ -2170,7 +2171,7 @@ async def generate(ctx: Context, payload: GenerateInput, out: Outputs, tel: Tele
             own = [*(ref for ref in own if ref.kind != "background"), *beside]
         else:
             beside = []
-        added = frozenset(ref.name for ref in [*beside, *anchor, *states.values()])
+        added = frozenset(ref.name for ref in [*beside, *anchor])
         kept = forced | {ref.name for ref in beside}
         role = {"keyframes": bool(index == 0 and opening or index + 1 == count and payload.last_frame),
                 "continues": index == 0 and resumed is not None}  # fmt: skip
@@ -2415,8 +2416,8 @@ def _made_here(read_or_take: Read | Keep) -> bool:
 
 
 def _reference(read: Read, warned: list[str]) -> dict[str, Any]:
-    """What a shot reads, as `generate` takes it: by what its files and kind are. A world state or a storyboard is a loose
-    picture: an arrangement to follow, read only by a segment whose text names it, not a look to reproduce."""
+    """What a shot reads, as `generate` takes it: by what its files and kind are. A scene is a loose picture: a layout to start
+    from, read at 512 px only by a segment whose text names it, not a look to reproduce."""
     entry: dict[str, Any] = {k: v for k, v in read.fields.items() if k in ("use_audio", "follow")}
     entry["name"] = spoken(f"<{read.name}>")[1:-1]
     if "video" in read.files:
@@ -2425,9 +2426,9 @@ def _reference(read: Read, warned: list[str]) -> dict[str, Any]:
         return entry | {"kind": "audio", "audio": read.files["audio"].sha256}
     picture = read.files["image"]
     entry["image"] = picture.sha256
-    if description := read.fields.get("description") or read.fields.get("blocking") or "":
+    if description := read.fields.get("description") or "":
         entry["description"] = description
-    if read.kind in ("world_state", "storyboard"):
+    if read.kind == "scene":
         return entry | {"kind": "environment", "follow": "loose"}
     if read.kind in ("environment", "setup"):
         return entry | {"kind": "environment"}
@@ -2467,7 +2468,7 @@ def adapt_shot(op: ShotOperation) -> list[Invocation]:
             warned.append(f"{op.asset}'s beat {number + 1} has no duration: it lasts {_BEAT_S:g} s")
         told.append(f"{'' if number else '[Shot 1] '}{f'At {_clock(at)}, ' if at else ''}{_kept(beat.description)}")
         length = beat.duration or _BEAT_S
-        moments |= {name_key(write.state): at + (length if write.at is None else write.at) for write in beat.writes}
+        moments |= {name_key(write.scene): at + (length if write.at is None else write.at) for write in beat.writes}
         at += length
     summary, end = _kept(f.summary), at or 15.0
     prompt = "\n\n".join(filter(None, (summary and f"summary:\n{summary}", "detailed_description:\n" + "\n".join(told)))) if told else f"[Shot 1] {summary}"  # fmt: skip
@@ -2487,7 +2488,7 @@ def adapt_shot(op: ShotOperation) -> list[Invocation]:
     if op.writes:
         request["writes"] = [{"of": write.name.rpartition(".")[0] if write.name.rpartition(".")[2].isdigit() else write.name,
                               "name": spoken(f"<{write.name}>")[1:-1], "at_s": moments.get(name_key(write.name), write.at_s),
-                              "description": write.fields.get("description") or write.fields.get("blocking") or ""}
+                              "description": str(write.fields.get("description", ""))}
                              for write in op.writes]  # fmt: skip
     if f.turbo is not None:
         request["turbo"] = f.turbo

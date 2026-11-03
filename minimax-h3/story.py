@@ -399,11 +399,15 @@ def _segment_call(
                 f"<{ref.name}> is the world state shown in {slot}: how the set is arranged and "
                 + ("where each person and object stands." if characters else "where everything in it stands.")
             )
-            # Its arrangement, never a look to keep, unless the text's own line says otherwise.
-            if ref.name in added or ((ref.name, "picture") not in retained and not author.get(name_key(ref.name))):
+            if ref.name in added:
                 kept = "each person's and object's position" if characters else "where everything in it stands"
                 retention.append(f"<{ref.name}>: attribute_transfer - keep the set's arrangement and {kept} "
                                  f"from {slot}, not its exact frame, framing or moment.")
+            elif (ref.name, "picture") not in retained and not author.get(name_key(ref.name)):
+                # A scene: a layout to start from, never a look to keep (Paul, 11-03).
+                layout = "characters and background" if characters else "the set"
+                retention.append(f"<{ref.name}>: attribute_transfer - use the layout of {layout} in {slot} as a starting point, "
+                                 "not its exact frame, framing or moment.")
         else:
             moves = [f"<{clip.name}>" if not _MEDIA.fullmatch(clip.name) else label(clip)
                      for clip in clips

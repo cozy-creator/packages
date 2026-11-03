@@ -24,7 +24,6 @@ from cozy_runtime.author import (
     SetupOperation,
     Sizes,
     Telemetry,
-    WorldStateOperation,
     held,
     name_label,
     spoken,
@@ -243,9 +242,9 @@ def adapt_environment(op: PictureOperation) -> list[Invocation]:
     return _picture(op, f, _styled(f"{f.description.strip()}\n\n{last}", f.style))
 
 
-@app.project_adapter("storyboard")
-def adapt_storyboard(op: PictureOperation) -> list[Invocation]:
-    """The pictures it mentions, composed into one scene, as written: it is a character and a place together. Each picture's own
+@app.project_adapter("scene")
+def adapt_scene(op: PictureOperation) -> list[Invocation]:
+    """Characters in a place at a moment: the pictures it mentions, composed into one, as written. Each picture's own
     description follows, since a mention reads as `<image3>` alone: with no words for it, a third picture was dropped in 3 of 3
     seeds (runs 27130, 27161, 27174), and with them kept (27200)."""
     described = [f"<{read.name}>: {text}" for read in op.reads if (text := str(read.fields.get("description", "")).strip())]
@@ -264,8 +263,7 @@ def adapt_setup(op: SetupOperation) -> list[Invocation]:
                            f"the light and the weather exactly as in {kept}; add nothing new, no people.")  # fmt: skip
 
 
-@app.project_adapter("world_state", "image")
-def adapt_image(op: WorldStateOperation) -> list[Invocation]:
-    """What it says, as it says it: a world state's start, and who and what is where."""
-    f = op.fields
-    return _picture(op, f, _styled("\n\n".join(filter(None, (_said(f), f.init.strip(), f.blocking.strip()))), f.style))
+@app.project_adapter("image")
+def adapt_image(op: PictureOperation) -> list[Invocation]:
+    """What it says, as it says it."""
+    return _picture(op, op.fields, _styled(_said(op.fields), op.fields.style))
