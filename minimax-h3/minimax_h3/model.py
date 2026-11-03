@@ -241,6 +241,10 @@ class H3Model(
     def silence(self, frames: int) -> Any:
         return self.pipe.silence_rows(frames).cpu()
 
+    @uses_components("audio_vae")
+    def carried_sound(self, waveform: Any) -> Any:
+        return self.pipe.carried_sound(waveform).cpu()
+
     @uses_components("transformer")
     def sample_fl2va(
         self, state: Any, *, on_step: Any, cancel: Any, recipe: FullRecipe = FULL_BALANCED

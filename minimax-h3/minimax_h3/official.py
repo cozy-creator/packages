@@ -77,6 +77,7 @@ from .adaln_pruned import AdaLNPrunedMiniMaxH3Transformer, step_invariants
 from .cell_texture import CellEqualizer
 from .conditioner import FinalHiddenState, PresentationLength, build_text_conditioner
 from .continuation import (
+    AUDIO_TICKS,
     AVContext,
     ContextReferenceLayout,
     ContinuationPlan,
@@ -136,6 +137,9 @@ MAX_DURATION = 15.0
 VAE_SPATIAL_RATIO = 16
 PATCH_SIZE = (1, 2, 2)
 AUDIO_CHANNELS = 2
+#: How much of a kept soundtrack is encoded for a carry: the audio VAE's projection is causal, so its last second
+#: reads what leads up to it.
+_SOUND_LEAD_S = 5
 MAX_IMAGE_REFERENCES = 9
 MAX_VIDEO_REFERENCES = 3
 MAX_AUDIO_REFERENCES = 3
@@ -1685,18 +1689,26 @@ class OfficialH3Pipeline:
         std = torch.tensor(vae.config.latents_std, device=raw.device).view(1, -1, 1, 1, 1)
         return (raw - mean) / std
 
-    def silence_rows(self, frames: int) -> Any:
-        """Packed `(2 * latents, 32)` rows of stereo silence covering `frames` video frames,
-        at the posterior mean (`open_h3/pipeline.py` encode_silence)."""
+    def _sound_rows(self, waveform: Any) -> Any:
+        """A stereo waveform's `(2, latents, 32)` rows at the posterior mean, on the audio VAE's device."""
         audio_vae = self.components["audio_vae"]
         device = next(audio_vae.parameters()).device
-        samples = round(frames / FPS * self.sample_rate)
         # The encode's WeightNorm weights go with it, as every other audio VAE pass's do: kept,
         # 0.3 GB of them pinned 0.77 GB of Torch's cache through the executor's idle offload, and
         # SeedVR2 2160p found too little room beside it (cr-226).
         with torch.no_grad(), _audio_weight_norm_scope(audio_vae):
-            rows = _soundtrack_rows(audio_vae, torch.zeros(AUDIO_CHANNELS, samples, device=device))
+            return _soundtrack_rows(audio_vae, waveform.to(device))
+
+    def silence_rows(self, frames: int) -> Any:
+        """Packed `(2 * latents, 32)` rows of stereo silence covering `frames` video frames,
+        at the posterior mean (`open_h3/pipeline.py` encode_silence)."""
+        rows = self._sound_rows(torch.zeros(AUDIO_CHANNELS, round(frames / FPS * self.sample_rate)))
         return rows.reshape(-1, rows.shape[-1])
+
+    def carried_sound(self, waveform: Any) -> Any:
+        """Packed rows of a kept soundtrack's last second, encoded with what leads up to it, as a carry holds them."""
+        rows = self._sound_rows(waveform[:, -_SOUND_LEAD_S * self.sample_rate :])
+        return rows[:, -AUDIO_TICKS:].reshape(-1, rows.shape[-1])
 
     def export_context(self, state: Any, *, provenance: str) -> AVContext | None:
         """The successor's carry from this request's denoised latents; None if it carries

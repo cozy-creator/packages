@@ -38,6 +38,16 @@ sync at the end. A successor carrying sound alone needs the sound to reach the j
 predecessor's picture ends one frame early when its grid rounds the sound down (362 frames →
 603 ticks → 361 frames).
 
+## Resuming mid-video
+
+`continue_from.at_s` cuts a whole video's latents at the nearest `17k + 5` frames (`shot_latents.cut`): the same tokens, in
+phase, whichever segment made them, so the last 22 frames there are the carry and the new segment joins the kept latents and
+decodes with them as one. The file keeps no audio latents before a video's end, so the carried second is encoded from its
+soundtrack by the audio VAE, ending on the tick nearest the picture join, where the kept sound stops. That is the one
+decoded-and-encoded link in a resume, and only sound: its one job is to condition the new sound. As at any join, the new
+segment's head is regenerated beside the carried frames and cut, so no new frame is lost. The kept latents don't change, and the
+video decodes again as one, so only the last few frames before the join differ, where the VAE's overlap reads the new latents.
+
 ## API
 
 `minimax_h3/continuation.py`: `Carry`, `ContinuationPlan(seconds, carried, successor)`,

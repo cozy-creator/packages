@@ -67,7 +67,7 @@ from cozy_runtime.author import (
     invocable,
     prefetch,
 )
-from cozy_runtime.author import Invocation, ProjectReference, ProjectShot, ProjectUpscale
+from cozy_runtime.author import Invocation, ProjectContinue, ProjectReference, ProjectShot, ProjectUpscale
 from msgspec.structs import replace
 from PIL import Image as PILImage
 from safetensors.torch import load as load_tensors
@@ -77,10 +77,12 @@ from gates import MediaFacts, refuse_before_encode
 from minimax_h3 import regenerate as refine_math
 from minimax_h3 import shot_latents
 from minimax_h3.continuation import (
+    AUDIO_TICKS_PER_S,
     AVContext,
     Carry,
     ContinuationPlan,
     RenderProvenance,
+    audio_ticks,
     context_provenance,
     decode_context,
     encode_context,
@@ -1089,11 +1091,13 @@ def _references_to_video(
     anchors: Sequence[tuple[Image, Literal["first", "last"]]],
     ended: Callable[[Any], None],
     earlier: _Earlier | None = None,
+    sound: tuple[Any, Fraction] | None = None,
 ) -> H3VideoOutput:
     plan = _plan(model, turbo_lora, "ref2va")
     steps = plan.schedule(payload.steps).transformer_evaluations
     dit = "transformer_ref" if turbo_lora is None else {"transformer_ref", "ref2va_turbo"}
-    ctx.plan("text_encoder", {"vae", "audio_vae"}, dit, "audio_vae", "vae")
+    # A cut video's sound is encoded first: what the segment carries starts from it.
+    ctx.plan(*(() if sound is None else ("audio_vae",)), "text_encoder", {"vae", "audio_vae"}, dit, "audio_vae", "vae")
     ctx.raise_if_cancelled()
     view = model.for_request(ctx, seed=payload.seed)
     notes = _retargeted(view.adapters, "transformer_ref")
@@ -1108,6 +1112,9 @@ def _references_to_video(
         )
     frames = delivery.sample_frames
     with tel.stage("prepare", overall_range=(0.00, 0.03)):
+        if sound is not None:
+            assert context is not None
+            context = context.with_sound(model.carried_sound(sound[0]), sound[1])
         references, sizing, guide, read_notes = assets_to_h3_refs(
             assets, pipe=model.pipe, frames=frames, videos=payload.videos, edges=payload.picture_edges
         )
@@ -1261,11 +1268,19 @@ class SegmentOutput(msgspec.Struct):
     latents: LatentFile
 
 
+def _sound_chunks(stream: Any) -> list[Any]:
+    """A decoded video's sound, `(channels, samples)` per chunk, none of its pictures."""
+    with stream as events:
+        return [np.stack([np.frombuffer(pcm, dtype=np.float32) for pcm in event.pcm_f32le])
+                for event in events if isinstance(event, DecodedAudioChunk)]  # fmt: skip
+
+
 @dataclass(frozen=True)
 class _Earlier:
     """A shot's segments before its last: their delivered latents end to end, their sound end to
-    end (each starts where the last ended, as continuation cut it), and their frames; and the
-    last segment's head to leave out, whole VAE cycles, so its latents follow in phase."""
+    end (each starts where the last ended, as continuation cut it; a cut video's, kept in its
+    latents, first), and their frames; and the last segment's head to leave out, whole VAE cycles,
+    so its latents follow in phase."""
 
     latents: Any
     waveform: Any
@@ -1274,13 +1289,11 @@ class _Earlier:
 
     @classmethod
     def read(cls, latents: Sequence[File], videos: Sequence[VideoFile], head: int) -> _Earlier:
-        parts = []
+        loaded = [load_tensors(file.read_bytes()) for file in latents]
+        parts = [tensors["sound"].numpy() for tensors in loaded if "sound" in tensors]
         for video in videos:
-            with video.stream(pictures=False) as stream:
-                for event in stream:
-                    if isinstance(event, DecodedAudioChunk):
-                        parts.append(np.stack([np.frombuffer(pcm, dtype=np.float32) for pcm in event.pcm_f32le]))
-        joined = torch.cat([load_tensors(file.read_bytes())["latents"] for file in latents], dim=2)
+            parts.extend(_sound_chunks(video.stream(pictures=False)))
+        joined = torch.cat([tensors["latents"] for tensors in loaded], dim=2)
         # 5k + 2 latents decode to 17k + 5 frames (`continuation.video_tokens`).
         frames = (int(joined.shape[2]) - 2) // 5 * 17 + 5
         return cls(joined, torch.from_numpy(np.concatenate(parts, axis=1)), frames, head)
@@ -1348,10 +1361,12 @@ async def ref2va_segment(
         Carry(int(payload.next_context_frames), payload.next_context_audio),
     )
     context: AVContext | None = None
+    sound = None
     if plan.carried:
         if payload.context is None:
             raise InvalidRequest("a carried picture or sound needs the previous context", fields=["payload.context"])
-        context = decode_context(shot_latents.context(payload.context.read_bytes()))
+        data = payload.context.read_bytes()
+        context, sound = decode_context(shot_latents.context(data)), shot_latents.sound(data)
     _reference_policy(assets)
     handed = _Segments(out, base_model, plan, observed, payload.latents)
     earlier = None
@@ -1368,7 +1383,7 @@ async def ref2va_segment(
         completed=handed if handed.wanted else None,
         anchors=_anchors(payload.first_frame, payload.last_frame),
         ended=partial(_keep_frames, out, tuple(skip + index for index in payload.exports), ended, exported),
-        earlier=earlier,
+        earlier=earlier, sound=sound,
     )  # fmt: skip
     return SegmentOutput(segment.video, list(segment.warnings), observed, handed.file("context"), ended[0], exported,
                        handed.file("latents"))  # fmt: skip
@@ -1636,9 +1651,15 @@ class EditPlate(Plate, kw_only=True):
 
 class Continue(ContinueFrom, kw_only=True):
     """A video this package made, and its `latents`: the request runs on its timeline and resumes
-    at its end."""
+    at its end, or with `at_s` at the join nearest that time, keeping only what comes before it."""
 
     latents: Latents | None = None
+    at_s: float | None = None
+
+
+class GenerateResult(ShotResult):
+    #: With `continue_from`: how many seconds of that video this one keeps, where the new part starts.
+    kept_s: float | None = None
 
 
 class GenerateInput(msgspec.Struct, kw_only=True):
@@ -1941,14 +1962,33 @@ def _is_native(aspect_ratio: str) -> bool:
         return False
 
 
-async def generate(ctx: Context, payload: GenerateInput, out: Outputs, tel: Telemetry) -> ShotResult:
+def _cut(resumed: Continue, out: Outputs) -> tuple[Continue, bool, list[str]]:
+    """`continue_from` at its `at_s`, as what a resume runs on: the latents up to the nearest join (a join of the grid, so
+    what follows is in phase), with the carry there and the sound that stays. Whether it cut, and what to warn of; `kept_s` in
+    the result says where it landed."""
+    assert resumed.latents is not None and resumed.at_s is not None
+    data, asked = resumed.latents.read_bytes(), resumed.at_s
+    end, kept = shot_latents.delivered(data), shot_latents.nearest_join(asked * FPS)
+    if kept >= end:
+        return replace(resumed, at_s=None), False, [f"continue_from.at_s {asked:g} s is at or past its video's end: it resumes "
+                                                    f"at {end / FPS:.2f} s"]  # fmt: skip
+    parts = _sound_chunks(resumed.video.stream(end=Fraction(audio_ticks(kept), AUDIO_TICKS_PER_S), pictures=False))
+    if not parts:
+        raise InvalidRequest("continue_from.video has no sound: it isn't the video these latents were made with",
+                             fields=["continue_from.video"])  # fmt: skip
+    cut = shot_latents.cut(data, kept, _CARRY.frames, torch.from_numpy(np.concatenate(parts, axis=1)))
+    file = out.save_bytes(cut, media_type="application/octet-stream")
+    return replace(resumed, latents=file, at_s=None), True, []
+
+
+async def generate(ctx: Context, payload: GenerateInput, out: Outputs, tel: Telemetry) -> GenerateResult:
     """One continuous video of any length, with sound, from MiniMax H3.
 
     Its segments of at most 15 s render in order, each continuing the last from its carried latents,
     and decode as one video, published as it grows. `continue_from` resumes a video this package
-    made, from its latents, on its timeline: the result is the whole video. The run's model stack
-    (`--lora`, `model.base_model`) serves every segment. Returns the video and its latents, whose
-    carry a later `continue_from` resumes."""
+    made, from its latents, on its timeline, at its end or at `at_s`: the result is the whole video.
+    The run's model stack (`--lora`, `model.base_model`) serves every segment. Returns the video and
+    its latents, whose carry a later `continue_from` resumes."""
     ctx.raise_if_cancelled()
     warnings: list[str] = []
     # Asking for steps asks for the full model, the only one that has a choice of them.
@@ -1964,11 +2004,19 @@ async def generate(ctx: Context, payload: GenerateInput, out: Outputs, tel: Tele
         warnings.append("continue_from has no latents, so this is a new video opening on its last frame, and it comes "
                         "back alone; the join may show")  # fmt: skip
         last = math.ceil(resumed.video.probe().duration * FPS)
+        if resumed.at_s is not None:
+            warnings.append(f"so at_s {resumed.at_s:g} s opens it on that frame instead")
+            last = min(last, max(1, round(resumed.at_s * FPS)))
         opening = _resume_frame(resumed.video, last, out)
         resumed = None
     duration_s = payload.duration_s
+    cut = False
     if resumed is not None:
         assert resumed.latents is not None
+        if resumed.at_s is not None:
+            resumed, cut, said = _cut(resumed, out)
+            warnings += said
+            assert resumed.latents is not None
         done = shot_latents.delivered(resumed.latents.read_bytes())
         if done >= duration_s * FPS:
             duration_s += done / FPS
@@ -2075,8 +2123,8 @@ async def generate(ctx: Context, payload: GenerateInput, out: Outputs, tel: Tele
         prefetch(ref2va_segment)
     work = [plan.sample_frames for plan in plans]
     seeds = [segment_seed(payload.seed, ctx.request_id, index) for index in range(count)]
-    # A resumed video's latents and its video join this one's at its last segment, decoded as one.
-    before = ((resumed.latents,), (resumed.video,)) if resumed is not None and resumed.latents is not None else ((), ())
+    # A resumed video's latents and its video join this one's at its last segment, decoded as one; a cut's sound is in its latents.
+    before = ((resumed.latents,), () if cut else (resumed.video,)) if resumed is not None and resumed.latents is not None else ((), ())
     joined = count > 1 or resumed is not None
     context: File | None = resumed.latents if resumed is not None else None
     expected = None
@@ -2143,7 +2191,8 @@ async def generate(ctx: Context, payload: GenerateInput, out: Outputs, tel: Tele
         out.publish("video", video, label=f"Video at {payload.resolution.value}")
     ctx.release_gpus()
     tel.log("h3 shot", segments=count, delivered_frames=total, turbo=turbo, preset=payload.preset)
-    return ShotResult(video=video, warnings=list(dict.fromkeys(warnings)), latents=latents)
+    return GenerateResult(video=video, warnings=list(dict.fromkeys(warnings)), latents=latents,
+                          kept_s=done / FPS if resumed is not None else None)  # fmt: skip
 
 
 def _shot_latents(out: Outputs, parts: Sequence[File], frames: int, context: File, text: str) -> File:
@@ -2267,8 +2316,18 @@ def _project_reference(ref: ProjectReference) -> dict[str, Any]:
     return entry | {field: value for field in ("image", "voice", "video", "audio") if (value := getattr(ref, field)) is not None}
 
 
+class _Continues(ProjectContinue, kw_only=True):
+    """The video a shot continues, and the time to keep it up to, if not its end (`cozy project render --from`)."""
+
+    at_s: float | None = None
+
+
+class _Shot(ProjectShot, kw_only=True):
+    continues: _Continues | None = None
+
+
 @app.project_adapter("shot")
-def adapt_shot(payload: ProjectShot) -> Invocation:
+def adapt_shot(payload: _Shot) -> Invocation:
     """A project's shot as `generate`: the summary and the beats this call reaches, in H3's sections and times."""
     beats = sorted((beat for beat in payload.beats if beat.at < payload.end_s), key=lambda beat: beat.at)
     told = [f"{'' if number else '[Shot 1] '}{f'At {_clock(beat.at)}, ' if beat.at > 0 else ''}{_kept(beat.description)}"
@@ -2281,9 +2340,9 @@ def adapt_shot(payload: ProjectShot) -> Invocation:
     for field in ("style", "soundscape", "music", "aspect_ratio", "plate", "first_frame", "last_frame"):
         if value := getattr(payload, field):
             request[field] = value
-    if payload.continues is not None:
-        request["continue_from"] = {"video": payload.continues.video} | (
-            {"latents": payload.continues.latents} if payload.continues.latents else {})  # fmt: skip
+    if (continues := payload.continues) is not None:
+        request["continue_from"] = {"video": continues.video} | ({"latents": continues.latents} if continues.latents else {}) | (
+            {"at_s": continues.at_s} if continues.at_s is not None else {})  # fmt: skip
     return Invocation(function=payload.function, input=request)
 
 

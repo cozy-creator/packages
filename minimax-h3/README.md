@@ -30,14 +30,15 @@ references:                                   # in this order H3 numbers them; e
   - {name: Rain, kind: audio, audio: ./rain.wav}
 first_frame: ./open.png                       # and/or last_frame
 # plate: {video: ./take3.mp4}                 # the video being edited (a first_frame beside it is ignored)
-# continue_from: {video: ./v1.mp4, latents: ./v1.latents}   # resume a video this package made
+# continue_from: {video: ./v1.mp4, latents: ./v1.latents, at_s: 15}   # resume a video this package made, at its end or at_s
 turbo: true
 ```
 
 The result is `video` (768p mp4), `latents` (its own, for `upscale` and `continue_from`) and
 `warnings`. `follow: loose` keeps a picture's arrangement, not its frame (read at 512 px: a world
 state). `continue_from` puts the request on that video's timeline: `duration_s` is the whole length,
-text before its end is history, and the result is the whole video, decoded as one. With a plate,
+text before its end is history, and the result is the whole video, decoded as one. `at_s` resumes at the join nearest that
+time instead, every 17 frames, keeping what is before it, and `kept_s` in the result says where. With a plate,
 add its edit LoRA (`--lora alissonerdx/minimax-h3-character-swap`, …) and start the prompt with that
 LoRA's trigger (`body_swap:`). The latents also carry the text the video was made from, which
 `upscale` uses when given no prompt.
