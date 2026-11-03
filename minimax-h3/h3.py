@@ -67,6 +67,7 @@ from cozy_runtime.author import (
     invocable,
     prefetch,
 )
+from cozy_runtime.author import Invocation, ProjectReference, ProjectShot, ProjectUpscale
 from msgspec.structs import replace
 from PIL import Image as PILImage
 from safetensors.torch import load as load_tensors
@@ -143,6 +144,7 @@ from story import (
     validate_references,
     voices,
     without_sections,
+    _HEADER,
 )
 
 app = App()
@@ -2227,3 +2229,63 @@ async def upscale(ctx: Context, payload: UpscaleInput, out: Outputs, tel: Teleme
 
 app.entrypoint(generate, emits_media=True, accelerator=False)
 app.entrypoint(upscale, emits_media=True, accelerator=False)
+
+
+# --- project adapters (xs-147): a project's shot and upscale as this package's own calls ------
+
+
+#: A line of a person's text the planner would read as ours: a timestamp or a section. Their line breaks reach the model.
+_OURS = re.compile(rf"(?:{_TIMED.pattern})|(?:{_AFTER.pattern})|(?:{_HEADER.pattern})", re.I | re.M)
+
+
+def _kept(text: str) -> str:
+    """A person's text as it goes into our form: each line as written, but one that would read as ours doesn't start its
+    line, so it can't set a time or end the description."""
+    return _OURS.sub(lambda line: f"… {line.group(0).lstrip()}", text.strip())
+
+
+def _project_reference(ref: ProjectReference) -> dict[str, Any]:
+    """A project's reference as `generate` takes it: a world state is a loose environment picture."""
+    entry: dict[str, Any] = {**ref.fields, "name": ref.name, "kind": "environment" if ref.kind == "world_state" else ref.kind}
+    if ref.kind == "world_state":
+        entry["follow"] = "loose"
+    if ref.image is not None and ref.description:
+        entry["description"] = ref.description
+    return entry | {field: value for field in ("image", "voice", "video", "audio") if (value := getattr(ref, field)) is not None}
+
+
+@app.project_adapter("shot")
+def adapt_shot(payload: ProjectShot) -> Invocation:
+    """A project's shot as `generate`: the summary and the beats this call reaches, in H3's sections and times."""
+    beats = sorted((beat for beat in payload.beats if beat.at < payload.end_s), key=lambda beat: beat.at)
+    told = [f"{'' if number else '[Shot 1] '}{f'At {_clock(beat.at)}, ' if beat.at > 0 else ''}{_kept(beat.description)}"
+            for number, beat in enumerate(beats)]  # fmt: skip
+    summary = _kept(payload.summary)
+    prompt = f"[Shot 1] {summary}" if not told else "\n\n".join(
+        filter(None, (summary and f"summary:\n{summary}", "detailed_description:\n" + "\n".join(told))))  # fmt: skip
+    request: dict[str, Any] = {"prompt": prompt, "duration_s": payload.end_s,
+                               "references": [_project_reference(ref) for ref in payload.references]}  # fmt: skip
+    for field in ("style", "soundscape", "music", "aspect_ratio", "plate", "first_frame", "last_frame"):
+        if value := getattr(payload, field):
+            request[field] = value
+    if payload.continues is not None:
+        request["continue_from"] = {"video": payload.continues.video} | (
+            {"latents": payload.continues.latents} if payload.continues.latents else {})  # fmt: skip
+    return Invocation(function=payload.function, input=request)
+
+
+@app.project_adapter("upscale")
+def adapt_upscale(payload: ProjectUpscale) -> Invocation:
+    """A project's upscale as `upscale`: the video, its latents, and for a re-render the text it was made from with what
+    it reads (Paul, 10-31), its names without brackets: the re-render attaches no reference."""
+    said = [payload.summary.strip(), *(beat.description.strip() for beat in sorted(payload.beats, key=lambda beat: beat.at))]
+    said += [f"{ref.name}: {ref.description.strip()}" for ref in payload.references if ref.description.strip()]
+    text = "\n".join(line for line in said if line).replace("<", "").replace(">", "")
+    if style := payload.style.strip():
+        text = f"Style: {style.rstrip('.')}.\n\n{text}"
+    request: dict[str, Any] = {"video": payload.video, "prompt": text}
+    if payload.resolution:
+        request["resolution"] = payload.resolution
+    if payload.latents:
+        request["latents"] = payload.latents
+    return Invocation(function=payload.function, input=request)

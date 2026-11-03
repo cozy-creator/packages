@@ -11,11 +11,16 @@ from cozy_runtime.author import (
     Adjustments,
     App,
     Context,
+    Invocation,
     Picture,
     ImageRequest,
     ImageResult,
     Memoize,
     Outputs,
+    ProjectEntity,
+    ProjectPicture,
+    ProjectSetup,
+    ProjectWorldState,
     Sizes,
     Telemetry,
     held,
@@ -196,3 +201,61 @@ def generate_turbo(
 ) -> ImageResult:
     """Qwen-Image-2.1-Turbo: the same inputs, on its 8-step distilled schedule."""
     return _generate(ctx, payload, model, out, tel, adj, TURBO_SIGMAS)
+
+
+# --- project adapters (xs-147): Qwen's words for a project's pictures, tuned by eye on this model (cl-726) ------
+
+
+def _styled(text: str, style: str) -> str:
+    return f"Style: {style.strip().rstrip('.')}.\n\n{text}" if style.strip() else text
+
+
+def _picture_call(function: str, prompt: str, pictures: list[ProjectPicture], aspect_ratio: str | None) -> Invocation:
+    request: dict[str, Any] = {"prompt": prompt, "pictures": [{"name": p.name, "image": p.image} for p in pictures]}
+    return Invocation(function=function, input=request | ({"aspect_ratio": aspect_ratio} if aspect_ratio else {}))
+
+
+@app.project_adapter("entity")
+def adapt_entity(payload: ProjectEntity) -> Invocation:
+    """A project's character, prop or place: a sheet on a transparent background, in the words of Qwen's model card, or an
+    establishing view of the empty set."""
+    name, description = payload.name, payload.description.strip()
+    if payload.kind == "environment":
+        prompt = _styled(f"{description}\n\nAn establishing view of the empty set, no people.", payload.style)
+        return _picture_call(payload.function, prompt, payload.pictures, payload.aspect_ratio)
+    if payload.kind == "character":
+        aspect_ratio = "16:9"
+        shown = (f"The image is a wide character sheet of {name}, in five separate views with no text.\n\n{description}\n\n"
+                 "On the left, the whole body is seen from the front and turned slightly, with nothing added to the body "
+                 "described and no ground under it. Beside it, the whole body is seen from behind and turned slightly, at the "
+                 "same size. On the right, three close-ups of the head are stacked one above the other: neutral with the mouth "
+                 "closed, joyful with the mouth wide open, and angry with the brow lowered and teeth bared.")  # fmt: skip
+    else:
+        # Front and back only (Paul, 11-03). At 3:2 each view has 3:4: a tall lantern and a wide chest both fill it.
+        # "From behind and turned slightly" drew the front twice; a half turn draws the back (11-03, chest 0/3 vs 2/2).
+        aspect_ratio = "3:2"
+        shown = (f"The image is a prop sheet of {name}, in two separate views with no text.\n\n{description}\n\n"
+                 "On the left, the whole object is seen from the front. On the right, the same object has been spun a half turn, "
+                 "at the same size, so its back faces the viewer and nothing on its front can be seen.")  # fmt: skip
+    prompt = (f"This is an RGBA image with transparency. {_styled(shown, payload.style)}\n\n"
+              "The image has alpha channel and the background is transparent.")  # fmt: skip
+    return _picture_call(payload.function, prompt, payload.pictures, aspect_ratio)
+
+
+@app.project_adapter("setup")
+def adapt_setup(payload: ProjectSetup) -> Invocation:
+    """A project's camera setup, in screen terms as written: bare camera words return a mirror (environment-angles)."""
+    camera = payload.camera.strip().rstrip(".")
+    opening = (f"Show the place in this picture, <{payload.environment}>, with nobody in it,"
+               if payload.from_frame else f"Show this exact <{payload.environment}>")  # fmt: skip
+    kept = "the picture" if payload.from_frame else "the image"
+    prompt = (f"{opening} from another camera position: {camera}. Keep every object, material, the light and the weather "
+              f"exactly as in {kept}; add nothing new, no people.")  # fmt: skip
+    return _picture_call(payload.function, prompt, payload.pictures, payload.aspect_ratio)
+
+
+@app.project_adapter("world_state")
+def adapt_world_state(payload: ProjectWorldState) -> Invocation:
+    """A project's world state: how it starts, and who and what is where."""
+    prompt = _styled("\n\n".join(filter(None, (payload.init.strip(), payload.blocking.strip()))), payload.style)
+    return _picture_call(payload.function, prompt, payload.pictures, payload.aspect_ratio)

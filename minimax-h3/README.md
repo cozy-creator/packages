@@ -42,6 +42,8 @@ add its edit LoRA (`--lora alissonerdx/minimax-h3-character-swap`, …) and star
 LoRA's trigger (`body_swap:`). The latents also carry the text the video was made from, which
 `upscale` uses when given no prompt.
 
+- **Projects.** `project-adapter-shot` and `project-adapter-upscale` turn a `cozy project` node into `generate` and `upscale`: the
+  summary and each beat in the sections and `At` times below. Nothing else changes: it is a `prompt` like any other.
 - **Text.** The prompt goes as written, in [MiniMax's form](https://huggingface.co/MiniMaxAI/MiniMax-H3/blob/main/docs/VIDEO_PROMPT_WRITING_GUIDE_ref_en.md):
   open with `[Shot 1]`, or get a warning. Added only: each name's `<Picture N>` in `subject_definitions`, the `summary`'s task tag,
   a `retention_analysis` line for each picture without one (`<name>: keep the look shown in the reference.`), `style` from its field, `non_diegetic_music: N/A` when none is written, since H3
