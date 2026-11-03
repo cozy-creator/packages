@@ -361,6 +361,16 @@ class AdaLNPrunedMiniMaxH3Transformer(MiniMaxH3Transformer3DModel):  # type: ign
                 else:
                     rows = block(rows, temb, adaln_indices, rotary_emb)
             dtype = get_parameter_dtype(self.proj_out)
+            if rows.shape[1] != sequence_length:
+                # Across GPUs `rows` is this GPU's share: the `_cp_plan` split it at the first
+                # block, splits `timestep_indices` at `norm_out` and gathers at the heads, so
+                # sequence-wide indices only apply after the heads, and they cannot be chunked.
+                normed = self.norm_out(rows, temb, timestep_indices).to(dtype)
+                video_output = self.proj_out(normed).index_select(1, video_indices)
+                audio_output = self.audio_proj_out(normed).index_select(1, audio_indices)
+                if not return_dict:
+                    return (video_output, audio_output)
+                return MiniMaxH3TransformerOutput(sample=video_output, audio_sample=audio_output)
 
             def head(proj: nn.Module, indices: torch.Tensor) -> torch.Tensor:
                 parts = []

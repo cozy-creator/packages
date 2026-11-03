@@ -19,7 +19,7 @@ duration_s: 40                                # any length; past 15 s it needs t
 style: 35 mm film, warm grade; no crowd       # holds in every segment
 soundscape: gulls, surf, wind
 music: N/A
-references:                                   # in this order H3 numbers them; every one is used
+references:                                   # in this order H3 numbers them; each goes where the text names it
   - {name: Theo, kind: character, image: ./theo.png}
   - {name: Juno, kind: character, image: ./juno.png, description: a red coat, voice: ./juno.wav}
   - {name: Lantern, kind: prop, image: ./lantern.png}
@@ -73,13 +73,15 @@ LoRA's trigger (`body_swap:`). The latents also carry the text the video was mad
 - **Timing that doesn't fit.** Nothing is refused. With no timestamps a video past 15 s renders 15 s and warns. A block too
   long for a segment renders at the limit and warns with its time: what follows comes straight after it, so the video is
   shorter than `duration_s`. A join lands on H3's whole-second grid, within about 0.7 s of its timestamp.
-- **Pictures.** Characters, props and the environment (`<Dock>`) are definitions in every
-  segment's text, each with its `description` when given. A project cleans character and prop
+- **Pictures.** A segment gets only the references its own text names, its `summary` included: a character, prop,
+  environment (`<Dock>`), world state, sound or clip named in one timed block goes only to the segment holding that block,
+  and a segment that names none renders without them, with a warning. A `plate` needs no naming. Each is a definition in
+  the text of the segments that name it, with its `description` when given. A project cleans character and prop
   pictures (background removal) before they reach `shot`, so a direct call should pass clean
   ones; nothing describes them automatically. A world state is a soft picture of the set
   read at 512 px, with its `layout` in its definition: the shot keeps who stands where without
   opening on that frame.
-  A later segment's environment is the previous segment's last frame, with the environment picture
+  A later segment's environment, when the segment before named it too, is that segment's last frame, with the environment picture
   beside it as a soft world state: the place holds without the picture's framing pulling the
   shot back with a cut (runs 20996, 21955, 21957).
 - **Footage.** `reference_footage` gives motion and camera; a `plate` (`{video}`) is followed
