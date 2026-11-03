@@ -1930,6 +1930,16 @@ def segment_seed(seed: int | None, request_id: str, index: int) -> int:
     return int.from_bytes(hashlib.sha256(f"{request_id}/h3/shot/{index}".encode()).digest()[:4], "big")
 
 
+def _is_native(aspect_ratio: str) -> bool:
+    """Whether `16:9`, `2.39:1`, `16/9`, `16x9` or `1.85` is about H3's own 1344x768; text that names no
+    ratio isn't."""
+    try:
+        wide, *tall = (Fraction(side) for side in re.split(r"\s*[:/xX]\s*", aspect_ratio.strip()))
+        return abs(wide / (tall[0] if tall else 1) - Fraction(1344, 768)) <= Fraction(1, 20)
+    except (ValueError, ZeroDivisionError):
+        return False
+
+
 async def generate(ctx: Context, payload: GenerateInput, out: Outputs, tel: Telemetry) -> ShotResult:
     """One continuous video of any length, with sound, from MiniMax H3.
 
@@ -1979,10 +1989,8 @@ async def generate(ctx: Context, payload: GenerateInput, out: Outputs, tel: Tele
         warnings.append("this prompt has no overall_soundscape and no soundscape, so it goes as N/A, which H3 reads as silence")
     if not _FIRST_SHOT.search(payload.prompt):
         warnings.append("this prompt has no `[Shot 1]`, which MiniMax's guide opens a shot with; it goes as written")
-    if payload.aspect_ratio is not None:
-        w, h = (int(side) for side in payload.aspect_ratio.split(":"))
-        if abs(w / h - 1344 / 768) > 0.05:
-            warnings.append(f"minimax-h3 renders 1344x768 for now, not {payload.aspect_ratio}")
+    if payload.aspect_ratio is not None and not _is_native(payload.aspect_ratio):
+        warnings.append(f"minimax-h3 renders 1344x768 for now, not {payload.aspect_ratio}")
     steps = None if turbo else payload.steps
     count = len(segments)
     # Every segment carries into a successor, its last too: the video's latents keep that carry, which
