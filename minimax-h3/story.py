@@ -61,6 +61,8 @@ _POLICY = {"character": "image", "prop": "image", "background": "image", "audio"
 #: The kinds read from a clip.
 CLIPS = ("video", "anchor_video")
 _SPEAKER = re.compile(r"\s*\((S\d+)\)")
+#: A picture's retention line when the writer gave it none. A clip's or a voice's look is not what it is there for.
+_KEEP_LOOK = "keep the look shown in the reference."
 #: A text's own retention line: its reference, then what it keeps.
 _OWN_RETENTION = re.compile(r"[ \t*-]*<([^<>]+)>(?:[ \t]*\(appears in [^)]*\))?[ \t]*:(.+)", re.I)
 _PREFIX = re.compile(r"\s*\[([^\]\n]*)\]")
@@ -202,7 +204,7 @@ def _piece_call(
     replaces that), each clip bound to the characters who perform it, `style` as the description's
     opening sentence, the soundscape, and the `summary`'s task tag, computed from the request (ref guide 3), replacing a
     different one with a warning, in a section of its own when the text has none. Retention is the writer's: a reference's own line from
-    `author` on a piece that lost it, and one line for each reference cozy `added` at a join.
+    `author` on a piece that lost it, one line for each reference cozy `added` at a join, and `_KEEP_LOOK` for a picture with no line.
     """
     pool, owners = voices(references)
     if not pool:
@@ -383,8 +385,11 @@ def _piece_call(
             del definitions[defined]
         elif ref.description:
             definitions[defined] += f" {ref.description}"
-        if (ref.name, _SLOT[ref.kind]) not in retained and (line := author.get(name_key(ref.name))):
-            retention.append(f"<{ref.name}>: {line}")
+        if (ref.name, _SLOT[ref.kind]) not in retained:
+            if line := author.get(name_key(ref.name)):
+                retention.append(f"<{ref.name}>: {line}")
+            elif FILE[ref.kind] == "image" and ref.name not in added:
+                retention.append(f"<{ref.name}>: {_KEEP_LOOK}")
     tag = " + ".join(task for task in TASKS if task in tasks)
     given = _tasks(text)
     if given and {task.casefold() for task in given} != tasks:
