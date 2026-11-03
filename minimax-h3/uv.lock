@@ -167,7 +167,7 @@ wheels = [
 
 [[package]]
 name = "cozy-runtime"
-version = "0.37.7"
+version = "0.37.8"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "msgspec" },
@@ -176,12 +176,12 @@ dependencies = [
     { name = "pillow" },
     { name = "tensorfs" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/9d/e5/72855fb9498bdc8fb142ef7c3cc3564dfbd3afb0d0183b5fc8a0ed31efd2/cozy_runtime-0.37.7.tar.gz", hash = "sha256:7cd6a34f71cd60e7332b1b3bc03e314dd48aea75ed4add6d9cf64876a6c6ad7b", size = 2688389, upload-time = "2026-11-03T05:34:51.209Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/73/d3/0005757603ab9928b68f16fbb9baad02aab754f1dd33aebfb40184754e75/cozy_runtime-0.37.8.tar.gz", hash = "sha256:bafe29f96b48a0ce5d09b5859e64f40ac0f8cabd1d4a2d6a8c01f1e4ad4b96d8", size = 2688584, upload-time = "2026-11-03T07:49:35.474Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/a6/e0/ec462cefbf8a8c7262974093ead7c144c174068bee65767f5104aa4a5d1c/cozy_runtime-0.37.7-cp312-abi3-manylinux_2_28_aarch64.whl", hash = "sha256:c1ca7e9c43e0802ec9285778401ac419055db13d023f7e00ad9f8e0e69925095", size = 30705881, upload-time = "2026-11-03T05:34:40.042Z" },
-    { url = "https://files.pythonhosted.org/packages/50/3a/727f0265d32eca7884b56b074c01ee4b5db9127068aa53b2edc974a6dea9/cozy_runtime-0.37.7-cp312-abi3-manylinux_2_28_x86_64.whl", hash = "sha256:8ecc69caaef7638f5f820c0fd9999ec4623b52e209e21508f276bc6679e93564", size = 34839197, upload-time = "2026-11-03T05:34:44.01Z" },
-    { url = "https://files.pythonhosted.org/packages/13/1a/7ebf29afd00ee733bf47eba79511ca759de8ee01aafede019b4b4ee68646/cozy_runtime-0.37.7-cp312-abi3-win_amd64.whl", hash = "sha256:c283419dfb300944c2169bdf483c3c9e7eb2f84ed60c13cecd45427d44dc225f", size = 21673158, upload-time = "2026-11-03T05:34:46.974Z" },
-    { url = "https://files.pythonhosted.org/packages/a5/c0/93fb767f23d3553da93f42f051ae4cf7719eab502cbb40533afec88b658d/cozy_runtime-0.37.7-py3-none-any.whl", hash = "sha256:02270967492479f0c07abf572df1e862ec5f1f957554d91d663f965f45b54137", size = 2328588, upload-time = "2026-11-03T05:34:49.632Z" },
+    { url = "https://files.pythonhosted.org/packages/b2/f8/ac07adc3233830c74f9fed2e3b4a937c9b59003a18497b5e4050d97f3391/cozy_runtime-0.37.8-cp312-abi3-manylinux_2_28_aarch64.whl", hash = "sha256:a1a20f9eedb77e0cb8f24bc14adc6dd6d60662da0f258d5a1ef86cc64105093b", size = 30706166, upload-time = "2026-11-03T07:49:25.296Z" },
+    { url = "https://files.pythonhosted.org/packages/7c/ed/2ecfd7f5b5027990b61e3afc2b8a8425abc962b1b20091af7d2b785c8087/cozy_runtime-0.37.8-cp312-abi3-manylinux_2_28_x86_64.whl", hash = "sha256:785202cb3a2a9d0b55d1b62d17e07012299978ee625783184cdbf4aa472cec2e", size = 34839304, upload-time = "2026-11-03T07:49:28.221Z" },
+    { url = "https://files.pythonhosted.org/packages/51/0c/35fbed6806b21feaeba50b85c3b5e80e2396d03462ef8d0e52cf12bca39b/cozy_runtime-0.37.8-cp312-abi3-win_amd64.whl", hash = "sha256:de40145e14e6aa1cd1ea1bbea79828ac1d89cc3e412a820ba9173886931770d5", size = 21673350, upload-time = "2026-11-03T07:49:31.175Z" },
+    { url = "https://files.pythonhosted.org/packages/08/d7/19ca967c7fd40f7e46f5ac340a6edfde7a8e268c4d44ffd71dae29ca79d3/cozy_runtime-0.37.8-py3-none-any.whl", hash = "sha256:93d839de2f03dc2e3cdb74522b3961017a50a46b32fdaabd6225d9daf5adc72b", size = 2328781, upload-time = "2026-11-03T07:49:33.717Z" },
 ]
 
 [package.optional-dependencies]
@@ -361,7 +361,7 @@ wheels = [
 
 [[package]]
 name = "minimax-h3"
-version = "0.3.9"
+version = "0.3.10"
 source = { editable = "." }
 dependencies = [
     { name = "cozy-runtime", extra = ["adapters", "media"] },
@@ -383,7 +383,7 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
-    { name = "cozy-runtime", extras = ["adapters", "media"], specifier = ">=0.37.7" },
+    { name = "cozy-runtime", extras = ["adapters", "media"], specifier = ">=0.37.8" },
     { name = "diffusers", specifier = ">=0.41,<0.42" },
     { name = "hf-xet", specifier = ">=1.6.0" },
     { name = "minimax-h3-tools", specifier = ">=0.1.0", index = "https://tensorhub.com/v1/index/_/simple/" },
