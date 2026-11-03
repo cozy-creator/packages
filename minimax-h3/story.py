@@ -1,4 +1,4 @@
-"""A shot piece's references and prompt: its text plus MiniMax's full-reference sections."""
+"""A shot segment's references and prompt: its text plus MiniMax's full-reference sections."""
 
 from __future__ import annotations
 
@@ -39,7 +39,7 @@ _HEADER = re.compile(
 )
 _MEDIA = re.compile(r"\s*(picture|audio|video)\s+(\d+)\s*", re.IGNORECASE)
 _SHOT = re.compile(r"\[Shot\s*(\d+)\]", re.IGNORECASE)
-#: Reference clips: a video of any length from 2 s, of which each piece reads its own window
+#: Reference clips: a video of any length from 2 s, of which each segment reads its own window
 #: (`shot`); audio outside 2-15 s refuses. Every input that carries a reference declares these.
 REFERENCE_VIDEO = VideoPreparation(min_seconds=2)
 REFERENCE_AUDIO = AudioPreparation(min_seconds=2, max_seconds=15, excess="refuse")
@@ -72,7 +72,7 @@ TASKS = ("video editing", "video continuation", "keyframe completion", "referenc
 
 
 class StoryReference(Reference, kw_only=True):
-    """One reference file (`FILE[kind]`) a piece attaches.
+    """One reference file (`FILE[kind]`) a segment attaches.
 
     - `background`: the environment, the shot's setup plate.
     - `video`: reference footage, its motion and camera.
@@ -82,7 +82,7 @@ class StoryReference(Reference, kw_only=True):
       no longer than the render. It costs what a second render does: per `reference_rows`, about
       5.5x the denoise for a 12 s clip beside a 15 s render.
     - `world_state`: a soft picture of the set, read at 512 px (or a text-only shot's previous
-      piece's last frame), with its layout as its `description`.
+      segment's last frame), with its layout as its `description`.
     """
 
     kind: Literal["character", "prop", "background", "audio", "video", "anchor_video", "world_state"]
@@ -112,7 +112,7 @@ def voices(references: Sequence[StoryReference]) -> tuple[list[StoryReference], 
 
 def validate_references(references: Sequence[StoryReference]) -> None:
     """One name per reference, voices only on characters. The H3 limits are per call
-    (`_piece_call`)."""
+    (`_segment_call`)."""
     names: set[str] = set()
     for reference in voices(references)[0]:
         if (key := name_key(reference.name)) in names:
@@ -142,13 +142,13 @@ def encoder_prompt(task: Task, prompt: str) -> str:
     return "\n\n".join(filter(None, (prompt.rstrip(), line)))
 
 
-class PieceCall(NamedTuple):
+class SegmentCall(NamedTuple):
     prompt: str
     references: list[StoryReference]
     warnings: list[str]
 
 
-def piece_call(
+def segment_call(
     text: str,
     references: Sequence[StoryReference],
     *,
@@ -161,12 +161,12 @@ def piece_call(
     added: frozenset[str] = frozenset(),
     keyframes: bool = False,
     continues: bool = False,
-) -> PieceCall:
-    """A Ref2VA piece's text and references: `text` with its music section, then what only cozy knows or a field set
-    (`_piece_call`). `retained`: `own_retention` of the shot's text. `added`: the references cozy adds at a join.
+) -> SegmentCall:
+    """A Ref2VA segment's text and references: `text` with its music section, then what only cozy knows or a field set
+    (`_segment_call`). `retained`: `own_retention` of the shot's text. `added`: the references cozy adds at a join.
     `keyframes`: it has a first or last frame. `continues`: it continues a source video."""
     text = _fill(text, {"non_diegetic_music": music.strip() or "N/A"})
-    return _piece_call(text, references, style.strip(), soundscape.strip(), index, forced, retained, added, keyframes, continues)
+    return _segment_call(text, references, style.strip(), soundscape.strip(), index, forced, retained, added, keyframes, continues)
 
 
 def _numbering(references: Sequence[StoryReference]) -> dict[tuple[str, int], StoryReference]:
@@ -181,7 +181,7 @@ def _numbering(references: Sequence[StoryReference]) -> dict[tuple[str, int], St
     return slots
 
 
-def _piece_call(
+def _segment_call(
     text: str,
     references: Sequence[StoryReference],
     style: str,
@@ -192,10 +192,10 @@ def _piece_call(
     added: frozenset[str] = frozenset(),
     keyframes: bool = False,
     continues: bool = False,
-) -> PieceCall:
+) -> SegmentCall:
     """Backgrounds and `forced` always; characters, world states, audio and videos only where
     the text names them, all in request order, as H3 packs and labels them. With no references
-    at all, none: the piece renders from its text and keyframes (FL2VA).
+    at all, none: the segment renders from its text and keyframes (FL2VA).
 
     A token names a reference by its name first (any case, `_`, `-` and space alike), else as
     the global `<Picture N>`/`<Audio N>`/`<Video N>`; these are renumbered for the call. A
@@ -204,11 +204,11 @@ def _piece_call(
     replaces that), each clip bound to the characters who perform it, `style` as the description's
     opening sentence, the soundscape, and the `summary`'s task tag, computed from the request (ref guide 3), replacing a
     different one with a warning, in a section of its own when the text has none. Retention is the writer's: a reference's own line from
-    `author` on a piece that lost it, one line for each reference cozy `added` at a join, and `_KEEP_LOOK` for a picture with no line.
+    `author` on a segment that lost it, one line for each reference cozy `added` at a join, and `_KEEP_LOOK` for a picture with no line.
     """
     pool, owners = voices(references)
     if not pool:
-        return PieceCall(text, [], [])
+        return SegmentCall(text, [], [])
     by_key = {name_key(ref.name): ref for ref in pool}
     by_slot = _numbering(pool)
     text, style = _open_with_style(text, style)
@@ -236,7 +236,7 @@ def _piece_call(
         if _MEDIA.fullmatch(name_key(token.group(1))) and lookup(token) is None
     )
     warnings = (
-        [f"Piece {index + 1}: {', '.join(unmatched)} match no reference; left as written."]
+        [f"Segment {index + 1}: {', '.join(unmatched)} match no reference; left as written."]
         if unmatched else []
     )
     named = {ref.name for ref in mentioned(text)}
@@ -249,16 +249,16 @@ def _piece_call(
     )
     if sum(ref.kind == "anchor_video" for ref in used) > 1:
         raise InvalidRequest(
-            f"piece {index + 1} anchors more than one video's frames", fields=["assets"]
+            f"segment {index + 1} anchors more than one video's frames", fields=["assets"]
         )
     if all(ref.kind == "audio" for ref in used):
-        # H3's Ref2VA needs a picture: a piece that names none renders from its text and
+        # H3's Ref2VA needs a picture: a segment that names none renders from its text and
         # keyframes (FL2VA), which takes no audio reference.
         if used:
-            warnings.append(f"Piece {index + 1} names only audio and no picture, so it renders "
+            warnings.append(f"Segment {index + 1} names only audio and no picture, so it renders "
                             "without references.")
-        return PieceCall(text, [], warnings)
-    _policy([_POLICY[ref.kind] for ref in used], f"piece {index + 1}: ")
+        return SegmentCall(text, [], warnings)
+    _policy([_POLICY[ref.kind] for ref in used], f"segment {index + 1}: ")
     sections = _sections(text)
     _, start, end = sections.get("detailed_description", (0, 0, 0))
     markers = list(_SHOT.finditer(text, start, end))
@@ -393,7 +393,7 @@ def _piece_call(
     tag = " + ".join(task for task in TASKS if task in tasks)
     given = _tasks(text)
     if given and {task.casefold() for task in given} != tasks:
-        warnings.append(f"Piece {index + 1}: the summary's [{' + '.join(given)}] is not what its references are, so it "
+        warnings.append(f"Segment {index + 1}: the summary's [{' + '.join(given)}] is not what its references are, so it "
                         f"goes as [{tag}]")  # fmt: skip
     sections = _sections(text)
     if "summary" in sections:
@@ -410,7 +410,7 @@ def _piece_call(
         "retention_analysis": "\n".join(retention),
         "overall_soundscape": soundscape or "N/A",
     }
-    return PieceCall(_fill(text, additions), used, warnings)
+    return SegmentCall(_fill(text, additions), used, warnings)
 
 def _tasks(text: str) -> list[str]:
     """The summary's `[task + task]` prefix, when it opens with one."""
@@ -421,7 +421,7 @@ def _tasks(text: str) -> list[str]:
 
 
 def _open_with_style(text: str, style: str) -> tuple[str, str]:
-    """The piece's own `style` section, else the global style, as the description's opening
+    """The segment's own `style` section, else the global style, as the description's opening
     sentence (ref guide 5.2) rather than a section of its own; and that style."""
     found = _sections(text)
     if "style" in found:
@@ -466,8 +466,8 @@ def description_span(text: str) -> tuple[int, int]:
 
 def own_retention(text: str) -> dict[str, str]:
     """What a text's own retention lines keep, by reference name (`name_key`), each without its `(appears in ...)`: a
-    later piece has its own shots. Its first piece has these lines as written; `_piece_call` writes them on the others,
-    only for the references that piece uses."""
+    later segment has its own shots. Its first segment has these lines as written; `_segment_call` writes them on the others,
+    only for the references that segment uses."""
     _, start, end = _sections(text).get("retention_analysis", (0, 0, 0))
     found = (_OWN_RETENTION.match(line) for line in text[start:end].splitlines())
     return {name_key(line.group(1)): line.group(2).strip() for line in found if line}

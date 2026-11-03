@@ -1,5 +1,5 @@
 """MiniMax-H3 as two node functions over one dual-DiT construction: `shot` renders one
-continuous take of any length in pieces, `upscale` takes a whole shot above 768p.
+continuous take of any length in segments, `upscale` takes a whole shot above 768p.
 
 Runtime reads typed file handles and encodes outputs. Official Diffusers owns H3 presentation,
 conditioning, AdaLN, solver, and decode math. This module validates the product contract,
@@ -134,12 +134,12 @@ from story import (
     REFERENCE_VIDEO,
     VIDEO_MAX_BYTES,
     VIDEO_READ_BYTES,
-    PieceCall,
+    SegmentCall,
     StoryReference,
     description_span,
     own_retention,
     encoder_prompt,
-    piece_call,
+    segment_call,
     validate_references,
     voices,
     without_sections,
@@ -152,7 +152,7 @@ _MIB = 1 << 20
 _MAX_AUDIO_SECONDS = Fraction(15, 1)
 
 Reference = ImageFile | VideoFile | AudioFile
-#: One reference of each kind, with its retained-read bound. A Ref2VA piece's `assets` declare
+#: One reference of each kind, with its retained-read bound. A Ref2VA segment's `assets` declare
 #: the preparations the shot's own fields do, so Runtime records a truncation on the call the
 #: client made.
 _REFERENCE = (
@@ -240,8 +240,8 @@ DurationSeconds = Annotated[
     ),
     Shape(frames={s: frames_for(s) for s in range(MIN_DURATION_S, MAX_DURATION_S + 1)}),
 ]
-#: A piece's new seconds. Its memory is sized by its `frames`, not by these alone.
-PieceSeconds = Annotated[int, msgspec.Meta(ge=MIN_DURATION_S, le=MAX_DURATION_S)]
+#: A segment's new seconds. Its memory is sized by its `frames`, not by these alone.
+SegmentSeconds = Annotated[int, msgspec.Meta(ge=MIN_DURATION_S, le=MAX_DURATION_S)]
 
 
 class Resolution(Enum):
@@ -540,7 +540,7 @@ def _finish(
     ended: Callable[[Any], None] | None = None,
     earlier: _Earlier | None = None,
 ) -> H3VideoOutput:
-    """Decode and encode the render, with `earlier` pieces before it as one video."""
+    """Decode and encode the render, with `earlier` segments before it as one video."""
     cancel()
     if completed is not None:
         # The successor's carry: a slice of the denoised latents, before either decode.
@@ -550,7 +550,7 @@ def _finish(
     decode = partial(model.decode_video, task, state)
     if earlier is not None:
         # The whole shot as one latent: the VAE cross-fades its chunks across every join,
-        # where decoding piece by piece steps the picture (run 20751: luma +3.7 at a join).
+        # where decoding segment by segment steps the picture (run 20751: luma +3.7 at a join).
         latents = torch.cat([earlier.latents.to(state.latents.device), state.latents[:, :, earlier.head :]], dim=2)
         decode = partial(model.decode_latents, latents)
         frames += earlier.frames
@@ -1045,7 +1045,7 @@ def _render_keyframes(
     ended: Callable[[Any], None] | None = None,
 ) -> H3VideoOutput:
     """An FL2VA render: text, and a first and/or last keyframe. `delivery` and `completed`
-    hand a successor its carry, and `ended` its last frame (`fl2va_piece`)."""
+    hand a successor its carry, and `ended` its last frame (`fl2va_segment`)."""
     plan = _plan(model, turbo_lora, "fl2va")
     steps = plan.schedule(steps).transformer_evaluations
     keyframes = ("vae",) if first is not None or last is not None else ()
@@ -1119,7 +1119,7 @@ def _references_to_video(
     notes = _retargeted(view.adapters, "transformer_ref")
     if payload.frames != held_frames(delivery, payload.videos):
         raise InvalidRequest(
-            f"a {payload.duration_s} s piece with these references holds "
+            f"a {payload.duration_s} s segment with these references holds "
             f"{held_frames(delivery, payload.videos)} frames, not {payload.frames}",
             fields=["payload.frames"],
         )
@@ -1203,19 +1203,19 @@ def _anchors(
     return [(image, at) for asset, at in pairs if (image := _frame(asset, f"{at}_frame")) is not None]
 
 
-# --- pieces ----------------------------------------------------------------------------
+# --- segments ----------------------------------------------------------------------------
 
 ContextFrames = Literal[0, 22, 39, 56]
 
 
-#: A piece's carry: a predecessor's exported context (~2.7 MB), or a resumed video's whole latents
-#: file, whose carry the piece reads (`shot_latents.context`).
+#: A segment's carry: a predecessor's exported context (~2.7 MB), or a resumed video's whole latents
+#: file, whose carry the segment reads (`shot_latents.context`).
 ContextFile = Annotated[
     File, FileBound(max_bytes=1 << 30, media_types=("application/octet-stream",))
 ]
-#: A piece's delivered video latents (`_Pieces`), about 3 MB a second at 768p.
+#: A segment's delivered video latents (`_Segments`), about 3 MB a second at 768p.
 LatentFile = Annotated[File, FileBound(max_bytes=1 << 30, media_types=("application/octet-stream",))]
-PieceVideo = Annotated[VideoFile, FileBound(max_bytes=1 << 30, max_decoded_bytes=32 << 20, media_types=("video/mp4",))]
+SegmentVideo = Annotated[VideoFile, FileBound(max_bytes=1 << 30, max_decoded_bytes=32 << 20, media_types=("video/mp4",))]
 
 
 def held_frames(plan: ContinuationPlan, videos: Sequence[VideoUse] = ()) -> int:
@@ -1229,16 +1229,16 @@ def held_frames(plan: ContinuationPlan, videos: Sequence[VideoUse] = ()) -> int:
 class Ref2VAInput(msgspec.Struct):
     prompt: str
     seed: int
-    duration_s: PieceSeconds
+    duration_s: SegmentSeconds
     steps: int | None
     turbo: bool
-    #: `held_frames` of this piece: the shape Runtime banks its memory by. A continuation
-    #: holds more than its seconds say, so a 12 s piece after a 6 s one ran on the 6 s
+    #: `held_frames` of this segment: the shape Runtime banks its memory by. A continuation
+    #: holds more than its seconds say, so a 12 s segment after a 6 s one ran on the 6 s
     #: peak and ran out on GPU 1 (run 1560). Any other value is refused.
     frames: int
-    #: How the piece uses each of its videos, in packed order.
+    #: How the segment uses each of its videos, in packed order.
     videos: tuple[VideoUse, ...]
-    #: What this piece carries from its predecessor, and what its successor carries.
+    #: What this segment carries from its predecessor, and what its successor carries.
     context_frames: ContextFrames = 0
     context_audio: bool = False
     next_context_frames: ContextFrames = 0
@@ -1248,41 +1248,41 @@ class Ref2VAInput(msgspec.Struct):
     #: Keyframes, anchored as ComfyUI's Add Guide anchors them (`anchor_rows`).
     first_frame: FrameImage = None
     last_frame: FrameImage = None
-    #: Delivered frames to return (`PieceOutput.frames`), by index.
+    #: Delivered frames to return (`SegmentOutput.frames`), by index.
     exports: tuple[int, ...] = ()
     #: Each picture's short edge in packed order; 0 sizes it as usual.
     picture_edges: tuple[int, ...] = ()
-    #: Return the delivered latents (`PieceOutput.latents`).
+    #: Return the delivered latents (`SegmentOutput.latents`).
     latents: bool = False
-    #: A shot's last piece: the earlier pieces' latents and videos, decoded with it as one.
+    #: A shot's last segment: the earlier segments' latents and videos, decoded with it as one.
     earlier_latents: tuple[LatentFile, ...] = ()
-    earlier_videos: tuple[PieceVideo, ...] = ()
+    earlier_videos: tuple[SegmentVideo, ...] = ()
     preset: Preset = "balanced"
 
 
-class PieceOutput(msgspec.Struct):
-    #: The piece's video; a shot's last piece returns the whole shot.
-    video: PieceVideo
+class SegmentOutput(msgspec.Struct):
+    #: The segment's video; a shot's last segment returns the whole shot.
+    video: SegmentVideo
     warnings: list[str]
     provenance: RenderProvenance
     # A fixed output slot: Runtime grants result outputs by field path, never inside a union.
-    # A piece with no successor returns it empty instead of exporting any window.
+    # A segment with no successor returns it empty instead of exporting any window.
     context: ContextFile
-    #: The piece's last delivered frame. A child's result is a granted input of the parent,
-    #: so it may feed the next piece (a picture the parent saved itself may not, run 20651).
+    #: The segment's last delivered frame. A child's result is a granted input of the parent,
+    #: so it may feed the next segment (a picture the parent saved itself may not, run 20651).
     last_frame: ImageFile
     #: The delivered frames the call's `exports` asks for, in order.
     frames: list[ImageFile]
     #: Its delivered video latents when the call asks (`latents`), else empty: a shot's last
-    #: piece decodes them with its own as one.
+    #: segment decodes them with its own as one.
     latents: LatentFile
 
 
 @dataclass(frozen=True)
 class _Earlier:
-    """A shot's pieces before its last: their delivered latents end to end, their sound end to
+    """A shot's segments before its last: their delivered latents end to end, their sound end to
     end (each starts where the last ended, as continuation cut it), and their frames; and the
-    last piece's head to leave out, whole VAE cycles, so its latents follow in phase."""
+    last segment's head to leave out, whole VAE cycles, so its latents follow in phase."""
 
     latents: Any
     waveform: Any
@@ -1303,8 +1303,8 @@ class _Earlier:
         return cls(joined, torch.from_numpy(np.concatenate(parts, axis=1)), frames, head)
 
 
-class _Pieces:
-    """What a piece hands on once it has denoised, before its decode: its successor's carry
+class _Segments:
+    """What a segment hands on once it has denoised, before its decode: its successor's carry
     and, when asked, its delivered latents."""
 
     def __init__(self, out: Outputs, model: H3Model, plan: ContinuationPlan, observed: RenderProvenance,
@@ -1319,7 +1319,7 @@ class _Pieces:
             self.saved["context"] = self.out.save_bytes(encode_context(carried), media_type="application/octet-stream")
         if self.latents:
             # The head is whole VAE cycles (`continuation`), so what follows it joins the
-            # previous piece's latents in phase.
+            # previous segment's latents in phase.
             head = video_tokens(self.plan.carried.frames) if self.plan.carried.frames else 0
             delivered = state.latents[:, :, head:].detach().float().cpu().contiguous()
             space = self.model.latent_space()
@@ -1335,9 +1335,9 @@ class _Pieces:
 
 
 def _sampling(payload: FL2VAInput | Ref2VAInput, turbo_lora: H3TurboLoRA) -> H3TurboLoRA | None:
-    """The piece's sampler over the one shared construction: the PDD adapter, or none."""
+    """The segment's sampler over the one shared construction: the PDD adapter, or none."""
     if payload.turbo and payload.steps is not None:
-        raise InvalidRequest("a turbo piece runs its LoRA's one schedule; it takes no steps")
+        raise InvalidRequest("a turbo segment runs its LoRA's one schedule; it takes no steps")
     return turbo_lora if payload.turbo else None
 
 
@@ -1346,7 +1346,7 @@ def _sampling(payload: FL2VAInput | Ref2VAInput, turbo_lora: H3TurboLoRA) -> H3T
     components={"base_model": _REF2VA, "turbo_lora": ("ref2va_turbo",)},
     memoize=True,
 )
-async def ref2va_piece(
+async def ref2va_segment(
     ctx: Context,
     *,
     payload: Ref2VAInput,
@@ -1355,8 +1355,8 @@ async def ref2va_piece(
     turbo_lora: H3TurboLoRA,
     out: Outputs,
     tel: Telemetry,
-) -> PieceOutput:
-    """A piece on Ref2VA: its references, the context it carries in, and its successor's."""
+) -> SegmentOutput:
+    """A segment on Ref2VA: its references, the context it carries in, and its successor's."""
     lora = _sampling(payload, turbo_lora)
     observed = provenance(base_model.checkpoint_ref, "" if lora is None else lora.checkpoint_ref)
     plan = ContinuationPlan(
@@ -1370,7 +1370,7 @@ async def ref2va_piece(
             raise InvalidRequest("a carried picture or sound needs the previous context", fields=["payload.context"])
         context = decode_context(shot_latents.context(payload.context.read_bytes()))
     _reference_policy(assets)
-    handed = _Pieces(out, base_model, plan, observed, payload.latents)
+    handed = _Segments(out, base_model, plan, observed, payload.latents)
     earlier = None
     if payload.earlier_latents:
         head = video_tokens(plan.carried.frames) if plan.carried.frames else 0
@@ -1378,7 +1378,7 @@ async def ref2va_piece(
     ended: list[ImageFile] = []
     exported: list[ImageFile] = []
     skip = 0 if earlier is None else earlier.frames
-    piece = _references_to_video(
+    segment = _references_to_video(
         ctx, "ref2va" if lora is None else "ref2va_turbo", payload, assets, base_model, out, tel,
         turbo_lora=lora, context=context, delivery=plan,
         expected_context_provenance=context_provenance(payload.previous_provenance or observed),
@@ -1387,11 +1387,11 @@ async def ref2va_piece(
         ended=partial(_keep_frames, out, tuple(skip + index for index in payload.exports), ended, exported),
         earlier=earlier,
     )  # fmt: skip
-    return PieceOutput(piece.video, list(piece.warnings), observed, handed.file("context"), ended[0], exported,
+    return SegmentOutput(segment.video, list(segment.warnings), observed, handed.file("context"), ended[0], exported,
                        handed.file("latents"))  # fmt: skip
 
 
-app.child_task(ref2va_piece)
+app.child_task(ref2va_segment)
 
 
 def log_prompt(tel: Telemetry, event: str, prompt: str, **fields: str | int) -> None:
@@ -1416,7 +1416,7 @@ FrameImage = Annotated[
 
 
 class FL2VAInput(msgspec.Struct, kw_only=True):
-    """One FL2VA piece: its text, keyframes and length, and what its successor carries."""
+    """One FL2VA segment: its text, keyframes and length, and what its successor carries."""
 
     prompt: str
     seed: int
@@ -1428,9 +1428,9 @@ class FL2VAInput(msgspec.Struct, kw_only=True):
     last_frame: FrameImage = None
     next_context_frames: ContextFrames = 0
     next_context_audio: bool = False
-    #: Delivered frames to return (`PieceOutput.frames`), by index.
+    #: Delivered frames to return (`SegmentOutput.frames`), by index.
     exports: tuple[int, ...] = ()
-    #: Return the delivered latents (`PieceOutput.latents`).
+    #: Return the delivered latents (`SegmentOutput.latents`).
     latents: bool = False
 
 
@@ -1459,7 +1459,7 @@ def _retargeted(adapters: Sequence[Any], dit: str) -> list[str]:
     components={"base_model": _FL2VA, "turbo_lora": ("fl2va_turbo",)},
     memoize=True,
 )
-async def fl2va_piece(
+async def fl2va_segment(
     ctx: Context,
     *,
     payload: FL2VAInput,
@@ -1467,15 +1467,15 @@ async def fl2va_piece(
     turbo_lora: H3TurboLoRA,
     out: Outputs,
     tel: Telemetry,
-) -> PieceOutput:
-    """A piece on FL2VA: its text and its first and/or last keyframe, or text alone."""
+) -> SegmentOutput:
+    """A segment on FL2VA: its text and its first and/or last keyframe, or text alone."""
     lora = _sampling(payload, turbo_lora)
     observed = provenance(base_model.checkpoint_ref, "" if lora is None else lora.checkpoint_ref)
     plan = ContinuationPlan(
         payload.duration_s, Carry(),
         Carry(int(payload.next_context_frames), payload.next_context_audio),
     )  # fmt: skip
-    handed = _Pieces(out, base_model, plan, observed, payload.latents)
+    handed = _Segments(out, base_model, plan, observed, payload.latents)
     ended: list[ImageFile] = []
     exported: list[ImageFile] = []
     shot = _render_keyframes(
@@ -1487,11 +1487,11 @@ async def fl2va_piece(
         completed=handed if handed.wanted else None,
         ended=partial(_keep_frames, out, payload.exports, ended, exported),
     )  # fmt: skip
-    return PieceOutput(shot.video, list(shot.warnings), observed, handed.file("context"), ended[0], exported,
+    return SegmentOutput(shot.video, list(shot.warnings), observed, handed.file("context"), ended[0], exported,
                        handed.file("latents"))  # fmt: skip
 
 
-app.child_task(fl2va_piece)
+app.child_task(fl2va_segment)
 
 
 class ResumeFrameInput(msgspec.Struct, kw_only=True):
@@ -1502,14 +1502,14 @@ class ResumeFrameInput(msgspec.Struct, kw_only=True):
 
 
 class ResumeFrame(msgspec.Struct):
-    #: A child's result is a granted input of the parent, so it may feed a piece; a picture the
+    #: A child's result is a granted input of the parent, so it may feed a segment; a picture the
     #: parent saved itself may not (run 20651; h3a-098's first proof, 25980).
     image: ImageFile
 
 
 @invocable(memoize=True)
 async def resume_frame(ctx: Context, *, payload: ResumeFrameInput, out: Outputs, tel: Telemetry) -> ResumeFrame:
-    """A continued video's last frame before `frames`: the one its next piece starts from."""
+    """A continued video's last frame before `frames`: the one its next segment starts from."""
     start = Fraction(max(payload.frames - 6, 0), FPS)
     decoded = payload.video.read(start=start, end=Fraction(payload.frames, FPS), audio=False)
     image = PILImage.frombytes("RGB", (decoded.width, decoded.height), decoded.frames_rgb[-1])
@@ -1613,10 +1613,10 @@ app.child_task(regenerate_shot)
 
 # --- shot: one continuous take of any length (`video/shot`) ------------------------------
 # The project names the pictures a shot uses and renders them; a shot here renders one take.
-# Its pieces of at most 15 s each continue the last from its carried latents, never decoded.
-# A piece is an ordinary serving child memoized on its full inputs (the previous piece's context
-# included), so a resubmitted shot skips the pieces it already finished. The CPU parent joins
-# each piece's packets as it lands and publishes the video so far.
+# Its segments of at most 15 s each continue the last from its carried latents, never decoded.
+# A segment is an ordinary serving child memoized on its full inputs (the previous segment's context
+# included), so a resubmitted shot skips the segments it already finished. The CPU parent joins
+# each segment's packets as it lands and publishes the video so far.
 
 ShotImage = Annotated[
     ImageFile,
@@ -1662,7 +1662,7 @@ class Sound(AudioReference, tag="audio", kw_only=True):
 
 
 class EditPlate(Plate, kw_only=True):
-    """The video being edited, followed frame by frame (Add Guide rows) across every piece: the
+    """The video being edited, followed frame by frame (Add Guide rows) across every segment: the
     prompt, or an edit LoRA, decides what changes."""
 
     video: ShotFootage
@@ -1678,12 +1678,12 @@ class Continue(ContinueFrom, kw_only=True):
 class GenerateInput(msgspec.Struct, kw_only=True):
     """One continuous video of any length (README.md), on the shot contract less its `beats`: `prompt` says what happens
     and when, its timestamps at line starts (`_TIMED`). `turbo` (the default) runs the turbo LoRA's 8 steps; `turbo: false`
-    the full model at `steps`. `style` holds in every piece, with what must or must not appear ("no person appears")."""
+    the full model at `steps`. `style` holds in every segment, with what must or must not appear ("no person appears")."""
 
     prompt: str
     duration_s: Annotated[float, msgspec.Meta(
         gt=0, extra={"max_piece_s": MAX_DURATION_S, "min_piece_s": MIN_DURATION_S},
-        description="Any length; rendered in pieces of at most 15 s (max_piece_s), so a longer video needs "
+        description="Any length; rendered in segments of at most 15 s (max_piece_s), so a longer video needs "
                     "timestamps in its prompt, or it renders 15 s and warns. With continue_from, its whole length.",
     )]  # fmt: skip
     style: str = ""
@@ -1696,10 +1696,6 @@ class GenerateInput(msgspec.Struct, kw_only=True):
     first_frame: FrameImage = None
     last_frame: FrameImage = None
     continue_from: Continue | None = None
-    shot_duration_s: Annotated[float | None, msgspec.Meta(
-        description="The whole video's length, when this call makes only its start and later calls continue it "
-                    "(`continue_from`). Text timed from `duration_s` on is theirs: it is left out of this call, with no warning.",
-    )] = None  # fmt: skip
     music: str = "N/A"
     turbo: bool = True
     steps: FullSteps | None = None
@@ -1709,9 +1705,9 @@ class GenerateInput(msgspec.Struct, kw_only=True):
     upscale: Upscale | None = None
 
 
-#: What each later piece carries from the one before: 22 frames of picture and one second of sound.
+#: What each later segment carries from the one before: 22 frames of picture and one second of sound.
 _CARRY = Carry(22, True)
-#: A later piece's new seconds: its carried frames share the 362-frame window, so 14.
+#: A later segment's new seconds: its carried frames share the 362-frame window, so 14.
 _MAX_NEXT_S = (MAX_FRAMES - _CARRY.head_frames) // FPS
 #: A loose picture (`follow: loose`, a world state) is read at this short edge: the full picture
 #: opens the shot on a copy of it (run 20661, first-frame SSIM 0.871), 256 px keeps the set but not
@@ -1724,33 +1720,34 @@ _DESCRIPTION = re.compile(r"^[ \t]*(?:integrated[ _-]*multimodal|detailed)[ _-]*
 #: A timestamp: at a line's start, after an optional `[Shot N]`; a time mid-sentence is plain text. It says when, and the
 #: model reads the words for what: cozy never takes one for a cut.
 _TIMED = re.compile(r"^[ \t]*(\[Shot[ \t]*\d+\][ \t]*)?At[ \t]+(\d+):(\d+(?:\.\d+)?)[ \t]*,?[ \t]*", re.I | re.M)
-#: Its shot markers, which a later piece renumbers from 1.
+#: Its shot markers, which a later segment renumbers from 1.
 _OWN_SHOT = re.compile(r"\[Shot[ \t]*\d+\]", re.I)
 _FIRST_SHOT = re.compile(r"\[Shot[ \t]*1\]", re.I)
 #: A join lands on H3's 17-frame grid, so a video continued (`continue_from`) can end just short of the timestamp the next
 #: call opens on: within this, that block opens it, and the earlier ones stay history.
 _JOIN_S = 17 / FPS
 _SOUNDSCAPE = re.compile(r"^[ \t]*(?:audio|overall[ _-]*soundscape)[ \t]*:", re.I | re.M)
+_REF2VA_HEADING = re.compile(r"^[ \t]*(?:summary|detailed[ _-]*description)[ \t]*:[ \t]*\n?", re.I | re.M)
 _OWN_SECTION = re.compile(r"^[ \t]*(?:subject[ _-]+definitions|summary|style|retention[ _-]+analysis"
                           r"|(?:integrated[ _-]*multimodal|detailed)[ _-]*description)[ \t]*:", re.I | re.M)  # fmt: skip
 
 
 def _delivered(seconds: int, first: bool) -> int:
-    """The frames a piece of `seconds` new seconds delivers on H3's 17n+5 grid."""
+    """The frames a segment of `seconds` new seconds delivers on H3's 17n+5 grid."""
     return ContinuationPlan(seconds, Carry() if first else _CARRY).delivered_frames
 
 
 class ShotPlan(NamedTuple):
-    """A shot's pieces: each one's whole seconds and the time on the shot's clock it opens on (0, or a timestamp)."""
+    """A shot's segments: each one's whole seconds and the time on the shot's clock it opens on (0, or a timestamp)."""
 
     seconds: list[int]
     opens: list[float]
     warnings: list[str]
 
 
-def plan_pieces(duration_s: float, marks: Iterable[float], carried: bool = False) -> ShotPlan:
-    """A shot's pieces: whole blocks of its text (from one of `marks`, its timestamps, to the next), as many as fit each
-    piece, so the fewest, and each later piece opens on a timestamp. A piece holds 15 s, or 14 when it continues a video:
+def plan_segments(duration_s: float, marks: Iterable[float], carried: bool = False) -> ShotPlan:
+    """A shot's segments: whole blocks of its text (from one of `marks`, its timestamps, to the next), as many as fit each
+    segment, so the fewest, and each later segment opens on a timestamp. A segment holds 15 s, or 14 when it continues a video:
     `carried`, or any but the first. A block longer than that renders that long and warns; what follows comes straight
     after it, so the video is shorter than asked. Lengths are H3's whole seconds on its 17n+5 grid, each the nearest to
     the next timestamp from what is delivered so far, and at least 5 s; the last reaches the end."""
@@ -1807,7 +1804,7 @@ def _clock(seconds: float) -> str:
 
 
 def _prompt_parts(prompt: str) -> tuple[str, str, str]:
-    """A prompt's heading (T2VA's), its body, and the audio and music fields that hold on every piece."""
+    """A prompt's heading (T2VA's), its body, and the audio and music fields that hold on every segment."""
     prompt = prompt.strip()
     head = found.group(0) if (found := _DESCRIPTION.match(prompt)) else ""
     after = _AFTER.search(prompt, len(head))
@@ -1824,9 +1821,8 @@ class _Block(NamedTuple):
     words: int
 
 
-def _blocks(body: str, duration_s: float, shot_s: float | None = None) -> tuple[list[_Block], list[str]]:
-    """The timed blocks of a text's description. A time out of order or past the end stays plain text, with a warning
-    that names the whole video's length (`shot_s`, when this call makes only its start)."""
+def _blocks(body: str, duration_s: float) -> tuple[list[_Block], list[str]]:
+    """The timed blocks of a text's description. A time out of order or past the end stays plain text, with a warning."""
     blocks: list[_Block] = []
     warnings: list[str] = []
     last = 0.0
@@ -1836,35 +1832,19 @@ def _blocks(body: str, duration_s: float, shot_s: float | None = None) -> tuple[
             blocks.append(_Block(at, bool(found[1]), found.start(), found.end()))
             last = at
         elif at > 0:
-            why = "out of order" if at <= last else f"past the end of this {max(duration_s, shot_s or 0):g} s video"
+            why = "out of order" if at <= last else f"past the end of this {duration_s:g} s video"
             warnings.append(f"the time {_clock(at)} is {why}: it stays plain text. Update its timing.")
     return blocks, warnings
 
 
-def _this_call(prompt: str, duration_s: float, shot_s: float) -> str:
-    """`prompt` without what later calls of its video render: its description from the first time at or past this call's
-    end and inside the video (`shot_s`). Their text would otherwise reach this call and be acted on early (se-100)."""
-    head, body, tail = _prompt_parts(prompt)
-    begin, stop = description_span(body)
-    last = 0.0
-    for found in _TIMED.finditer(body, begin, stop):
-        at = int(found[2]) * 60 + float(found[3])
-        if at > last and duration_s <= at < shot_s:
-            kept = "\n\n".join(filter(None, (body[:found.start()].rstrip(), body[stop:].strip())))
-            return "\n\n".join(filter(None, (head + kept, tail)))
-        if last < at < duration_s:
-            last = at
-    return prompt
-
-
-def piece_texts(prompt: str, starts: Sequence[float], *, continued: bool = False, duration_s: float = math.inf) -> list[str]:
-    """Each piece's text: the prompt's, with nothing added, and only its own blocks (`plan_pieces` and `starts`: what opens
-    each), so no piece redraws what an earlier one set up (0.2.4 gate, runs 24980/24981: back in the food cart). The first
-    is as written, past 15 s without what comes after it. A later one keeps the text's sections, less the summary and
-    retention that tell the whole video's flow (`story` restores each reference's own retention line): the block it opens
+def segment_texts(prompt: str, starts: Sequence[float], *, continued: bool = False, duration_s: float = math.inf) -> list[str]:
+    """Each segment's text: the prompt's, with nothing added, and only its own blocks (`plan_segments` and `starts`: what opens
+    each), so no segment redraws what an earlier one set up (0.2.4 gate, runs 24980/24981: back in the food cart). The first
+    is as written, past 15 s without what comes after it. A later one keeps the text's sections, its summary among them, less
+    the retention, which tells the whole video's flow (`story` restores each reference's own retention line): the block it opens
     on, with no time, then the rest with their times on its clock, whose head is the carried frames, and its `[Shot N]`
-    renumbered from 1. With `continued`, the first piece continues a video too, on the block in force at its start. The
-    audio and music fields close every piece."""
+    renumbered from 1. With `continued`, the first segment continues a video too, on the block in force at its start. The
+    audio and music fields close every segment."""
     head, body, tail = _prompt_parts(prompt)
     blocks, _ = _blocks(body, duration_s)
     begin, stop = description_span(body)
@@ -1886,7 +1866,7 @@ def piece_texts(prompt: str, starts: Sequence[float], *, continued: bool = False
             number = iter(range(1, len(body) + 2))
             description = _OWN_SHOT.sub(lambda _: f"[Shot {next(number)}]", "\n".join(line for line in lines if line))
             text = "\n\n".join(filter(None, (body[:begin].rstrip() + ("\n" if begin else "") + description, body[stop:].strip())))
-            text = without_sections(text, ("summary", "retention_analysis"))
+            text = without_sections(text, ("retention_analysis",))
         text = head + text
         texts.append(f"{text}\n\n{tail}" if tail else text)
     return texts
@@ -1895,10 +1875,10 @@ def piece_texts(prompt: str, starts: Sequence[float], *, continued: bool = False
 def shot_windows(
     references: Sequence[StoryReference], spans: Sequence[tuple[int, int]]
 ) -> tuple[list[dict[str, int]], list[str]]:
-    """Where each piece's window of each clip starts, and the warnings. A piece reads the shot
+    """Where each segment's window of each clip starts, and the warnings. A segment reads the shot
     frames it samples, its carried head included (`spans`: first frame, count), 1:1 from the
     clip's first frame on the 24-fps clock, so a plate stays frame-aligned across an edge. A
-    piece takes the tail of a clip that ends in its window, and none of one that leaves it
+    segment takes the tail of a clip that ends in its window, and none of one that leaves it
     less than `REFERENCE_VIDEO`'s minimum."""
     least = math.ceil(Fraction(REFERENCE_VIDEO.min_seconds or 0) * FPS)
     windows: list[dict[str, int]] = [{} for _ in spans]
@@ -1913,7 +1893,7 @@ def shot_windows(
             if min(start + frames, length) - start >= least:
                 window[ref.name] = start
         if ref.kind == "video" and (span := sum(ref.name in window for window in windows)) > 1:
-            warnings.append(f"<{ref.name}> guides {span} pieces, each from its own span: put each timestamp where the clip "
+            warnings.append(f"<{ref.name}> guides {span} segments, each from its own span: put each timestamp where the clip "
                             "shows it, or the shot runs ahead of the clip")  # fmt: skip
         if length < total:
             warnings.append(f"<{ref.name}> ends {length / FPS:.1f} s into this {total / FPS:.1f} s shot, "
@@ -1924,8 +1904,10 @@ def shot_windows(
 
 
 def _fl2va_text(text: str, payload: GenerateInput) -> str:
-    """An FL2VA piece's text: its own, opening with the style, with the soundscape as its `audio`
-    line and the music as its `non_diegetic_music` line where it has none."""
+    """An FL2VA segment's text: its own, with no `summary:` or `detailed_description:` heading (Ref2VA's form, not
+    FL2VA's), opening with the style, with the soundscape as its `audio` line and the music as its `non_diegetic_music`
+    line where it has none."""
+    text = _REF2VA_HEADING.sub("", text).strip()
     if (style := payload.style.strip()) and style.casefold() not in text.casefold():
         found = _DESCRIPTION.search(text)
         at = found.end() if found else 0
@@ -1968,8 +1950,8 @@ def _shot_references(payload: GenerateInput) -> tuple[list[StoryReference], list
     return refs, warnings
 
 
-def piece_seed(seed: int | None, request_id: str, index: int) -> int:
-    """The shot's seed, one more per piece; or chosen once per request, so a retried attempt
+def segment_seed(seed: int | None, request_id: str, index: int) -> int:
+    """The shot's seed, one more per segment; or chosen once per request, so a retried attempt
     keeps it."""
     if seed is not None:
         return seed + index
@@ -1979,14 +1961,12 @@ def piece_seed(seed: int | None, request_id: str, index: int) -> int:
 async def generate(ctx: Context, payload: GenerateInput, out: Outputs, tel: Telemetry) -> ShotResult:
     """One continuous video of any length, with sound, from MiniMax H3.
 
-    Its pieces of at most 15 s render in order, each continuing the last from its carried latents,
+    Its segments of at most 15 s render in order, each continuing the last from its carried latents,
     and decode as one video, published as it grows. `continue_from` resumes a video this package
     made, from its latents, on its timeline: the result is the whole video. The run's model stack
-    (`--lora`, `model.base_model`) serves every piece. Returns the video and its latents, whose
+    (`--lora`, `model.base_model`) serves every segment. Returns the video and its latents, whose
     carry a later `continue_from` resumes."""
     ctx.raise_if_cancelled()
-    if payload.shot_duration_s is not None:
-        payload = replace(payload, prompt=_this_call(payload.prompt, payload.duration_s, payload.shot_duration_s))
     if payload.turbo and payload.steps is not None:
         raise InvalidRequest(f"turbo runs its LoRA's 8 steps; steps {payload.steps} needs turbo: false",
                              fields=["steps"])  # fmt: skip
@@ -2004,8 +1984,8 @@ async def generate(ctx: Context, payload: GenerateInput, out: Outputs, tel: Tele
             raise InvalidRequest(f"duration_s {payload.duration_s:g} is not past the {done / FPS:.2f} s "
                                  "continue_from already has", fields=["duration_s"])  # fmt: skip
     begun = done / FPS
-    blocks, timing = _blocks(_prompt_parts(payload.prompt)[1], payload.duration_s, payload.shot_duration_s)
-    pieces, opens, planned = plan_pieces(payload.duration_s - begun, [block.at - begun for block in blocks if block.at > begun + _JOIN_S],
+    blocks, timing = _blocks(_prompt_parts(payload.prompt)[1], payload.duration_s)
+    segments, opens, planned = plan_segments(payload.duration_s - begun, [block.at - begun for block in blocks if block.at > begun + _JOIN_S],
                                          carried=resumed is not None)  # fmt: skip
     references, warnings = _shot_references(payload)
     warnings += [*timing, *planned]
@@ -2019,38 +1999,38 @@ async def generate(ctx: Context, payload: GenerateInput, out: Outputs, tel: Tele
         if abs(w / h - 1344 / 768) > 0.05:
             warnings.append(f"minimax-h3 renders 1344x768 for now, not {payload.aspect_ratio}")
     steps = None if payload.turbo else payload.steps
-    count = len(pieces)
-    # Every piece carries into a successor, its last too: the video's latents keep that carry, which
+    count = len(segments)
+    # Every segment carries into a successor, its last too: the video's latents keep that carry, which
     # a `continue_from` of it resumes.
     plans = [ContinuationPlan(length, _CARRY if index or resumed else Carry(), _CARRY)
-             for index, length in enumerate(pieces)]  # fmt: skip
+             for index, length in enumerate(segments)]  # fmt: skip
     *starts, total = accumulate((plan.delivered_frames for plan in plans), initial=done)
     windows, notes = shot_windows(references, [(start - plan.prefix_frames, plan.sample_frames)
                                                for start, plan in zip(starts, plans, strict=True)])  # fmt: skip
     warnings += notes
     style, sound, music = payload.style, payload.soundscape, payload.music
-    # A continued piece's place is the previous piece's last frame, with the setup plate beside it as an
+    # A continued segment's place is the previous segment's last frame, with the setup plate beside it as an
     # attribute_transfer world state: the plate as the place pulls a shot that has moved from its framing back
     # with a cut (run 20996), and the last frame alone lets the place drift (run 21955). A resumed video's
-    # first piece has no last frame of a piece (its parent cannot hand one on): the plate alone holds the place.
+    # first segment has no last frame of a segment (its parent cannot hand one on): the plate alone holds the place.
     places = [ref.name for ref in references if ref.kind == "background"]
     plates = [StoryReference(name=f"{ref.name} plate", kind="world_state", image=ref.image,
                              description=f"It is <{ref.name}>'s setup plate: its architecture and materials, not its framing.")
               for ref in references if ref.kind == "background"]  # fmt: skip
     forced = frozenset(ref.name for ref in [*references, *plates])
     files: dict[str, File | None] = {ref.name: getattr(ref, FILE[ref.kind]) for ref in voices([*references, *plates])[0]}
-    calls: list[PieceCall] = []
+    calls: list[SegmentCall] = []
     people = _has_people(payload)
     here = "who and what" if people else "what"
-    texts = piece_texts(payload.prompt, [begun + at for at in opens], continued=resumed is not None, duration_s=payload.duration_s)
+    texts = segment_texts(payload.prompt, [begun + at for at in opens], continued=resumed is not None, duration_s=payload.duration_s)
     for index, text in enumerate(texts):
         own = [ref for ref in references if ref.kind not in CLIPS or ref.name in windows[index]]
-        # A continued piece with no place to carry starts from the previous piece's last frame as a world state,
+        # A continued segment with no place to carry starts from the previous segment's last frame as a world state,
         # after the request's own pictures so their <Picture N> keep their numbers: who and what is where now. Every
-        # continued piece that saw one joined cleanly (se-087: 9 of 9 seams); those without, character-only and
+        # continued segment that saw one joined cleanly (se-087: 9 of 9 seams); those without, character-only and
         # footage shots, reframed or cut (24525, 24603).
-        anchor = [StoryReference(name=f"Piece {index} end", kind="world_state",
-                                 description=f"This piece starts from it: {here} is where now.")
+        anchor = [StoryReference(name=f"Segment {index} end", kind="world_state",
+                                 description=f"This segment starts from it: {here} is where now.")
                   ] if not places else []  # fmt: skip
         if index:
             own = [*own, *plates, *anchor]
@@ -2059,48 +2039,48 @@ async def generate(ctx: Context, payload: GenerateInput, out: Outputs, tel: Tele
         added = frozenset(ref.name for ref in [*plates, *anchor])
         role = {"keyframes": bool(index == 0 and payload.first_frame or index + 1 == count and payload.last_frame),
                 "continues": index == 0 and resumed is not None}  # fmt: skip
-        call = piece_call(text, own, style=style, soundscape=sound, music=music, index=index, retained=retained, added=added,
+        call = segment_call(text, own, style=style, soundscape=sound, music=music, index=index, retained=retained, added=added,
                           forced=forced | ({ref.name for ref in anchor} if index else set()), **role)  # fmt: skip
         if not call.references and resumed is not None:
-            # A resumed video's first piece carries into Ref2VA, which needs a picture: with none of the request's
+            # A resumed video's first segment carries into Ref2VA, which needs a picture: with none of the request's
             # own, it starts from the continued video's last frame as the same world state (h3a-098, run 25881).
             frame = await resume_frame(payload=ResumeFrameInput(video=resumed.video, frames=done))  # type: ignore[call-arg]
             files[anchor[0].name] = frame.image
-            call = piece_call(text, [*own, *anchor], style=style, soundscape=sound, music=music, index=index,
+            call = segment_call(text, [*own, *anchor], style=style, soundscape=sound, music=music, index=index,
                               retained=retained, added=added, forced=forced | {anchor[0].name}, **role)  # fmt: skip
-        calls.append(call if call.references else PieceCall(_fl2va_text(text, payload), [], call.warnings))
+        calls.append(call if call.references else SegmentCall(_fl2va_text(text, payload), [], call.warnings))
         warnings += call.warnings
-    tel.log("h3 shot pieces", pieces=count, seconds=",".join(map(str, pieces)), resumed_at=done,
+    tel.log("h3 shot segments", segments=count, seconds=",".join(map(str, segments)), resumed_at=done,
             boundaries_s=",".join(f"{start / FPS:.2f}" for start in starts[1:]), delivered_frames=total,
             clip_windows=";".join(",".join(f"{name}@{at}" for name, at in w.items()) for w in windows))  # fmt: skip
     if not calls[0].references and any(call.references for call in calls[1:]):
-        # Only a text-only first piece (FL2VA) runs ahead of a Ref2VA one. A hint the shot never
+        # Only a text-only first segment (FL2VA) runs ahead of a Ref2VA one. A hint the shot never
         # uses loads on after it ends and holds the GPU from the next run (0.2.0 gate 41159884913:
         # h3-5s, then upscale waited 3 h 50 min).
-        prefetch(ref2va_piece)
+        prefetch(ref2va_segment)
     work = [plan.sample_frames for plan in plans]
-    seeds = [piece_seed(payload.seed, ctx.request_id, index) for index in range(count)]
-    # A resumed video's latents and its video join this one's at its last piece, decoded as one.
+    seeds = [segment_seed(payload.seed, ctx.request_id, index) for index in range(count)]
+    # A resumed video's latents and its video join this one's at its last segment, decoded as one.
     before = ((resumed.latents,), (resumed.video,)) if resumed is not None and resumed.latents is not None else ((), ())
     joined = count > 1 or resumed is not None
     context: File | None = resumed.latents if resumed is not None else None
     expected = None
-    returned: list[PieceOutput] = []
+    returned: list[SegmentOutput] = []
     for index, (call, plan) in enumerate(zip(calls, plans, strict=True)):
         ctx.raise_if_cancelled()
         first = payload.first_frame if index == 0 else None
         last = payload.last_frame if index + 1 == count else None
-        end_piece = joined and index + 1 == count
+        end_segment = joined and index + 1 == count
         span = (sum(work[:index]) / sum(work), sum(work[: index + 1]) / sum(work))
         try:
-            with tel.scope(f"Piece {index + 1} of {count}", overall_range=span):
-                log_prompt(tel, "h3 piece prompt", call.prompt, piece=index + 1,
+            with tel.scope(f"Segment {index + 1} of {count}", overall_range=span):
+                log_prompt(tel, "h3 segment prompt", call.prompt, segment=index + 1,
                            references=", ".join(ref.name for ref in call.references))  # fmt: skip
                 if call.references:
                     uses = video_uses(call.references, windows[index])
-                    result = await ref2va_piece(  # type: ignore[call-arg]
+                    result = await ref2va_segment(  # type: ignore[call-arg]
                         payload=Ref2VAInput(
-                            prompt=call.prompt, seed=seeds[index], duration_s=pieces[index], steps=steps,
+                            prompt=call.prompt, seed=seeds[index], duration_s=segments[index], steps=steps,
                             turbo=payload.turbo, preset=payload.preset, frames=held_frames(plan, uses), videos=uses,
                             previous_provenance=expected, context=context if plan.carried else None,
                             context_frames=cast(ContextFrames, plan.carried.frames),
@@ -2108,17 +2088,17 @@ async def generate(ctx: Context, payload: GenerateInput, out: Outputs, tel: Tele
                             next_context_frames=cast(ContextFrames, plan.successor.frames),
                             next_context_audio=plan.successor.audio, first_frame=first, last_frame=last,
                             latents=True,
-                            earlier_latents=(*before[0], *(r.latents for r in returned)) if end_piece else (),
-                            earlier_videos=(*before[1], *(r.video for r in returned)) if end_piece else (),
+                            earlier_latents=(*before[0], *(r.latents for r in returned)) if end_segment else (),
+                            earlier_videos=(*before[1], *(r.video for r in returned)) if end_segment else (),
                             picture_edges=tuple(_LOOSE_EDGE if ref.kind == "world_state" else 0
                                                 for ref in call.references if FILE[ref.kind] == "image"),
                         ), assets=_call_assets(files | ({place: returned[-1].last_frame for place in places} if index else {}),
                                                call.references),
                     )  # fmt: skip
                 else:
-                    result = await fl2va_piece(  # type: ignore[call-arg]
+                    result = await fl2va_segment(  # type: ignore[call-arg]
                         payload=FL2VAInput(
-                            prompt=call.prompt, seed=seeds[index], duration_s=pieces[index], steps=steps,
+                            prompt=call.prompt, seed=seeds[index], duration_s=segments[index], steps=steps,
                             turbo=payload.turbo, preset=payload.preset, first_frame=first, last_frame=last,
                             next_context_frames=cast(ContextFrames, plan.successor.frames),
                             next_context_audio=plan.successor.audio, latents=True,
@@ -2127,37 +2107,37 @@ async def generate(ctx: Context, payload: GenerateInput, out: Outputs, tel: Tele
         except ChildCallError as failure:
             # Concurrent caller cancellation must not become a successful partial result.
             ctx.raise_if_cancelled()
-            raise OutputError(f"piece {index + 1} of {count} failed ({failure.code}): {str(failure)[:512]}",
-                              code="piece_failed") from failure  # fmt: skip
+            raise OutputError(f"segment {index + 1} of {count} failed ({failure.code}): {str(failure)[:512]}",
+                              code="segment_failed") from failure  # fmt: skip
         expected = result.provenance
         context = result.context
         returned.append(result)
         warnings += result.warnings
-        files[f"Piece {index + 1} end"] = result.last_frame
-        out.publish("video", result.video, label="Video" if index + 1 == count else f"Piece {index + 1} of {count}")
+        files[f"Segment {index + 1} end"] = result.last_frame
+        out.publish("video", result.video, label="Video" if index + 1 == count else f"Segment {index + 1} of {count}")
     latents = _shot_latents(out, [*before[0], *(r.latents for r in returned)], total, returned[-1].context,
                             _upscale_prompt(payload))  # fmt: skip
     video = returned[-1].video
     if payload.resolution is not Resolution.NATIVE:
         # Through `upscale`, as every caller: the video's own latents, so Regenerate encodes nothing.
         request = UpscaleInput(video=video, resolution=payload.resolution, upscale=payload.upscale,
-                               prompt=_upscale_prompt(payload), seed=piece_seed(payload.seed, ctx.request_id, count),
+                               prompt=_upscale_prompt(payload), seed=segment_seed(payload.seed, ctx.request_id, count),
                                latents=latents, preset=payload.preset)  # fmt: skip
         video = (await upscale(ctx, request, out, tel)).video
         out.publish("video", video, label=f"Video at {payload.resolution.value}")
     ctx.release_gpus()
-    tel.log("h3 shot", pieces=count, delivered_frames=total, turbo=payload.turbo, preset=payload.preset)
+    tel.log("h3 shot", segments=count, delivered_frames=total, turbo=payload.turbo, preset=payload.preset)
     return ShotResult(video=video, warnings=list(dict.fromkeys(warnings)), latents=latents)
 
 
 def _shot_latents(out: Outputs, parts: Sequence[File], frames: int, context: File, text: str) -> File:
-    """The whole video's latents: each part's delivered latents end to end (each piece cuts its
+    """The whole video's latents: each part's delivered latents end to end (each segment cuts its
     carried head, whole VAE cycles, so they join in phase; a resumed video's own latents first), in
-    the latent space they name, with its last piece's carry and the text it was made from."""
+    the latent space they name, with its last segment's carry and the text it was made from."""
     blobs = [part.read_bytes() for part in parts]
     spaces = {shot_latents.metadata(data).get("vae_space", "") for data in blobs}
     if len(spaces) != 1 or "" in spaces:
-        raise OutputError("the video's pieces name no single latent space", code="output_integrity")
+        raise OutputError("the video's segments name no single latent space", code="output_integrity")
     latents = torch.cat([load_tensors(data)["latents"] for data in blobs], dim=2)
     data = shot_latents.save(latents, frames, spaces.pop(), context.read_bytes(), text)
     return out.save_bytes(data, media_type="application/octet-stream")
@@ -2165,12 +2145,12 @@ def _shot_latents(out: Outputs, parts: Sequence[File], frames: int, context: Fil
 
 def _upscale_prompt(payload: GenerateInput) -> str:
     """The text a video was made from, for an upscale that re-renders it (Paul, 10-31): the whole
-    video as one piece's text (`piece_texts`) after each reference's description, opening with the
-    style and closing with the soundscape and music as its pieces do (`_fl2va_text`). Names lose their
+    video as one segment's text (`segment_texts`) after each reference's description, opening with the
+    style and closing with the soundscape and music as its segments do (`_fl2va_text`). Names lose their
     brackets: the re-render attaches no reference."""
     defined = [(ref.name, ref.description) for ref in payload.references if not isinstance(ref, Clip | Sound)]
     lines = " ".join(f"{name}: {text.strip().rstrip('.')}." for name, text in defined if text.strip())
-    text = piece_texts(payload.prompt, [0.0])[0]
+    text = segment_texts(payload.prompt, [0.0])[0]
     if lines:
         text = text.replace("[Shot 1] ", f"{lines} [Shot 1] ", 1) if "[Shot 1] " in text else f"{lines}\n{text}"
     return re.sub(r"<([^<>]+)>", r"\1", _fl2va_text(text, payload))

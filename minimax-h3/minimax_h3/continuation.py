@@ -359,7 +359,7 @@ class DeliveredFrames:
 
 
 class RenderProvenance(msgspec.Struct, frozen=True):
-    """The model selections a piece rendered with: a carried context names them."""
+    """The model selections a segment rendered with: a carried context names them."""
 
     model_manifest: str
     turbo_lora_manifest: str = ""

@@ -1369,7 +1369,7 @@ class OfficialH3Pipeline:
         soundtrack through the audio VAE's posterior mode. Two things change where it runs:
 
         - A video-VAE encode is a pure function of the reference's pixels, so its latents are
-          memoized per generation by an exact key (`ReferenceMemo`): a long-form piece's
+          memoized per generation by an exact key (`ReferenceMemo`): a long-form segment's
           later shots reuse their references' latents. The audio encode is not: H3's audio
           is not bitwise reproducible run to run (h3a-088), so it runs every time.
         - Image encodes that miss run across the group's idle ranks (`author.spread`,
