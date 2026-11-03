@@ -57,7 +57,7 @@ from cozy_runtime.author import (
 )
 from cozy_runtime.author.kernels import Plan
 
-from ._prepared import _FlowEuler, _Layout
+from ._prepared import _FlowEuler, _Layout, _cached_step
 
 
 def _modulation(block: Any, arguments: Mapping[str, Any]) -> fusion.Modulation:
@@ -459,35 +459,18 @@ class QwenImage21Model(
             on_step(0)
             if steps < 2:
                 return latents
-            euler = _FlowEuler(scheduler, device)
+            euler = _FlowEuler.from_scheduler(scheduler, device)
         blocks = transformer.transformer_blocks
-        caches = [kv_cache.get_layer(index) for index in range(len(blocks))]
-        rotary, target, attention = layout.rotary_emb, layout.modulation_mask, layout.attention_mask
-
-        def step(i: torch.Tensor, latents: torch.Tensor) -> None:
-            with torch.no_grad():
-                hidden = transformer.img_in(latents)
-                temb = transformer.time_text_embed(euler.timestep(i), hidden)
-                modulation = transformer.modulation(temb)
-                # One `for` over the stack: a step cache's skipped forward ends it after block 0.
-                for index, block in enumerate(blocks):
-                    hidden = block(
-                        hidden_states=hidden,
-                        modulation=modulation,
-                        rotary_emb=rotary,
-                        attention_mask=attention,
-                        target_token_mask=target,
-                        layer_cache=caches[index],
-                        kv_cache_mode="cached",
-                        cache_write_slice=None,
-                        segments=None,
-                        key_valid=None,
-                    )
-                hidden = transformer.norm_out(hidden, temb, target)
-                noise = transformer.proj_out(hidden)
-                latents.copy_((latents.float() + euler.delta(i) * noise).to(latents.dtype))
-
-        denoise_loop(step, range(1, steps), state=(latents,), on_step=on_step, cache=cache)
+        prefix = tuple(
+            tensor
+            for layer in range(len(blocks))
+            for tensor in kv_cache.get_layer(layer).get()
+        )
+        denoise_loop(
+            _cached_step(transformer), range(1, steps), state=(latents,),
+            inputs=(euler.ts, euler.dt, layout.rotary_emb, layout.modulation_mask, *prefix),
+            key=("qwen-image-2.1.cached/1", len(blocks)), on_step=on_step, cache=cache,
+        )
         return latents
 
     def _denoise_eager(
