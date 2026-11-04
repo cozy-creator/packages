@@ -641,7 +641,7 @@ def model_plans(assets: ModelAssets, *, turbo: bool = False) -> dict[Trunk, Time
     if missing:
         raise InvalidRequest(
             f"this model release carries no {', '.join(missing)}: H3 reads its timestep plans "
-            f"from the model, first carried by {PLANS_SINCE[turbo]}",
+            f"from the model, so run it with `model.{'turbo_lora' if turbo else 'base_model'}={PLANS_SINCE[turbo]}` or newer",
             code="model_asset_missing",
             fields=missing,
         )
