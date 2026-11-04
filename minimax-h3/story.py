@@ -417,7 +417,8 @@ def _segment_call(
         if (ref.name, _SLOT[ref.kind]) in own:
             del definitions[defined]
         elif ref.description:
-            definitions[defined] += f" {ref.description}"
+            # A description ends its line with a blank one, however it was typed.
+            definitions[defined] += f" {ref.description.strip()}\n"
         if (ref.name, _SLOT[ref.kind]) not in retained:
             if line := author.get(name_key(ref.name)):
                 retention.append(f"<{ref.name}>: {line}")

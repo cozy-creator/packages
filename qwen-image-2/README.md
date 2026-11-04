@@ -5,8 +5,7 @@ the same with Qwen-Image-2.1-Turbo. Both take the same inputs. The model checkpo
 independently from the package. TensorFS owns model downloads and bytes;
 Runtime owns construction, memory residency and component execution.
 
-In a `cozy project`, its adapters (`project-adapter-image`, `-image-generate`, `-image-generate_turbo`) write the words tuned on this model: a
-character or prop on a transparent background as its description and `render: instructions:` say, an establishing view, a camera setup.
+In a `cozy project`, its adapters (`project-adapter-generate`, `-generate_turbo`) write the words tuned on this model: an asset's `instructions`, the `description` of each picture it mentions, and with `transparent` Qwen's own words for a transparent background.
 
 `prompt` reaches the model exactly as given. The image keeps the decoder's alpha when anything in it is
 transparent, and is RGB otherwise; alpha within 4 levels of 0 or 255 (the decoder's noise) snaps

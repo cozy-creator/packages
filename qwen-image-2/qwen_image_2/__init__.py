@@ -14,13 +14,12 @@ from cozy_runtime.author import (
     Context,
     Invocation,
     Picture,
-    PictureOperation,
     ImageRequest,
     ImageResult,
     Memoize,
     Operation,
     Outputs,
-    PictureFields,
+    PictureInputs,
     Refuse,
     Sizes,
     Telemetry,
@@ -217,53 +216,46 @@ def generate_turbo(
 
 #: `GenerateInput.pictures`' most.
 _MAX_PICTURES = 10
-#: What a project's `render` may set: `turbo` picks the function, `transparent` adds the words of Qwen's model card, `style` and
-#: `aspect_ratio` stand where the asset writes none, and the rest are the function's own fields.
-_OPTIONS = ("seed", "megapixels", "steps", "guidance", "negative_prompt", "prompt_upsampling", "preset")
+#: What an asset's inputs pass to its function as they are.
+_PASSED = ("seed", "megapixels", "steps", "preset")
 
 
-class TurboFields(PictureFields, kw_only=True):
-    """`generate_turbo`'s box. The bounds are hints for it, not refusals: `generate` holds what's past them and says so. What the model
-    ignores (`guidance`, `negative_prompt`, `prompt_upsampling`) isn't asked for."""
+class TurboInputs(PictureInputs, kw_only=True):
+    """`generate_turbo`'s controls. The bounds are hints for them, not refusals: `generate` holds what's past them and says so."""
 
     aspect_ratio: Annotated[str | None, msgspec.Meta(extra={"min": 0.0625, "max": 16})] = None
     megapixels: Annotated[float | None, msgspec.Meta(extra={"min": MIN_MEGAPIXELS, "max": MAX_MEGAPIXELS})] = None
     preset: Literal["quality", "balanced", "fast"] = "balanced"
     transparent: bool = False
+    seed: Annotated[int | None, msgspec.Meta(extra={"hidden": True})] = None
 
 
-class FullFields(TurboFields, kw_only=True):
-    """`generate`'s box: Turbo's schedule is its own, so only this one has a choice of steps."""
+class FullInputs(TurboInputs, kw_only=True):
+    """`generate`'s controls: Turbo's schedule is its own, so only this one has a choice of steps."""
 
     steps: Annotated[int | None, msgspec.Meta(extra={"min": 1, "max": _MAX_STEPS})] = None
 
 
 class TurboOperation(Operation, kw_only=True):
-    fields: TurboFields
+    inputs: TurboInputs
 
 
 class FullOperation(Operation, kw_only=True):
-    fields: FullFields
+    inputs: FullInputs
 
 
-def _image(op: PictureOperation | TurboOperation | FullOperation) -> list[Invocation]:
-    """The style, what it says, and what each picture it mentions is: a mention reads as `<image3>` alone, and with no words for it a
+def _image(op: TurboOperation | FullOperation) -> list[Invocation]:
+    """The style, its instructions, and what each picture it mentions is: a mention reads as `<image3>` alone, and with no words for it a
     third picture was dropped in 3 of 3 seeds (runs 27130, 27161, 27174), kept with them (27190, 27200). Pictures are all of what it
     mentions: `<kyogre>` means a read's first, and the rest are `<kyogre 2>`, `<kyogre 3>`."""
-    f = op.fields
-    options, warned = op.known_options(("turbo", "transparent", "style", "aspect_ratio", *_OPTIONS))
-    options |= {key: value for key in ("transparent", *_OPTIONS) if (value := getattr(f, key, None)) not in (None, False)}
-    # A node's description is what it is, for what mentions it. Making it reads its instructions alone (Paul, 11-04); a file naming only
-    # this package may say all it means as `description`, as it always could.
-    own = "" if op.function else f.description.strip()
-    if op.function and not f.instructions.strip():
+    f, warned = op.inputs, []
+    if not f.instructions.strip():
         raise Refuse(f"{op.asset} says nothing to make: write its instructions")
-    said = [own, f.instructions.strip(), "\n".join(
-        f"<{read.name}>: {text}" for read in op.reads if (text := str(read.fields.get("description", "")).strip()))]  # fmt: skip
-    prompt = "\n\n".join(filter(None, said))
-    if style := (f.style or str(options.get("style", ""))).strip():
+    words = "\n".join(f"<{read.name}>: {read.description.strip()}" for read in op.reads if read.description.strip())
+    prompt = "\n\n".join(filter(None, [f.instructions.strip(), words]))
+    if style := f.style.strip():
         prompt = f"Style: {style.rstrip('.')}.\n\n{prompt}"
-    if options.get("transparent"):
+    if f.transparent:
         prompt = f"This is an RGBA image with transparency. {prompt}\n\nThe image has alpha channel and the background is transparent."
     pictures = [{"name": f"{name} {number + 1}" if number else name, "image": picture.sha256}
                 for read in op.reads for name in (spoken(f"<{read.name}>")[1:-1],)
@@ -272,26 +264,20 @@ def _image(op: PictureOperation | TurboOperation | FullOperation) -> list[Invoca
         warned.append(f"{op.asset} reads {len(pictures)} pictures and Qwen takes {_MAX_PICTURES}: it uses the first {_MAX_PICTURES}")
         del pictures[_MAX_PICTURES:]
     request: dict[str, Any] = {"prompt": spoken(prompt), "pictures": pictures}
-    if aspect_ratio := f.aspect_ratio or options.get("aspect_ratio"):
-        request["aspect_ratio"] = aspect_ratio
-    request |= {key: value for key, value in options.items() if key in _OPTIONS}
-    function = op.function or ("generate_turbo" if options.get("turbo") else "generate")
-    return [Invocation(function=function, input=request, warnings=warned)]
+    if f.aspect_ratio:
+        request["aspect_ratio"] = f.aspect_ratio
+    # What nobody chose is the function's own default, so it isn't sent.
+    request |= {key: value for key in _PASSED if (value := getattr(f, key, None)) is not None and (key, value) != ("preset", "balanced")}
+    return [Invocation(function=op.function, input=request, warnings=warned)]
 
 
-@app.project_adapter("image")
-def adapt_image(op: PictureOperation) -> list[Invocation]:
-    """An image asset that names only this package: `render: {turbo: true}` picks the function."""
-    return _image(op)
-
-
-@app.project_adapter("image", functions=["generate"])
+@app.project_adapter("generate")
 def adapt_generate(op: FullOperation) -> list[Invocation]:
-    """A node of `generate`."""
+    """An asset of `generate`."""
     return _image(op)
 
 
-@app.project_adapter("image", functions=["generate_turbo"])
+@app.project_adapter("generate_turbo")
 def adapt_generate_turbo(op: TurboOperation) -> list[Invocation]:
-    """A node of `generate_turbo`."""
+    """An asset of `generate_turbo`."""
     return _image(op)

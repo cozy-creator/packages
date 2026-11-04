@@ -74,7 +74,7 @@ from cozy_runtime.author import (
     Read,
     Refuse,
     ShotBeat,
-    ShotFields,
+    ShotInputs,
     name_key,
     spoken,
 )
@@ -2316,16 +2316,18 @@ _TRANSPARENT = 0.05
 _BEAT_S = 5.0
 #: A kept take reaches its shot's end if less than this is left.
 _REACHES_S = 1.0
-#: What a project's `render` may set for a shot. `style`, `aspect_ratio`, `soundscape` and `music` stand where the shot writes none.
-_SHOT_OPTIONS = ("seed", "turbo", "context_frames", "style", "soundscape", "music", "aspect_ratio", "steps", "preset", "resolution", "upscale")
-#: And for an upscale, which shares a project's `video` defaults with its shots: the rest of those are no news to it.
-_UPSCALE_OPTIONS = ("seed", "upscale", "preset")
+#: What a shot's inputs pass to its function as they are.
+_SHOT_PASSED = ("seed", "turbo", "steps", "preset", "resolution", "upscale", "context_frames")
+#: And an upscale's.
+_UPSCALE_PASSED = ("seed", "upscale", "preset")
 
 
-def _options(op: Operation, known: Sequence[str]) -> tuple[dict[str, Any], list[str]]:
-    """What the file says for this package alone, and what a node's box set of the same."""
-    options, warned = op.known_options(known)
-    return options | {key: value for key in known if (value := getattr(op.fields, key, None)) not in (None, "")}, warned
+#: What a control holds when nobody chose: the function's own default, so nothing need be sent.
+_UNSET = {"preset": "balanced", "resolution": "768p", "turbo": True}
+
+
+def _passed(inputs: Any, names: Sequence[str]) -> dict[str, Any]:
+    return {key: value for key in names if (value := getattr(inputs, key, None)) not in (None, "", _UNSET.get(key))}
 
 
 def _read_named(op: Operation, value: str) -> Read | None:
@@ -2340,10 +2342,9 @@ def _made_here(read_or_take: Read | Keep) -> bool:
 
 
 def _reference(read: Read, warned: list[str]) -> dict[str, Any]:
-    """What a shot reads, as `generate` takes it. An entity's kind says what it is: a character or prop as pictured, an environment as
-    the set. A plain image is a loose picture: a layout to start from, read at 512 px only by a segment whose text names it, not a
-    look to reproduce."""
-    entry: dict[str, Any] = {k: v for k, v in read.fields.items() if k in ("use_audio", "follow")}
+    """What a shot reads, as `generate` takes it. A character or prop as pictured, an environment as the set. A plain picture is loose: a
+    layout to start from, read at 512 px only by a segment whose text names it, not a look to reproduce."""
+    entry: dict[str, Any] = {k: v for k, v in read.inputs.items() if k in ("use_audio", "follow")}
     entry["name"] = spoken(f"<{read.name}>")[1:-1]
 
     def first(field: str) -> OperationFile | None:
@@ -2361,19 +2362,19 @@ def _reference(read: Read, warned: list[str]) -> dict[str, Any]:
         assert sound is not None  # `_has_media`
         return entry | {"kind": "audio", "audio": sound.sha256}
     entry["image"] = picture.sha256
-    if description := read.fields.get("description") or "":
-        entry["description"] = description
-    if read.kind == "environment":
+    if read.description:
+        entry["description"] = read.description
+    if read.asset_type == "environment":
         return entry | {"kind": "environment"}
-    if read.kind not in ("character", "prop"):
+    if read.asset_type not in ("character", "prop"):
         return entry | {"kind": "environment", "follow": "loose"}
-    if read.kind == "character" and (voice := first("voice") or first("audio")):
+    if read.asset_type == "character" and (voice := first("voice") or first("audio")):
         entry["voice"] = voice.sha256
-    # Only a drawn picture: an imported one may be opaque on purpose, as `--remove-background` leaves it, on white.
-    if read.kind in ("character", "prop") and picture.alpha < _TRANSPARENT and read.made_by:
+    # Only a drawn picture: an imported one may be opaque on purpose.
+    if picture.alpha < _TRANSPARENT and read.made_by:
         warned.append(f"<{read.name}>'s picture is opaque, so its background goes into the shot: draw it on a blank background, or "
-                      "import a picture with `cozy project import --remove-background`")  # fmt: skip
-    return entry | {"kind": read.kind}
+                      "take its background off with a tool")  # fmt: skip
+    return entry | {"kind": read.asset_type}
 
 
 def _has_media(read: Read) -> bool:
@@ -2399,27 +2400,14 @@ def _kept_take(op: Operation, keep: Keep, end: float, warned: list[str]) -> dict
     return {"video": keep.video.sha256, "latents": keep.latents.sha256} | ({"at_s": at_s} if at_s is not None else {})
 
 
-class VideoFields(ShotFields, kw_only=True):
-    """A shot's fields, or a shot taken up: `video` mentions it, `resolution` is its short edge (`1440p`). `instructions` is a shot's
-    text when it has no summary or beats."""
-
-    instructions: str = ""
-    video: str = ""
-    resolution: str | None = None
-
-
-class VideoOperation(Operation, kw_only=True):
-    fields: VideoFields
-
-
 class Beat(ShotBeat, kw_only=True):
     """A beat is one piece of text with a length, and H3 renders at most this much in one go: past it, `_shot` clamps it and says so."""
 
     duration: Annotated[float | None, msgspec.Meta(extra={"max_duration": MAX_DURATION_S})] = None
 
 
-class TurboFields(ShotFields, kw_only=True):
-    """`generate_turbo`'s box. H3 renders 1344x768 for now (`_is_native`), so its one shape is 16:9. A frame mentions a picture."""
+class TurboInputs(ShotInputs, kw_only=True):
+    """`generate_turbo`'s controls. H3 renders 1344x768 for now (`_is_native`), so its one shape is 16:9. A frame mentions a picture."""
 
     beats: list[Beat] = []
     aspect_ratio: Annotated[str | None, msgspec.Meta(extra={"options": ["16:9"]})] = None
@@ -2429,97 +2417,82 @@ class TurboFields(ShotFields, kw_only=True):
     resolution: Literal["768p", "1080p", "1440p", "2160p"] = "768p"
     #: A shot's text when it has no summary or beats, as a hand-written file may say. The box has those.
     instructions: Annotated[str, msgspec.Meta(extra={"hidden": True})] = ""
+    seed: Annotated[int | None, msgspec.Meta(extra={"hidden": True})] = None
+    upscale: Annotated[Upscale | None, msgspec.Meta(extra={"hidden": True})] = None
+    context_frames: Annotated[int | None, msgspec.Meta(extra={"hidden": True})] = None
 
 
-class FullFields(TurboFields, kw_only=True):
-    """`generate`'s box: only the full model has a choice of steps."""
+class FullInputs(TurboInputs, kw_only=True):
+    """`generate`'s controls: Turbo on as `GenerateInput` has it, and off, the full model and its choice of steps."""
 
-    steps: FullSteps | None = None
+    turbo: bool = True
+    steps: Annotated[FullSteps | None, msgspec.Meta(extra={"label": "Steps, with Turbo off"})] = None
 
 
 class TurboOperation(Operation, kw_only=True):
-    fields: TurboFields
+    inputs: TurboInputs
 
 
 class FullOperation(Operation, kw_only=True):
-    fields: FullFields
+    inputs: FullInputs
 
 
-class UpscaleFields(msgspec.Struct, kw_only=True):
-    """`upscale`'s box: the shot it takes up, and to what (UPSCALE.md). At `768p` it would come back as it is, so that's not offered."""
+class UpscaleInputs(msgspec.Struct, kw_only=True):
+    """`upscale`'s controls: the shot it takes up, and to what (UPSCALE.md). At `768p` it would come back as it is, so that's not offered."""
 
     video: Annotated[str, msgspec.Meta(extra={"accept": "video"})] = ""
     resolution: Literal["1080p", "1440p", "2160p"] = "1440p"
     #: What Regenerate re-renders from when the video has no latents of ours. The box asks for the rest.
     instructions: Annotated[str, msgspec.Meta(extra={"hidden": True})] = ""
     style: Annotated[str, msgspec.Meta(extra={"hidden": True})] = ""
+    seed: Annotated[int | None, msgspec.Meta(extra={"hidden": True})] = None
+    upscale: Annotated[Upscale | None, msgspec.Meta(extra={"hidden": True})] = None
+    preset: Annotated[Preset | None, msgspec.Meta(extra={"hidden": True})] = None
 
 
 class UpscaleOperation(Operation, kw_only=True):
-    fields: UpscaleFields
+    inputs: UpscaleInputs
+
+
+
+
+def _named_shot(op: TurboOperation | FullOperation) -> list[Invocation]:
+    f = op.inputs
+    if not (f.summary or f.beats or f.instructions.strip()):
+        raise Refuse(f"{op.asset} says nothing to make: a shot needs a summary or beats")
+    return _shot(op)
 
 
 # `reserved` is read as written, and is the package's: Calcifer takes every adapter's as one list, so it's said once. Its prompt syntax: `<d>`
 # around dialogue and `<scenetrans>`, `<cutoff>`, and the language a line is spoken in, `<d><English>Hello<d>`. MiniMax's guide lists no
 # languages: these are the ones people write dialogue in.
-@app.project_adapter("video", reserved=[
+@app.project_adapter("generate", reserved=[
     "d", "scenetrans", "cutoff",
     "english", "chinese", "mandarin", "cantonese", "japanese", "korean", "spanish", "french", "german", "italian", "portuguese",
     "russian", "arabic", "hindi", "bengali", "urdu", "punjabi", "tamil", "telugu", "indonesian", "malay", "vietnamese", "thai",
     "filipino", "tagalog", "turkish", "persian", "hebrew", "greek", "dutch", "swedish", "norwegian", "danish", "finnish", "polish",
     "czech", "ukrainian", "romanian", "hungarian", "swahili",
 ])  # fmt: skip
-def adapt_video(op: VideoOperation) -> list[Invocation]:
-    """A video that names only this package: by its fields, a shot (`summary`, `beats`), or an upscale (a `video` it reads, with a `resolution`)."""
-    f = op.fields
-    if f.summary or f.beats:
-        made = _shot(op)
-        if f.video:
-            made[0].warnings.append(f"{op.asset} has a summary or beats and a `video`: it's a shot, and `video` is ignored")
-        return made
-    if f.video or (f.resolution and (not f.instructions.strip() or any(read.files_of("video") for read in op.reads))):
-        return _upscale(op)
-    if f.instructions.strip():
-        return _shot(op)
-    raise Refuse(f"{op.asset} says nothing to make: a video needs a summary or beats, a render prompt, or a `video` to upscale")
-
-
-def _named_shot(op: TurboOperation | FullOperation) -> list[Invocation]:
-    f = op.fields
-    if not (f.summary or f.beats or f.instructions.strip()):
-        raise Refuse(f"{op.asset} says nothing to make: a shot needs a summary or beats")
-    return _shot(op)
-
-
-@app.project_adapter("video", functions=["generate"])
 def adapt_generate(op: FullOperation) -> list[Invocation]:
-    """A node of `generate`: the full model."""
+    """An asset of `generate`: the full model."""
     return _named_shot(op)
 
 
-@app.project_adapter("video", functions=["generate_turbo"])
+@app.project_adapter("generate_turbo")
 def adapt_generate_turbo(op: TurboOperation) -> list[Invocation]:
-    """A node of `generate_turbo`."""
+    """An asset of `generate_turbo`."""
     return _named_shot(op)
 
 
-@app.project_adapter("video", functions=["upscale"])
+@app.project_adapter("upscale")
 def adapt_upscale(op: UpscaleOperation) -> list[Invocation]:
-    """A node of `upscale`."""
+    """An asset of `upscale`."""
     return _upscale(op)
 
 
-def _shot(op: VideoOperation | TurboOperation | FullOperation) -> list[Invocation]:
-    """A shot: its summary, its beats on one timeline, sound, and what it reads. One call of any length: `generate` plans its
-    segments. The function its node names, else `generate`, with `turbo` as the file says."""
-    options, warned = _options(op, _SHOT_OPTIONS)
-    if op.function:
-        for key in filter(options.__contains__, ("turbo", "steps") if op.function == "generate_turbo" else ("turbo",)):
-            warned.append(f"{op.asset}: {op.function} says which model it runs: `{key}` is ignored")
-            del options[key]
-        if op.function == "generate":
-            options["turbo"] = False
-    f, at, told = op.fields, 0.0, []
+def _shot(op: TurboOperation | FullOperation) -> list[Invocation]:
+    """A shot: its summary, its beats on one timeline, sound, and what it reads. One call of any length: `generate` plans its segments."""
+    f, at, told, warned = op.inputs, 0.0, [], []
     for number, beat in enumerate(f.beats):
         length = beat.duration or _BEAT_S
         if not beat.duration:
@@ -2529,11 +2502,11 @@ def _shot(op: VideoOperation | TurboOperation | FullOperation) -> list[Invocatio
             length = MAX_DURATION_S
         told.append(f"{'' if number else '[Shot 1] '}{f'At {_clock(at)}, ' if at else ''}{_kept(beat.description)}")
         at += length
-    # A mention with no file behind it, such as an entity with no links, is words: its name and description, with no reference.
+    # A mention with no file behind it, such as an asset that is only words, is words: its name and description, with no reference.
     written = f.summary or f.instructions
     said = {name_key(name) for text in (written, *(beat.description for beat in f.beats)) for name in MENTION.findall(text)}
     bare = {name_key(read.name): read for read in op.reads if name_key(read.name) in said and not _has_media(read)}
-    described = [f"{spoken(f'<{read.name}>')[1:-1]}: {_kept(text)}" for read in bare.values() if (text := str(read.fields.get("description", "")).strip())]
+    described = [f"{spoken(f'<{read.name}>')[1:-1]}: {_kept(read.description)}" for read in bare.values() if read.description.strip()]
     summary, end = "\n".join(filter(None, (_kept(written), *described))), at or 15.0
     prompt = "\n\n".join(filter(None, (summary and f"summary:\n{summary}", "detailed_description:\n" + "\n".join(told)))) if told else f"[Shot 1] {summary}"  # fmt: skip
     prompt = MENTION.sub(lambda found: spoken(found[0])[1:-1] if name_key(found[1]) in bare else found[0], prompt)
@@ -2543,12 +2516,11 @@ def _shot(op: VideoOperation | TurboOperation | FullOperation) -> list[Invocatio
     reads.sort(key=lambda read: not read.files_of("image"))
     request: dict[str, Any] = {"prompt": spoken(prompt), "duration_s": end, "references": [_reference(read, warned) for read in reads]}
     for key in ("style", "soundscape", "music", "aspect_ratio"):
-        if value := getattr(f, key) or options.pop(key, ""):
+        if value := getattr(f, key):
             request[key] = str(value).strip()
-        options.pop(key, None)
-    request |= options
-    if f.resolution:
-        request["resolution"] = f.resolution
+    request |= _passed(f, _SHOT_PASSED)
+    if request.get("turbo", True) and request.pop("steps", None):
+        warned.append(f"{op.asset}'s steps apply only with Turbo off: Turbo runs its 8")
     kept = _kept_take(op, op.keep, end, warned) if op.keep is not None else None
     for field in ("first_frame", "last_frame"):
         if (value := getattr(f, field)) and kept is None and (read := _read_named(op, value)) and read.files_of("image"):
@@ -2557,31 +2529,28 @@ def _shot(op: VideoOperation | TurboOperation | FullOperation) -> list[Invocatio
         request["plate"] = {"video": read.files_of("video")[0].sha256} | ({"use_audio": True} if f.plate.use_audio else {})
     if kept is not None:
         request["continue_from"] = kept
-    return [Invocation(function=op.function or "generate", input=request, warnings=warned)]
+    return [Invocation(function=op.function, input=request, warnings=warned)]
 
 
-def _upscale(op: VideoOperation | UpscaleOperation) -> list[Invocation]:
+def _upscale(op: UpscaleOperation) -> list[Invocation]:
     """A shot's video taken up to `resolution`. Regenerate re-renders it from the text it was made from (Paul, 10-31), which its latents
-    carry; a read crosses a mention with only its description, so with none of ours it goes from this node's own instructions, its names
+    carry; a read crosses a mention with only its description, so with none of ours it goes from this asset's own instructions, its names
     without brackets: the re-render attaches no reference. No run at or above that size: this asset is what it reads."""
-    named = _read_named(op, op.fields.video) if op.fields.video else None
+    f = op.inputs
+    named = _read_named(op, f.video) if f.video else None
     shot = named if named and named.files_of("video") else next((read for read in op.reads if read.files_of("video")), None)
     if shot is None:
-        raise Refuse(f"{op.asset}: {f'{op.fields.video} has no video yet: render it first' if op.fields.video else 'a `resolution` needs a `video` to take there, or a summary or beats to make one'}")
-    options, warned = _options(op, _SHOT_OPTIONS)
-    video, wanted = shot.files_of("video")[0], op.fields.resolution or options.get("resolution")
-    if wanted and wanted[:-1].isdigit() and video.height and min(video.width or video.height, video.height) >= int(wanted[:-1]):
+        raise Refuse(f"{op.asset}: {f'{f.video} has no video yet: render it first' if f.video else 'a `resolution` needs a `video` to take there, or a summary or beats to make one'}")
+    video, wanted = shot.files_of("video")[0], f.resolution
+    if wanted[:-1].isdigit() and video.height and min(video.width or video.height, video.height) >= int(wanted[:-1]):
         return []
-    request: dict[str, Any] = {"video": video.sha256}
-    if wanted:
-        request["resolution"] = wanted
+    request: dict[str, Any] = {"video": video.sha256, "resolution": wanted}
     if "latents" in shot.files and _made_here(shot):
         request["latents"] = shot.files["latents"].sha256
     else:
-        said = [op.fields.instructions.strip(), *(f"{read.name}: {str(read.fields['description']).strip()}" for read in op.reads
-                                                  if read is not shot and str(read.fields.get("description", "")).strip())]  # fmt: skip
+        said = [f.instructions.strip(), *(f"{read.name}: {read.description.strip()}" for read in op.reads if read is not shot and read.description.strip())]
         text = "\n".join(line for line in said if line).replace("<", "").replace(">", "")
-        style = (op.fields.style or str(options.get("style", ""))).strip()
+        style = f.style.strip()
         if text:
             request["prompt"] = f"Style: {style.rstrip('.')}.\n\n{text}" if style else text
-    return [Invocation(function="upscale", input=request | {key: value for key, value in options.items() if key in _UPSCALE_OPTIONS}, warnings=warned)]
+    return [Invocation(function="upscale", input=request | _passed(f, _UPSCALE_PASSED))]
