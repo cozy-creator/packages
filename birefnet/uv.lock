@@ -81,7 +81,7 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
-    { name = "cozy-runtime", extras = ["media"], specifier = ">=0.37.7" },
+    { name = "cozy-runtime", extras = ["media"], specifier = ">=0.39.0" },
     { name = "einops", specifier = ">=0.8" },
     { name = "kornia", specifier = ">=0.8" },
     { name = "msgspec", specifier = ">=0.19" },

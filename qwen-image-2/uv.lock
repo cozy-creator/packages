@@ -529,7 +529,7 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
-    { name = "cozy-runtime", extras = ["media"], specifier = ">=0.37.9" },
+    { name = "cozy-runtime", extras = ["media"], specifier = ">=0.39.0" },
     { name = "diffusers", specifier = ">=0.41,<0.42" },
     { name = "msgspec", specifier = ">=0.19" },
     { name = "numpy", specifier = ">=1.26" },
