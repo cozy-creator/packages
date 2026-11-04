@@ -2502,9 +2502,15 @@ def adapt_shot(op: ShotOperation) -> list[Invocation]:
         length = beat.duration or _BEAT_S
         moments |= {name_key(write.world_state): at + (length if write.at is None else write.at) for write in beat.writes}
         at += length
-    summary, end = _kept(f.summary), at or 15.0
-    prompt = "\n\n".join(filter(None, (summary and f"summary:\n{summary}", "detailed_description:\n" + "\n".join(told)))) if told else f"[Shot 1] {summary}"  # fmt: skip
+    # A mention with no file behind it, such as an entity with no links, is words: its name and description, with no reference.
     said = {name_key(name) for text in (f.summary, *(beat.description for beat in f.beats)) for name in MENTION.findall(text)}
+    bare = {name_key(read.name): read for read in op.reads if name_key(read.name) in said and not _has_media(read)}
+    described = [f"{spoken(f'<{read.name}>')[1:-1]}: {_kept(text)}" for read in bare.values() if (text := str(read.fields.get("description", "")).strip())]
+    summary, end = "\n".join(filter(None, (_kept(f.summary), *described))), at or 15.0
+    prompt = "\n\n".join(filter(None, (summary and f"summary:\n{summary}", "detailed_description:\n" + "\n".join(told)))) if told else f"[Shot 1] {summary}"  # fmt: skip
+    prompt = MENTION.sub(lambda found: spoken(found[0])[1:-1] if name_key(found[1]) in bare else found[0], prompt)
+    warned += [f"<{read.name}> has a voice and no picture, and H3 takes a voice only beside a character's picture: it isn't sent"
+               for read in bare.values() if read.files_of("voice")]  # fmt: skip
     reads = [read for read in op.reads if name_key(read.name) in said and _has_media(read)]
     reads.sort(key=lambda read: not read.files_of("image") or read.kind == "")
     request: dict[str, Any] = {"prompt": spoken(prompt), "duration_s": end, "references": [_reference(read, warned) for read in reads]}
