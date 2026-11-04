@@ -2459,18 +2459,16 @@ class UpscaleOperation(Operation, kw_only=True):
     fields: UpscaleFields
 
 
-# Its prompt syntax: `<d>` around dialogue and `<scenetrans>`, `<cutoff>`, and the language a line is spoken in, `<d><English>Hello<d>`.
-# MiniMax's guide lists no languages: these are the ones people write dialogue in.
-_RESERVED = [
+# `reserved` is read as written, and is the package's: Calcifer takes every adapter's as one list, so it's said once. Its prompt syntax: `<d>`
+# around dialogue and `<scenetrans>`, `<cutoff>`, and the language a line is spoken in, `<d><English>Hello<d>`. MiniMax's guide lists no
+# languages: these are the ones people write dialogue in.
+@app.project_adapter("video", reserved=[
     "d", "scenetrans", "cutoff",
     "english", "chinese", "mandarin", "cantonese", "japanese", "korean", "spanish", "french", "german", "italian", "portuguese",
     "russian", "arabic", "hindi", "bengali", "urdu", "punjabi", "tamil", "telugu", "indonesian", "malay", "vietnamese", "thai",
     "filipino", "tagalog", "turkish", "persian", "hebrew", "greek", "dutch", "swedish", "norwegian", "danish", "finnish", "polish",
     "czech", "ukrainian", "romanian", "hungarian", "swahili",
-]  # fmt: skip
-
-
-@app.project_adapter("video", reserved=_RESERVED)
+])  # fmt: skip
 def adapt_video(op: VideoOperation) -> list[Invocation]:
     """A video that names only this package: by its fields, a shot (`summary`, `beats`), or an upscale (a `video` it reads, with a `resolution`)."""
     f = op.fields
@@ -2493,13 +2491,13 @@ def _named_shot(op: TurboOperation | FullOperation) -> list[Invocation]:
     return _shot(op)
 
 
-@app.project_adapter("video", functions=["generate"], reserved=_RESERVED)
+@app.project_adapter("video", functions=["generate"])
 def adapt_generate(op: FullOperation) -> list[Invocation]:
     """A node of `generate`: the full model."""
     return _named_shot(op)
 
 
-@app.project_adapter("video", functions=["generate_turbo"], reserved=_RESERVED)
+@app.project_adapter("video", functions=["generate_turbo"])
 def adapt_generate_turbo(op: TurboOperation) -> list[Invocation]:
     """A node of `generate_turbo`."""
     return _named_shot(op)
