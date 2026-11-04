@@ -20,7 +20,6 @@ from cozy_runtime.author import (
     Recipe,
     Sizes,
     Telemetry,
-    UnsupportedInput,
     held,
 )
 
@@ -108,13 +107,13 @@ def generate(
                     *_GUIDANCE[1:])
     negative = CARD_NEGATIVE if payload.negative_prompt is None else payload.negative_prompt
     seed = payload.drawn_seed()
-    if payload.cfg_interval_start > payload.cfg_interval_stop:
-        raise UnsupportedInput(
-            "cfg_interval_start must not exceed cfg_interval_stop", code="cfg_interval"
-        )
+    interval = (payload.cfg_interval_start, payload.cfg_interval_stop)
+    if interval[0] > interval[1]:
+        adj.warn("cfg_interval_start", f"{interval[0]} is past cfg_interval_stop {interval[1]}: they run swapped")
+        interval = interval[::-1]
     # Both CFG conditions in one forward: short of memory, the Runtime cuts its rows. FBCache
     # keeps a cache per condition, so it runs them apart.
-    guided = guidance > 1.0 and payload.cfg_interval_start < payload.cfg_interval_stop
+    guided = guidance > 1.0 and interval[0] < interval[1]
     batched = guided and payload.first_block_cache <= 0.0
     with _Phases(tel) as phases:
         images = model.render(
@@ -124,7 +123,7 @@ def generate(
             height,
             steps,
             guidance,
-            (payload.cfg_interval_start, payload.cfg_interval_stop),
+            interval,
             payload.first_block_cache,
             seed,
             phases,

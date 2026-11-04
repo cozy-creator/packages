@@ -17,6 +17,7 @@ import numpy as np
 import torch
 from cozy_runtime import fusion, rng, tiles
 from cozy_runtime.author import (
+    OutputError,
     AdapterCompatibility,
     Config,
     Loader,
@@ -346,7 +347,11 @@ class Krea2(Model[Krea2Graph], encoded_leaves="accept"):
             inverse = 1.0 / z.new_tensor(vae.config.latents_std).view(1, -1, 1, 1, 1)
             image = _decoded(vae, z / inverse + mean)[0, :, 0].float()
             if not torch.isfinite(image).all():
-                raise ValueError("Krea 2's decoder produced non-finite pixels")
+                raise OutputError(
+                    "Krea 2's decoder produced non-finite pixels, so there is no picture: try another seed, "
+                    "and if it repeats another lane with `--lane bf16`",
+                    code="output_integrity",
+                )
             pixels = ((image.clamp(-1, 1) * 0.5 + 0.5).clamp(0, 1) * 255).round().to(torch.uint8)
             return Image.fromarray(pixels.permute(1, 2, 0).contiguous().cpu().numpy())
 

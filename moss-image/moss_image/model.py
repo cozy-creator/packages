@@ -25,6 +25,7 @@ import torch
 from cozy_runtime import rng
 from cozy_runtime.attention import Attention
 from cozy_runtime.author import (
+    OutputError,
     Config,
     Loader,
     MemoDistribution,
@@ -423,6 +424,10 @@ class MossImage(Model[MossGraph], encoded_leaves="accept", attention_bits={"tran
             z = z.reshape(b, c // 4, 2, 2, h, w).permute(0, 1, 4, 2, 5, 3).reshape(b, c // 4, 2 * h, 2 * w)
             image = vae.decode(z.to(vae.dtype), return_dict=False)[0].clamp(-1, 1)
             if not torch.isfinite(image).all():
-                raise ValueError("MOSS-Image's decoder produced non-finite pixels")
+                raise OutputError(
+                    "MOSS-Image's decoder produced non-finite pixels, so there is no picture: try another seed, "
+                    "and if it repeats another lane with `--lane bf16`",
+                    code="output_integrity",
+                )
             (picture,) = VaeImageProcessor(vae_scale_factor=PATCH).postprocess(image.float(), output_type="pil")
         return picture  # type: ignore[no-any-return]

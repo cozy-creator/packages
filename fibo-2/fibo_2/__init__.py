@@ -81,16 +81,23 @@ def _caption(
     structured = _json_object(prompt)
     if structured is not None:
         if images and "edit_instruction" not in structured:
-            raise UnsupportedInput('an edit\'s JSON prompt needs an "edit_instruction"', code="prompt")
+            raise UnsupportedInput(
+                'an edit\'s JSON prompt needs an "edit_instruction": add one saying what to change, or send plain text',
+                code="prompt",
+            )
         return prompt
     if not upsample:
         return prompt
-    if not images:
-        return upsampler.caption(prompt, None)
     if len(images) > 1:
         adj.warn("prompt_upsampling", "Bria's edit VLM reads one image: with several, the instruction goes as typed")
         return prompt
-    caption = json.loads(edit_upsampler.caption(prompt, images[0]))
+    try:
+        if not images:
+            return upsampler.caption(prompt, None)
+        caption = json.loads(edit_upsampler.caption(prompt, images[0]))
+    except UnsupportedInput as failed:
+        adj.warn("prompt_upsampling", f"{failed.message}; the prompt goes as typed")
+        return prompt
     # FIBO-edit-vlm restates the request as `reworded_prompt`, which Bria's cleaning drops; Fibo 2.0
     # reads the request as `edit_instruction`.
     caption["edit_instruction"] = caption.pop("reworded_prompt", None) or caption.get("edit_instruction") or prompt

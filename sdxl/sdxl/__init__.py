@@ -452,8 +452,8 @@ def _integrity(torch: Any, image: Any, pixels: Any, tel: Telemetry) -> None:
     if nan_fraction > 0.0:
         raise OutputError(
             f"the decode produced NaN over {nan_fraction:.4%} of the image and this "
-            "package does not publish it: a non-finite decode is a failed generation, "
-            "not a picture with artefacts",
+            "package does not publish it: try another seed, and if it repeats another lane "
+            "with `--lane bf16`",
             code="output_integrity",
         )
     tel.metric("image_spread", round(float(pixels.to(torch.float32).std()), 4))
