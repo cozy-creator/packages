@@ -4,6 +4,8 @@
 multimodal model (Apache-2.0). Decoding is greedy unless `temperature` is set; a sampled answer
 replays from its `seed`, so the same request always gives the same answer, and it is memoized.
 
+`caption` says what a picture or a video shows, in its own question, for a project's Caption: `cozy run qwen3.6/caption --file images=./character.png`.
+
 Write the request in a file, `request.yaml`:
 
 ```yaml

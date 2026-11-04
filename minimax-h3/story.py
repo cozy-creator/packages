@@ -19,12 +19,11 @@ from cozy_runtime.author import (
 
 from minimax_h3.official import MAX_AUDIO_REFERENCES, MAX_IMAGE_REFERENCES, MAX_REFERENCES, MAX_VIDEO_REFERENCES, Task
 
-#: MiniMax's full-reference sections in their canonical order. A `style` section is read and
-#: moved into the description's opening, where the guide puts it (ref guide 5.2).
+#: MiniMax's full-reference sections in their canonical order. Anything else a person writes, such
+#: as a `style:` line, is words where it stands.
 SECTIONS = (
     "subject_definitions",
     "summary",
-    "style",
     "retention_analysis",
     "detailed_description",
     "overall_soundscape",
@@ -185,7 +184,6 @@ def segment_call(
     text: str,
     references: Sequence[StoryReference],
     *,
-    style: str,
     soundscape: str,
     music: str,
     index: int,
@@ -199,7 +197,7 @@ def segment_call(
     (`_segment_call`). `retained`: `own_retention` of the shot's text. `added`: the references cozy adds at a join.
     `keyframes`: it has a first or last frame. `continues`: it continues a source video."""
     text = _fill(text, {"non_diegetic_music": music.strip() or "N/A"})
-    return _segment_call(text, references, style.strip(), soundscape.strip(), index, forced, retained, added, keyframes, continues)
+    return _segment_call(text, references, soundscape.strip(), index, forced, retained, added, keyframes, continues)
 
 
 def _numbering(references: Sequence[StoryReference]) -> dict[tuple[str, int], StoryReference]:
@@ -217,7 +215,6 @@ def _numbering(references: Sequence[StoryReference]) -> dict[tuple[str, int], St
 def _segment_call(
     text: str,
     references: Sequence[StoryReference],
-    style: str,
     soundscape: str,
     index: int,
     forced: frozenset[str] = frozenset(),
@@ -234,8 +231,7 @@ def _segment_call(
     the global `<Picture N>`/`<Audio N>`/`<Video N>`; these are renumbered for the call. A
     character's voice follows the character. To the text as written go only what cozy alone
     knows or a field set: each name's `<Picture N>` in `subject_definitions` (its own line
-    replaces that), each clip bound to the characters who perform it, `style` as the description's
-    opening sentence, the soundscape, and the `summary`'s task tag, computed from the request (ref guide 3), replacing a
+    replaces that), each clip bound to the characters who perform it, the soundscape, and the `summary`'s task tag, computed from the request (ref guide 3), replacing a
     different one with a warning, in a section of its own when the text has none. Retention is the writer's: a reference's own line from
     `author` on a segment that lost it, one line for each reference cozy `added` at a join, and `_KEEP_LOOK` for a picture with no line.
     """
@@ -244,7 +240,6 @@ def _segment_call(
         return SegmentCall(text, [], [])
     by_key = {name_key(ref.name): ref for ref in pool}
     by_slot = _numbering(pool)
-    text, style = _open_with_style(text, style)
 
     def lookup(token: re.Match[str]) -> StoryReference | None:
         return _named(token, by_key, by_slot)
@@ -452,26 +447,6 @@ def _tasks(text: str) -> list[str]:
     prefix = _PREFIX.match(text, start, end)
     given = [task.strip() for task in prefix.group(1).split("+")] if prefix else []
     return given if all(task.casefold() in TASKS for task in given) else []
-
-
-def _open_with_style(text: str, style: str) -> tuple[str, str]:
-    """The segment's own `style` section, else the global style, as the description's opening
-    sentence (ref guide 5.2) rather than a section of its own; and that style."""
-    found = _sections(text)
-    if "style" in found:
-        head, start, end = found["style"]
-        style = text[start:end].strip() or style
-        text = text[:head] + text[end:]
-    if not style:
-        return text, style
-    found = _sections(text)
-    if "detailed_description" not in found:
-        return _fill(text, {"detailed_description": style}), style
-    head, start, end = found["detailed_description"]
-    if head == start:
-        return f"{style}\n{text}", style
-    rest = text[start:end].lstrip(" \t")
-    return text[:start] + "\n" + style + ("" if rest.startswith("\n") else "\n") + rest + text[end:], style
 
 
 def _sections(text: str) -> dict[str, tuple[int, int, int]]:

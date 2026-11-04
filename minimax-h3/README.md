@@ -1,55 +1,69 @@
 # MiniMax H3
 
-Video with sound from MiniMax H3, as two functions on the shot contract (`cozy_runtime.author`'s
-`ShotRequest`), so a project renders shots with it, or with any other package that takes the same
-fields:
+Video with sound from MiniMax H3, as two functions. Each is a node on a canvas and the same call for `cozy run`:
 
-- **`generate`** renders one continuous video of any length. `turbo: true` (the default) runs the
-  turbo LoRA's 8 steps; `turbo: false` the full model at `steps` 30, 40 or 50 (refused with turbo).
+- **`generate`** renders one continuous shot of any length from an optional `summary` and at least one beat. `turbo: true` (the
+  default) runs the turbo LoRA's 8 steps; `turbo: false` or `steps` (30, 40 or 50) the full model.
 - **`upscale`** takes a whole video to 1080p, 1440p or 2160p ([UPSCALE.md](UPSCALE.md)).
 
 ```yaml
 # video.yaml — cozy run minimax-h3/generate --input video.yaml
-prompt: |                                     # as written, in MiniMax's form; <Name> names a reference
-  [Shot 1] <Theo> and <Juno> circle each other on <Dock>.
-  At 00:06.000, <Juno> feints left.
-  [Shot 2] At 00:13.000, the shot cuts to a low angle as she sweeps <Theo>'s legs.
-  At 00:27.000, <Theo> rolls and stands.
-duration_s: 40                                # any length; past 15 s it needs timestamps
-style: 35 mm film, warm grade; no crowd       # holds in every segment
+summary: <Theo> and <Juno> fight on <Dock>, on 35 mm film, in a warm grade, with no crowd.   # every segment reads it
+beats:                                        # what happens, in order, each at most 15 s; together, the shot's length
+  - description: The two circle each other.
+    duration: 6
+  - description: <Juno> feints left and sweeps <Theo>'s legs.
+    duration: 7
+  - description: The camera drops to a low angle. <Theo> rolls and stands.
+    duration: 14
 soundscape: gulls, surf, wind
 music: N/A
 references:                                   # in this order H3 numbers them; each goes where the text names it
-  - {name: Theo, kind: character, image: ./theo.png}
-  - {name: Juno, kind: character, image: ./juno.png, description: a red coat, voice: ./juno.wav}
-  - {name: Lantern, kind: prop, image: ./lantern.png}
-  - {name: Dock, kind: environment, image: ./dock-b.png}
-  - {name: Stage, kind: environment, image: ./stage.png, follow: loose,
+  - {name: Theo, asset_type: character, image: ./theo.png}
+  - {name: Juno, asset_type: character, image: ./juno.png, description: a red coat, voice: ./juno.wav}
+  - {name: Lantern, asset_type: prop, image: ./lantern.png}
+  - {name: Dock, asset_type: environment, image: ./dock-b.png}
+  - {name: Stage, asset_type: environment, image: ./stage.png, follow: loose,
      description: "Theo by the hut, left; Juno by the crates, right."}
-  - {name: Walk, kind: video, video: "./walk.mp4#t=0:03,0:09", use_audio: false}
-  - {name: Rain, kind: audio, audio: ./rain.wav}
+  - {name: Walk, video: "./walk.mp4#t=0:03,0:09", use_audio: false}
+  - {name: Rain, audio: ./rain.wav}
 first_frame: ./open.png                       # and/or last_frame
 # plate: {video: ./take3.mp4}                 # the video being edited (a first_frame beside it is ignored)
 # continue_from: {video: ./v1.mp4, latents: ./v1.latents, at_s: 15}   # resume a video this package made, at its end or at_s
 turbo: true
 ```
 
+**One beat with no summary goes as written,** in MiniMax's own form if you like, and its `duration` is the whole video's, of any
+length; past 15 s it needs timestamps at the start of a line:
+
+```yaml
+beats:
+  - duration: 40
+    description: |
+      [Shot 1] <Theo> and <Juno> circle each other on <Dock>.
+      At 00:13.000, <Juno> feints left.
+      [Shot 2] At 00:27.000, the shot cuts to a low angle.
+```
+
+In a project, `references` are filled from what the text mentions, each member by its name. A picture with no `asset_type` is loose.
+
 The result is `video` (768p mp4), `latents` (its own, for `upscale` and `continue_from`) and
 `warnings`. `follow: loose` keeps a picture's arrangement, not its frame (read at 512 px: a world
-state). `continue_from` puts the request on that video's timeline: `duration_s` is the whole length,
+state). `continue_from` puts the request on that video's timeline: the beats are the whole length,
 text before its end is history, and the result is the whole video, decoded as one. `at_s` resumes at the join nearest that
 time instead, every 17 frames, keeping what is before it, and `kept_s` in the result says where. With a plate,
 add its edit LoRA (`--lora alissonerdx/minimax-h3-character-swap`, …) and start the prompt with that
 LoRA's trigger (`body_swap:`). The latents also carry the text the video was made from, which
 `upscale` uses when given no prompt.
 
-- **Projects.** `project-adapter-generate`, `-generate_turbo` and `-upscale` turn a `cozy project` asset into those functions: the
-  summary and each beat in the sections and `At` times below. Nothing else changes: it is a `prompt` like any other.
-- **Text.** The prompt goes as written, in [MiniMax's form](https://huggingface.co/MiniMaxAI/MiniMax-H3/blob/main/docs/VIDEO_PROMPT_WRITING_GUIDE_ref_en.md):
+- **Beats.** The summary and each beat become MiniMax's sections and `At` times, on one timeline, and a line of a person's that would
+  read as ours is kept from it. A beat with no words is only a length. An empty `soundscape` or `music` says `N/A`, which is the
+  default, since H3 otherwise invents score and speech. Dialogue goes in a beat, `<d>[English] Hello<d>`.
+- **Text as written** goes in [MiniMax's form](https://huggingface.co/MiniMaxAI/MiniMax-H3/blob/main/docs/VIDEO_PROMPT_WRITING_GUIDE_ref_en.md):
   open with `[Shot 1]`, or get a warning. Added only: each name's `<Picture N>` in `subject_definitions`, the `summary`'s task tag,
-  a `retention_analysis` line for each picture without one (`<name>: keep the look shown in the reference.`), `style` from its field, `non_diegetic_music: N/A` when none is written, since H3
-  otherwise invents score and speech, and `overall_soundscape` from the `soundscape` field, or `N/A` with a warning,
-  since the guide reads that as silence. Your own line replaces any of these.
+  a `retention_analysis` line for each picture without one (`<name>: keep the look shown in the reference.`), `non_diegetic_music`
+  from its field, and `overall_soundscape` from its, or `N/A`, which the guide reads as silence. Your own line replaces any of these. A
+  `style:` line means nothing to H3: it goes where it stands.
 - **Sections.** With a `detailed_description:`, timestamps are read only inside it. `summary:`, `overall_soundscape:` and
   `non_diegetic_music:` go on every segment.
 - **Task tag.** With references, every segment's `summary` opens with its `[task + task]` from the guide, computed from the
@@ -73,7 +87,7 @@ LoRA's trigger (`body_swap:`). The latents also carry the text the video was mad
   video, so no join steps the picture.
 - **Timing that doesn't fit.** Nothing is refused. With no timestamps a video past 15 s renders 15 s and warns. A block too
   long for a segment renders at the limit and warns with its time: what follows comes straight after it, so the video is
-  shorter than `duration_s`. A join lands on H3's whole-second grid, within about 0.7 s of its timestamp.
+  shorter than asked. A join lands on H3's whole-second grid, within about 0.7 s of its timestamp.
 - **Pictures.** A segment gets only the references its own text names, its `summary` included: a character, prop,
   environment (`<Dock>`), world state, sound or clip named in one timed block goes only to the segment holding that block,
   and a segment that names none renders without them, with a warning. A `plate` needs no naming. Each is a definition in
@@ -102,7 +116,7 @@ LoRA's trigger (`body_swap:`). The latents also carry the text the video was mad
   also picks the upscale's.
 - **Result.** `video` (768p mp4) and `warnings`. A segment
   renders whole seconds on H3's 17n+5 frame grid, so the video can run up to a second past
-  `duration_s`; the edit trims it.
+  its beats; the edit trims it.
 - **Models.** `minimaxai/minimax-h3@1.0.0-rc.7` and `alibaba-pai/minimax-h3-turbo-lora@1.0.1`.
   `model.base_model=<checkpoint>` and `--lora <org/lora>[,strength]` serve every segment; a
   LoRA trained on the other transformer than a segment runs is applied to it, with a warning.

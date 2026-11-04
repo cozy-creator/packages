@@ -5,9 +5,9 @@ the same with Qwen-Image-2.1-Turbo. Both take the same inputs. The model checkpo
 independently from the package. TensorFS owns model downloads and bytes;
 Runtime owns construction, memory residency and component execution.
 
-In a `cozy project`, its adapters (`project-adapter-generate`, `-generate_turbo`) write the words tuned on this model: an asset's `instructions`, the `description` of each picture it mentions, and with `transparent` Qwen's own words for a transparent background.
+Each picture's `description` follows the prompt as `<name>: description`, in the words tuned on this model: a mention reads as `<image3>` alone, and with no words for it a third picture was dropped. In a `cozy project`, `pictures` are filled from what the text mentions, each with its description, and the words of an asset with no file go in the same way.
 
-`prompt` reaches the model exactly as given. The image keeps the decoder's alpha when anything in it is
+`prompt` reaches the model as given, then those words. The image keeps the decoder's alpha when anything in it is
 transparent, and is RGB otherwise; alpha within 4 levels of 0 or 255 (the decoder's noise) snaps
 to it. `seed` is optional and the chosen seed is
 returned. Seeds range from 0 through 9007199254740991 (the interoperable 53-bit
