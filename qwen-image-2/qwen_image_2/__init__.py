@@ -25,6 +25,7 @@ from cozy_runtime.author import (
     Sizes,
     Telemetry,
     held,
+    name_key,
     name_label,
     spoken,
 )
@@ -212,8 +213,16 @@ def _styled(text: str, style: str) -> str:
     return f"Style: {style.strip().rstrip('.')}.\n\n{text}" if style.strip() else text
 
 
-def _said(fields: PictureFields) -> str:
-    return "\n\n".join(filter(None, (fields.description.strip(), fields.instructions.strip())))
+def _said(op: Operation, fields: PictureFields) -> str:
+    """What it is, then how to draw this picture. A state (`kyogre.primal`) is the same subject as the parent it reads, whose
+    picture is its reference: its instructions say how it changes, its description or else its parent's what it is."""
+    description, how = fields.description.strip(), fields.instructions.strip()
+    parent_name, dot, _ = op.asset.rpartition(".")
+    parent = next((read for read in op.reads if dot and name_key(read.name) == name_key(parent_name)), None)
+    if parent is not None:
+        description = description or str(parent.fields.get("description", "")).strip()
+        how = f"The same <{parent.name}> as in the picture{f', in this form or outfit: {how}' if how else '.'}"
+    return "\n\n".join(filter(None, (description, how)))
 
 
 #: What a project's `options` may set: `turbo` picks the function, and the rest are this function's own fields.
@@ -236,16 +245,16 @@ def _picture(op: Operation, fields: PictureFields, prompt: str) -> list[Invocati
 def adapt_subject(op: PictureOperation) -> list[Invocation]:
     """On a blank background: the style, what it is, then how to draw it, in the words of Qwen's model card for transparency, since
     a reference needs its subject alone. No layout is assumed."""
-    return _picture(op, op.fields, f"This is an RGBA image with transparency. {_styled(_said(op.fields), op.fields.style)}\n\n"
+    return _picture(op, op.fields, f"This is an RGBA image with transparency. {_styled(_said(op, op.fields), op.fields.style)}\n\n"
                                    "The image has alpha channel and the background is transparent.")  # fmt: skip
 
 
 @app.project_adapter("environment")
 def adapt_environment(op: PictureOperation) -> list[Invocation]:
     """A place with no people, instructions or not: with none, an establishing view of the empty set."""
-    f, how = op.fields, op.fields.instructions.strip()
-    last = f"{how}\n\nThe empty set, no people." if how else "An establishing view of the empty set, no people."
-    return _picture(op, f, _styled(f"{f.description.strip()}\n\n{last}", f.style))
+    f, said = op.fields, _said(op, op.fields)
+    last = "The empty set, no people." if f.instructions.strip() or said != f.description.strip() else "An establishing view of the empty set, no people."
+    return _picture(op, f, _styled(f"{said}\n\n{last}", f.style))
 
 
 @app.project_adapter("scene")
@@ -254,7 +263,7 @@ def adapt_scene(op: PictureOperation) -> list[Invocation]:
     description follows, since a mention reads as `<image3>` alone: with no words for it, a third picture was dropped in 3 of 3
     seeds (runs 27130, 27161, 27174), and with them kept (27200)."""
     described = [f"<{read.name}>: {text}" for read in op.reads if (text := str(read.fields.get("description", "")).strip())]
-    return _picture(op, op.fields, "\n\n".join(filter(None, (_said(op.fields), "\n".join(described)))))
+    return _picture(op, op.fields, "\n\n".join(filter(None, (_said(op, op.fields), "\n".join(described)))))
 
 
 @app.project_adapter("setup")
@@ -272,4 +281,4 @@ def adapt_setup(op: SetupOperation) -> list[Invocation]:
 @app.project_adapter("image")
 def adapt_image(op: PictureOperation) -> list[Invocation]:
     """What it says, as it says it."""
-    return _picture(op, op.fields, _styled(_said(op.fields), op.fields.style))
+    return _picture(op, op.fields, _styled(_said(op, op.fields), op.fields.style))

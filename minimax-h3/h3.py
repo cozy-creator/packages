@@ -2441,7 +2441,8 @@ def _reference(read: Read, warned: list[str]) -> dict[str, Any]:
         return entry | {"kind": "audio", "audio": read.files["audio"].sha256}
     picture = read.files["image"]
     entry["image"] = picture.sha256
-    if description := read.fields.get("description") or "":
+    # A state (`kyogre.primal`) with no words of its own has its parent's.
+    if description := read.fields.get("description") or read.parent_fields.get("description") or "":
         entry["description"] = description
     if read.kind == "scene":
         return entry | {"kind": "environment", "follow": "loose"}
