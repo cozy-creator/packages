@@ -72,6 +72,7 @@ from cozy_runtime.author import (
     Invocation,
     Keep,
     Operation,
+    OperationFile,
     Read,
     Refuse,
     ShotOperation,
@@ -2435,26 +2436,39 @@ def _reference(read: Read, warned: list[str]) -> dict[str, Any]:
     from, read at 512 px only by a segment whose text names it, not a look to reproduce."""
     entry: dict[str, Any] = {k: v for k, v in read.fields.items() if k in ("use_audio", "follow")}
     entry["name"] = spoken(f"<{read.name}>")[1:-1]
-    if "video" in read.files:
-        return entry | {"kind": "video", "video": read.files["video"].sha256}
-    if "image" not in read.files:
-        return entry | {"kind": "audio", "audio": read.files["audio"].sha256}
-    picture = read.files["image"]
+
+    def first(field: str) -> OperationFile | None:
+        """`generate` takes one file of a kind per reference."""
+        files = read.files_of(field)
+        if len(files) > 1:
+            warned.append(f"<{read.name}> has {len(files)} files in `{field}`, and H3 takes one per reference: it uses the first")
+        return files[0] if files else None
+
+    if video := first("video"):
+        return entry | {"kind": "video", "video": video.sha256}
+    picture = first("image")
+    if picture is None:
+        sound = first("audio")
+        assert sound is not None  # `_has_media`
+        return entry | {"kind": "audio", "audio": sound.sha256}
     entry["image"] = picture.sha256
-    # A state (`kyogre.primal`) with no words of its own has its parent's.
-    if description := read.fields.get("description") or read.parent_fields.get("description") or "":
+    if description := read.fields.get("description") or "":
         entry["description"] = description
     if read.kind in ("storyboard", "world_state"):
         return entry | {"kind": "environment", "follow": "loose"}
     if read.kind in ("environment", "setup"):
         return entry | {"kind": "environment"}
-    if read.kind == "character" and "audio" in read.files:
-        entry["voice"] = read.files["audio"].sha256
+    if read.kind == "character" and (voice := first("voice") or first("audio")):
+        entry["voice"] = voice.sha256
     # Only a drawn picture: an imported one may be opaque on purpose, as `--remove-background` leaves it, on white.
     if read.kind in ("character", "prop") and picture.alpha < _TRANSPARENT and read.made_by:
         warned.append(f"<{read.name}>'s picture is opaque, so its background goes into the shot: draw it on a blank background, or "
                       "import a picture with `cozy project import --remove-background`")  # fmt: skip
     return entry | {"kind": read.kind if read.kind in ("character", "prop") else "prop"}
+
+
+def _has_media(read: Read) -> bool:
+    return any(read.files_of(field) for field in ("image", "video", "audio"))
 
 
 def _kept_take(op: Operation, keep: Keep, end: float, warned: list[str]) -> dict[str, Any] | None:
@@ -2491,8 +2505,8 @@ def adapt_shot(op: ShotOperation) -> list[Invocation]:
     summary, end = _kept(f.summary), at or 15.0
     prompt = "\n\n".join(filter(None, (summary and f"summary:\n{summary}", "detailed_description:\n" + "\n".join(told)))) if told else f"[Shot 1] {summary}"  # fmt: skip
     said = {name_key(name) for text in (f.summary, *(beat.description for beat in f.beats)) for name in MENTION.findall(text)}
-    reads = [read for read in op.reads if name_key(read.name) in said and {"image", "video", "audio"} & set(read.files)]
-    reads.sort(key=lambda read: "image" not in read.files or read.kind == "")
+    reads = [read for read in op.reads if name_key(read.name) in said and _has_media(read)]
+    reads.sort(key=lambda read: not read.files_of("image") or read.kind == "")
     request: dict[str, Any] = {"prompt": spoken(prompt), "duration_s": end, "references": [_reference(read, warned) for read in reads]}
     request |= {key: str(value).strip() for key in ("soundscape", "music") if (value := options.pop(key, ""))}
     request |= {key: value.strip() for key in ("style", "soundscape", "music") if (value := getattr(f, key))}
@@ -2501,10 +2515,10 @@ def adapt_shot(op: ShotOperation) -> list[Invocation]:
     request |= options
     kept = _kept_take(op, op.keep, end, warned) if op.keep is not None else None
     for field in ("first_frame", "last_frame"):
-        if (value := getattr(f, field)) and kept is None and (read := _read_named(op, value)) and "image" in read.files:
-            request[field] = read.files["image"].sha256
-    if f.plate and (read := _read_named(op, f.plate.video)) and "video" in read.files:
-        request["plate"] = {"video": read.files["video"].sha256} | ({"use_audio": True} if f.plate.use_audio else {})
+        if (value := getattr(f, field)) and kept is None and (read := _read_named(op, value)) and read.files_of("image"):
+            request[field] = read.files_of("image")[0].sha256
+    if f.plate and (read := _read_named(op, f.plate.video)) and read.files_of("video"):
+        request["plate"] = {"video": read.files_of("video")[0].sha256} | ({"use_audio": True} if f.plate.use_audio else {})
     if op.writes:
         request["writes"] = [{"of": write.name.rpartition(".")[0] if write.name.rpartition(".")[2].isdigit() else write.name,
                               "name": spoken(f"<{write.name}>")[1:-1], "at_s": moments.get(name_key(write.name), write.at_s),
@@ -2519,11 +2533,11 @@ def adapt_shot(op: ShotOperation) -> list[Invocation]:
 def adapt_upscale(op: UpscaleOperation) -> list[Invocation]:
     """A shot's video taken up to `resolution`, from the text it was made from (Paul, 10-31), its names without brackets: the
     re-render attaches no reference. No run at or above that size: this asset is what it reads."""
-    shot = next((read for read in op.reads if "video" in read.files), None)
+    shot = next((read for read in op.reads if read.files_of("video")), None)
     if shot is None:
         raise Refuse(f"{op.asset} reads no video to upscale")
     options, warned = op.known_options(_UPSCALE_OPTIONS)
-    video, wanted = shot.files["video"], options.get("resolution") or op.fields.resolution
+    video, wanted = shot.files_of("video")[0], options.get("resolution") or op.fields.resolution
     if wanted and wanted[:-1].isdigit() and video.height and min(video.width or video.height, video.height) >= int(wanted[:-1]):
         return []
     said = [str(shot.fields.get("summary", "")).strip(), *(str(beat.get("description", "")).strip() for beat in shot.fields.get("beats", []))]
