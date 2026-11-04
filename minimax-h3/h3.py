@@ -2458,7 +2458,7 @@ class UpscaleOperation(Operation, kw_only=True):
 
 def _named_shot(op: TurboOperation | FullOperation) -> list[Invocation]:
     f = op.inputs
-    if not (f.summary or f.beats or f.instructions.strip()):
+    if not (f.summary or f.instructions.strip() or any(beat.description.strip() for beat in f.beats)):
         raise Refuse(f"{op.asset} says nothing to make: a shot needs a summary or beats")
     return _shot(op)
 
@@ -2500,7 +2500,9 @@ def _shot(op: TurboOperation | FullOperation) -> list[Invocation]:
         elif length > MAX_DURATION_S:
             warned.append(f"{op.asset}'s beat {number + 1} is {length:g} s and a beat holds {MAX_DURATION_S} s at most: it lasts {MAX_DURATION_S} s")
             length = MAX_DURATION_S
-        told.append(f"{'' if number else '[Shot 1] '}{f'At {_clock(at)}, ' if at else ''}{_kept(beat.description)}")
+        # A beat with no words yet is only a length: a box opens with one.
+        if said_here := _kept(beat.description):
+            told.append(f"{'' if told else '[Shot 1] '}{f'At {_clock(at)}, ' if at else ''}{said_here}")
         at += length
     # A mention with no file behind it, such as an asset that is only words, is words: its name and description, with no reference.
     written = f.summary or f.instructions
