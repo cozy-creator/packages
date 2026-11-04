@@ -17,7 +17,10 @@ from cozy_runtime.author import (
     ImageRequest,
     ImageResult,
     Memoize,
+    Operation,
     Outputs,
+    PictureFields,
+    Refuse,
     Sizes,
     Telemetry,
     held,
@@ -33,9 +36,12 @@ app = App()
 
 #: The pixel counts Qwen serves: upstream's 1 MP default to its native 2K (4 MP), the default without
 #: references; upstream's rotary table centres at most 2048 tokens of 16 px on an axis.
-SIZES = Sizes((1.0, 4.0), (32, 2048 * 16), 32, "the 1-4 MP Qwen-Image serves")
+MIN_MEGAPIXELS = 1.0
+MAX_MEGAPIXELS = 4.0
+SIZES = Sizes((MIN_MEGAPIXELS, MAX_MEGAPIXELS), (32, 2048 * 16), 32, "the 1-4 MP Qwen-Image serves")
 #: Steps without a checkpoint schedule (Turbo names its own 8), and the most admitted.
-_STEPS, _MAX_STEPS = 40, 100
+_STEPS = 40
+_MAX_STEPS = 100
 #: Qwen-Image-2.1-Turbo's distilled schedule, its `model_index.json` `sample_sigmas`
 #: (hf://Qwen/Qwen-Image-2.1-Turbo@fc13ba19). The Runtime's model config holds components only,
 #: so the function, not the checkpoint, names the regime.
@@ -211,14 +217,43 @@ _MAX_PICTURES = 10
 _OPTIONS = ("seed", "megapixels", "steps", "guidance", "negative_prompt", "prompt_upsampling", "preset")
 
 
-@app.project_adapter("image")
-def adapt_image(op: PictureOperation) -> list[Invocation]:
+class TurboFields(PictureFields, kw_only=True):
+    """`generate_turbo`'s box. The bounds are hints for it, not refusals: `generate` holds what's past them and says so. What the model
+    ignores (`guidance`, `negative_prompt`, `prompt_upsampling`) isn't asked for."""
+
+    aspect_ratio: Annotated[str | None, msgspec.Meta(extra={"min": 0.0625, "max": 16})] = None
+    megapixels: Annotated[float | None, msgspec.Meta(extra={"min": MIN_MEGAPIXELS, "max": MAX_MEGAPIXELS})] = None
+    preset: Literal["quality", "balanced", "fast"] = "balanced"
+    transparent: bool = False
+
+
+class FullFields(TurboFields, kw_only=True):
+    """`generate`'s box: Turbo's schedule is its own, so only this one has a choice of steps."""
+
+    steps: Annotated[int | None, msgspec.Meta(extra={"min": 1, "max": _MAX_STEPS})] = None
+
+
+class TurboOperation(Operation, kw_only=True):
+    fields: TurboFields
+
+
+class FullOperation(Operation, kw_only=True):
+    fields: FullFields
+
+
+def _image(op: PictureOperation | TurboOperation | FullOperation) -> list[Invocation]:
     """The style, what it says, and what each picture it mentions is: a mention reads as `<image3>` alone, and with no words for it a
     third picture was dropped in 3 of 3 seeds (runs 27130, 27161, 27174), kept with them (27190, 27200). Pictures are all of what it
     mentions: `<kyogre>` means a read's first, and the rest are `<kyogre 2>`, `<kyogre 3>`."""
     f = op.fields
     options, warned = op.known_options(("turbo", "transparent", "style", "aspect_ratio", *_OPTIONS))
-    said = [f.description.strip(), f.instructions.strip(), "\n".join(
+    options |= {key: value for key in ("transparent", *_OPTIONS) if (value := getattr(f, key, None)) not in (None, False)}
+    # A node's description is what it is, for what mentions it. Making it reads its instructions alone (Paul, 11-04); a file naming only
+    # this package may say all it means as `description`, as it always could.
+    own = "" if op.function else f.description.strip()
+    if op.function and not f.instructions.strip():
+        raise Refuse(f"{op.asset} says nothing to make: write its instructions")
+    said = [own, f.instructions.strip(), "\n".join(
         f"<{read.name}>: {text}" for read in op.reads if (text := str(read.fields.get("description", "")).strip()))]  # fmt: skip
     prompt = "\n\n".join(filter(None, said))
     if style := (f.style or str(options.get("style", ""))).strip():
@@ -235,4 +270,23 @@ def adapt_image(op: PictureOperation) -> list[Invocation]:
     if aspect_ratio := f.aspect_ratio or options.get("aspect_ratio"):
         request["aspect_ratio"] = aspect_ratio
     request |= {key: value for key, value in options.items() if key in _OPTIONS}
-    return [Invocation(function="generate_turbo" if options.get("turbo") else "generate", input=request, warnings=warned)]
+    function = op.function or ("generate_turbo" if options.get("turbo") else "generate")
+    return [Invocation(function=function, input=request, warnings=warned)]
+
+
+@app.project_adapter("image")
+def adapt_image(op: PictureOperation) -> list[Invocation]:
+    """An image asset that names only this package: `render: {turbo: true}` picks the function."""
+    return _image(op)
+
+
+@app.project_adapter("image", functions=["generate"])
+def adapt_generate(op: FullOperation) -> list[Invocation]:
+    """A node of `generate`."""
+    return _image(op)
+
+
+@app.project_adapter("image", functions=["generate_turbo"])
+def adapt_generate_turbo(op: TurboOperation) -> list[Invocation]:
+    """A node of `generate_turbo`."""
+    return _image(op)

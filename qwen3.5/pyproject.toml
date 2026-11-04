@@ -4,7 +4,7 @@ version = "0.1.2"
 description = "Qwen3.5: single-turn questions about text, images and videos"
 requires-python = ">=3.12"
 dependencies = [
-    "cozy-runtime[media]>=0.36.0",
+    "cozy-runtime[media]>=0.39.6",
     "msgspec>=0.19",
     "numpy>=1.26",
     "pillow>=12",
