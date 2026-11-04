@@ -2502,7 +2502,18 @@ class VideoOperation(Operation, kw_only=True):
     fields: VideoFields
 
 
-@app.project_adapter("video", reserved=["d", "scenetrans", "cutoff"])
+# Its prompt syntax: `<d>` around dialogue and `<scenetrans>`, `<cutoff>`, and the language a line is spoken in, `<d><English>Hello<d>`.
+# MiniMax's guide lists no languages: these are the ones people write dialogue in.
+@app.project_adapter(
+    "video",
+    reserved=[
+        "d", "scenetrans", "cutoff",
+        "english", "chinese", "mandarin", "cantonese", "japanese", "korean", "spanish", "french", "german", "italian", "portuguese",
+        "russian", "arabic", "hindi", "bengali", "urdu", "punjabi", "tamil", "telugu", "indonesian", "malay", "vietnamese", "thai",
+        "filipino", "tagalog", "turkish", "persian", "hebrew", "greek", "dutch", "swedish", "norwegian", "danish", "finnish", "polish",
+        "czech", "ukrainian", "romanian", "hungarian", "swahili",
+    ],
+)  # fmt: skip
 def adapt_video(op: VideoOperation) -> list[Invocation]:
     """A video this package makes: by its fields, a shot (`summary`, `beats`), or an upscale (a `video` it reads, with a `resolution`)."""
     f = op.fields
