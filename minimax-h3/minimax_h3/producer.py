@@ -363,7 +363,7 @@ def produce(
         f"comfy_kitchen.sol_attn_chunked(int8, stats={statistics}, vmargin=1.1, "
         f"prefix=int8, qkv=one-operand{',v=once' if reuse and not parallel else ''})"
     )
-    out = attn.to_out[1](split(attn.to_out[0], output.flatten(2, 3), Cut(1)))
+    out = attn.to_out[1](split(attn.to_out[0], output.flatten(2, 3), Cut(1), holds=2))
     del output
     return out
 

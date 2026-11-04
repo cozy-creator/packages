@@ -104,6 +104,10 @@ def take(value: Any) -> Any:
     return taken
 #: The widths compiled: a transformer with others is not installable.
 HIDDEN, FFN, HEAD_DIM, ROTARY = 5376, 14336, 128, 96
+#: A tail window's peak, in its rows of hidden (`_Tail`): its normed rows, the FFN's [value | gate]
+#: projection and SwiGLU product, its quantized operands and its down projection. Whole, 13.3 GB
+#: at 15 s against 1.17 GB of hidden (run 25405).
+_TAIL_HOLDS = 12
 _ROW_WARPS = 16
 _ROPE_HEADS = 8
 _ROPE_WARPS = 4
@@ -762,7 +766,7 @@ class H3AttnProcessor(MiniMaxH3AttnProcessor):  # type: ignore[misc]
             return attn.to_out[1](attn.to_out[0](hidden_states.flatten(2, 3)))
         attended = split(heads, heads, Cut(2))
         del heads, hidden_states  # an owned input goes before the out projection's output comes
-        out = attn.to_out[1](split(attn.to_out[0], attended.flatten(2, 3), Cut(1)))
+        out = attn.to_out[1](split(attn.to_out[0], attended.flatten(2, 3), Cut(1), holds=2))
         del attended
         return out
 
@@ -934,7 +938,7 @@ class FusedMiniMaxH3TransformerBlock(MiniMaxH3TransformerBlock):  # type: ignore
         )
         tail = _Tail(self, hidden_states, adaln_indices, gate_msa, scale_mlp, shift_mlp, gate_mlp)
         # The tail writes its rows in place: a view that does not flatten would take a copy.
-        return split(tail.run, tail, Cut(1), out=attn_output.contiguous())
+        return split(tail.run, tail, Cut(1), out=attn_output.contiguous(), holds=_TAIL_HOLDS)
 
 
 class _Tail:
