@@ -87,6 +87,10 @@ def _render(
         embeds, mask = model.encode(prompt, images)
         unconditional = model.encode(negative, images) if guidance > 1 else None
     ctx.raise_if_cancelled()
+    if images:
+        # The edit DiT and its LoRA build on their first read: here, so step 1 holds only a step.
+        with tel.stage("loading the edit model"):
+            _ = dit.graph, lora and lora.graph
     with tel.stage("generating image", overall_range=(0.1, 0.95)):
         denoise = dit.denoise if lora is None else partial(lora.denoise, dit)
         latents = denoise(
