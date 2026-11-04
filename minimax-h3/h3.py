@@ -2413,10 +2413,10 @@ _TRANSPARENT = 0.05
 _BEAT_S = 5.0
 #: A kept take reaches its shot's end if less than this is left.
 _REACHES_S = 1.0
-#: What a project's `options` may set for `generate`. `soundscape` and `music` are the text for a shot that writes none.
-_SHOT_OPTIONS = ("seed", "turbo", "context_frames", "soundscape", "music", "aspect_ratio", "steps", "preset", "resolution", "upscale")
-#: And for `upscale`.
-_UPSCALE_OPTIONS = ("seed", "upscale", "resolution", "preset")
+#: What a project's `render` may set for a shot. `style`, `aspect_ratio`, `soundscape` and `music` stand where the shot writes none.
+_SHOT_OPTIONS = ("seed", "turbo", "context_frames", "style", "soundscape", "music", "aspect_ratio", "steps", "preset", "resolution", "upscale")
+#: And for an upscale, which shares a project's `video` defaults with its shots: the rest of those are no news to it.
+_UPSCALE_OPTIONS = ("seed", "upscale", "preset")
 
 
 def _read_named(op: Operation, value: str) -> Read | None:
@@ -2543,10 +2543,10 @@ def _shot(op: VideoOperation) -> list[Invocation]:
     reads = [read for read in op.reads if name_key(read.name) in said and _has_media(read)]
     reads.sort(key=lambda read: not read.files_of("image"))
     request: dict[str, Any] = {"prompt": spoken(prompt), "duration_s": end, "references": [_reference(read, warned) for read in reads]}
-    request |= {key: str(value).strip() for key in ("soundscape", "music") if (value := options.pop(key, ""))}
-    request |= {key: value.strip() for key in ("style", "soundscape", "music") if (value := getattr(f, key))}
-    if f.aspect_ratio:
-        request["aspect_ratio"] = f.aspect_ratio
+    for key in ("style", "soundscape", "music", "aspect_ratio"):
+        if value := getattr(f, key) or options.pop(key, ""):
+            request[key] = str(value).strip()
+        options.pop(key, None)
     request |= options
     kept = _kept_take(op, op.keep, end, warned) if op.keep is not None else None
     for field in ("first_frame", "last_frame"):
@@ -2570,18 +2570,18 @@ def _upscale(op: VideoOperation) -> list[Invocation]:
     shot = next((read for read in op.reads if read.files_of("video")), None)
     if shot is None:
         raise Refuse(f"{op.asset} reads no video to upscale")
-    options, warned = op.known_options(_UPSCALE_OPTIONS)
-    video, wanted = shot.files_of("video")[0], options.get("resolution") or op.fields.resolution
+    options, warned = op.known_options(_SHOT_OPTIONS)
+    video, wanted = shot.files_of("video")[0], op.fields.resolution or options.get("resolution")
     if wanted and wanted[:-1].isdigit() and video.height and min(video.width or video.height, video.height) >= int(wanted[:-1]):
         return []
     said = [str(shot.fields.get("summary", "")).strip(), *(str(beat.get("description", "")).strip() for beat in shot.fields.get("beats", []))]
     said += [f"{read.name}: {str(read.fields['description']).strip()}" for read in op.reads
              if read is not shot and str(read.fields.get("description", "")).strip()]  # fmt: skip
     text = "\n".join(line for line in said if line).replace("<", "").replace(">", "")
-    style = (op.fields.style or str(shot.fields.get("style", ""))).strip()
+    style = (op.fields.style or str(shot.fields.get("style", "")) or str(options.get("style", ""))).strip()
     request: dict[str, Any] = {"video": video.sha256, "prompt": f"Style: {style.rstrip('.')}.\n\n{text}" if style else text}
     if wanted:
         request["resolution"] = wanted
     if "latents" in shot.files and _made_here(shot):
         request["latents"] = shot.files["latents"].sha256
-    return [Invocation(function="upscale", input=request | options, warnings=warned)]
+    return [Invocation(function="upscale", input=request | {key: value for key, value in options.items() if key in _UPSCALE_OPTIONS}, warnings=warned)]
