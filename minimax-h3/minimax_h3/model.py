@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import math
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from functools import partial
 from typing import Any, Literal
 
 import torch
+from diffusers.models.autoencoders.autoencoder_kl_minimax_h3 import MiniMaxH3VideoTransformerBlock
 
 from cozy_runtime import fusion, stepcache
 from diffusers import MiniMaxH3Transformer3DModel
@@ -46,12 +47,39 @@ from .official import (
     regenerate_plan,
 )
 from .overlay import ATTENTION_KWARG, OVERLAY_KWARG, TURBO_BANK
-from .vae_tiles import VAE_BLOCK
 
 #: Reference latents one generation keeps (`ReferenceMemo`), least recently used first out; the
 #: Runtime sheds them sooner when memory is short.
 REFERENCE_MEMO_ENTRIES = 256
 
+
+def _layer_scales(block: Any, arguments: Mapping[str, Any]) -> fusion.Modulation:
+    """A video decoder block's layer scales: the gates of one row every token reads."""
+    row = block.scale1.new_zeros(1, dtype=torch.long)
+    return fusion.Modulation(row, gate_msa=block.scale1[None], gate_mlp=block.scale2[None])
+
+
+#: The video VAE's ViT decoder block as Runtime fuses it: fp16 autocast over an fp32 residual
+#: stream, torch RMSNorms, weightless q/k norms, split-half RoPE on 48 of 64 channels in fp16,
+#: Diffusers' value-first SwiGLU, `h + branch * scale` layer scales. The attention is composed
+#: (its processor upcasts q and k to fp32 around the norms; the kernel reads them as fp16).
+VAE_BLOCK = fusion.DiTBlock(
+    MiniMaxH3VideoTransformerBlock,
+    width=2048,
+    head_dim=64,
+    modulation=_layer_scales,
+    norms=("norm1", "norm2"),
+    norm="rms",
+    attention="attn",
+    arguments=("rotary_emb",),
+    mlp=fusion.GatedMLP("ff", gate="net.0.proj", down="net.2", value_first=True),
+    rope=fusion.Rope("rotary_emb", interleaved=False, rotary=48, rounding="product"),
+    scale=False,
+    rows="fp16",
+    rms_rounding="once",
+    qk_affine=False,
+    compose=True,
+)
 
 
 def condition_references(model: H3Model, task: Task, state: Any, *, tel: Telemetry) -> None:

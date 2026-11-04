@@ -117,7 +117,6 @@ class _Layout:
         transformer: Any,
         img_shapes: list[list[tuple[int, int, int]]],
         img_mask: torch.Tensor,
-        encoder_hidden_states_mask: torch.Tensor | None,
         device: Any,
     ) -> None:
         repeats = torch.where(img_mask, self._IMG_TOKENS_PER_SLOT, 1)[0]
@@ -125,18 +124,8 @@ class _Layout:
         rotary_emb = transformer.pos_embed(img_shapes[0], expanded, device=device)
         _, target_token_mask = transformer.build_token_metadata(expanded, img_shapes[0])
 
-        joint_key_valid = None
-        if encoder_hidden_states_mask is not None:
-            joint_key_valid = torch.ones(1, expanded.shape[0], dtype=torch.bool, device=device)
-            text_positions = (~expanded).nonzero(as_tuple=True)[0]
-            vlm_text_positions = ~img_mask[0][: encoder_hidden_states_mask.shape[1]]
-            joint_key_valid[:, text_positions] = encoder_hidden_states_mask.bool()[
-                :, vlm_text_positions
-            ]
-
         prefix_len = int((~target_token_mask).sum())
         self.prefix_len = prefix_len
         # The target queries only: the cached prefix lives in the K/V cache, never recomputed.
         self.rotary_emb = rotary_emb[prefix_len:]
         self.modulation_mask = target_token_mask[prefix_len:]
-        self.attention_mask = None if joint_key_valid is None else joint_key_valid[:, None, None, :]

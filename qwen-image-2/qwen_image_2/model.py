@@ -437,7 +437,7 @@ class QwenImage21Model(
                 [image_pad_mask, image_pad_mask.new_ones(1, latents.shape[1] // 4)], dim=1
             )
             img_shapes = [[(1, height // pipeline.vae_scale_factor, width // pipeline.vae_scale_factor)]]
-            layout = _Layout(transformer, img_shapes, image_pad_mask, None, device)
+            layout = _Layout(transformer, img_shapes, image_pad_mask, device)
 
             # Step 0 prefills the prefix K/V over the full joint sequence.
             kv_cache = QwenImage21KVCache(len(transformer.transformer_blocks))
