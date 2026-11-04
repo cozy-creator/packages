@@ -1678,7 +1678,7 @@ class GenerateResult(ShotResult):
 
 class WorldWrite(msgspec.Struct, kw_only=True):
     """A screenshot to keep as the next state of the series `of`: the frame at `at_s` on the video's clock, or its last. From the
-    next segment on, `<of>` (and `<name>`, this one frame) is that picture as a scene: the picture is the state, and the text says
+    next segment on, `<of>` (and `<name>`, this one frame) is that picture as a storyboard: the picture is the state, and the text says
     what's happening. `description`: only what the file says of this revision itself, never its series' words, which may no longer
     be true. In the segment that holds it, a mention is words only: the model remembers."""
 
@@ -2129,7 +2129,7 @@ async def generate(ctx: Context, payload: GenerateInput, out: Outputs, tel: Tele
     people = _has_people(payload)
     here = "who and what" if people else "what"
     texts = segment_texts(payload.prompt, [begun + at for at in opens], continued=resumed is not None, duration_s=duration_s, carry=carry)
-    # From the segment after a write, its series and its own name are that frame, as a scene. Its series' description may no
+    # From the segment after a write, its series and its own name are that frame, as a storyboard. Its series' description may no
     # longer be true of it, so that isn't sent.
     known = {name_key(ref.name): ref for ref in references}
     series = {name_key(name): write.of for write in payload.writes for name in (write.of, write.name) if name}
@@ -2431,7 +2431,7 @@ def _made_here(read_or_take: Read | Keep) -> bool:
 
 
 def _reference(read: Read, warned: list[str]) -> dict[str, Any]:
-    """What a shot reads, as `generate` takes it: by what its files and kind are. A scene is a loose picture: a layout to start
+    """What a shot reads, as `generate` takes it: by what its files and kind are. A storyboard is a loose picture: a layout to start
     from, read at 512 px only by a segment whose text names it, not a look to reproduce."""
     entry: dict[str, Any] = {k: v for k, v in read.fields.items() if k in ("use_audio", "follow")}
     entry["name"] = spoken(f"<{read.name}>")[1:-1]
@@ -2444,7 +2444,7 @@ def _reference(read: Read, warned: list[str]) -> dict[str, Any]:
     # A state (`kyogre.primal`) with no words of its own has its parent's.
     if description := read.fields.get("description") or read.parent_fields.get("description") or "":
         entry["description"] = description
-    if read.kind == "scene":
+    if read.kind == "storyboard":
         return entry | {"kind": "environment", "follow": "loose"}
     if read.kind in ("environment", "setup"):
         return entry | {"kind": "environment"}
@@ -2486,7 +2486,7 @@ def adapt_shot(op: ShotOperation) -> list[Invocation]:
             warned.append(f"{op.asset}'s beat {number + 1} has no duration: it lasts {_BEAT_S:g} s")
         told.append(f"{'' if number else '[Shot 1] '}{f'At {_clock(at)}, ' if at else ''}{_kept(beat.description)}")
         length = beat.duration or _BEAT_S
-        moments |= {name_key(write.scene): at + (length if write.at is None else write.at) for write in beat.writes}
+        moments |= {name_key(write.storyboard): at + (length if write.at is None else write.at) for write in beat.writes}
         at += length
     summary, end = _kept(f.summary), at or 15.0
     prompt = "\n\n".join(filter(None, (summary and f"summary:\n{summary}", "detailed_description:\n" + "\n".join(told)))) if told else f"[Shot 1] {summary}"  # fmt: skip

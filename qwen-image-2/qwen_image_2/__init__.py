@@ -257,8 +257,8 @@ def adapt_environment(op: PictureOperation) -> list[Invocation]:
     return _picture(op, f, _styled(f"{said}\n\n{last}", f.style))
 
 
-@app.project_adapter("scene")
-def adapt_scene(op: PictureOperation) -> list[Invocation]:
+@app.project_adapter("storyboard")
+def adapt_storyboard(op: PictureOperation) -> list[Invocation]:
     """Characters in a place at a moment: the pictures it mentions, composed into one, as written. Each picture's own
     description follows, since a mention reads as `<image3>` alone: with no words for it, a third picture was dropped in 3 of 3
     seeds (runs 27130, 27161, 27174), and with them kept (27200)."""
