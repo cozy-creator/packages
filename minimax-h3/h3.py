@@ -2461,7 +2461,7 @@ def _kept_take(op: Operation, keep: Keep, end: float, warned: list[str]) -> dict
         return None
     if keep.latents is None or not _made_here(keep):
         raise Refuse(f"{take} has no latents this package can read, so it can't continue it: nothing is made; "
-                     "--new renders the whole shot")  # fmt: skip
+                     f"`cozy project render {op.asset}`, with no --take or --in, renders the whole shot")  # fmt: skip
     if at_s is not None and at_s >= min(keep.ends_s, end):
         warned.append(f"{op.asset}: --in {at_s:g} s is at or past {min(keep.ends_s, end):.2f} s: it goes on from take {keep.take}'s end")
         at_s = None
