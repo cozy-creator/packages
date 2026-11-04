@@ -7,7 +7,7 @@ from typing import Annotated
 import msgspec
 from PIL import Image
 
-from cozy_runtime.author import App, CleanOperation, Context, FileBound, ImageFile, Invocation, Outputs, Refuse, Telemetry
+from cozy_runtime.author import App, FileBound, Context, ImageFile, Outputs, Telemetry
 
 from .model import BackgroundRemovalModel
 
@@ -58,14 +58,3 @@ def remove_background(
     with tel.stage("saving character reference", overall_range=(0.9, 1.0)):
         result = out.save_image(white_background(image, mask), format="webp")
     return RemoveBackgroundOutput(result)
-
-
-@app.project_adapter("clean")
-def adapt_clean(op: CleanOperation) -> list[Invocation]:
-    """A clean is a picture. One already transparent needs no run: this asset's files are what it reads."""
-    picture = next((read for read in op.reads if "image" in read.files), None)
-    if picture is None:
-        raise Refuse(f"{op.asset} reads no picture to clean")
-    if picture.files["image"].alpha >= 0.05:
-        return []
-    return [Invocation(function="remove_background", input={"image": picture.files["image"].sha256})]

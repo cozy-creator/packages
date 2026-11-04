@@ -2450,9 +2450,10 @@ def _reference(read: Read, warned: list[str]) -> dict[str, Any]:
         return entry | {"kind": "environment"}
     if read.kind == "character" and "audio" in read.files:
         entry["voice"] = read.files["audio"].sha256
-    if read.kind in ("character", "prop") and picture.alpha < _TRANSPARENT and "remove_background" not in read.made_by:
-        warned.append(f"<{read.name}>'s picture is opaque, so its background goes into the shot: add a clean asset "
-                      f"(`with: birefnet/remove_background`), or draw it on a transparent background")  # fmt: skip
+    # Only a drawn picture: an imported one may be opaque on purpose, as `--remove-background` leaves it, on white.
+    if read.kind in ("character", "prop") and picture.alpha < _TRANSPARENT and read.made_by:
+        warned.append(f"<{read.name}>'s picture is opaque, so its background goes into the shot: draw it on a blank background, or "
+                      "import a picture with `cozy project import --remove-background`")  # fmt: skip
     return entry | {"kind": read.kind if read.kind in ("character", "prop") else "prop"}
 
 
