@@ -211,8 +211,8 @@ def generate_turbo(
 
 #: `GenerateInput.pictures`' most.
 _MAX_PICTURES = 10
-#: What a project's `render` may set: `turbo` picks the function, `transparent` adds the words of Qwen's model card, `style` and
-#: `aspect_ratio` stand where the asset writes none, and the rest are the function's own fields.
+#: What a project's `render` may set: `turbo` picks the function, `style` and `aspect_ratio` stand where the asset writes none,
+#: and the rest are the function's own fields. Transparency is asked for in the prompt (README).
 _OPTIONS = ("seed", "megapixels", "steps", "guidance", "negative_prompt", "prompt_upsampling", "preset")
 
 
@@ -222,14 +222,12 @@ def adapt_image(op: PictureOperation) -> list[Invocation]:
     third picture was dropped in 3 of 3 seeds (runs 27130, 27161, 27174), kept with them (27190, 27200). Pictures are all of what it
     mentions: `<kyogre>` means a read's first, and the rest are `<kyogre 2>`, `<kyogre 3>`."""
     f = op.fields
-    options, warned = op.known_options(("turbo", "transparent", "style", "aspect_ratio", *_OPTIONS))
+    options, warned = op.known_options(("turbo", "style", "aspect_ratio", *_OPTIONS))
     said = [f.description.strip(), f.instructions.strip(), "\n".join(
         f"<{read.name}>: {text}" for read in op.reads if (text := str(read.fields.get("description", "")).strip()))]  # fmt: skip
     prompt = "\n\n".join(filter(None, said))
     if style := (f.style or str(options.get("style", ""))).strip():
         prompt = f"Style: {style.rstrip('.')}.\n\n{prompt}"
-    if options.get("transparent"):
-        prompt = f"This is an RGBA image with transparency. {prompt}\n\nThe image has alpha channel and the background is transparent."
     pictures = [{"name": f"{name} {number + 1}" if number else name, "image": picture.sha256}
                 for read in op.reads for name in (spoken(f"<{read.name}>")[1:-1],)
                 for number, picture in enumerate(read.files_of("image"))]  # fmt: skip
