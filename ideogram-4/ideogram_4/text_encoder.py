@@ -84,7 +84,10 @@ class QwenEncoder(Model[EncoderGraph], encoded_leaves="accept"):
         ids = self.tokenizer(text, return_tensors="pt", add_special_tokens=False)["input_ids"]
         count = int(ids.shape[1])
         if count > MAX_TOKENS:
-            raise UnsupportedInput(f"the caption is {count} tokens; Ideogram 4 reads at most {MAX_TOKENS}", code="prompt")
+            raise UnsupportedInput(
+                f"the caption is {count} tokens, and Ideogram 4 reads at most {MAX_TOKENS}: shorten it, or try another seed",
+                code="prompt",
+            )
         with torch.inference_mode():
             states = Ideogram4Pipeline._get_text_encoder_hidden_states(
                 model.model, ids.to(device), torch.ones_like(ids, device=device), torch.arange(count, device=device)[None]
@@ -127,7 +130,8 @@ class QwenUpsampler(Model[UpsamplerGraph], encoded_leaves="accept", min_bits=4, 
             caption = json.loads(text)
         except json.JSONDecodeError as error:
             raise UnsupportedInput(
-                f"the prompt upsampler wrote no JSON caption ({error}); run with prompt_upsampling=false",
+                f"the prompt upsampler wrote no JSON caption ({error}): try another seed or a shorter prompt, "
+                "or pass the caption itself as the prompt",
                 code="output_integrity",
             ) from error
         return json.dumps(caption, separators=(",", ":"), ensure_ascii=False)

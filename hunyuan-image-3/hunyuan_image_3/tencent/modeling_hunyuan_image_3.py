@@ -2629,7 +2629,10 @@ class HunyuanImage3ForCausalMM(nn.Module):
         cot = (tkw.think_token if first_bot_task == "think" else tkw.recaption_token) + cot_text_gen
         ratio_index = None
         if need_ratio:
-            ratio_index = self._get_ratio_index_from_token(input_ids[0, -1].item(), tkw)
+            try:
+                ratio_index = self._get_ratio_index_from_token(input_ids[0, -1].item(), tkw)
+            except ValueError:  # thinking that used all its tokens ends on no ratio: the caller picks the size
+                ratio_index = None
         return cot, ratio_index
 
     @torch.no_grad()

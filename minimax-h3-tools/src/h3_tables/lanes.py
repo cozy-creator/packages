@@ -331,16 +331,15 @@ def select(
                         code="h3_plan_source",
                     )
             candidates = [QuantizationTensor(component, key, "bf16", shape) for key, shape in dit_plan]
-            unmatched = "the reviewed plan never selects"
         else:
             structural = prepare_source_quantization(source, components=(component,))
             candidates = [tensor for tensor in structural.tensors if tensor.key in carried]
-            unmatched = "the structural selection never picked; a keep entry that excludes nothing is a typo"
         kept = set(treatment.keep)
         missing = sorted(kept - {tensor.key for tensor in candidates})
         if missing:
             raise UnsupportedInput(
-                f"{component} keep list names {missing}, which {unmatched}",
+                f"this checkpoint's {component} isn't H3's: it lacks {missing}, which this recipe "
+                "leaves unencoded; use a lane made from the H3 release",
                 code="h3_keep_unmatched",
             )
         selected = [tensor for tensor in candidates if tensor.key not in kept]
@@ -352,7 +351,8 @@ def select(
         missing = sorted(set(scheme_of) - {tensor.key for tensor in selected})
         if missing:
             raise UnsupportedInput(
-                f"{component} encode_as names {missing}, which {unmatched}",
+                f"this checkpoint's {component} isn't H3's: it lacks {missing}, which this recipe "
+                "encodes; use a lane made from the H3 release",
                 code="h3_keep_unmatched",
             )
         selected = [

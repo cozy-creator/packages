@@ -66,6 +66,7 @@ def _render(
     drafter: Drafter,
     out: Outputs,
     tel: Telemetry,
+    adj: Adjustments,
     *,
     prompt: str,
     upsample: bool,
@@ -89,7 +90,11 @@ def _render(
         with tel.stage("upsampling prompt", overall_range=(0.0, 0.15)):
             def run() -> str:
                 return upsampler.upsample(prompt, images, canvas, table)
-            caption = drafter.drafting(run) if draft else run()
+            written = drafter.drafting(run) if draft else run()
+        if written:
+            caption = written
+        else:
+            adj.warn("prompt_upsampling", "the upsampler returned nothing; the prompt goes as written")
         tel.log("upsampled prompt", caption=caption[:2000])
     ctx.raise_if_cancelled()
     references = None
@@ -194,7 +199,7 @@ def _generate(ctx: Context, function: str, payload: GenerateInput, drafter: Draf
     # The upsampler is told the references' order in words, or as the layout record's ids; Klein
     # reading the prompt itself was trained on `<ref_image_N>`.
     prompt = payload.rendered(adj, (ref_id if rows else ordinal) if upsample else tagged)
-    return _render(ctx, model, upsampler, drafter, out, tel, prompt=prompt, upsample=upsample,
+    return _render(ctx, model, upsampler, drafter, out, tel, adj, prompt=prompt, upsample=upsample,
                    draft=payload.prompt_drafting, images=images, prepared=prepared, size=size, crop=crop,
                    canvas=canvas, rows=rows, steps=steps, guidance=guidance, negative=payload.negative_prompt or "",
                    seed=payload.drawn_seed())

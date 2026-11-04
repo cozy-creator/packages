@@ -64,8 +64,11 @@ def _json_object(prompt: str) -> dict[str, Any] | None:
 
 def _with_regions(caption: dict[str, Any], regions: list[Region]) -> str:
     composition = caption.setdefault("compositional_deconstruction", {"background": "", "elements": []})
-    if not isinstance(composition, dict) or not isinstance(composition.setdefault("elements", []), list):
-        raise UnsupportedInput("the caption's compositional_deconstruction.elements is not a list", code="prompt")
+    if not isinstance(composition, dict):
+        raise UnsupportedInput("the caption's compositional_deconstruction is not an object: give it a background and elements",
+                               code="prompt")
+    if not isinstance(composition.setdefault("elements", []), list):
+        composition["elements"] = [composition["elements"]]
     composition["elements"].extend(element(region, i) for i, region in enumerate(regions))
     return json.dumps(caption, separators=(",", ":"), ensure_ascii=False)
 

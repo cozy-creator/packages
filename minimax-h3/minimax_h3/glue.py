@@ -733,6 +733,76 @@ def warm(launch: Launch, device: Any, *, heads: int, fp8: bool) -> float:
     return (time.perf_counter() - started) * 1000
 
 
+def _off(got: Any, want: Any) -> float:
+    """`got`'s relative L2 error against the exact `want`, inf where it is not finite."""
+    got = got.double()
+    if not bool(torch.isfinite(got).all()):
+        return float("inf")
+    return float((got - want).norm() / want.norm().clamp(min=1e-30))
+
+
+def checked(launch: Launch, device: Any, *, heads: int, fp8: bool) -> str:
+    """Each entry against its arithmetic in float64 on this card: what disagrees, or "". Rounding to
+    bf16 loses 1e-3 and an e4m3 row 5e-2; a misaddressed tile or a wrong dtype loses O(1)."""
+    generator = torch.Generator(device=device).manual_seed(20261104)
+
+    def random(*shape: int, by: float = 1.0) -> Any:
+        values = torch.randn(*shape, generator=generator, device=device, dtype=torch.float32)
+        return (values * by).to(torch.bfloat16)
+
+    rows, table, eps = 3, 5, 1e-5
+    x, branch = random(1, rows, HIDDEN), random(1, rows, HIDDEN)
+    weight = random(HIDDEN, by=0.1)
+    gate, scale, shift = (random(table, HIDDEN, by=0.5) for _ in range(3))
+    index = torch.arange(rows, device=device) % table
+    wide = {"gate": gate[index].double(), "scale": scale[index].double(), "shift": shift[index].double()}
+    added = x.double() + wide["gate"] * branch.double()
+
+    def norm(value: Any) -> Any:
+        rms = value * torch.rsqrt(value.pow(2).mean(-1, keepdim=True) + eps) * weight.double()
+        return rms * (1 + wide["scale"]) + wide["shift"]
+
+    ffn = random(1, rows, 2 * FFN)
+    product = ffn[..., :FFN].double() * torch.nn.functional.silu(ffn[..., FFN:].double())
+    errors: dict[str, tuple[float, float]] = {}
+    with torch.no_grad():
+        errors["norm"] = _off(rmsnorm_modulate(launch, x, weight, scale, shift, index, eps), norm(x.double())), 1e-2
+        hidden, out = gate_add_rmsnorm_modulate(launch, x, gate, branch, index, weight, scale, shift, eps)
+        errors["gate add"] = _off(hidden, added), 1e-2
+        errors["gate add norm"] = _off(out, norm(added)), 1e-2
+        errors["residual"] = _off(gate_add(launch, x, gate, branch, index), added), 1e-2
+        errors["swiglu"] = _off(swiglu(launch, ffn), product), 1e-2
+        for quantized, want, name in (
+            (rmsnorm_modulate(launch, x, weight, scale, shift, index, eps, fp8=True), norm(x.double()), "fp8 norm"),
+            (swiglu(launch, ffn, fp8=True), product, "fp8 swiglu"),
+            (
+                gate_add_rmsnorm_modulate(
+                    launch, x, gate, branch, index, weight, scale, shift, eps, fp8=True
+                )[1],
+                norm(added),
+                "fp8 gate add norm",
+            ),
+        ) if fp8 else ():
+            decoded = quantized.payload.double() * quantized.scale.double()
+            errors[name] = _off(decoded.view_as(want), want), 0.1
+        q = random(1, rows, heads, HEAD_DIM)
+        angles = torch.rand(rows, ROTARY, generator=generator, device=device, dtype=torch.float32) * 6.0
+        cos, sin = torch.cos(angles), torch.sin(angles)
+        head_weight = random(HEAD_DIM, by=0.1)
+        rms = q.double() * torch.rsqrt(q.double().pow(2).mean(-1, keepdim=True) + eps) * head_weight.double()
+        half = ROTARY // 2
+        low, high = rms[..., :half], rms[..., half:ROTARY]
+        c, s = cos.double()[None, :, None], sin.double()[None, :, None]
+        turned = torch.cat(
+            [low * c[..., :half] - high * s[..., :half], high * c[..., half:] + low * s[..., half:], rms[..., ROTARY:]],
+            dim=-1,
+        )
+        errors["rope"] = _off(rmsnorm_rope(launch, q.clone(), head_weight, cos, sin, eps), turned), 1e-2
+        errors["key sums"] = _off(key_sums(launch, q), q[0].double().sum(0)), 1e-2
+    wrong = {name: f"{got:.2e}" for name, (got, bar) in errors.items() if not got <= bar}
+    return f"{wrong} of {len(errors)} entries off their arithmetic" if wrong else ""
+
+
 # ------------------------------------------------------------------ fused modules
 
 
@@ -1290,6 +1360,10 @@ def install(model: object, pipe: Any, plan: Plan) -> str:
         if not transformers:
             return _eager(model, plan, "fusion_no_transformer", "no MiniMax-H3 transformer to fuse")
         glue = plan.load(kernels(device))
+        heads = int(transformers[0][1].config.num_attention_heads)
+        wrong = checked(glue, device, heads=heads, fp8=kernels(device) is GLUE_FP8)
+        if wrong:  # no fused block has served yet: the eager model does, and the run says why
+            return _eager(model, plan, "fusion_numeric", wrong)
     except KernelsUnavailable as exc:
         return _eager(model, plan, f"fusion_{exc.code}", str(exc))
     except GlueRefusal as exc:
