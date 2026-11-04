@@ -216,14 +216,20 @@ def _said(fields: PictureFields) -> str:
     return "\n\n".join(filter(None, (fields.description.strip(), fields.instructions.strip())))
 
 
+#: What a project's `options` may set: `turbo` picks the function, and the rest are this function's own fields.
+_OPTIONS = ("seed", "megapixels", "aspect_ratio", "steps", "guidance", "negative_prompt", "prompt_upsampling", "preset")
+
+
 def _picture(op: Operation, fields: PictureFields, prompt: str) -> list[Invocation]:
-    """One picture, from the pictures it reads, by its `turbo` field `generate_turbo`, else `generate`."""
+    """One picture, from the pictures it reads: `options.turbo` is `generate_turbo`, else `generate`."""
+    options, warned = op.known_options(("turbo", *_OPTIONS))
     pictures = [{"name": spoken(f"<{read.name}>")[1:-1], "image": read.files["image"].sha256}
                 for read in op.reads if "image" in read.files]  # fmt: skip
     request: dict[str, Any] = {"prompt": spoken(prompt), "pictures": pictures}
     if fields.aspect_ratio:
         request["aspect_ratio"] = fields.aspect_ratio
-    return [Invocation(function="generate_turbo" if fields.turbo else "generate", input=request)]
+    request |= {key: value for key, value in options.items() if key != "turbo"}
+    return [Invocation(function="generate_turbo" if options.get("turbo") else "generate", input=request, warnings=warned)]
 
 
 @app.project_adapter("character", "prop")

@@ -90,6 +90,7 @@ from minimax_h3 import shot_latents
 from minimax_h3.continuation import (
     AUDIO_TICKS_PER_S,
     AVContext,
+    CONTEXT_FRAMES,
     Carry,
     ContinuationPlan,
     RenderProvenance,
@@ -1716,12 +1717,12 @@ class GenerateInput(msgspec.Struct, kw_only=True):
     resolution: RegenerateResolution = Resolution.NATIVE
     upscale: Upscale | None = None
     writes: list[WorldWrite] = msgspec.field(default_factory=list)
+    #: The frames each later segment carries from the one before, of 22, 39 or 56; another number takes the nearest, with a warning.
+    context_frames: int = 22
 
 
-#: What each later segment carries from the one before: 22 frames of picture and one second of sound.
+#: What each later segment carries from the one before by default: 22 frames of picture and one second of sound.
 _CARRY = Carry(22, True)
-#: A later segment's new seconds: its carried frames share the 362-frame window, so 14.
-_MAX_NEXT_S = (MAX_FRAMES - _CARRY.head_frames) // FPS
 #: A loose picture (`follow: loose`, a world state) is read at this short edge: the full picture
 #: opens the shot on a copy of it (run 20661, first-frame SSIM 0.871), 256 px keeps the set but not
 #: who stands where (run 20689); its description carries the positions.
@@ -1745,9 +1746,9 @@ _OWN_SECTION = re.compile(r"^[ \t]*(?:subject[ _-]+definitions|summary|style|ret
                           r"|(?:integrated[ _-]*multimodal|detailed)[ _-]*description)[ \t]*:", re.I | re.M)  # fmt: skip
 
 
-def _delivered(seconds: int, first: bool) -> int:
+def _delivered(seconds: int, first: bool, carry: Carry) -> int:
     """The frames a segment of `seconds` new seconds delivers on H3's 17n+5 grid."""
-    return ContinuationPlan(seconds, Carry() if first else _CARRY).delivered_frames
+    return ContinuationPlan(seconds, Carry() if first else carry).delivered_frames
 
 
 class ShotPlan(NamedTuple):
@@ -1758,16 +1759,18 @@ class ShotPlan(NamedTuple):
     warnings: list[str]
 
 
-def plan_segments(duration_s: float, marks: Iterable[float], carried: bool = False) -> ShotPlan:
+def plan_segments(duration_s: float, marks: Iterable[float], carried: bool = False, carry: Carry = _CARRY) -> ShotPlan:
     """A shot's segments: whole blocks of its text (from one of `marks`, its timestamps, to the next), as many as fit each
     segment, so the fewest, and each later segment opens on a timestamp. A segment holds 15 s, or 14 when it continues a video:
     `carried`, or any but the first. A block longer than that renders that long and warns; what follows comes straight
     after it, so the video is shorter than asked. Lengths are H3's whole seconds on its 17n+5 grid, each the nearest to
     the next timestamp from what is delivered so far, and at least 5 s; the last reaches the end."""
     fresh = not carried
+    # A later segment's new seconds: its carried frames share the 362-frame window.
+    most_next = (MAX_FRAMES - carry.head_frames) // FPS
 
     def limit(index: int) -> int:
-        return _delivered(MAX_DURATION_S, True) if index == 0 and fresh else _delivered(_MAX_NEXT_S, False)
+        return _delivered(MAX_DURATION_S, True, carry) if index == 0 and fresh else _delivered(most_next, False, carry)
 
     edges = sorted({mark for mark in marks if 0 < mark < duration_s})
     groups: list[list[float]] = []
@@ -1781,25 +1784,25 @@ def plan_segments(duration_s: float, marks: Iterable[float], carried: bool = Fal
     past = 0  # the frames delivered beyond the last timestamp reached
     for index, (start, end) in enumerate(groups):
         first = index == 0 and fresh
-        most = MAX_DURATION_S if first else _MAX_NEXT_S
+        most = MAX_DURATION_S if first else most_next
         asked = math.ceil((end - start) * FPS - 1e-6)
-        wanted = min(asked - past, _delivered(most, first))
+        wanted = min(asked - past, _delivered(most, first, carry))
         lengths = range(MIN_DURATION_S, most + 1)
-        if asked > _delivered(most, first):
+        if asked > _delivered(most, first, carry):
             length, past = most, 0
-            held = f"{_delivered(most, first) / FPS:.1f} s, the most one segment holds"
+            held = f"{_delivered(most, first, carry) / FPS:.1f} s, the most one segment holds"
             warnings.append(f"the text at {_clock(start)} runs {end - start:g} s and renders {held}: update its timing. "
                             "What follows comes straight after it, so the video is shorter than duration_s."
                             if edges else f"this {duration_s:g} s video has no timestamps, so it renders {held}. Longer "
                             "video needs `At MM:SS.mmm` at the start of a line.")  # fmt: skip
         elif index == len(groups) - 1:
-            length = next((n for n in lengths if _delivered(n, first) >= wanted), most)
-            if _delivered(length, first) - wanted > FPS:
+            length = next((n for n in lengths if _delivered(n, first, carry) >= wanted), most)
+            if _delivered(length, first, carry) - wanted > FPS:
                 warnings.append(f"a segment renders at least {MIN_DURATION_S} s, so this runs "
-                                f"{(_delivered(length, first) - wanted) / FPS:.1f} s longer than asked.")  # fmt: skip
+                                f"{(_delivered(length, first, carry) - wanted) / FPS:.1f} s longer than asked.")  # fmt: skip
         else:
-            length = min(lengths, key=lambda n: (abs(_delivered(n, first) - wanted), n))
-            past = _delivered(length, first) - wanted
+            length = min(lengths, key=lambda n: (abs(_delivered(n, first, carry) - wanted), n))
+            past = _delivered(length, first, carry) - wanted
             if past > FPS:
                 warnings.append(f"a segment renders at least {MIN_DURATION_S} s, so the text at {_clock(end)} starts about "
                                 f"{past / FPS:.1f} s late: update its timing.")  # fmt: skip
@@ -1874,7 +1877,7 @@ def _blocks(body: str, duration_s: float) -> tuple[list[_Block], list[str]]:
     return blocks, warnings
 
 
-def segment_texts(prompt: str, starts: Sequence[float], *, continued: bool = False, duration_s: float = math.inf) -> list[str]:
+def segment_texts(prompt: str, starts: Sequence[float], *, continued: bool = False, duration_s: float = math.inf, carry: Carry = _CARRY) -> list[str]:
     """Each segment's text: the prompt's, with nothing added, and only its own blocks (`plan_segments` and `starts`: what opens
     each), so no segment redraws what an earlier one set up (0.2.4 gate, runs 24980/24981: back in the food cart). The first
     is as written, past 15 s without what comes after it. A later one keeps the text's sections, its summary among them, less
@@ -1898,7 +1901,7 @@ def segment_texts(prompt: str, starts: Sequence[float], *, continued: bool = Fal
             lines = []
             for at, marked, said in timed:
                 if at == opens or start < at < end:
-                    time = f"At {_clock(at - start + _CARRY.head_frames / FPS)}, " if at > max(opens, start) else ""
+                    time = f"At {_clock(at - start + carry.head_frames / FPS)}, " if at > max(opens, start) else ""
                     lines.append(f"{'[Shot 1] ' if marked else ''}{time}{said if time else said[:1].upper() + said[1:]}")
             number = iter(range(1, len(body) + 2))
             description = _OWN_SHOT.sub(lambda _: f"[Shot {next(number)}]", "\n".join(line for line in lines if line))
@@ -2009,7 +2012,7 @@ def _is_native(aspect_ratio: str) -> bool:
         return False
 
 
-def _cut(resumed: Continue, out: Outputs) -> tuple[Continue, bool, list[str]]:
+def _cut(resumed: Continue, out: Outputs, carry: Carry) -> tuple[Continue, bool, list[str]]:
     """`continue_from` at its `at_s`, as what a resume runs on: the latents up to the nearest join (a join of the grid, so
     what follows is in phase), with the carry there and the sound that stays. Whether it cut, and what to warn of; `kept_s` in
     the result says where it landed."""
@@ -2023,7 +2026,7 @@ def _cut(resumed: Continue, out: Outputs) -> tuple[Continue, bool, list[str]]:
     if not parts:
         raise InvalidRequest("continue_from.video has no sound: it isn't the video these latents were made with",
                              fields=["continue_from.video"])  # fmt: skip
-    cut = shot_latents.cut(data, kept, _CARRY.frames, torch.from_numpy(np.concatenate(parts, axis=1)))
+    cut = shot_latents.cut(data, kept, carry.frames, torch.from_numpy(np.concatenate(parts, axis=1)))
     file = out.save_bytes(cut, media_type="application/octet-stream")
     return replace(resumed, latents=file, at_s=None), True, []
 
@@ -2058,12 +2061,20 @@ async def generate(ctx: Context, payload: GenerateInput, out: Outputs, tel: Tele
         resumed = None
     duration_s = payload.duration_s
     cut = False
+    frames = min(CONTEXT_FRAMES, key=lambda held: abs(held - payload.context_frames))
+    if frames != payload.context_frames:
+        warnings.append(f"context_frames {payload.context_frames} isn't one of {CONTEXT_FRAMES}: it carries {frames}")
+    carry = Carry(frames, True)
     if resumed is not None:
         assert resumed.latents is not None
         if resumed.at_s is not None:
-            resumed, cut, said = _cut(resumed, out)
+            resumed, cut, said = _cut(resumed, out, carry)
             warnings += said
             assert resumed.latents is not None
+        if not cut and (own := decode_context(shot_latents.context(resumed.latents.read_bytes())).carry.frames) not in (0, frames):
+            # Going on from a video's end takes the carry that video kept.
+            warnings.append(f"the video this continues carries {own} frames, so this does too, not {frames}")
+            carry = Carry(own, True)
         done = shot_latents.delivered(resumed.latents.read_bytes())
         if done >= duration_s * FPS:
             duration_s += done / FPS
@@ -2072,7 +2083,7 @@ async def generate(ctx: Context, payload: GenerateInput, out: Outputs, tel: Tele
     begun = done / FPS
     blocks, timing = _blocks(_prompt_parts(payload.prompt)[1], duration_s)
     segments, opens, planned = plan_segments(duration_s - begun, [block.at - begun for block in blocks if block.at > begun + _JOIN_S],
-                                         carried=resumed is not None)  # fmt: skip
+                                         carried=resumed is not None, carry=carry)  # fmt: skip
     references, reading = _shot_references(payload)
     warnings += [*reading, *timing, *planned]
     for name, keyframe in (("first_frame", payload.first_frame), ("last_frame", payload.last_frame)):
@@ -2091,7 +2102,7 @@ async def generate(ctx: Context, payload: GenerateInput, out: Outputs, tel: Tele
     count = len(segments)
     # Every segment carries into a successor, its last too: the video's latents keep that carry, which
     # a `continue_from` of it resumes.
-    plans = [ContinuationPlan(length, _CARRY if index or resumed else Carry(), _CARRY)
+    plans = [ContinuationPlan(length, carry if index or resumed else Carry(), carry)
              for index, length in enumerate(segments)]  # fmt: skip
     *starts, total = accumulate((plan.delivered_frames for plan in plans), initial=done)
     windows, notes = shot_windows(references, [(start - plan.prefix_frames, plan.sample_frames)
@@ -2117,7 +2128,7 @@ async def generate(ctx: Context, payload: GenerateInput, out: Outputs, tel: Tele
     named_before: frozenset[str] = frozenset()
     people = _has_people(payload)
     here = "who and what" if people else "what"
-    texts = segment_texts(payload.prompt, [begun + at for at in opens], continued=resumed is not None, duration_s=duration_s)
+    texts = segment_texts(payload.prompt, [begun + at for at in opens], continued=resumed is not None, duration_s=duration_s, carry=carry)
     # From the segment after a write, its series and its own name are that frame, as a scene. Its series' description may no
     # longer be true of it, so that isn't sent.
     known = {name_key(ref.name): ref for ref in references}
@@ -2402,6 +2413,10 @@ _TRANSPARENT = 0.05
 _BEAT_S = 5.0
 #: A kept take reaches its shot's end if less than this is left.
 _REACHES_S = 1.0
+#: What a project's `options` may set for `generate`. `soundscape` and `music` are the text for a shot that writes none.
+_SHOT_OPTIONS = ("seed", "turbo", "context_frames", "soundscape", "music", "aspect_ratio", "steps", "preset", "resolution", "upscale")
+#: And for `upscale`.
+_UPSCALE_OPTIONS = ("seed", "upscale", "resolution", "preset")
 
 
 def _read_named(op: Operation, value: str) -> Read | None:
@@ -2462,7 +2477,8 @@ def _kept_take(op: Operation, keep: Keep, end: float, warned: list[str]) -> dict
 def adapt_shot(op: ShotOperation) -> list[Invocation]:
     """A shot: its summary, its beats on one timeline, sound, and what it reads. One call of any length: `generate` plans its
     segments. Its writes go along: `generate` makes those frames and uses them."""
-    f, at, told, warned, moments = op.fields, 0.0, [], [], {}
+    options, warned = op.known_options(_SHOT_OPTIONS)
+    f, at, told, moments = op.fields, 0.0, [], {}
     for number, beat in enumerate(f.beats):
         if not beat.duration:
             warned.append(f"{op.asset}'s beat {number + 1} has no duration: it lasts {_BEAT_S:g} s")
@@ -2476,9 +2492,11 @@ def adapt_shot(op: ShotOperation) -> list[Invocation]:
     reads = [read for read in op.reads if name_key(read.name) in said and {"image", "video", "audio"} & set(read.files)]
     reads.sort(key=lambda read: "image" not in read.files or read.kind == "")
     request: dict[str, Any] = {"prompt": spoken(prompt), "duration_s": end, "references": [_reference(read, warned) for read in reads]}
+    request |= {key: str(value).strip() for key in ("soundscape", "music") if (value := options.pop(key, ""))}
     request |= {key: value.strip() for key in ("style", "soundscape", "music") if (value := getattr(f, key))}
     if f.aspect_ratio:
         request["aspect_ratio"] = f.aspect_ratio
+    request |= options
     kept = _kept_take(op, op.keep, end, warned) if op.keep is not None else None
     for field in ("first_frame", "last_frame"):
         if (value := getattr(f, field)) and kept is None and (read := _read_named(op, value)) and "image" in read.files:
@@ -2490,8 +2508,6 @@ def adapt_shot(op: ShotOperation) -> list[Invocation]:
                               "name": spoken(f"<{write.name}>")[1:-1], "at_s": moments.get(name_key(write.name), write.at_s),
                               "description": str(write.fields.get("description", ""))}
                              for write in op.writes]  # fmt: skip
-    if f.turbo is not None:
-        request["turbo"] = f.turbo
     if kept is not None:
         request["continue_from"] = kept
     return [Invocation(function="generate", input=request, warnings=warned)]
@@ -2504,7 +2520,8 @@ def adapt_upscale(op: UpscaleOperation) -> list[Invocation]:
     shot = next((read for read in op.reads if "video" in read.files), None)
     if shot is None:
         raise Refuse(f"{op.asset} reads no video to upscale")
-    video, wanted = shot.files["video"], op.fields.resolution
+    options, warned = op.known_options(_UPSCALE_OPTIONS)
+    video, wanted = shot.files["video"], options.get("resolution") or op.fields.resolution
     if wanted and wanted[:-1].isdigit() and video.height and min(video.width or video.height, video.height) >= int(wanted[:-1]):
         return []
     said = [str(shot.fields.get("summary", "")).strip(), *(str(beat.get("description", "")).strip() for beat in shot.fields.get("beats", []))]
@@ -2517,4 +2534,4 @@ def adapt_upscale(op: UpscaleOperation) -> list[Invocation]:
         request["resolution"] = wanted
     if "latents" in shot.files and _made_here(shot):
         request["latents"] = shot.files["latents"].sha256
-    return [Invocation(function="upscale", input=request)]
+    return [Invocation(function="upscale", input=request | options, warnings=warned)]
