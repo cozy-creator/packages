@@ -108,6 +108,9 @@ HIDDEN, FFN, HEAD_DIM, ROTARY = 5376, 14336, 128, 96
 #: projection and SwiGLU product, its quantized operands and its down projection. Whole, 13.3 GB
 #: at 15 s against 1.17 GB of hidden (run 25405).
 _TAIL_HOLDS = 12
+#: A head window's peak, in windows beside the whole output: Q, K and V, the attention's own K/V
+#: copies and its output. 6.2 measured on a capped 4090 (run 29255).
+HEAD_HOLDS = 7
 _ROW_WARPS = 16
 _ROPE_HEADS = 8
 _ROPE_WARPS = 4
@@ -834,7 +837,7 @@ class H3AttnProcessor(MiniMaxH3AttnProcessor):  # type: ignore[misc]
         if heads is None:
             hidden_states = self.whole(attn, hidden_states, rotary_emb, attention_mask)
             return attn.to_out[1](attn.to_out[0](hidden_states.flatten(2, 3)))
-        attended = split(heads, heads, Cut(2))
+        attended = split(heads, heads, Cut(2), holds=HEAD_HOLDS)
         del heads, hidden_states  # an owned input goes before the out projection's output comes
         out = attn.to_out[1](split(attn.to_out[0], attended.flatten(2, 3), Cut(1), holds=2))
         del attended

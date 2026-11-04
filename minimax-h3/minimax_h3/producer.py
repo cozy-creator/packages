@@ -50,7 +50,15 @@ from cozy_runtime.author.kernels import ROWWISE_FP8, PreQuantized, quantize_once
 from cozy_runtime.rows import Rows
 from cozy_runtime.rows import rows as columns
 
-from .glue import KEY_MEAN, FusedMiniMaxH3AttnProcessor, H3AttnProcessor, KeyMean, Owned, take
+from .glue import (
+    HEAD_HOLDS,
+    KEY_MEAN,
+    FusedMiniMaxH3AttnProcessor,
+    H3AttnProcessor,
+    KeyMean,
+    Owned,
+    take,
+)
 
 FAST = "kitchen-sol-producer-fast-shared-qkv"
 FP4_LOWMEM = "kitchen-sol-producer-fp4-lowmem-shared-qkv"
@@ -512,7 +520,7 @@ def _attend(
         else:
             # Kitchen's call holds the whole document's K/V codes and its whole output: an exact
             # split by query heads, which the Runtime sizes beside the DiT's weights.
-            output = split(heads, heads, Cut(2))
+            output = split(heads, heads, Cut(2), holds=HEAD_HOLDS)
         means.close()
         reuse = means.prior is not None
     return output, reuse
