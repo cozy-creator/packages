@@ -12,7 +12,6 @@ from cozy_runtime.author import (
     Context,
     Picture,
     ImageRequest,
-    InvalidRequest,
     ImageResult,
     Memoize,
     Outputs,
@@ -78,8 +77,7 @@ def layout(
     pixel_boxes = [None if box is None else canvas_box(box, width, height) for box in boxes]
     for index, (box, drawn) in enumerate(zip(boxes, pixel_boxes, strict=True)):
         if box is not None and drawn is None:
-            raise InvalidRequest(f"pictures.{index}.box is under a pixel on the {width}x{height} output",
-                                 code="invalid_box", fields=(f"pictures.{index}.box",))
+            adj.warn(f"pictures.{index}.box", f"ignored: it is under a pixel on the {width}x{height} output")
     if sum(box is not None for box in pixel_boxes) > MAX_BOXES:
         adj.warn("pictures", f"HiDream-O1 draws only the {MAX_BOXES} largest boxes, as upstream")
     side = reference_size(max(width, height), len(images) + 1)

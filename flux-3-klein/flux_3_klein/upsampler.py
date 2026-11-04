@@ -310,6 +310,4 @@ class Upsampler(Model[UpsamplerGraph], encoded_leaves="accept", min_bits=4, phas
             presence_penalty=PRESENCE_PENALTY[task],
         )
         caption = str(tokenizer.decode(out[0], skip_special_tokens=True)).strip()
-        if not caption:
-            raise UnsupportedInput("the prompt upsampler returned an empty caption", code="output_integrity")
-        return reconcile(caption, locked) if locked else caption
+        return reconcile(caption, locked) if caption and locked else caption

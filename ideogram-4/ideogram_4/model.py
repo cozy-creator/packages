@@ -12,7 +12,7 @@ from collections.abc import Callable, Sequence
 
 import torch
 from cozy_runtime import rng
-from cozy_runtime.author import Config, Loader, Model, Telemetry, hold_dtype, uses_components
+from cozy_runtime.author import OutputError, Config, Loader, Model, Telemetry, hold_dtype, uses_components
 from diffusers import AutoencoderKLFlux2, FlowMatchEulerDiscreteScheduler, Ideogram4Transformer2DModel
 from diffusers.image_processor import VaeImageProcessor
 from diffusers.pipelines.ideogram4.pipeline_ideogram4 import (
@@ -145,6 +145,10 @@ class Ideogram4(Model[IdeogramGraph], encoded_leaves="accept"):
             z = z.view(1, rows, columns, 2, 2, channels).permute(0, 5, 1, 3, 2, 4).reshape(1, channels, rows * 2, columns * 2)
             pixels = vae.decode(z.to(vae.dtype), return_dict=False)[0]
             if not torch.isfinite(pixels).all():
-                raise ValueError("Ideogram 4's decoder produced non-finite pixels")
+                raise OutputError(
+                    "Ideogram 4's decoder produced non-finite pixels, so there is no picture: try another seed, "
+                    "and if it repeats another lane with `--lane bf16`",
+                    code="output_integrity",
+                )
             (image,) = VaeImageProcessor(vae_scale_factor=PATCH).postprocess(pixels.float(), output_type="pil")
         return image

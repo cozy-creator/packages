@@ -39,7 +39,6 @@ from cozy_runtime.author import (
     ShotResult,
     VideoReference,
     AudioFile,
-    AudioProbe,
     ChildCallError,
     Context,
     DecodedAudioChunk,
@@ -63,7 +62,6 @@ from cozy_runtime.author import (
     ThreadPoolExecutor,
     UnsupportedInput,
     VideoFile,
-    VideoProbe,
     invocable,
     prefetch,
 )
@@ -394,30 +392,20 @@ class ReferenceSizing(msgspec.Struct, frozen=True):
 def resolve_reference_sizing(
     images: Sequence[ImageSizing], *, default: int, video_tokens: int
 ) -> ReferenceSizing:
-    """An explicit fidelity is never changed. The images without one share the package
-    default and step down the ladder together until the total fits the budget; auto-sizing
-    never rises above the default."""
+    """The images without a fidelity share the package default and step down the ladder together
+    until the total fits the budget, never above the default; past its last rung the explicit ones
+    step down with them."""
 
-    def sized(edge: int) -> ReferenceSizing:
-        resolved = tuple(replace(image, resolved=image.requested or edge) for image in images)
+    def sized(edge: int, explicit: bool = False) -> ReferenceSizing:
+        resolved = tuple(
+            replace(image, resolved=min(image.requested, edge) if explicit and image.requested else image.requested or edge)
+            for image in images
+        )
         return ReferenceSizing(resolved, video_tokens, default)
 
     ladder = [default, *(rung for rung in _SHORT_EDGE_LADDER if rung < default)]
-    for edge in ladder:
-        sizing = sized(edge)
-        if sizing.total <= MAX_CONDITIONER_VISION_TOKENS:
-            return sizing
-    floor = sized(ladder[-1])
-    explicit = [image for image in floor.images if image.requested]
-    raise UnsupportedInput(
-        f"reference vision presentation needs {floor.total} tokens even with every default-sized "
-        f"image at {ladder[-1]} px ({video_tokens} from videos, "
-        f"{sum(image.tokens for image in explicit)} from the explicit short edges "
-        f"{[image.requested for image in explicit]}); this release admits at most "
-        f"{MAX_CONDITIONER_VISION_TOKENS}",
-        code="reference_policy",
-        fields=["assets"],
-    )
+    tries = [*(sized(edge) for edge in ladder), *(sized(edge, True) for edge in _SHORT_EDGE_LADDER)]
+    return next((sizing for sizing in tries if sizing.total <= MAX_CONDITIONER_VISION_TOKENS), tries[-1])
 
 
 def assets_to_h3_refs(
@@ -467,15 +455,12 @@ def assets_to_h3_refs(
         elif isinstance(reference, VideoFile):
             video = reference.probe()
             keeps[index] = keeps[index] and video.soundtrack is not None
-            _validate_video(video, field, sound=keeps[index])
             if not uses[index].anchor:
                 window = min(Fraction(frames, FPS), video.duration - Fraction(uses[index].start, FPS))
                 shown = shown_width(video.width, video.pixel_aspect_ratio)
                 video_tokens += reference_video_vision_tokens(shown, video.height, window)
         else:
-            audio = reference.probe()
-            _validate_audio(audio, field)
-            audio_duration += audio.duration
+            audio_duration += reference.probe().duration
     sizing = resolve_reference_sizing(
         images, default=DEFAULT_REFERENCE_IMAGE_SHORT_EDGE, video_tokens=video_tokens
     )
@@ -503,25 +488,6 @@ def assets_to_h3_refs(
         else:
             prepared.append(pipe.audio_reference(reference.read(end=reference.probe().duration * share)))
     return prepared, sizing, guide, notes
-
-
-def _validate_audio(audio: AudioProbe, field: str) -> None:
-    _validate_audio_channels(audio.channels, field)
-
-
-def _validate_video(video: VideoProbe, field: str, *, sound: bool) -> None:
-    # Frame and soundtrack clock alignment belong to the model's video_reference.
-    if sound and video.soundtrack is not None:
-        _validate_audio_channels(video.soundtrack.channels, field)
-
-
-def _validate_audio_channels(channels: int, field: str) -> None:
-    if channels not in (1, 2):
-        raise UnsupportedInput(
-            f"{field} audio must be mono or stereo, got {channels} channels",
-            code="reference_policy",
-            fields=[field],
-        )
 
 
 def _finish(
@@ -969,12 +935,10 @@ def _read_draft(video: VideoFile) -> tuple[Any, Any | None, int, int, list[str]]
         f"the {width}x{height} video was cover-scaled to 1344x768 for the refine"
     ]  # fmt: skip
     if probe.frame_rate != FPS:
-        warnings.append(f"the {float(probe.frame_rate):g} fps video was read at 24 fps for the refine")
+        warnings.append(f"the {float(probe.frame_rate or 0):g} fps video was read at 24 fps for the refine")
     waveform = None
     if pcm:
         waveform = torch.from_numpy(np.stack([np.concatenate(c) for c in zip(*pcm, strict=True)]))
-        if int(waveform.shape[0]) not in _AUDIO_LAYOUTS:
-            raise InvalidRequest("regenerate keeps mono or stereo soundtracks", fields=["video"])
     return pixels, waveform, rate, count, warnings
 
 
@@ -995,8 +959,6 @@ def _read_soundtrack(video: VideoFile, frames: int) -> tuple[Any | None, int]:
     if not pcm:
         return None, rate
     waveform = torch.from_numpy(np.stack([np.concatenate(c) for c in zip(*pcm, strict=True)]))
-    if int(waveform.shape[0]) not in _AUDIO_LAYOUTS:
-        raise InvalidRequest("regenerate keeps mono or stereo soundtracks", fields=["video"])
     return waveform, rate
 
 
@@ -1968,6 +1930,23 @@ def _is_native(aspect_ratio: str) -> bool:
         return False
 
 
+def _unusable(resumed: Continue) -> str:
+    """Why `continue_from` can't resume from its latents, as `regenerate_shot` reads them; empty when it can. H3's own
+    videos have sound, so one without it isn't the video they were made with."""
+    if resumed.video.probe().soundtrack is None:
+        return "its video has no sound, so it isn't the video they were made with"
+    assert resumed.latents is not None
+    try:
+        data = resumed.latents.read_bytes()
+        shot_latents.delivered(data)
+        decode_context(shot_latents.context(data))
+    except InvalidRequest as refused:
+        return refused.message
+    except (KeyError, ValueError, RuntimeError):  # bytes no safetensors reader takes
+        return "it is not a minimax-h3 latents file"
+    return ""
+
+
 def _cut(resumed: Continue, out: Outputs, carry: Carry) -> tuple[Continue, bool, list[str]]:
     """`continue_from` at its `at_s`, as what a resume runs on: the latents up to the nearest join (a join of the grid, so
     what follows is in phase), with the carry there and the sound that stays. Whether it cut, and what to warn of; `kept_s` in
@@ -1979,10 +1958,9 @@ def _cut(resumed: Continue, out: Outputs, carry: Carry) -> tuple[Continue, bool,
         return replace(resumed, at_s=None), False, [f"continue_from.at_s {asked:g} s is at or past its video's end: it resumes "
                                                     f"at {end / FPS:.2f} s"]  # fmt: skip
     parts = _sound_chunks(resumed.video.stream(end=Fraction(audio_ticks(kept), AUDIO_TICKS_PER_S), pictures=False))
-    if not parts:
-        raise InvalidRequest("continue_from.video has no sound: it isn't the video these latents were made with",
-                             fields=["continue_from.video"])  # fmt: skip
-    cut = shot_latents.cut(data, kept, carry.frames, torch.from_numpy(np.concatenate(parts, axis=1)))
+    # A soundtrack that starts past the join has nothing to keep yet: `cut` pads it with silence.
+    sound = np.concatenate(parts, axis=1) if parts else np.zeros((2, 0), dtype=np.float32)
+    cut = shot_latents.cut(data, kept, carry.frames, torch.from_numpy(sound))
     file = out.save_bytes(cut, media_type="application/octet-stream")
     return replace(resumed, latents=file, at_s=None), True, []
 
@@ -2005,6 +1983,9 @@ async def generate(ctx: Context, payload: GenerateInput, out: Outputs, tel: Tele
     if opening is not None and (payload.plate is not None or resumed is not None):
         warnings.append(f"{'the plate' if payload.plate is not None else 'continue_from'} sets the opening; first_frame is ignored")
         opening = None
+    if resumed is not None and resumed.latents is not None and (why := _unusable(resumed)):
+        warnings.append(f"continue_from's latents can't be used: {why}")
+        resumed = replace(resumed, latents=None)
     if resumed is not None and resumed.latents is None:
         # Nothing carries in without latents: a new video opens on the old one's last frame.
         warnings.append("continue_from has no latents, so this is a new video opening on its last frame, and it comes "
@@ -2408,12 +2389,13 @@ def _kept_take(op: Operation, keep: Keep, end: float, warned: list[str]) -> dict
         return None
     if keep.latents is None or not _made_here(keep):
         raise Refuse(f"{take} has no latents this package can read, so it can't continue it: nothing is made; "
-                     "--new renders the whole shot")  # fmt: skip
+                     f"`cozy project render {op.asset}`, with no --take or --in, renders the whole shot")  # fmt: skip
     if at_s is not None and at_s >= min(keep.ends_s, end):
         warned.append(f"{op.asset}: --in {at_s:g} s is at or past {min(keep.ends_s, end):.2f} s: it goes on from take {keep.take}'s end")
         at_s = None
     if at_s is None and end - keep.ends_s < _REACHES_S:
-        raise Refuse(f"{take} already reaches the shot's end ({keep.ends_s:.2f} s of {end:g} s): nothing is made")
+        raise Refuse(f"{take} already reaches the shot's end ({keep.ends_s:.2f} s of {end:g} s), so nothing is made: "
+                     "add `--in <seconds>` to redo its end, or lengthen the shot")  # fmt: skip
     return {"video": keep.video.sha256, "latents": keep.latents.sha256} | ({"at_s": at_s} if at_s is not None else {})
 
 
@@ -2477,7 +2459,18 @@ class UpscaleOperation(Operation, kw_only=True):
     fields: UpscaleFields
 
 
-@app.project_adapter("video", reserved=["d", "scenetrans", "cutoff"])
+# Its prompt syntax: `<d>` around dialogue and `<scenetrans>`, `<cutoff>`, and the language a line is spoken in, `<d><English>Hello<d>`.
+# MiniMax's guide lists no languages: these are the ones people write dialogue in.
+_RESERVED = [
+    "d", "scenetrans", "cutoff",
+    "english", "chinese", "mandarin", "cantonese", "japanese", "korean", "spanish", "french", "german", "italian", "portuguese",
+    "russian", "arabic", "hindi", "bengali", "urdu", "punjabi", "tamil", "telugu", "indonesian", "malay", "vietnamese", "thai",
+    "filipino", "tagalog", "turkish", "persian", "hebrew", "greek", "dutch", "swedish", "norwegian", "danish", "finnish", "polish",
+    "czech", "ukrainian", "romanian", "hungarian", "swahili",
+]  # fmt: skip
+
+
+@app.project_adapter("video", reserved=_RESERVED)
 def adapt_video(op: VideoOperation) -> list[Invocation]:
     """A video that names only this package: by its fields, a shot (`summary`, `beats`), or an upscale (a `video` it reads, with a `resolution`)."""
     f = op.fields
@@ -2486,7 +2479,7 @@ def adapt_video(op: VideoOperation) -> list[Invocation]:
         if f.video:
             made[0].warnings.append(f"{op.asset} has a summary or beats and a `video`: it's a shot, and `video` is ignored")
         return made
-    if f.video or f.resolution:
+    if f.video or (f.resolution and (not f.instructions.strip() or any(read.files_of("video") for read in op.reads))):
         return _upscale(op)
     if f.instructions.strip():
         return _shot(op)
@@ -2500,13 +2493,13 @@ def _named_shot(op: TurboOperation | FullOperation) -> list[Invocation]:
     return _shot(op)
 
 
-@app.project_adapter("video", functions=["generate"], reserved=["d", "scenetrans", "cutoff"])
+@app.project_adapter("video", functions=["generate"], reserved=_RESERVED)
 def adapt_generate(op: FullOperation) -> list[Invocation]:
     """A node of `generate`: the full model."""
     return _named_shot(op)
 
 
-@app.project_adapter("video", functions=["generate_turbo"], reserved=["d", "scenetrans", "cutoff"])
+@app.project_adapter("video", functions=["generate_turbo"], reserved=_RESERVED)
 def adapt_generate_turbo(op: TurboOperation) -> list[Invocation]:
     """A node of `generate_turbo`."""
     return _named_shot(op)
@@ -2556,6 +2549,8 @@ def _shot(op: VideoOperation | TurboOperation | FullOperation) -> list[Invocatio
             request[key] = str(value).strip()
         options.pop(key, None)
     request |= options
+    if f.resolution:
+        request["resolution"] = f.resolution
     kept = _kept_take(op, op.keep, end, warned) if op.keep is not None else None
     for field in ("first_frame", "last_frame"):
         if (value := getattr(f, field)) and kept is None and (read := _read_named(op, value)) and read.files_of("image"):
@@ -2574,7 +2569,7 @@ def _upscale(op: VideoOperation | UpscaleOperation) -> list[Invocation]:
     named = _read_named(op, op.fields.video) if op.fields.video else None
     shot = named if named and named.files_of("video") else next((read for read in op.reads if read.files_of("video")), None)
     if shot is None:
-        raise Refuse(f"{op.asset} reads no video to upscale")
+        raise Refuse(f"{op.asset}: {f'{op.fields.video} has no video yet: render it first' if op.fields.video else 'a `resolution` needs a `video` to take there, or a summary or beats to make one'}")
     options, warned = _options(op, _SHOT_OPTIONS)
     video, wanted = shot.files_of("video")[0], op.fields.resolution or options.get("resolution")
     if wanted and wanted[:-1].isdigit() and video.height and min(video.width or video.height, video.height) >= int(wanted[:-1]):

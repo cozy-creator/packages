@@ -19,6 +19,7 @@ import numpy as np
 import torch
 from cozy_runtime import lora, rng
 from cozy_runtime.author import (
+    OutputError,
     Config,
     Loader,
     Model,
@@ -307,6 +308,10 @@ class Flux2(Model[Flux2Graph], encoded_leaves="accept"):
             latents = Flux2Pipeline._unpatchify_latents(latents * std + mean)
             image = vae.decode(latents.to(vae.dtype), return_dict=False)[0][0]
             if not torch.isfinite(image).all():
-                raise ValueError("FLUX.2's decoder produced non-finite pixels")
+                raise OutputError(
+                    "FLUX.2's decoder produced non-finite pixels, so there is no picture: try another seed, "
+                    "and if it repeats another lane with `--lane bf16`",
+                    code="output_integrity",
+                )
             pixels = ((image.float().clamp(-1, 1) + 1) * 127.5).round().to(torch.uint8).permute(1, 2, 0).cpu().numpy()
         return Image.fromarray(pixels)

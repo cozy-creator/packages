@@ -25,7 +25,8 @@ class RemoveBackgroundOutput(msgspec.Struct):
     image: Annotated[
         ImageFile,
         FileBound(
-            max_bytes=64 << 20,
+            # TensorD's output allowance reads this: a large photo's cutout must not be lost to it.
+            max_bytes=1 << 40,
             max_decoded_bytes=256 << 20,
             media_types=("image/webp",),
         ),

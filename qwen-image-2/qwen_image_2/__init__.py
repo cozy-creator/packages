@@ -8,6 +8,7 @@ import msgspec
 import torch
 from cozy_runtime import stepcache
 from cozy_runtime.author import (
+    OutputError,
     Adjustments,
     App,
     Context,
@@ -84,7 +85,11 @@ def decoded_image(decoded: Any) -> Image.Image:
     # The model returns B,C,H,W in [-1,1], just as upstream VaeImageProcessor consumes.
     pixels = decoded[0].detach().float()
     if not bool(torch.isfinite(pixels).all()):
-        raise ValueError("Qwen Image decoder produced non-finite pixels")
+        raise OutputError(
+            "Qwen Image decoder produced non-finite pixels, so there is no picture: try another seed, "
+            "and if it repeats another lane with `--lane bf16`",
+            code="output_integrity",
+        )
     pixels = ((pixels / 2 + 0.5).clamp(0, 1) * 255).round().to(torch.uint8).permute(1, 2, 0)
     if pixels.shape[-1] == 4:
         alpha = pixels[..., 3]
