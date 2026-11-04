@@ -5,21 +5,26 @@ condition-image K/V cache over the full joint sequence. Steps ``1..N-1`` are the
 over the target-image tokens only, identical from one step to the next but for the timestep and
 the running latent, so they run as one `denoise_loop` the Runtime may capture.
 
-Everything except the latent is a function of the request *layout* (prompt length, canvas), not
-of the step: the rotary tables, the target-token modulation mask and the key-valid mask are
-derived once, eagerly, by `_Layout`, so the step carries no host sync, no Python scalar read and
-no data-dependent shape. The step calls the transformer's own ``img_in``/``time_text_embed``/
+The rotary tables and target-token modulation mask are derived once by `_Layout`, so the step
+carries no host sync, no Python scalar read and no data-dependent shape. The prefix K/V is
+prompt-specific. It joins the layout and schedules as explicitly declared per-call inputs;
+no retained step closure owns a previous prompt's tensors. The step calls the transformer's
+own ``img_in``/``time_text_embed``/
 ``modulation``/``norm_out``/``proj_out`` and the installed blocks, so the numerics are the
 Diffusers/Runtime ones.
 """
 
 from __future__ import annotations
 
+from collections.abc import Callable
+from dataclasses import dataclass
 from typing import Any
 
 import torch
+from diffusers.models.transformers.transformer_qwenimage21 import QwenImage21KVLayerCache
 
 
+@dataclass(frozen=True)
 class _FlowEuler:
     """FlowMatch Euler device schedules, indexed by the global step.
 
@@ -29,10 +34,16 @@ class _FlowEuler:
     per-step sigma delta in f32 — the exact `FlowMatchEulerDiscreteScheduler.step` arithmetic.
     """
 
-    def __init__(self, scheduler: Any, device: Any) -> None:
+    ts: torch.Tensor
+    dt: torch.Tensor
+
+    @classmethod
+    def from_scheduler(cls, scheduler: Any, device: Any) -> _FlowEuler:
         sigmas = scheduler.sigmas
-        self.ts = (scheduler.timesteps.to(torch.bfloat16) / 1000).to(device=device)
-        self.dt = (sigmas[1:] - sigmas[:-1]).to(device=device)
+        return cls(
+            (scheduler.timesteps.to(torch.bfloat16) / 1000).to(device=device),
+            (sigmas[1:] - sigmas[:-1]).to(device=device),
+        )
 
     def timestep(self, index: torch.Tensor) -> torch.Tensor:
         # causal_condition: the sampled row for the target tokens plus the trailing t=0 row the
@@ -42,6 +53,51 @@ class _FlowEuler:
 
     def delta(self, index: torch.Tensor) -> torch.Tensor:
         return self.dt.index_select(0, index).reshape(())
+
+
+def _cached_step(transformer: Any) -> Callable[..., None]:
+    """A step whose only closed-over owner is the placed transformer.
+
+    Schedules, target layout and every prefix K/V arrive as declared tensors.
+    Rebuilding the small cache wrappers from those arguments also works when
+    Runtime records on its own copies and later copies a new prompt into them.
+    """
+    blocks = transformer.transformer_blocks
+
+    def step(
+        index: torch.Tensor,
+        latents: torch.Tensor,
+        timesteps: torch.Tensor,
+        deltas: torch.Tensor,
+        rotary: torch.Tensor,
+        target: torch.Tensor,
+        *prefix: torch.Tensor,
+    ) -> None:
+        with torch.no_grad():
+            euler = _FlowEuler(timesteps, deltas)
+            hidden = transformer.img_in(latents)
+            temb = transformer.time_text_embed(euler.timestep(index), hidden)
+            modulation = transformer.modulation(temb)
+            for layer, block in enumerate(blocks):
+                cache = QwenImage21KVLayerCache()
+                cache.store(prefix[2 * layer], prefix[2 * layer + 1])
+                hidden = block(
+                    hidden_states=hidden,
+                    modulation=modulation,
+                    rotary_emb=rotary,
+                    attention_mask=None,
+                    target_token_mask=target,
+                    layer_cache=cache,
+                    kv_cache_mode="cached",
+                    cache_write_slice=None,
+                    segments=None,
+                    key_valid=None,
+                )
+            hidden = transformer.norm_out(hidden, temb, target)
+            noise = transformer.proj_out(hidden)
+            latents.copy_((latents.float() + euler.delta(index) * noise).to(latents.dtype))
+
+    return step
 
 
 class _Layout:
