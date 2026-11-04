@@ -108,7 +108,8 @@ def _source(present: Rows, config: dict[str, Any]) -> str:
     """The converted release's one component: the merged factors and the curve sites (h3.lora)."""
     if len(present) != 1:
         raise UnsupportedInput(
-            f"the Open-H3 source holds one h3.lora component, not {sorted(present)}",
+            f"this takes the release's lora/ folder converted with --source-format h3.lora, and "
+            f"this has {sorted(present)}",
             code="h3_regenerate_source",
         )
     (name, found), = present.items()
