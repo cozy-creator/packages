@@ -2502,7 +2502,7 @@ class VideoOperation(Operation, kw_only=True):
     fields: VideoFields
 
 
-@app.project_adapter("video")
+@app.project_adapter("video", reserved=["d", "scenetrans", "cutoff"])
 def adapt_video(op: VideoOperation) -> list[Invocation]:
     """A video this package makes: by its fields, a shot (`summary`, `beats`), or an upscale (a `video` it reads, with a `resolution`)."""
     f = op.fields
