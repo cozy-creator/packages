@@ -1483,8 +1483,8 @@ class HunyuanImage3TokenizerFast(PreTrainedTokenizerFast):
         if max_length is not None:
             if output.tokens.shape[-1] > max_length:
                 raise ValueError(
-                    f"Encoded token length {output.tokens.shape[-1]} exceeds max_length {max_length}.\n"
-                    f"Please set a larger max_length or check the input messages:\n{message_list}"
+                    f"this prompt is {output.tokens.shape[-1]} tokens, and HunyuanImage 3 reads at most "
+                    f"{max_length}: shorten it and run again"
                 )
 
         return output, sections

@@ -104,7 +104,7 @@ class Captioner(Model[CaptionerGraph], encoded_leaves="accept", min_bits=4, phas
             caption = json.loads(text)
         except json.JSONDecodeError as error:
             raise UnsupportedInput(
-                f"the prompt upsampler wrote no JSON caption ({error}); run with prompt_upsampling=false",
+                f"the prompt upsampler wrote no JSON caption ({error})",
                 code="output_integrity",
             ) from error
         if not isinstance(caption, dict):

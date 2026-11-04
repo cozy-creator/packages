@@ -19,6 +19,7 @@ import torch
 import torch.nn.functional as F
 from cozy_runtime import fusion, rng, vlm
 from cozy_runtime.author import (
+    OutputError,
     Config,
     Loader,
     Model,
@@ -410,6 +411,10 @@ class Klein(
             latents = latents.reshape(b, c // 4, 2, 2, h, w).permute(0, 1, 4, 2, 5, 3).reshape(b, c // 4, h * 2, w * 2)
             image = vae.decode(latents.to(vae.dtype), return_dict=False)[0][0]
             if not torch.isfinite(image).all():
-                raise ValueError("Klein's decoder produced non-finite pixels")
+                raise OutputError(
+                    "Klein's decoder produced non-finite pixels, so there is no picture: try another seed, "
+                    "and if it repeats another lane with `--lane bf16`",
+                    code="output_integrity",
+                )
             pixels = ((image.float().clamp(-1, 1) + 1) * 127.5).round().to(torch.uint8).permute(1, 2, 0).cpu().numpy()
         return Image.fromarray(pixels)

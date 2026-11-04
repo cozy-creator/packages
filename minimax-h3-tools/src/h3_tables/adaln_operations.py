@@ -94,7 +94,9 @@ def _body_kind(present: Rows) -> bool:
     if actual == set(full_order(_sections(), current)):
         return False
     raise UnsupportedInput(
-        "AdaLN preparation requires one assembled full or pruned H3 model", code="adaln_source"
+        "this takes a whole H3 lane, full or pruned, and this model is neither: make one with "
+        "`minimax-h3-tools/bf16-full`, then use that",
+        code="adaln_source",
     )
 
 
@@ -111,7 +113,9 @@ def _bindings(document: dict[str, Any]) -> dict[Task, str]:
             or any(c not in "0123456789abcdef" for c in digest[7:])
         ):
             raise UnsupportedInput(
-                "H3 generating-weight binding is not an exact digest", code="adaln_binding"
+                "this pruned lane records no generating weights, so its tables can't be reused or "
+                "replaced: start from its full lane",
+                code="adaln_binding",
             )
         result[task] = digest
     return result
@@ -122,7 +126,9 @@ def _validate_body_config(raw: bytes, pruned: bool) -> dict[str, Any]:
     if not pruned:
         if raw != dual_full_config(_sections()):
             raise UnsupportedInput(
-                "H3 full-body config differs from its supported constructor", code="adaln_config"
+                "this model's config isn't the H3 release's: make a full lane from the release "
+                "with `minimax-h3-tools/bf16-full`, then use that",
+                code="adaln_config",
             )
         return {}
     value = canonical_json.decode(raw)
@@ -320,7 +326,9 @@ def _apply_adaln(
     pruned = _body_kind(present)
     if pruned != require_pruned:
         raise UnsupportedInput(
-            "AdaLN attachment source has a different pruning state", code="adaln_source"
+            "this operation and this model disagree on pruned: apply-adaln takes a full model, "
+            "retable-adaln a pruned one",
+            code="adaln_source",
         )
     document = _validate_body_config(config(opened), pruned)
     for task in _TASKS:

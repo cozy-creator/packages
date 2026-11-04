@@ -78,7 +78,7 @@ def timestep_plan(source: Checkpoint, task: Task, *, component: str | None = Non
     held = source.components.get(name)
     if held is None or TIMESTEP_PLAN not in held.assets:
         raise UnsupportedInput(
-            f"H3 source {name} lacks its required {TIMESTEP_PLAN} asset; use a migrated model",
+            f"this checkpoint has no {TIMESTEP_PLAN} on {name}: use a lane of minimaxai/minimax-h3",
             code="adaln_plan",
         )
     try:

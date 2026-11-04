@@ -271,7 +271,11 @@ def _check_curve(component: str, held: Mapping[str, Any], topology: H3Topology) 
     """`held` carries a curve-form DiT's modulation rows (TensorFS `h3.curve`), plain floats."""
     curve = held.get("adaln_t_table")
     if curve is None or len(curve.shape) != 2 or curve.shape[0] < 2:
-        raise UnsupportedInput(f"{component} has no [grid, k] adaln_t_table", code="h3_lane_source")
+        raise UnsupportedInput(
+            f"{component} has no adaln_t_table, so this isn't a ComfyUI curve-form checkpoint: use "
+            "bf16-pruned for a normal H3 checkpoint",
+            code="h3_lane_source",
+        )
     for key, shape in curve_shapes(topology, *curve.shape).items():
         row = held.get(key)
         if (
@@ -300,7 +304,8 @@ def lane_rows(
     16-bit rows where the spec stores float32 are widened)."""
     if set(present) != set(COMPONENTS):
         raise UnsupportedInput(
-            f"source components are {sorted(present)}, not H3's five", code="h3_lane_source"
+            f"this checkpoint has {sorted(present)}; H3 needs transformer, transformer_ref, text_encoder, vae and audio_vae; a DiT alone is composed first, with `cozy model upload --base`",
+            code="h3_lane_source",
         )
     sections = parse_full_config(_asset("model-config.json"))
     widened: set[tuple[str, str]] = set()
@@ -454,7 +459,7 @@ async def vae(ctx: Context, *, source: Weights[Any], tel: Telemetry) -> ModelArt
     `NORMALISED_COMPONENTS`: one component and no base, so writing it fetches that component
     only. `cozy model upload --base` composes it into lanes."""
     opened = open_source(ctx, source)
-    held = rows(opened)["vae"]
+    held = rows(opened).get("vae", {})
     selection = _lanes.select(
         "vae", NORMALISED_COMPONENTS["vae"], opened, held, allow_inert=True
     )
@@ -547,7 +552,8 @@ def quantizer_selections(
     present = rows(source)
     if set(present) != set(COMPONENTS):
         raise UnsupportedInput(
-            f"source components are {sorted(present)}, not H3's five", code="h3_quantize_source"
+            f"this checkpoint has {sorted(present)}; H3 needs transformer, transformer_ref, text_encoder, vae and audio_vae; a DiT alone is composed first, with `cozy model upload --base`",
+            code="h3_quantize_source",
         )
     sections = parse_full_config(_asset("model-config.json"))
     for component in DIT_COMPONENT.values():
@@ -685,7 +691,8 @@ def retable_rows(
     `full` carries the exact modulation weights they are computed from."""
     if set(pruned) != set(COMPONENTS):
         raise UnsupportedInput(
-            f"retable source components are {sorted(pruned)}", code="h3_retable_source"
+            f"retable takes a whole AdaLN-pruned H3 lane, and this has {sorted(pruned)}",
+            code="h3_retable_source",
         )
     sections = parse_full_config(_asset("model-config.json"))
     tables: dict[str, tuple[str, ...]] = {}

@@ -15,7 +15,7 @@ from typing import Any
 
 import torch
 from cozy_runtime import rng, vlm
-from cozy_runtime.author import Config, Loader, MemoDistribution, Model, Telemetry, hold_dtype, uses_components
+from cozy_runtime.author import OutputError, Config, Loader, MemoDistribution, Model, Telemetry, hold_dtype, uses_components
 from diffusers import (
     AutoencoderKLFlux2,
     BriaFibo2Pipeline,
@@ -243,6 +243,10 @@ class Fibo2(Model[FiboGraph], encoded_leaves="accept"):
             latents = pipe._unpatchify_latents(latents / scale.to(latents) + mean)
             image = vae.decode(latents.to(vae.dtype), return_dict=False)[0]
             if not torch.isfinite(image).all():
-                raise ValueError("Fibo 2.0's decoder produced non-finite pixels")
+                raise OutputError(
+                    "Fibo 2.0's decoder produced non-finite pixels, so there is no picture: try another seed, "
+                    "and if it repeats another lane with `--lane bf16`",
+                    code="output_integrity",
+                )
             (picture,) = pipe.image_processor.postprocess(image.float(), output_type="pil")
         return picture  # type: ignore[no-any-return]
