@@ -2146,11 +2146,7 @@ async def generate(ctx: Context, payload: GenerateInput, out: Outputs, tel: Tele
             assert resumed is not None
             wrote(position, _resume_frame(resumed.video, frame + 1, out))
     for index, text in enumerate(texts):
-        named = named_in(text, references)
-        # A still reference goes only to the segments whose own text names it; a clip goes by its window.
-        own = [ref for ref in references
-               if (ref.kind in CLIPS and ref.name in windows[index])
-               or (ref.kind not in CLIPS and ref.name in named)]  # fmt: skip
+        own = [ref for ref in references if ref.kind not in CLIPS or ref.name in windows[index]]
         states = {}
         for position, segment, _ in landed:
             if segment < index:
@@ -2158,8 +2154,7 @@ async def generate(ctx: Context, payload: GenerateInput, out: Outputs, tel: Tele
                 for name in filter(None, (write.of, write.name)):
                     base = known.get(name_key(name))
                     states[name_key(name)] = StoryReference(name=base.name if base else name, kind="world_state", description=write.description)
-        held = {name_key(ref.name) for ref in own}
-        own = [states.get(name_key(ref.name), ref) for ref in own] + [state for key, state in states.items() if key not in held]
+        own = [states.get(name_key(ref.name), ref) for ref in own] + [state for key, state in states.items() if key not in known]
 
         def words_only(token: re.Match[str]) -> str:
             """A mention of a state with no picture yet: the series' own picture, if it has one, else plain words."""
@@ -2169,6 +2164,7 @@ async def generate(ctx: Context, payload: GenerateInput, out: Outputs, tel: Tele
             return f"<{series[key]}>" if name_key(series[key]) in known | states else series[key]
 
         text = MENTION.sub(words_only, text)
+        named = named_in(text, references)
         places = frozenset(name for name in plates if name in named and name_key(name) not in states and (index == 0 or name in named_before))
         named_before = named
         carried.append(places if index else frozenset())
