@@ -2070,8 +2070,11 @@ async def generate(ctx: Context, payload: GenerateInput, out: Outputs, tel: Tele
     here = "who and what" if people else "what"
     texts = segment_texts(payload.prompt, [begun + at for at in opens], continued=resumed is not None, duration_s=duration_s)
     for index, text in enumerate(texts):
-        own = [ref for ref in references if ref.kind not in CLIPS or ref.name in windows[index]]
         named = named_in(text, references)
+        # A still reference goes only to the segments whose own text names it; a clip goes by its window.
+        own = [ref for ref in references
+               if (ref.kind in CLIPS and ref.name in windows[index])
+               or (ref.kind not in CLIPS and ref.name in named)]  # fmt: skip
         places = frozenset(name for name in plates if name in named and (index == 0 or name in named_before))
         named_before = named
         carried.append(places if index else frozenset())
