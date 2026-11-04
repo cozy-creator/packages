@@ -100,7 +100,7 @@ LoRA's trigger (`body_swap:`). The latents also carry the text the video was mad
   The full model runs NVIDIA's 30-step tiers: quality 15 dense steps, the rest sparse at tau 0.5,
   with EasyCache; balanced 10 dense at tau 1.0; fast that with FirstBlockCache. Above 768p it
   also picks the upscale's.
-- **Result.** `video` (768p mp4), `frames` (one per `writes` entry) and `warnings`. A segment
+- **Result.** `video` (768p mp4) and `warnings`. A segment
   renders whole seconds on H3's 17n+5 frame grid, so the video can run up to a second past
   `duration_s`; the edit trims it.
 - **Models.** `minimaxai/minimax-h3@1.0.0-rc.7` and `alibaba-pai/minimax-h3-turbo-lora@1.0.1`.

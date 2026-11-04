@@ -1190,12 +1190,9 @@ def _references_to_video(
     return H3VideoOutput(result.video, notes + result.warnings)
 
 
-def _keep_frames(
-    out: Outputs, exports: Sequence[int], last: list[ImageFile], exported: list[ImageFile], pixels: Any
-) -> None:
-    """A call's delivered `(frames, H, W, 3)` RGB8: its last frame, and the `exports` it returns."""
+def _keep_frames(out: Outputs, last: list[ImageFile], pixels: Any) -> None:
+    """A call's delivered `(frames, H, W, 3)` RGB8: its last frame."""
     last.append(out.save_image(PILImage.fromarray(pixels[-1].numpy())))
-    exported.extend(out.save_image(PILImage.fromarray(pixels[index].numpy())) for index in exports)
 
 
 def _anchors(
@@ -1251,8 +1248,6 @@ class Ref2VAInput(msgspec.Struct):
     #: Keyframes, anchored as ComfyUI's Add Guide anchors them (`anchor_rows`).
     first_frame: FrameImage = None
     last_frame: FrameImage = None
-    #: Delivered frames to return (`SegmentOutput.frames`), by index.
-    exports: tuple[int, ...] = ()
     #: Each picture's short edge in packed order; 0 sizes it as usual.
     picture_edges: tuple[int, ...] = ()
     #: Return the delivered latents (`SegmentOutput.latents`).
@@ -1274,8 +1269,6 @@ class SegmentOutput(msgspec.Struct):
     #: The segment's last delivered frame. A child's result is a granted input of the parent,
     #: so it may feed the next segment (a picture the parent saved itself may not, run 20651).
     last_frame: ImageFile
-    #: The delivered frames the call's `exports` asks for, in order.
-    frames: list[ImageFile]
     #: Its delivered video latents when the call asks (`latents`), else empty: a shot's last
     #: segment decodes them with its own as one.
     latents: LatentFile
@@ -1387,19 +1380,16 @@ async def ref2va_segment(
         head = video_tokens(plan.carried.frames) if plan.carried.frames else 0
         earlier = _Earlier.read(payload.earlier_latents, payload.earlier_videos, head)
     ended: list[ImageFile] = []
-    exported: list[ImageFile] = []
-    skip = 0 if earlier is None else earlier.frames
     segment = _references_to_video(
         ctx, "ref2va" if lora is None else "ref2va_turbo", payload, assets, base_model, out, tel,
         turbo_lora=lora, context=context, delivery=plan,
         expected_context_provenance=context_provenance(payload.previous_provenance or observed),
         completed=handed if handed.wanted else None,
         anchors=_anchors(payload.first_frame, payload.last_frame),
-        ended=partial(_keep_frames, out, tuple(skip + index for index in payload.exports), ended, exported),
+        ended=partial(_keep_frames, out, ended),
         earlier=earlier, sound=sound,
     )  # fmt: skip
-    return SegmentOutput(segment.video, list(segment.warnings), observed, handed.file("context"), ended[0], exported,
-                       handed.file("latents"))  # fmt: skip
+    return SegmentOutput(segment.video, list(segment.warnings), observed, handed.file("context"), ended[0], handed.file("latents"))
 
 
 app.child_task(ref2va_segment)
@@ -1435,8 +1425,6 @@ class FL2VAInput(msgspec.Struct, kw_only=True):
     last_frame: FrameImage = None
     next_context_frames: ContextFrames = 0
     next_context_audio: bool = False
-    #: Delivered frames to return (`SegmentOutput.frames`), by index.
-    exports: tuple[int, ...] = ()
     #: Return the delivered latents (`SegmentOutput.latents`).
     latents: bool = False
 
@@ -1485,7 +1473,6 @@ async def fl2va_segment(
     )  # fmt: skip
     handed = _Segments(out, base_model, plan, observed, payload.latents)
     ended: list[ImageFile] = []
-    exported: list[ImageFile] = []
     shot = _render_keyframes(
         ctx, "fl2va" if lora is None else "fl2va_turbo", base_model, out, tel,
         prompt=encoder_prompt("fl2va", payload.prompt), seed=payload.seed,
@@ -1493,10 +1480,9 @@ async def fl2va_segment(
         first=_frame(payload.first_frame, "first_frame"), last=_frame(payload.last_frame, "last_frame"),
         turbo_lora=lora, preset=payload.preset, delivery=plan if plan.successor else None,
         completed=handed if handed.wanted else None,
-        ended=partial(_keep_frames, out, payload.exports, ended, exported),
+        ended=partial(_keep_frames, out, ended),
     )  # fmt: skip
-    return SegmentOutput(shot.video, list(shot.warnings), observed, handed.file("context"), ended[0], exported,
-                       handed.file("latents"))  # fmt: skip
+    return SegmentOutput(shot.video, list(shot.warnings), observed, handed.file("context"), ended[0], handed.file("latents"))
 
 
 app.child_task(fl2va_segment)
@@ -1673,20 +1659,6 @@ class Continue(ContinueFrom, kw_only=True):
 class GenerateResult(ShotResult):
     #: With `continue_from`: how many seconds of that video this one keeps, where the new part starts.
     kept_s: float | None = None
-    #: The frames `writes` asked for, in that order.
-    written: list[ImageFile] = msgspec.field(default_factory=list)
-
-
-class WorldWrite(msgspec.Struct, kw_only=True):
-    """A screenshot to keep as the next state of the series `of`: the frame at `at_s` on the video's clock, or its last. From the
-    next segment on, `<of>` (and `<name>`, this one frame) is that picture, loose: the picture is the state, and the text says
-    what's happening. `description`: only what the file says of this revision itself, never its series' words, which may no longer
-    be true. In the segment that holds it, a mention is words only: the model remembers."""
-
-    of: str
-    name: str = ""
-    at_s: float | None = None
-    description: str = ""
 
 
 class GenerateTurboInput(msgspec.Struct, kw_only=True):
@@ -1715,7 +1687,6 @@ class GenerateTurboInput(msgspec.Struct, kw_only=True):
     #: (UPSCALE.md); Regenerate starts from its own latents.
     resolution: RegenerateResolution = Resolution.NATIVE
     upscale: Upscale | None = None
-    writes: list[WorldWrite] = msgspec.field(default_factory=list)
     #: The frames each later segment carries from the one before, of 22, 39 or 56; another number takes the nearest, with a warning.
     context_frames: int = 22
 
@@ -1814,27 +1785,6 @@ def plan_segments(duration_s: float, marks: Iterable[float], carried: bool = Fal
                                 f"{past / FPS:.1f} s late: update its timing.")  # fmt: skip
         seconds.append(length)
     return ShotPlan(seconds, [start for start, _ in groups], warnings)
-
-
-def place_writes(writes: Sequence[WorldWrite], opens: Sequence[float], starts: Sequence[int], total: int) -> tuple[list[tuple[int, int, int]], list[str]]:
-    """Which frame each write takes, oldest first: (its position in `writes`, its segment, the frame in that segment's delivery).
-    A segment's text runs on from the time it opens (`opens`) at its first frame (`starts`), so that is what a time counts from;
-    a time that opens a segment belongs to the one before, so that segment reads it. Segment -1 is a continued video's kept part,
-    on that video's clock. A write adds no segment."""
-    ends = [*starts[1:], total]
-    landed, warnings = [], []
-    for position, write in enumerate(writes):
-        if write.at_s is None:
-            landed.append((position, len(opens) - 1, total - 1 - starts[-1]))
-        elif write.at_s * FPS < starts[0]:
-            landed.append((position, -1, max(0, round(write.at_s * FPS))))
-        else:
-            segment = max(index for index, opened in enumerate(opens) if index == 0 or opened < write.at_s - 1e-3)
-            frame, last = round((write.at_s - opens[segment]) * FPS), ends[segment] - starts[segment] - 1
-            if frame > last + FPS and segment == len(opens) - 1:
-                warnings.append(f"the write of <{write.of}> at {write.at_s:g} s is past the video's end, so it takes the last frame")
-            landed.append((position, segment, max(0, min(frame, last))))
-    return sorted(landed, key=lambda place: (place[1], place[2])), warnings
 
 
 def _has_people(payload: GenerateInput) -> bool:
@@ -2114,8 +2064,6 @@ async def generate(ctx: Context, payload: GenerateInput, out: Outputs, tel: Tele
     windows, notes = shot_windows(references, [(start - plan.prefix_frames, plan.sample_frames)
                                                for start, plan in zip(starts, plans, strict=True)])  # fmt: skip
     warnings += notes
-    landed, said = place_writes(payload.writes, [begun + at for at in opens], starts, total)
-    warnings += said
     style, sound, music = payload.style, payload.soundscape, payload.music
     # A segment gets what its text names. A continued segment's place, named by the segment before it too, is that
     # segment's last frame, with the setup plate beside it as an attribute_transfer world state: the plate as the place
@@ -2135,43 +2083,10 @@ async def generate(ctx: Context, payload: GenerateInput, out: Outputs, tel: Tele
     people = _has_people(payload)
     here = "who and what" if people else "what"
     texts = segment_texts(payload.prompt, [begun + at for at in opens], continued=resumed is not None, duration_s=duration_s, carry=carry)
-    # From the segment after a write, its series and its own name are that frame, loose. Its series' description may no
-    # longer be true of it, so that isn't sent.
-    known = {name_key(ref.name): ref for ref in references}
-    series = {name_key(name): write.of for write in payload.writes for name in (write.of, write.name) if name}
-    written: dict[int, File] = {}
-
-    def wrote(position: int, frame: File) -> None:
-        write = payload.writes[position]
-        written[position] = frame
-        for name in filter(None, (write.of, write.name)):
-            files[known[name_key(name)].name if name_key(name) in known else name] = frame
-
-    for position, segment, frame in landed:
-        if segment < 0:
-            assert resumed is not None
-            wrote(position, _resume_frame(resumed.video, frame + 1, out))
     for index, text in enumerate(texts):
         own = [ref for ref in references if ref.kind not in CLIPS or ref.name in windows[index]]
-        states = {}
-        for position, segment, _ in landed:
-            if segment < index:
-                write = payload.writes[position]
-                for name in filter(None, (write.of, write.name)):
-                    base = known.get(name_key(name))
-                    states[name_key(name)] = StoryReference(name=base.name if base else name, kind="world_state", description=write.description)
-        own = [states.get(name_key(ref.name), ref) for ref in own] + [state for key, state in states.items() if key not in known]
-
-        def words_only(token: re.Match[str]) -> str:
-            """A mention of a state with no picture yet: the series' own picture, if it has one, else plain words."""
-            key = name_key(token[1])
-            if key not in series or key in known or key in states:
-                return token[0]
-            return f"<{series[key]}>" if name_key(series[key]) in known | states else series[key]
-
-        text = MENTION.sub(words_only, text)
         named = named_in(text, references)
-        places = frozenset(name for name in plates if name in named and name_key(name) not in states and (index == 0 or name in named_before))
+        places = frozenset(name for name in plates if name in named and (index == 0 or name in named_before))
         named_before = named
         carried.append(places if index else frozenset())
         beside = [plates[name] for name in plates if name in places]
@@ -2234,8 +2149,6 @@ async def generate(ctx: Context, payload: GenerateInput, out: Outputs, tel: Tele
         last = payload.last_frame if index + 1 == count else None
         end_segment = joined and index + 1 == count
         span = (sum(work[:index]) / sum(work), sum(work[: index + 1]) / sum(work))
-        here_written = [place for place in landed if place[1] == index]
-        exports = tuple(frame for _, _, frame in here_written)
         try:
             with tel.scope(f"Segment {index + 1} of {count}", overall_range=span):
                 log_prompt(tel, "h3 segment prompt", call.prompt, segment=index + 1,
@@ -2251,7 +2164,7 @@ async def generate(ctx: Context, payload: GenerateInput, out: Outputs, tel: Tele
                             context_audio=plan.carried.audio,
                             next_context_frames=cast(ContextFrames, plan.successor.frames),
                             next_context_audio=plan.successor.audio, first_frame=first, last_frame=last,
-                            latents=True, exports=exports,
+                            latents=True,
                             earlier_latents=(*before[0], *(r.latents for r in returned)) if end_segment else (),
                             earlier_videos=(*before[1], *(r.video for r in returned)) if end_segment else (),
                             picture_edges=tuple(_LOOSE_EDGE if ref.kind == "world_state" else 0
@@ -2265,7 +2178,7 @@ async def generate(ctx: Context, payload: GenerateInput, out: Outputs, tel: Tele
                             prompt=call.prompt, seed=seeds[index], duration_s=segments[index], steps=steps,
                             turbo=turbo, preset=payload.preset, first_frame=first, last_frame=last,
                             next_context_frames=cast(ContextFrames, plan.successor.frames),
-                            next_context_audio=plan.successor.audio, latents=True, exports=exports,
+                            next_context_audio=plan.successor.audio, latents=True,
                         ),
                     )  # fmt: skip
         except ChildCallError:
@@ -2277,8 +2190,6 @@ async def generate(ctx: Context, payload: GenerateInput, out: Outputs, tel: Tele
         returned.append(result)
         warnings += result.warnings
         files[f"Segment {index + 1} end"] = result.last_frame
-        for (position, _, _), frame in zip(here_written, result.frames, strict=True):
-            wrote(position, frame)
         out.publish("video", result.video, label="Video" if index + 1 == count else f"Segment {index + 1} of {count}")
     latents = _shot_latents(out, [*before[0], *(r.latents for r in returned)], total, returned[-1].context,
                             _upscale_prompt(payload))  # fmt: skip
@@ -2293,10 +2204,9 @@ async def generate(ctx: Context, payload: GenerateInput, out: Outputs, tel: Tele
         warnings += upscaled.warnings
         out.publish("video", video, label=f"Video at {payload.resolution.value}")
     ctx.release_gpus()
-    tel.log("h3 shot", segments=count, delivered_frames=total, turbo=turbo, preset=payload.preset, writes=len(written))
+    tel.log("h3 shot", segments=count, delivered_frames=total, turbo=turbo, preset=payload.preset)
     return GenerateResult(video=video, warnings=list(dict.fromkeys(warnings)), latents=latents,
-                          kept_s=done / FPS if resumed is not None else None,
-                          written=[written[position] for position in range(len(payload.writes))])  # fmt: skip
+                          kept_s=done / FPS if resumed is not None else None)  # fmt: skip
 
 
 def _shot_latents(out: Outputs, parts: Sequence[File], frames: int, context: File, text: str) -> File:
@@ -2611,8 +2521,7 @@ def adapt_upscale(op: UpscaleOperation) -> list[Invocation]:
 
 def _shot(op: VideoOperation | TurboOperation | FullOperation) -> list[Invocation]:
     """A shot: its summary, its beats on one timeline, sound, and what it reads. One call of any length: `generate` plans its
-    segments. Its writes go along: `generate` makes those frames and uses them. The function its node names, else `generate`, with
-    `turbo` as the file says."""
+    segments. The function its node names, else `generate`, with `turbo` as the file says."""
     options, warned = _options(op, _SHOT_OPTIONS)
     if op.function:
         for key in filter(options.__contains__, ("turbo", "steps") if op.function == "generate_turbo" else ("turbo",)):
@@ -2620,7 +2529,7 @@ def _shot(op: VideoOperation | TurboOperation | FullOperation) -> list[Invocatio
             del options[key]
         if op.function == "generate":
             options["turbo"] = False
-    f, at, told, moments = op.fields, 0.0, [], {}
+    f, at, told = op.fields, 0.0, []
     for number, beat in enumerate(f.beats):
         length = beat.duration or _BEAT_S
         if not beat.duration:
@@ -2629,7 +2538,6 @@ def _shot(op: VideoOperation | TurboOperation | FullOperation) -> list[Invocatio
             warned.append(f"{op.asset}'s beat {number + 1} is {length:g} s and a beat holds {MAX_DURATION_S} s at most: it lasts {MAX_DURATION_S} s")
             length = MAX_DURATION_S
         told.append(f"{'' if number else '[Shot 1] '}{f'At {_clock(at)}, ' if at else ''}{_kept(beat.description)}")
-        moments |= {name_key(write.image): at + (length if write.at is None else min(write.at, length)) for write in beat.writes}
         at += length
     # A mention with no file behind it, such as an entity with no links, is words: its name and description, with no reference.
     written = f.summary or f.instructions
@@ -2655,11 +2563,6 @@ def _shot(op: VideoOperation | TurboOperation | FullOperation) -> list[Invocatio
             request[field] = read.files_of("image")[0].sha256
     if f.plate and (read := _read_named(op, f.plate.video)) and read.files_of("video"):
         request["plate"] = {"video": read.files_of("video")[0].sha256} | ({"use_audio": True} if f.plate.use_audio else {})
-    if op.writes:
-        request["writes"] = [{"of": write.name.rpartition(".")[0] if write.name.rpartition(".")[2].isdigit() else write.name,
-                              "name": spoken(f"<{write.name}>")[1:-1], "at_s": moments.get(name_key(write.name), write.at_s),
-                              "description": str(write.fields.get("description", ""))}
-                             for write in op.writes]  # fmt: skip
     if kept is not None:
         request["continue_from"] = kept
     return [Invocation(function=op.function or "generate", input=request, warnings=warned)]
