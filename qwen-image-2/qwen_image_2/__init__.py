@@ -12,16 +12,12 @@ from cozy_runtime.author import (
     App,
     Context,
     Invocation,
-    Operation,
     Picture,
-    PictureFields,
     PictureOperation,
     ImageRequest,
     ImageResult,
     Memoize,
     Outputs,
-    Refuse,
-    SetupOperation,
     Sizes,
     Telemetry,
     held,
@@ -205,27 +201,30 @@ def generate_turbo(
     return _generate(ctx, payload, model, out, tel, adj, TURBO_SIGMAS)
 
 
-# --- project adapters: Qwen's words for a project's pictures, tuned by eye on this model (cl-726) ------
-
-
-def _styled(text: str, style: str) -> str:
-    return f"Style: {style.strip().rstrip('.')}.\n\n{text}" if style.strip() else text
-
-
-def _said(fields: PictureFields) -> str:
-    return "\n\n".join(filter(None, (fields.description.strip(), fields.instructions.strip())))
+# --- project adapter: an image asset, in the words this model was tuned by eye on (cl-726) ------
 
 
 #: `GenerateInput.pictures`' most.
 _MAX_PICTURES = 10
-#: What a project's `options` may set: `turbo` picks the function, and the rest are this function's own fields.
+#: What a project's `render` may set: `turbo` picks the function, `transparent` adds the words of Qwen's model card, and the rest are
+#: the function's own fields.
 _OPTIONS = ("seed", "megapixels", "aspect_ratio", "steps", "guidance", "negative_prompt", "prompt_upsampling", "preset")
 
 
-def _picture(op: Operation, fields: PictureFields, prompt: str) -> list[Invocation]:
-    """One picture, from the pictures it reads: `options.turbo` is `generate_turbo`, else `generate`."""
-    options, warned = op.known_options(("turbo", *_OPTIONS))
-    # All of a read's images: `<kyogre>` means its first, and the rest are `<kyogre 2>`, `<kyogre 3>`.
+@app.project_adapter("image")
+def adapt_image(op: PictureOperation) -> list[Invocation]:
+    """The style, what it says, and what each picture it mentions is: a mention reads as `<image3>` alone, and with no words for it a
+    third picture was dropped in 3 of 3 seeds (runs 27130, 27161, 27174), kept with them (27190, 27200). Pictures are all of what it
+    mentions: `<kyogre>` means a read's first, and the rest are `<kyogre 2>`, `<kyogre 3>`."""
+    f = op.fields
+    options, warned = op.known_options(("turbo", "transparent", *_OPTIONS))
+    said = [f.description.strip(), f.instructions.strip(), "\n".join(
+        f"<{read.name}>: {text}" for read in op.reads if (text := str(read.fields.get("description", "")).strip()))]  # fmt: skip
+    prompt = "\n\n".join(filter(None, said))
+    if style := f.style.strip():
+        prompt = f"Style: {style.rstrip('.')}.\n\n{prompt}"
+    if options.get("transparent"):
+        prompt = f"This is an RGBA image with transparency. {prompt}\n\nThe image has alpha channel and the background is transparent."
     pictures = [{"name": f"{name} {number + 1}" if number else name, "image": picture.sha256}
                 for read in op.reads for name in (spoken(f"<{read.name}>")[1:-1],)
                 for number, picture in enumerate(read.files_of("image"))]  # fmt: skip
@@ -233,50 +232,7 @@ def _picture(op: Operation, fields: PictureFields, prompt: str) -> list[Invocati
         warned.append(f"{op.asset} reads {len(pictures)} pictures and Qwen takes {_MAX_PICTURES}: it uses the first {_MAX_PICTURES}")
         del pictures[_MAX_PICTURES:]
     request: dict[str, Any] = {"prompt": spoken(prompt), "pictures": pictures}
-    if fields.aspect_ratio:
-        request["aspect_ratio"] = fields.aspect_ratio
-    request |= {key: value for key, value in options.items() if key != "turbo"}
+    if f.aspect_ratio:
+        request["aspect_ratio"] = f.aspect_ratio
+    request |= {key: value for key, value in options.items() if key not in ("turbo", "transparent")}
     return [Invocation(function="generate_turbo" if options.get("turbo") else "generate", input=request, warnings=warned)]
-
-
-@app.project_adapter("character", "prop")
-def adapt_subject(op: PictureOperation) -> list[Invocation]:
-    """On a blank background: the style, what it is, then how to draw it, in the words of Qwen's model card for transparency, since
-    a reference needs its subject alone. No layout is assumed."""
-    return _picture(op, op.fields, f"This is an RGBA image with transparency. {_styled(_said(op.fields), op.fields.style)}\n\n"
-                                   "The image has alpha channel and the background is transparent.")  # fmt: skip
-
-
-@app.project_adapter("environment")
-def adapt_environment(op: PictureOperation) -> list[Invocation]:
-    """A place with no people, instructions or not: with none, an establishing view of the empty set."""
-    f = op.fields
-    last = "The empty set, no people." if f.instructions.strip() else "An establishing view of the empty set, no people."
-    return _picture(op, f, _styled(f"{_said(f)}\n\n{last}", f.style))
-
-
-@app.project_adapter("storyboard", "world_state")
-def adapt_storyboard(op: PictureOperation) -> list[Invocation]:
-    """Characters in a place at a moment: the pictures it mentions, composed into one, as written. Each picture's own
-    description follows, since a mention reads as `<image3>` alone: with no words for it, a third picture was dropped in 3 of 3
-    seeds (runs 27130, 27161, 27174), and with them kept (27200)."""
-    described = [f"<{read.name}>: {text}" for read in op.reads if (text := str(read.fields.get("description", "")).strip())]
-    return _picture(op, op.fields, "\n\n".join(filter(None, (_said(op.fields), "\n".join(described)))))
-
-
-@app.project_adapter("setup")
-def adapt_setup(op: SetupOperation) -> list[Invocation]:
-    """A place from a camera position, in screen terms as written: bare camera words return a mirror (environment-angles)."""
-    f = op.fields
-    if not op.reads:
-        raise Refuse(f"{op.asset} is a setup that names no place")
-    place, kept = op.reads[0].name, "the picture" if f.from_frame else "the image"
-    opening = f"Show the place in this picture, <{place}>, with nobody in it," if f.from_frame else f"Show this exact <{place}>"
-    return _picture(op, f, f"{opening} from another camera position: {f.camera.strip().rstrip('.')}. Keep every object, material, "
-                           f"the light and the weather exactly as in {kept}; add nothing new, no people.")  # fmt: skip
-
-
-@app.project_adapter("image")
-def adapt_image(op: PictureOperation) -> list[Invocation]:
-    """What it says, as it says it."""
-    return _picture(op, op.fields, _styled(_said(op.fields), op.fields.style))

@@ -75,8 +75,7 @@ from cozy_runtime.author import (
     OperationFile,
     Read,
     Refuse,
-    ShotOperation,
-    UpscaleOperation,
+    ShotFields,
     name_key,
     spoken,
 )
@@ -1679,7 +1678,7 @@ class GenerateResult(ShotResult):
 
 class WorldWrite(msgspec.Struct, kw_only=True):
     """A screenshot to keep as the next state of the series `of`: the frame at `at_s` on the video's clock, or its last. From the
-    next segment on, `<of>` (and `<name>`, this one frame) is that picture as a world state: the picture is the state, and the text says
+    next segment on, `<of>` (and `<name>`, this one frame) is that picture, loose: the picture is the state, and the text says
     what's happening. `description`: only what the file says of this revision itself, never its series' words, which may no longer
     be true. In the segment that holds it, a mention is words only: the model remembers."""
 
@@ -2130,7 +2129,7 @@ async def generate(ctx: Context, payload: GenerateInput, out: Outputs, tel: Tele
     people = _has_people(payload)
     here = "who and what" if people else "what"
     texts = segment_texts(payload.prompt, [begun + at for at in opens], continued=resumed is not None, duration_s=duration_s, carry=carry)
-    # From the segment after a write, its series and its own name are that frame, as a world state. Its series' description may no
+    # From the segment after a write, its series and its own name are that frame, loose. Its series' description may no
     # longer be true of it, so that isn't sent.
     known = {name_key(ref.name): ref for ref in references}
     series = {name_key(name): write.of for write in payload.writes for name in (write.of, write.name) if name}
@@ -2432,8 +2431,9 @@ def _made_here(read_or_take: Read | Keep) -> bool:
 
 
 def _reference(read: Read, warned: list[str]) -> dict[str, Any]:
-    """What a shot reads, as `generate` takes it: by what its files and kind are. A storyboard or a world state is a loose picture: a layout to start
-    from, read at 512 px only by a segment whose text names it, not a look to reproduce."""
+    """What a shot reads, as `generate` takes it. An entity's kind says what it is: a character or prop as pictured, an environment as
+    the set. A plain image is a loose picture: a layout to start from, read at 512 px only by a segment whose text names it, not a
+    look to reproduce."""
     entry: dict[str, Any] = {k: v for k, v in read.fields.items() if k in ("use_audio", "follow")}
     entry["name"] = spoken(f"<{read.name}>")[1:-1]
 
@@ -2454,17 +2454,17 @@ def _reference(read: Read, warned: list[str]) -> dict[str, Any]:
     entry["image"] = picture.sha256
     if description := read.fields.get("description") or "":
         entry["description"] = description
-    if read.kind in ("storyboard", "world_state"):
-        return entry | {"kind": "environment", "follow": "loose"}
-    if read.kind in ("environment", "setup"):
+    if read.kind == "environment":
         return entry | {"kind": "environment"}
+    if read.kind not in ("character", "prop"):
+        return entry | {"kind": "environment", "follow": "loose"}
     if read.kind == "character" and (voice := first("voice") or first("audio")):
         entry["voice"] = voice.sha256
     # Only a drawn picture: an imported one may be opaque on purpose, as `--remove-background` leaves it, on white.
     if read.kind in ("character", "prop") and picture.alpha < _TRANSPARENT and read.made_by:
         warned.append(f"<{read.name}>'s picture is opaque, so its background goes into the shot: draw it on a blank background, or "
                       "import a picture with `cozy project import --remove-background`")  # fmt: skip
-    return entry | {"kind": read.kind if read.kind in ("character", "prop") else "prop"}
+    return entry | {"kind": read.kind}
 
 
 def _has_media(read: Read) -> bool:
@@ -2489,8 +2489,36 @@ def _kept_take(op: Operation, keep: Keep, end: float, warned: list[str]) -> dict
     return {"video": keep.video.sha256, "latents": keep.latents.sha256} | ({"at_s": at_s} if at_s is not None else {})
 
 
-@app.project_adapter("shot")
-def adapt_shot(op: ShotOperation) -> list[Invocation]:
+class VideoFields(ShotFields, kw_only=True):
+    """A shot's fields, or a shot taken up: `video` mentions it, `resolution` is its short edge (`1440p`). `instructions` is a shot's
+    text when it has no summary or beats."""
+
+    instructions: str = ""
+    video: str = ""
+    resolution: str | None = None
+
+
+class VideoOperation(Operation, kw_only=True):
+    fields: VideoFields
+
+
+@app.project_adapter("video")
+def adapt_video(op: VideoOperation) -> list[Invocation]:
+    """A video this package makes: by its fields, a shot (`summary`, `beats`), or an upscale (a `video` it reads, with a `resolution`)."""
+    f = op.fields
+    if f.summary or f.beats:
+        made = _shot(op)
+        if f.video:
+            made[0].warnings.append(f"{op.asset} has a summary or beats and a `video`: it's a shot, and `video` is ignored")
+        return made
+    if f.video or f.resolution:
+        return _upscale(op)
+    if f.instructions.strip():
+        return _shot(op)
+    raise Refuse(f"{op.asset} says nothing to make: a video needs a summary or beats, a render prompt, or a `video` to upscale")
+
+
+def _shot(op: VideoOperation) -> list[Invocation]:
     """A shot: its summary, its beats on one timeline, sound, and what it reads. One call of any length: `generate` plans its
     segments. Its writes go along: `generate` makes those frames and uses them."""
     options, warned = op.known_options(_SHOT_OPTIONS)
@@ -2500,19 +2528,20 @@ def adapt_shot(op: ShotOperation) -> list[Invocation]:
             warned.append(f"{op.asset}'s beat {number + 1} has no duration: it lasts {_BEAT_S:g} s")
         told.append(f"{'' if number else '[Shot 1] '}{f'At {_clock(at)}, ' if at else ''}{_kept(beat.description)}")
         length = beat.duration or _BEAT_S
-        moments |= {name_key(write.world_state): at + (length if write.at is None else write.at) for write in beat.writes}
+        moments |= {name_key(write.image): at + (length if write.at is None else write.at) for write in beat.writes}
         at += length
     # A mention with no file behind it, such as an entity with no links, is words: its name and description, with no reference.
-    said = {name_key(name) for text in (f.summary, *(beat.description for beat in f.beats)) for name in MENTION.findall(text)}
+    written = f.summary or f.instructions
+    said = {name_key(name) for text in (written, *(beat.description for beat in f.beats)) for name in MENTION.findall(text)}
     bare = {name_key(read.name): read for read in op.reads if name_key(read.name) in said and not _has_media(read)}
     described = [f"{spoken(f'<{read.name}>')[1:-1]}: {_kept(text)}" for read in bare.values() if (text := str(read.fields.get("description", "")).strip())]
-    summary, end = "\n".join(filter(None, (_kept(f.summary), *described))), at or 15.0
+    summary, end = "\n".join(filter(None, (_kept(written), *described))), at or 15.0
     prompt = "\n\n".join(filter(None, (summary and f"summary:\n{summary}", "detailed_description:\n" + "\n".join(told)))) if told else f"[Shot 1] {summary}"  # fmt: skip
     prompt = MENTION.sub(lambda found: spoken(found[0])[1:-1] if name_key(found[1]) in bare else found[0], prompt)
     warned += [f"<{read.name}> has a voice and no picture, and H3 takes a voice only beside a character's picture: it isn't sent"
                for read in bare.values() if read.files_of("voice")]  # fmt: skip
     reads = [read for read in op.reads if name_key(read.name) in said and _has_media(read)]
-    reads.sort(key=lambda read: not read.files_of("image") or read.kind == "")
+    reads.sort(key=lambda read: not read.files_of("image"))
     request: dict[str, Any] = {"prompt": spoken(prompt), "duration_s": end, "references": [_reference(read, warned) for read in reads]}
     request |= {key: str(value).strip() for key in ("soundscape", "music") if (value := options.pop(key, ""))}
     request |= {key: value.strip() for key in ("style", "soundscape", "music") if (value := getattr(f, key))}
@@ -2535,8 +2564,7 @@ def adapt_shot(op: ShotOperation) -> list[Invocation]:
     return [Invocation(function="generate", input=request, warnings=warned)]
 
 
-@app.project_adapter("upscale")
-def adapt_upscale(op: UpscaleOperation) -> list[Invocation]:
+def _upscale(op: VideoOperation) -> list[Invocation]:
     """A shot's video taken up to `resolution`, from the text it was made from (Paul, 10-31), its names without brackets: the
     re-render attaches no reference. No run at or above that size: this asset is what it reads."""
     shot = next((read for read in op.reads if read.files_of("video")), None)

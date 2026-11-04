@@ -404,7 +404,7 @@ def _segment_call(
                 retention.append(f"<{ref.name}>: attribute_transfer - keep the set's arrangement and {kept} "
                                  f"from {slot}, not its exact frame, framing or moment.")
             elif (ref.name, "picture") not in retained and not author.get(name_key(ref.name)):
-                # A storyboard or a world state: a layout to start from, never a look to keep (Paul, 11-03).
+                # A plain image: a layout to start from, never a look to keep (Paul, 11-03).
                 layout = "characters and background" if characters else "the set"
                 retention.append(f"<{ref.name}>: attribute_transfer - use the layout of {layout} in {slot} as a starting point, "
                                  "not its exact frame, framing or moment.")
