@@ -2468,10 +2468,9 @@ class UpscaleFields(msgspec.Struct, kw_only=True):
 
     video: Annotated[str, msgspec.Meta(extra={"accept": "video"})] = ""
     resolution: Literal["1080p", "1440p", "2160p"] = "1440p"
-    style: str = ""
-    preset: Preset = "balanced"
     #: What Regenerate re-renders from when the video has no latents of ours. The box asks for the rest.
     instructions: Annotated[str, msgspec.Meta(extra={"hidden": True})] = ""
+    style: Annotated[str, msgspec.Meta(extra={"hidden": True})] = ""
 
 
 class UpscaleOperation(Operation, kw_only=True):
