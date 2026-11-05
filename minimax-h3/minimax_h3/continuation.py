@@ -40,7 +40,8 @@ AUDIO_TICKS = 40
 AUDIO_TICKS_PER_S = 40
 MAX_FRAMES = 362
 MAX_CONTEXT_BYTES = 16 << 20
-MAX_CONTEXT_PIXELS = 1344 * 768
+#: A canvas's area, with room for its sides rounding up to the 32 px grid past H3's 1344x768 (a 1280x2784 picture).
+MAX_CONTEXT_PIXELS = 1344 * 768 * 5 // 4
 CONTEXT_SCHEMA = "cozy.minimax-h3.av-context/3"
 
 
