@@ -197,7 +197,7 @@ _MEMO = ("qwen_image_2", "qwen_image_2.model")
     defaults={"model": "qwen/qwen-image-2.1@0.1.0"},
     memoize=Memoize(requires=["seed"]),
     memo_dependencies=_MEMO,
-    node=Node(label="Qwen Image 2"),
+    node=Node(name="image", label="Qwen Image 2"),
 )
 def generate(
     ctx: Context,
@@ -215,7 +215,7 @@ def generate(
     defaults={"model": "qwen/qwen-image-2.1-turbo@0.1.1"},
     memoize=Memoize(requires=["seed"]),
     memo_dependencies=_MEMO,
-    node=Node(label="Qwen Image 2 Turbo"),
+    node=Node(name="image", label="Qwen Image 2 Turbo"),
 )
 def generate_turbo(
     ctx: Context,

@@ -2324,6 +2324,7 @@ async def upscale(ctx: Context, payload: UpscaleInput, out: Outputs, tel: Teleme
 
 
 app.entrypoint(generate, emits_media=True, accelerator=False, node=Node(
+    name="shot",
     label="MiniMax H3",
     show=["soundscape", "music"],
     hide=["steps", "upscale", "context_frames", "plate"],
@@ -2339,6 +2340,7 @@ app.entrypoint(generate, emits_media=True, accelerator=False, node=Node(
     ],
 ))  # fmt: skip
 app.entrypoint(upscale, emits_media=True, accelerator=False, node=Node(
+    name="upscale",
     label="MiniMax H3 Upscale",
     hide=["upscale", "preset"],
     fill={"latents": "video.latents", "prompt": "video.description"},
