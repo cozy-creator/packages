@@ -8,21 +8,21 @@ import msgspec
 import torch
 from cozy_runtime import stepcache
 from cozy_runtime.author import (
-    OutputError,
     Adjustments,
     App,
     AspectRatio,
     Context,
-    Picture,
     ImageFile,
     ImagePreparation,
-    ImageRequest,
     ImageResult,
     Memoize,
-    ModelDefault,
     Node,
+    OutputError,
     Outputs,
+    Picture,
+    PictureRequest,
     Sizes,
+    Steps,
     Telemetry,
     held,
     name_label,
@@ -53,19 +53,23 @@ class Mentioned(Picture, kw_only=True):
     """A picture, or with no file an asset that's only words, which its `description` gives the model."""
 
     image: Annotated[ImageFile, ImagePreparation(max_pixels=16 << 20)] | None = None
+    description: str = ""
 
 
-class GenerateInput(ImageRequest):
+class TurboInput(PictureRequest):
     pictures: Annotated[list[Mentioned], msgspec.Meta(max_length=10)] = msgspec.field(
         default_factory=list
     )
     #: Bounds for a box, not refusals: past them `_generate` holds it and says so.
     aspect_ratio: Annotated[AspectRatio | None, msgspec.Meta(extra={"min": 0.0625, "max": 16})] = None
     megapixels: Annotated[float | None, msgspec.Meta(extra={"min": MIN_MEGAPIXELS, "max": MAX_MEGAPIXELS})] = None
-    steps: Annotated[ModelDefault[Annotated[int, msgspec.Meta(ge=1)] | None], msgspec.Meta(extra={"max": _MAX_STEPS})] = None
     #: Speed against fidelity: `fast` reuses the transformer's cached residual on steps that
     #: change it little (`CACHE`); `quality` and `balanced` run every step.
     preset: Literal["quality", "balanced", "fast"] = "balanced"
+
+
+class GenerateInput(TurboInput):
+    steps: Annotated[Steps, msgspec.Meta(extra={"max": _MAX_STEPS})] = None
 
 
 #: The text-to-image denoise's step cache per preset (`stepcache`): FirstBlockCache 0.08 for
@@ -110,7 +114,7 @@ def decoded_image(decoded: Any) -> Image.Image:
     return Image.fromarray(pixels.contiguous().cpu().numpy())
 
 
-def _said(payload: GenerateInput) -> str:
+def _said(payload: TurboInput) -> str:
     """Its text, and what each picture it mentions is: a mention reads as `<image3>` alone, and with no words for it a third picture was
     dropped in 3 of 3 seeds (runs 27130, 27161, 27174), kept with them (27190, 27200)."""
     words = "\n".join(f"<{picture.name}>: {picture.description.strip()}" for picture in payload.pictures if picture.description.strip())
@@ -119,27 +123,19 @@ def _said(payload: GenerateInput) -> str:
 
 def _generate(
     ctx: Context,
-    payload: GenerateInput,
+    payload: TurboInput,
     model: QwenImage21Model,
     out: Outputs,
     tel: Telemetry,
     adj: Adjustments,
+    steps: int,
     sigmas: tuple[float, ...] | None,
 ) -> ImageResult:
     """Both functions' body: `sigmas` is the distilled schedule (`generate_turbo`), else the base
     model's uniform spacing."""
-    payload.ignored(adj, "guidance", "negative_prompt", "prompt_upsampling",
-                    reason="Qwen-Image-2.1 samples without CFG and has no prompt upsampler")
     said = _said(payload)
     payload = msgspec.structs.replace(payload, pictures=[picture for picture in payload.pictures if picture.image is not None])
-    payload.unplaced(adj, "Qwen-Image-2.1 has no layout control")
     prompt = render(said, payload.pictures, label if len(payload.pictures) > 1 else name_label, adj=adj, listed="pictures")
-    if sigmas:
-        steps = len(sigmas)
-        if payload.steps not in (None, steps):
-            adj.clamp("steps", payload.steps, steps, "Turbo's own distilled schedule")
-    else:
-        steps = held(adj, "steps", payload.steps or _STEPS, 1, _MAX_STEPS)
     tel.log("sampling", regime="turbo" if sigmas else "base", steps=steps,
             schedule="distilled sigmas" if sigmas else "uniform, dynamic shift")
     seed = payload.drawn_seed()
@@ -201,7 +197,7 @@ _MEMO = ("qwen_image_2", "qwen_image_2.model")
     defaults={"model": "qwen/qwen-image-2.1@0.1.0"},
     memoize=Memoize(requires=["seed"]),
     memo_dependencies=_MEMO,
-    node=Node(label="Qwen Image 2", hide=["guidance", "negative_prompt", "prompt_upsampling"]),
+    node=Node(label="Qwen Image 2"),
 )
 def generate(
     ctx: Context,
@@ -212,22 +208,22 @@ def generate(
     adj: Adjustments,
 ) -> ImageResult:
     """Qwen-Image-2.1, the 40-step base model."""
-    return _generate(ctx, payload, model, out, tel, adj, None)
+    return _generate(ctx, payload, model, out, tel, adj, held(adj, "steps", payload.steps or _STEPS, 1, _MAX_STEPS), None)
 
 
 @app.entrypoint(
     defaults={"model": "qwen/qwen-image-2.1-turbo@0.1.1"},
     memoize=Memoize(requires=["seed"]),
     memo_dependencies=_MEMO,
-    node=Node(label="Qwen Image 2 Turbo", hide=["steps", "guidance", "negative_prompt", "prompt_upsampling"]),
+    node=Node(label="Qwen Image 2 Turbo"),
 )
 def generate_turbo(
     ctx: Context,
-    payload: GenerateInput,
+    payload: TurboInput,
     model: QwenImage21Model,
     out: Outputs,
     tel: Telemetry,
     adj: Adjustments,
 ) -> ImageResult:
     """Qwen-Image-2.1-Turbo: the same inputs, on its 8-step distilled schedule."""
-    return _generate(ctx, payload, model, out, tel, adj, TURBO_SIGMAS)
+    return _generate(ctx, payload, model, out, tel, adj, len(TURBO_SIGMAS), TURBO_SIGMAS)

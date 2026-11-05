@@ -11,16 +11,21 @@ from cozy_runtime.author import (
     Adjustments,
     App,
     Context,
-    Picture,
-    ImageRequest,
+    Guidance,
     ImageResult,
     Memoize,
+    NegativePrompt,
     Outputs,
+    Picture,
+    PictureRequest,
+    PlacedPicture,
     Region,
     Sizes,
+    Steps,
     Telemetry,
     corners,
     held,
+    placements,
 )
 from PIL import Image
 
@@ -48,15 +53,22 @@ SIZES = Sizes((MIN_SIDE**2 / MEGAPIXEL, MATCH_MAX_PIXELS / MEGAPIXEL), (MIN_SIDE
               "the sizes Klein admits")
 
 
-class GenerateInput(ImageRequest):
-    pictures: Annotated[list[Picture], msgspec.Meta(max_length=10)] = msgspec.field(
+class TurboInput(PictureRequest):
+    pictures: Annotated[list[PlacedPicture], msgspec.Meta(max_length=10)] = msgspec.field(
         default_factory=list
     )
+    steps: Steps = None
+    prompt_upsampling: bool | None = None
     #: Elements and rendered text placed by box, described in words.
     regions: list[Region] | None = None
     #: Upsample with Qwen3.5-9B's MTP head drafting tokens (1.1-1.2× faster a caption on a 4090);
     #: its first use downloads the 0.5 GB head.
     prompt_drafting: bool = True
+
+
+class GenerateInput(TurboInput):
+    guidance: Guidance = None
+    negative_prompt: NegativePrompt = None
 
 
 def _render(
@@ -122,7 +134,7 @@ def _render(
 
 
 def _layout(
-    adj: Adjustments, payload: GenerateInput, images: list[Image.Image], placed: bool
+    adj: Adjustments, payload: TurboInput, images: list[Image.Image], placed: bool
 ) -> tuple[list[Image.Image], tuple[int, int], tuple[int, int, int, int] | None, str | None]:
     """The prepared references, the output size, the crop after decoding and the upsampler's canvas.
     No references, or references placed by box (elements, not the canvas): the ratio (1:1) at the
@@ -164,11 +176,11 @@ def tagged(n: int, picture: Picture) -> str:
     return f"<ref_image_{n - 1}>"
 
 
-def layout_rows(payload: GenerateInput) -> list[Row]:
+def layout_rows(payload: TurboInput) -> list[Row]:
     """Klein's table rows for the request's boxes: a placed picture is `ref_image_<i>` at its box (the
     upsampler describes it from the image); a region is a new element, its text quoted in the desc."""
     rows: list[Row] = []
-    for i, box in enumerate(payload.placements()):
+    for i, box in enumerate(placements(payload.pictures)):
         if box is not None:
             rows.append({"id": f"obj_{len(rows) + 1}", "from": f"ref_image_{i}", "src_bbox": None,
                          "tgt_bbox": canvas_box(box), "desc": ""})
@@ -181,16 +193,16 @@ def layout_rows(payload: GenerateInput) -> list[Row]:
     return rows
 
 
-def _generate(ctx: Context, function: str, payload: GenerateInput, drafter: Drafter, model: Klein,
+def _generate(ctx: Context, function: str, payload: TurboInput, drafter: Drafter, model: Klein,
               upsampler: Upsampler, out: Outputs, tel: Telemetry, adj: Adjustments) -> ImageResult:
     default, most = _STEPS[function]
     steps = held(adj, "steps", payload.steps or default, 1, most)
-    if function == "generate":
+    guidance: float | None = None
+    negative = ""
+    if isinstance(payload, GenerateInput):
         given = _GUIDANCE if payload.guidance is None else payload.guidance
-        guidance: float | None = held(adj, "guidance", given, 1.0, _MAX_GUIDANCE)
-    else:
-        guidance = None
-        payload.ignored(adj, "guidance", "negative_prompt", reason="the distilled Klein samples without CFG")
+        guidance = held(adj, "guidance", given, 1.0, _MAX_GUIDANCE)
+        negative = payload.negative_prompt or ""
     rows = layout_rows(payload)
     images = [asset.read() for asset in payload.images()]
     placed = any(picture.box is not None for picture in payload.pictures)
@@ -201,7 +213,7 @@ def _generate(ctx: Context, function: str, payload: GenerateInput, drafter: Draf
     prompt = payload.rendered(adj, (ref_id if rows else ordinal) if upsample else tagged)
     return _render(ctx, model, upsampler, drafter, out, tel, adj, prompt=prompt, upsample=upsample,
                    draft=payload.prompt_drafting, images=images, prepared=prepared, size=size, crop=crop,
-                   canvas=canvas, rows=rows, steps=steps, guidance=guidance, negative=payload.negative_prompt or "",
+                   canvas=canvas, rows=rows, steps=steps, guidance=guidance, negative=negative,
                    seed=payload.drawn_seed())
 
 
@@ -229,7 +241,7 @@ def generate(ctx: Context, payload: GenerateInput, drafter: Drafter, model: Klei
 
 @app.entrypoint(defaults=_DISTILLED, components=_COMPONENTS, on_demand=_ON_DEMAND,
                 memoize=Memoize(requires=["seed"]))
-def generate_turbo(ctx: Context, payload: GenerateInput, drafter: Drafter, model: Klein, upsampler: Upsampler,
+def generate_turbo(ctx: Context, payload: TurboInput, drafter: Drafter, model: Klein, upsampler: Upsampler,
                    out: Outputs, tel: Telemetry, adj: Adjustments) -> ImageResult:
     """The distilled Klein, 16 steps, no guidance: text to image, or an edit of up to ten ordered pictures."""
     return _generate(ctx, "generate_turbo", payload, drafter, model, upsampler, out, tel, adj)

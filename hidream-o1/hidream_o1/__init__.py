@@ -10,14 +10,18 @@ from cozy_runtime.author import (
     Adjustments,
     App,
     Context,
-    Picture,
-    ImageRequest,
+    Guidance,
     ImageResult,
     Memoize,
+    NegativePrompt,
     Outputs,
+    PictureRequest,
+    PlacedPicture,
     Sizes,
+    Steps,
     Telemetry,
     held,
+    placements,
 )
 from PIL import Image
 
@@ -41,19 +45,25 @@ DEV_FLASH = Recipe("flash", noise=7.5, clip=2.5)
 UNCONDITIONAL = " "
 
 
-class GenerateInput(ImageRequest):
+class TurboInput(PictureRequest):
     #: Given, the image edits them, or composes them in order. HiDream-O1 has no words of its own
     #: for them, so a `<name>` mention reads as the name.
-    pictures: Annotated[list[Picture], msgspec.Meta(max_length=10)] = msgspec.field(
+    pictures: Annotated[list[PlacedPicture], msgspec.Meta(max_length=10)] = msgspec.field(
         default_factory=list
     )
+
+
+class GenerateInput(TurboInput):
+    steps: Steps = None
+    guidance: Guidance = None
+    negative_prompt: NegativePrompt = None
     #: CFG over the first 80% of the steps only (limited-interval guidance): with CFG to the end,
     #: flat areas show a 32 px grid of slightly miscoloured patches. False: CFG on every step, as upstream.
     guidance_interval: bool = True
 
 
 def layout(
-    adj: Adjustments, payload: GenerateInput, images: list[Image.Image]
+    adj: Adjustments, payload: TurboInput, images: list[Image.Image]
 ) -> tuple[tuple[int, int], list[Image.Image]]:
     """The output size and the prepared references. What is not given is the first reference's
     (ratio, pixel count), else 1:1 at 4 MP; pixels are held to 3.52-4 MP. A lone reference given
@@ -61,7 +71,7 @@ def layout(
     its size. Otherwise each is resized to the area of a square on the output's longer side, smaller
     with more references (upstream's `generate_image`). References placed by box are elements, not
     the canvas: the output is 1:1 at 4 MP unless given, and upstream's layout canvas follows them."""
-    boxes = payload.placements()
+    boxes = placements(payload.pictures)
     place = any(box is not None for box in boxes)
     first = images[0].size if images and not place else None
     target = payload.target(first, megapixels=NATIVE_PIXELS / MP)
@@ -86,10 +96,9 @@ def layout(
 
 def _generate(
     ctx: Context, model: HiDreamO1, out: Outputs, tel: Telemetry, adj: Adjustments, *,
-    payload: GenerateInput, recipe: Recipe, steps: int, guidance: float, negative: str | None,
+    payload: TurboInput, recipe: Recipe, steps: int, guidance: float, negative: str | None,
     interval: bool = False,
 ) -> ImageResult:
-    payload.ignored(adj, "prompt_upsampling", reason="HiDream-O1 has no prompt upsampler")
     seed = payload.drawn_seed()
     prompt = payload.rendered(adj)
     images = [asset.read() for asset in payload.images()]
@@ -130,14 +139,9 @@ def generate(ctx: Context, payload: GenerateInput, model: HiDreamO1, out: Output
 
 @app.entrypoint(defaults=_DEV, components=_COMPONENTS, memoize=Memoize(requires=["seed"]),
                 memo_dependencies=_MEMO)
-def generate_turbo(ctx: Context, payload: GenerateInput, model: HiDreamO1, out: Outputs,
+def generate_turbo(ctx: Context, payload: TurboInput, model: HiDreamO1, out: Outputs,
                    tel: Telemetry, adj: Adjustments) -> ImageResult:
     """HiDream-O1-Image-Dev: 28 distilled steps, no CFG. A one-picture edit samples flow-match Euler."""
-    if payload.steps not in (None, DEV_STEPS):
-        adj.clamp("steps", payload.steps, DEV_STEPS, "the Dev model's distilled schedule")
-    payload.ignored(adj, "guidance", "negative_prompt", reason="HiDream-O1-Dev samples without CFG")
-    if not payload.guidance_interval:
-        adj.warn("guidance_interval", "ignored: HiDream-O1-Dev samples without CFG")
     recipe = Recipe("euler") if len(payload.pictures) == 1 else DEV_FLASH
     return _generate(ctx, model, out, tel, adj, payload=payload, recipe=recipe, steps=DEV_STEPS,
                      guidance=0.0, negative=None)

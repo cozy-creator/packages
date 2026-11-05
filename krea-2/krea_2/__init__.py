@@ -2,19 +2,18 @@
 
 from __future__ import annotations
 
-from typing import Annotated
-
-import msgspec
 from cozy_runtime.author import (
     Adjustments,
     App,
     Context,
-    Picture,
+    Guidance,
     ImageRequest,
     ImageResult,
     Memoize,
+    NegativePrompt,
     Outputs,
     Sizes,
+    Steps,
     Telemetry,
     held,
 )
@@ -31,30 +30,34 @@ SIZES = Sizes((0.25, 4.0), (256, 4096), PATCH, "Krea 2's 0.25-4 MP")
 RAW, TURBO = (52, 3.5, 1.0), (8, 0.0, 4.0)
 
 
-class GenerateInput(ImageRequest):
-    #: Krea 2 makes images from text only.
-    pictures: Annotated[list[Picture], msgspec.Meta(max_length=0)] = msgspec.field(
-        default_factory=list
-    )
+class TurboInput(ImageRequest):
+    steps: Steps = None
 
 
-def _generate(ctx: Context, payload: GenerateInput, model: Krea2, out: Outputs, tel: Telemetry,
+class GenerateInput(TurboInput):
+    guidance: Guidance = None
+    negative_prompt: NegativePrompt = None
+
+
+def _generate(ctx: Context, payload: TurboInput, model: Krea2, out: Outputs, tel: Telemetry,
               adj: Adjustments, *, distilled: bool) -> ImageResult:
     model.hold_vae()
-    payload.ignored(adj, "prompt_upsampling", reason="Krea 2 has no prompt upsampler")
     prompt = payload.rendered(adj)
     steps, guidance, megapixels = TURBO if distilled else RAW
     steps = held(adj, "steps", payload.steps or steps, 1, 100, "Krea 2's 1-100 steps")
-    guidance = held(adj, "guidance", guidance if payload.guidance is None else payload.guidance, 0.0, 20.0,
-                    "Krea 2's guidance 0-20")
-    if guidance == 0:
-        payload.ignored(adj, "negative_prompt", reason="guidance 0 runs no negative branch")
+    words = ""
+    if isinstance(payload, GenerateInput):
+        guidance = held(adj, "guidance", guidance if payload.guidance is None else payload.guidance, 0.0, 20.0,
+                        "Krea 2's guidance 0-20")
+        words = payload.negative_prompt or ""
+        if guidance == 0 and words:
+            adj.warn("negative_prompt", "ignored: guidance 0 runs no negative branch")
     seed = payload.drawn_seed()
     width, height = payload.size(adj, None, SIZES, megapixels=megapixels)
     ctx.raise_if_cancelled()
     with tel.stage("encoding prompt", overall_range=(0.0, 0.05)):
         positive = model.encode(prompt)
-        negative = model.encode(payload.negative_prompt or "") if guidance > 0 else None
+        negative = model.encode(words) if guidance > 0 else None
     ctx.raise_if_cancelled()
     with tel.stage("generating image", overall_range=(0.05, 0.95)):
         latents = model.denoise(
@@ -82,7 +85,7 @@ def generate(ctx: Context, payload: GenerateInput, model: Krea2, out: Outputs, t
 
 @app.entrypoint(defaults={"model": "krea/krea-2-turbo@0.1.0"}, components=_COMPONENTS,
                 memoize=Memoize(requires=["seed"]), memo_dependencies=_MEMO)
-def generate_turbo(ctx: Context, payload: GenerateInput, model: Krea2, out: Outputs, tel: Telemetry,
+def generate_turbo(ctx: Context, payload: TurboInput, model: Krea2, out: Outputs, tel: Telemetry,
                    adj: Adjustments) -> ImageResult:
     """The fast model, Krea 2 Turbo (or a fine-tune of it): 8 steps without guidance at its fixed shift, 2048²."""
     return _generate(ctx, payload, model, out, tel, adj, distilled=True)

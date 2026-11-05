@@ -12,12 +12,15 @@ from cozy_runtime.author import (
     Adjustments,
     App,
     Context,
-    Picture,
-    ImageRequest,
+    Guidance,
     ImageResult,
     Memoize,
+    NegativePrompt,
     Outputs,
+    Picture,
+    PictureRequest,
     Sizes,
+    Steps,
     Telemetry,
     held,
 )
@@ -41,12 +44,18 @@ TEXT_NEGATIVE = (
 EDIT_NEGATIVE, GUIDANCE = " ", 4.0
 
 
-class GenerateInput(ImageRequest):
+class TurboInput(PictureRequest):
     #: Given, Qwen-Image-Edit-2511 edits or composes them, in order; else Qwen-Image-2512 generates
     #: from the prompt.
     pictures: Annotated[list[Picture], msgspec.Meta(max_length=10)] = msgspec.field(
         default_factory=list
     )
+    steps: Steps = None
+
+
+class GenerateInput(TurboInput):
+    guidance: Guidance = None
+    negative_prompt: NegativePrompt = None
 
 
 def label(n: int, picture: Picture) -> str:
@@ -63,7 +72,7 @@ def _render(
     out: Outputs,
     tel: Telemetry,
     adj: Adjustments,
-    payload: GenerateInput,
+    payload: TurboInput,
     *,
     steps: int,
     guidance: float,
@@ -71,8 +80,6 @@ def _render(
 ) -> ImageResult:
     seed = payload.drawn_seed()
     model.hold_vae(tel)
-    payload.ignored(adj, "prompt_upsampling", reason="Qwen-Image has no prompt upsampler")
-    payload.unplaced(adj, "Qwen-Image has no layout control")
     prompt = payload.rendered(adj, label)
     # Upright, with any transparency over white, as upstream's RGB references.
     images = [asset.read() for asset in payload.images()]
@@ -155,7 +162,7 @@ def generate(
 )
 def generate_turbo(
     ctx: Context,
-    payload: GenerateInput,
+    payload: TurboInput,
     model: QwenImage,
     edit_model: QwenImageTransformer,
     turbo_lora: QwenImageLoRA,
@@ -165,7 +172,6 @@ def generate_turbo(
     adj: Adjustments,
 ) -> ImageResult:
     """Each DiT with lightx2v's 8-step Lightning LoRA for it: 8 steps, no CFG."""
-    payload.ignored(adj, "guidance", "negative_prompt", reason="the Lightning LoRA samples without CFG")
     steps = held(adj, "steps", payload.steps or TURBO_STEPS, 1, 100)
     edit = bool(payload.pictures)
     dit, lora = (edit_model, edit_turbo_lora) if edit else (model, turbo_lora)

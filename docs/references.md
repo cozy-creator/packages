@@ -28,10 +28,9 @@ A file is the attached file itself (`image`, `video`, `audio`, `--file`).
 - **The package renders each mention** in its model's own words for the Nth picture: the wording
   the model was trained on (table below). A model with no such wording reads the name itself.
   The result's `prompt` is the text the model read.
-- **Image packages** (the shared image request):
+- **Image packages:**
   - The first picture sets the default aspect ratio and pixel count.
-  - `box` (`[x0, y0, x1, y1]`, 0–1) places a picture. Only models with layout control use it; the
-    others warn.
+  - `box` (`[x0, y0, x1, y1]`, 0–1) places a picture, on the models with layout control.
   - Text-only packages take no pictures.
 - **Shot functions** (minimax-h3) take one `references` list tagged by `kind` (`character`, `prop`,
   `environment`, `video`, `audio`); see the package README.
@@ -53,9 +52,9 @@ The convention lives in `cozy_runtime.author`, and it is opt-in. Nothing below t
 knows it, so a package may declare any input shape it likes.
 
 ```python
-from cozy_runtime.author import ImageRequest, Picture, Reference, VideoFile, render
+from cozy_runtime.author import Picture, PictureRequest, Reference, VideoFile, render
 
-class GenerateInput(ImageRequest):  # pictures: list[Picture]; narrow the count with Meta(max_length=N)
+class GenerateInput(PictureRequest):  # pictures: list[Picture]; narrow the count with Meta(max_length=N)
     ...
 
 def label(n: int, picture: Picture) -> str:

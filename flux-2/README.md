@@ -31,19 +31,18 @@ cozy run flux-2/generate_turbo model.model=flux-2-klein-4b \
   prompt='A lighthouse on a basalt cliff in a winter storm' aspect_ratio=16:9
 cozy run flux-2/generate_turbo model.model=flux-2-klein-9b \
   prompt='Make <Lighthouse> night, the lamp lit' pictures:='[{"name": "Lighthouse", "image": "lighthouse.png"}]'
-cozy run flux-2/generate model.model=flux-2-klein-4b-base prompt='...' negative_prompt='blurry'
+cozy run flux-2/generate model.model=flux-2-klein-4b-base prompt='...'
 cozy run flux-2/generate prompt='...'          # [dev]
 cozy run flux-2/generate_turbo prompt='...'    # [dev] Turbo
 ```
 
-Inputs are the shared image request, the same in every image package: `prompt`, `pictures`, `aspect_ratio` (any W:H), `megapixels` (any size, 1024² pixels each), `steps`, `guidance`, `negative_prompt`, `seed` and `prompt_upsampling`. Left out, each is the checkpoint's default: steps as above (Turbo always runs its 8),
-guidance 4 ([dev]'s embedded guidance, 2.5 with Turbo; [klein] Base's CFG scale), no negative prompt
-([klein] Base only), no upsampling, a random seed. Steps 1–100, guidance 1–20; a knob the checkpoint
-has no use for is ignored with a warning, and unknown fields are dropped with one. A `<Name>` mention
+Inputs: `prompt`, `pictures`, `aspect_ratio` (any W:H), `megapixels` (any size, 1024² pixels each), `seed`, `guidance` and `prompt_upsampling`, and `steps` on `generate` (Turbo always runs its schedule). Left out, each is the checkpoint's default: steps as above,
+guidance 4 ([dev]'s embedded guidance, 2.5 with Turbo; [klein] Base's CFG scale), no upsampling, a
+random seed. Steps 1–100, guidance 1–20; a distilled [klein] warns that it has no use for `guidance`, and
+unknown fields are dropped with a warning. A `<Name>` mention
 of a picture reads as "image N", the wording of BFL's prompting guide ("subject from image 1, style
 from image 2"; [references](../docs/references.md)); the text encoder sees no image, so the pictures
-bind by order. With pictures, a size input you leave out is the first picture's; a picture's
-`box` is ignored with a warning (no layout control). The result is `image`, `width`, `height`, `seed`
+bind by order. With pictures, a size input you leave out is the first picture's. The result is `image`, `width`, `height`, `seed`
 and `prompt`, the prompt actually used.
 
 Text-to-image defaults to 1:1 at 1 MP (1024×1024). With references and no size, the output takes the first
@@ -59,7 +58,7 @@ It follows BFL's reference code (`black-forest-labs/flux2` 50fe516): the text en
 10/20/30 (Mistral) and 9/18/27 (Qwen3) over 512 tokens; references cropped to the 16 px grid at up to
 2024² pixels for one, 1024² each for several, at time offsets 10, 20, …; Euler steps in bf16 on BFL's
 schedule (linear times shifted by the token count's empirical mu); [klein] Base's CFG against
-`negative_prompt` (BFL's is empty). Turbo runs fal's card as written: its sigmas
+BFL's empty negative prompt. Turbo runs fal's card as written: its sigmas
 `1, 0.6509, … 0.00031` through Diffusers' `Flux2Pipeline`, which shifts them by mu as well, at guidance
 2.5. The modules are Diffusers' (main 7ecb1e1b).
 

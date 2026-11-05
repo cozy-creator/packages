@@ -36,14 +36,14 @@ cozy run fibo-2/generate_turbo prompt='Replace the jacket with a red leather one
   pictures:='[{"name": "Photo", "image": "photo.jpg"}]'
 ```
 
-Both take the shared image request (`ImageRequest`). Unset knobs take Fibo's defaults: `steps` 50 (Dev) or 4
-(Turbo), `guidance` 5.0 and `negative_prompt` Bria's (Dev only; Turbo warns and ignores them), and
-`prompt_upsampling` on. A `seed` is drawn when omitted and returned. Fibo 2.0 was trained at about 1 MP on a
+Both take `prompt`, `pictures`, `aspect_ratio`, `megapixels`, `seed`, `steps` and `prompt_upsampling`, and
+`generate` also `guidance` and `negative_prompt`: Turbo samples without guidance. Unset knobs take Fibo's
+defaults: `steps` 50 (Dev) or 4 (Turbo), `guidance` 5.0 and `negative_prompt` Bria's, and `prompt_upsampling` on. A `seed` is drawn when omitted and returned. Fibo 2.0 was trained at about 1 MP on a
 16 px grid (model card). Text-to-image defaults to 1:1 at 1024×1024. With references, the output takes the
 first one's aspect ratio and pixel count; `aspect_ratio` or `megapixels` replaces only that one. Sizes are
 held to 0.25–1 MP and 64–8192 px sides, steps to 200 (Dev) or 50 (Turbo) and guidance to 1–20, each move a
 `clamp` adjustment. A lone reference is cropped to the output's size; several are each cropped to about 1 MP
-at their own ratio (Diffusers). A picture's `box` is ignored with a warning (no layout control). The result
+at their own ratio (Diffusers). The result
 is `image`, its size, the `seed` and `prompt`: the prompt the image was made from.
 
 ## Prompts

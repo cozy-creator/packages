@@ -12,12 +12,14 @@ from cozy_runtime.author import (
     Adjustments,
     App,
     Context,
-    Picture,
-    ImageRequest,
+    Guidance,
     ImageResult,
     Memoize,
     Outputs,
+    Picture,
+    PictureRequest,
     Sizes,
+    Steps,
     Telemetry,
     held,
 )
@@ -34,10 +36,16 @@ SIZES = Sizes((MIN_SIDE**2 / MEGAPIXEL, MAX_PIXELS / MEGAPIXEL), (MIN_SIDE, MAX_
               "the model's 4 MP maximum")
 
 
-class GenerateInput(ImageRequest):
+class TurboInput(PictureRequest):
     pictures: Annotated[list[Picture], msgspec.Meta(max_length=10)] = msgspec.field(
         default_factory=list
     )
+    guidance: Guidance = None
+    prompt_upsampling: bool | None = None
+
+
+class GenerateInput(TurboInput):
+    steps: Steps = None
 
 
 def label(n: int, picture: Picture) -> str:
@@ -46,11 +54,10 @@ def label(n: int, picture: Picture) -> str:
     return f"image {n}"
 
 
-def _generate(ctx: Context, payload: GenerateInput, model: Flux2, turbo: Flux2TurboLoRA | None,
+def _generate(ctx: Context, payload: TurboInput, model: Flux2, turbo: Flux2TurboLoRA | None,
               upsampler: Flux2Upsampler, out: Outputs, tel: Telemetry, adj: Adjustments) -> ImageResult:
     model.hold_vae(tel)
     seed = payload.drawn_seed()
-    payload.unplaced(adj, "FLUX.2 has no layout control")
     images = [asset.read() for asset in payload.images()]
     width, height = payload.size(adj, images[0].size if images else None, SIZES, megapixels=1.0)
     # The function names the regime (`generate_turbo` passes `turbo`): [dev] 50 steps at guidance 4,
@@ -59,19 +66,16 @@ def _generate(ctx: Context, payload: GenerateInput, model: Flux2, turbo: Flux2Tu
     distilled = turbo is not None and not model.dev
     turbo = turbo if model.dev else None
     steps = 8 if turbo else 4 if distilled else 50
-    if payload.steps is not None and turbo and payload.steps != steps:
-        adj.clamp("steps", payload.steps, steps, "the Turbo LoRA's own 8-step schedule")
-    elif payload.steps is not None:
+    if isinstance(payload, GenerateInput) and payload.steps is not None:
         steps = held(adj, "steps", payload.steps, 1, 100)
     if distilled:
         guidance = None
-        payload.ignored(adj, "guidance", reason="FLUX.2 [klein] distilled takes no guidance")
+        if payload.guidance is not None:
+            adj.warn("guidance", "ignored: FLUX.2 [klein] distilled takes no guidance")
     else:
         default = 2.5 if turbo else 4.0
         guidance = held(adj, "guidance", default if payload.guidance is None else payload.guidance, 1.0, 20.0)
     cfg = not model.dev and guidance is not None and guidance > 1  # distilled: no guidance
-    if not cfg:
-        payload.ignored(adj, "negative_prompt", reason="only FLUX.2 [klein] Base runs CFG")
     tel.log("sampling", model="[dev]" if model.dev else "[klein]",
             regime="turbo" if turbo else "distilled" if distilled else "base", steps=steps,
             guidance=guidance, cfg=cfg)
@@ -91,7 +95,7 @@ def _generate(ctx: Context, payload: GenerateInput, model: Flux2, turbo: Flux2Tu
             references = model.encode_references(prepare_references(images))
     with tel.stage("encoding prompt", overall_range=(0.2, 0.25)):
         embeds = model.encode(prompt)
-        negative = model.encode(payload.negative_prompt or "") if cfg else None
+        negative = model.encode("") if cfg else None
     ctx.raise_if_cancelled()
     tokens = (height // PATCH) * (width // PATCH)
     timesteps = schedule(steps, tokens, TURBO_SIGMAS if turbo else None)
@@ -127,7 +131,7 @@ def generate(ctx: Context, payload: GenerateInput, model: Flux2, upsampler: Flux
 
 @app.entrypoint(defaults={"model": _DEV, "turbo_lora": "fal/flux-2-dev-turbo@0.1.0", "upsampler": _DEV},
                 components=_TURBO_COMPONENTS, on_demand=("upsampler", "turbo_lora"), memoize=Memoize(requires=["seed"]))
-def generate_turbo(ctx: Context, payload: GenerateInput, model: Flux2, turbo_lora: Flux2TurboLoRA,
+def generate_turbo(ctx: Context, payload: TurboInput, model: Flux2, turbo_lora: Flux2TurboLoRA,
                    upsampler: Flux2Upsampler, out: Outputs, tel: Telemetry, adj: Adjustments) -> ImageResult:
     """The fast model: FLUX.2 [dev] with fal's Turbo LoRA (8 steps, guidance 2.5), or a [klein] by
     `model=` (4 steps)."""

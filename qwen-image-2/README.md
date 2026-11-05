@@ -11,10 +11,9 @@ Each picture's `description` follows the prompt as `<name>: description`, in the
 transparent, and is RGB otherwise; alpha within 4 levels of 0 or 255 (the decoder's noise) snaps
 to it. `seed` is optional and the chosen seed is
 returned. Seeds range from 0 through 9007199254740991 (the interoperable 53-bit
-integer range); omitting one chooses a random seed in that range. Inputs are the shared image request, the same in every image package: `prompt`, `pictures`, `aspect_ratio` (any W:H), `megapixels` (any size, 1024² pixels each), `steps`, `guidance`, `negative_prompt`, `seed` and `prompt_upsampling`. Steps default to 40 (1–100); `generate_turbo` runs Turbo's distilled schedule
-(its 8 `sample_sigmas`), and a different `steps` is reported as a `clamp` adjustment. Qwen
-runs no CFG and has no upsampler, so `guidance`, `negative_prompt` and `prompt_upsampling` are ignored
-with a warning, as are unknown fields. The result is `image`, `width`, `height`, `seed` and `prompt`.
+integer range); omitting one chooses a random seed in that range. Inputs: `prompt`, `pictures`, `aspect_ratio` (any W:H), `megapixels` (any size, 1024² pixels each), `seed` and `preset`, and `steps` on `generate`, 40 by default (1–100); `generate_turbo` runs Turbo's distilled schedule
+(its 8 `sample_sigmas`). Qwen runs no CFG and has no upsampler, so it has no `guidance`, `negative_prompt` or
+`prompt_upsampling`. Unknown fields are ignored with a warning. The result is `image`, `width`, `height`, `seed` and `prompt`.
 
 Outputs use lossless WebP to preserve the same decoded pixels and alpha while reducing the
 bytes returned to the client. A canvas with either side at least 16384 pixels uses PNG,
@@ -80,8 +79,7 @@ upstream 1 MP conditioning area independently of the output's `megapixels`.
 With references, what is not given is the FIRST reference's (the image being edited): an omitted
 `aspect_ratio` takes its exact ratio and an omitted `megapixels` its pixel count, held inside 1–4 MP
 (reported as a `clamp` adjustment when held). Upstream takes the LAST reference's; every Cozy image
-package takes the first. Qwen-Image-2.1 has no layout control: a picture's `box` is ignored with a
-warning.
+package takes the first.
 
 The VAE runs in bf16 on GPUs that compute it natively (Turbo stores it so; the base release
 stores F32), else in its stored dtype. It decodes the whole canvas, each block in strips of rows
