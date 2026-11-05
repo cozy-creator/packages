@@ -11,14 +11,14 @@ resolution: 1440p
 upscale:
   model: regenerate-2k   # seedvr2 (default) | regenerate-2k
   strength: 0.7          # regenerate-2k only: 0.7 (default), 0.8, 0.909 (NVIDIA's)
-prompt: A street musician plays a violin under a neon sign that reads OPEN LATE.   # regenerate-2k only; absent, the text the latents carry
+prompt: A street musician plays a violin under a neon sign that reads OPEN LATE.   # regenerate-2k only, when no latents carry the text
 ```
 
 | | `seedvr2` (default) | `regenerate-2k` |
 |---|---|---|
 | What runs | SeedVR2 7B restores the 768p frames | NVIDIA's [Open-H3-Regenerate-2K](https://nvlabs.github.io/Sana/Open-H3-Regenerate-2K/): the shot's 768p latent is upscaled in latent space and re-rendered by H3 at the target, 3 steps (2 at 0.8 and 0.7) |
 | Frame | H3's 7:4 letterboxed into 16:9; any other video keeps its aspect | **fills 16:9: the 7:4 frame is stretched 1.6% horizontally**, as NVIDIA trained it |
-| Controls | SeedVR2's (Tuning, below) | `strength`, and the shot's text: `prompt`, else the one its `latents` carry (its summary, beats and descriptions) |
+| Controls | SeedVR2's (Tuning, below) | `strength`, and the shot's text: the one its `latents` carry (its summary, beats and descriptions), else `prompt`, which a project fills with the words that made the take |
 | Faces, small text | kept | redrawn: at 0.909 a face becomes another person's and a hat or sunglasses can change (0.7 keeps them); small text becomes other letters at every strength (large text stays legible) |
 
 `regenerate-2k` at `768p` is a refine-only pass at the native size. `strength` is the

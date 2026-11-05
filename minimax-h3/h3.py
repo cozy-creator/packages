@@ -1577,7 +1577,7 @@ class GenerateResult(ShotResult):
 
 
 #: A beat that says no length lasts this.
-_BEAT_S = 5.0
+_BEAT_S = 15.0
 #: Below this a picture's background reads as part of its subject.
 _TRANSPARENT = 0.05
 #: A kept video reaches its shot's end if less than this is left.
@@ -2265,7 +2265,7 @@ class UpscaleInput(msgspec.Struct, kw_only=True):
     video: Annotated[VideoFile, FileBound(max_decoded_bytes=2 << 30)]
     resolution: RegenerateResolution = Resolution.QHD
     upscale: Upscale | None = None
-    #: regenerate-2k's text; absent, the text `latents` carry (the shot's whole text).
+    #: regenerate-2k's text when no `latents` carry the shot's whole text.
     prompt: str = ""
     seed: int | None = None
     #: The shot's latents (`ShotResult.latents`): regenerate-2k starts from them instead of
@@ -2297,8 +2297,9 @@ async def upscale(ctx: Context, payload: UpscaleInput, out: Outputs, tel: Teleme
         with payload.video.stream() as events:
             return UpscaleOutput(out.save_video_stream(iter(events)).video, warnings)
     if method.model == "regenerate-2k":
-        # The text the video was made from: given, else the one its latents carry.
-        prompt = payload.prompt.strip() or (shot_latents.text(payload.latents.read_bytes()) if payload.latents else "")
+        # The text the video was made from: its latents carry it whole, and with them gone a project's words stand in, names without brackets.
+        carried = shot_latents.text(payload.latents.read_bytes()) if payload.latents else ""
+        prompt = carried or re.sub(r"<([^<>]+)>", r"\1", payload.prompt).strip()
         if not prompt:
             raise InvalidRequest("regenerate-2k re-renders the video from the text it was made from: give prompt, "
                                  "or its latents", fields=["prompt"])  # fmt: skip
@@ -2329,6 +2330,8 @@ app.entrypoint(generate, emits_media=True, accelerator=False, node=Node(
     show=["soundscape", "music"],
     hide=["steps", "upscale", "context_frames", "plate"],
     fill={"continue_from": "take"},
+    # `shot_latents.nearest_join`, the VAE's `17k + 5`, past `_continued`'s shortest piece of 5 s.
+    cuts={"every": 17, "offset": 5, "first": 124},
     # Its prompt syntax: `<d>` around dialogue and `<scenetrans>`, `<cutoff>`, and the language a line is spoken in, `<d><English>Hello<d>`.
     # MiniMax's guide lists no languages: these are the ones people write dialogue in.
     reserved=[
@@ -2343,5 +2346,5 @@ app.entrypoint(upscale, emits_media=True, accelerator=False, node=Node(
     name="upscale",
     label="MiniMax H3 Upscale",
     hide=["upscale", "preset"],
-    fill={"latents": "video.latents", "prompt": "video.description"},
+    fill={"latents": "video.latents", "prompt": "video.text"},
 ))  # fmt: skip
