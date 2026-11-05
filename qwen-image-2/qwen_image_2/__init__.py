@@ -226,7 +226,6 @@ class TurboInputs(PictureInputs, kw_only=True):
     aspect_ratio: Annotated[str | None, msgspec.Meta(extra={"min": 0.0625, "max": 16})] = None
     megapixels: Annotated[float | None, msgspec.Meta(extra={"min": MIN_MEGAPIXELS, "max": MAX_MEGAPIXELS})] = None
     preset: Literal["quality", "balanced", "fast"] = "balanced"
-    transparent: bool = False
     seed: Annotated[int | None, msgspec.Meta(extra={"hidden": True})] = None
 
 
@@ -255,8 +254,6 @@ def _image(op: TurboOperation | FullOperation) -> list[Invocation]:
     prompt = "\n\n".join(filter(None, [f.instructions.strip(), words]))
     if style := f.style.strip():
         prompt = f"Style: {style.rstrip('.')}.\n\n{prompt}"
-    if f.transparent:
-        prompt = f"This is an RGBA image with transparency. {prompt}\n\nThe image has alpha channel and the background is transparent."
     pictures = [{"name": f"{name} {number + 1}" if number else name, "image": picture.sha256}
                 for read in op.reads for name in (spoken(f"<{read.name}>")[1:-1],)
                 for number, picture in enumerate(read.files_of("image"))]  # fmt: skip
