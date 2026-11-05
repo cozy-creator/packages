@@ -1,7 +1,7 @@
 # Qwen Image 2
 
 `generate` creates or edits one lossless image using Qwen-Image-2.1, and `generate_turbo` does
-the same with Qwen-Image-2.1-Turbo. Both take the same inputs. The model checkpoint is selected
+the same with Qwen-Image-2.1-Turbo. Both take the same inputs, and on a canvas they're one box with a Turbo toggle. The model checkpoint is selected
 independently from the package. TensorFS owns model downloads and bytes;
 Runtime owns construction, memory residency and component execution.
 
@@ -11,7 +11,7 @@ Each picture's `description` follows the prompt as `<name>: description`, in the
 transparent, and is RGB otherwise; alpha within 4 levels of 0 or 255 (the decoder's noise) snaps
 to it. `seed` is optional and the chosen seed is
 returned. Seeds range from 0 through 9007199254740991 (the interoperable 53-bit
-integer range); omitting one chooses a random seed in that range. Inputs: `prompt`, `pictures`, `aspect_ratio` (any W:H), `megapixels` (any size, 1024² pixels each), `seed` and `preset`, and `steps` on `generate`, 40 by default (1–100); `generate_turbo` runs Turbo's distilled schedule
+integer range); omitting one chooses a random seed in that range. Inputs: `prompt`, `pictures`, `aspect_ratio` (any W:H), `megapixels` (any size, 1024² pixels each) and `seed`. The full model runs 40 steps, Turbo the 8 of its checkpoint
 (its 8 `sample_sigmas`). Qwen runs no CFG and has no upsampler, so it has no `guidance`, `negative_prompt` or
 `prompt_upsampling`. Unknown fields are ignored with a warning. The result is `image`, `width`, `height`, `seed` and `prompt`.
 

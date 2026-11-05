@@ -2,11 +2,10 @@
 
 from __future__ import annotations
 
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any
 
 import msgspec
 import torch
-from cozy_runtime import stepcache
 from cozy_runtime.author import (
     Adjustments,
     App,
@@ -22,9 +21,7 @@ from cozy_runtime.author import (
     Picture,
     PictureRequest,
     Sizes,
-    Steps,
     Telemetry,
-    held,
     name_label,
     render,
 )
@@ -40,9 +37,8 @@ app = App()
 MIN_MEGAPIXELS = 1.0
 MAX_MEGAPIXELS = 4.0
 SIZES = Sizes((MIN_MEGAPIXELS, MAX_MEGAPIXELS), (32, 2048 * 16), 32, "the 1-4 MP Qwen-Image serves")
-#: Steps without a checkpoint schedule (Turbo names its own 8), and the most admitted.
+#: The full model's steps; Turbo's are its schedule's.
 _STEPS = 40
-_MAX_STEPS = 100
 #: Qwen-Image-2.1-Turbo's distilled schedule, its `model_index.json` `sample_sigmas`
 #: (hf://Qwen/Qwen-Image-2.1-Turbo@fc13ba19). The Runtime's model config holds components only,
 #: so the function, not the checkpoint, names the regime.
@@ -56,29 +52,13 @@ class Mentioned(Picture, kw_only=True):
     description: str = ""
 
 
-class TurboInput(PictureRequest):
+class GenerateInput(PictureRequest):
     pictures: Annotated[list[Mentioned], msgspec.Meta(max_length=10)] = msgspec.field(
         default_factory=list
     )
     #: Bounds for a box, not refusals: past them `_generate` holds it and says so.
     aspect_ratio: Annotated[AspectRatio | None, msgspec.Meta(extra={"min": 0.0625, "max": 16})] = None
     megapixels: Annotated[float | None, msgspec.Meta(extra={"min": MIN_MEGAPIXELS, "max": MAX_MEGAPIXELS})] = None
-    #: Speed against fidelity: `fast` reuses the transformer's cached residual on steps that
-    #: change it little (`CACHE`); `quality` and `balanced` run every step.
-    preset: Literal["quality", "balanced", "fast"] = "balanced"
-
-
-class GenerateInput(TurboInput):
-    steps: Annotated[Steps, msgspec.Meta(extra={"max": _MAX_STEPS})] = None
-
-
-#: The text-to-image denoise's step cache per preset (`stepcache`): FirstBlockCache 0.08 for
-#: `fast`, NVIDIA sol-engine's aggressive threshold; none otherwise.
-CACHE: dict[str, stepcache.Policy | None] = {
-    "quality": None,
-    "balanced": None,
-    "fast": stepcache.FirstBlockCache(0.08),
-}
 
 
 def label(n: int, picture: Picture) -> str:
@@ -114,7 +94,7 @@ def decoded_image(decoded: Any) -> Image.Image:
     return Image.fromarray(pixels.contiguous().cpu().numpy())
 
 
-def _said(payload: TurboInput) -> str:
+def _said(payload: GenerateInput) -> str:
     """Its text, and what each picture it mentions is: a mention reads as `<image3>` alone, and with no words for it a third picture was
     dropped in 3 of 3 seeds (runs 27130, 27161, 27174), kept with them (27190, 27200)."""
     words = "\n".join(f"<{picture.name}>: {picture.description.strip()}" for picture in payload.pictures if picture.description.strip())
@@ -123,7 +103,7 @@ def _said(payload: TurboInput) -> str:
 
 def _generate(
     ctx: Context,
-    payload: TurboInput,
+    payload: GenerateInput,
     model: QwenImage21Model,
     out: Outputs,
     tel: Telemetry,
@@ -177,7 +157,6 @@ def _generate(
             reference_images=reference_images,
             reference_latents=reference_latents,
             image_pad_mask=image_pad_mask,
-            cache=CACHE[payload.preset],
         )
     ctx.raise_if_cancelled()
     with tel.stage("decoding image", overall_range=(0.9, 0.98)):
@@ -197,7 +176,7 @@ _MEMO = ("qwen_image_2", "qwen_image_2.model")
     defaults={"model": "qwen/qwen-image-2.1@0.1.0"},
     memoize=Memoize(requires=["seed"]),
     memo_dependencies=_MEMO,
-    node=Node(name="image", label="Qwen Image 2"),
+    node=Node(name="image", label="Qwen Image 2", show=["megapixels"]),
 )
 def generate(
     ctx: Context,
@@ -208,18 +187,18 @@ def generate(
     adj: Adjustments,
 ) -> ImageResult:
     """Qwen-Image-2.1, the 40-step base model."""
-    return _generate(ctx, payload, model, out, tel, adj, held(adj, "steps", payload.steps or _STEPS, 1, _MAX_STEPS), None)
+    return _generate(ctx, payload, model, out, tel, adj, _STEPS, None)
 
 
 @app.entrypoint(
     defaults={"model": "qwen/qwen-image-2.1-turbo@0.1.1"},
     memoize=Memoize(requires=["seed"]),
     memo_dependencies=_MEMO,
-    node=Node(name="image", label="Qwen Image 2 Turbo"),
+    node=Node(name="image", label="Qwen Image 2", variant="Turbo", show=["megapixels"]),
 )
 def generate_turbo(
     ctx: Context,
-    payload: TurboInput,
+    payload: GenerateInput,
     model: QwenImage21Model,
     out: Outputs,
     tel: Telemetry,
