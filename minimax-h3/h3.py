@@ -2020,8 +2020,9 @@ async def generate(ctx: Context, payload: GenerateInput, out: Outputs, tel: Tele
     if payload.turbo and not turbo:
         warnings.append(f"steps {payload.steps} runs the full model, not turbo's 8 steps")
     resumed, done, opening, ending = shot.resumed, 0, payload.first_frame, payload.last_frame
-    if opening is not None and (payload.plate is not None or resumed is not None):
-        warnings.append(f"{'the plate' if payload.plate is not None else 'continue_from'} sets the opening; first_frame is ignored")
+    if opening is not None and payload.plate is not None:
+        warnings.append("the plate sets the opening; first_frame is ignored")
+    if resumed is not None or payload.plate is not None:
         opening = None
     if ending is not None and resumed is not None:
         warnings.append("continue_from goes on from where it was: last_frame is ignored")
