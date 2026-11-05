@@ -186,7 +186,13 @@ def denoise_refine(
             delta = sigmas.index_select(0, i) - sigmas.index_select(0, i + 1)
             rows.add_(velocity * delta.reshape(1, 1))
 
-        denoise_loop(step, range(len(plan)), state=(video,), carried=slots, labels=labels, on_step=on_step)
+        transformer._engage(overlay, 0)  # armed before the loop, as `denoise_loop` requires
+        try:
+            denoise_loop(
+                step, range(len(plan)), state=(video,), carried=slots, labels=labels, on_step=on_step
+            )
+        finally:
+            transformer._release()
 
 
 def euler(

@@ -311,14 +311,14 @@ class AdaLNPrunedMiniMaxH3Transformer(MiniMaxH3Transformer3DModel):  # type: ign
     ) -> MiniMaxH3TransformerOutput | tuple[torch.Tensor, torch.Tensor]:
         """Diffusers 0.41's forward, the projected rows scoped to the packing: Diffusers keeps
         them to its end, the video's float32 rows (2.25 GB a GPU at H3 15 s, degree 2) through
-        every block. It checks the rows and arms a turbo bank `attention_kwargs` names (`_arm`),
-        unless its denoise checked every step's rows ahead (`StepInvariants.checked`), and ends
-        disarmed: in the forward, as a package forward hook would keep it out of native loops."""
+        every block. It checks the rows and arms a turbo bank `attention_kwargs` names (`_arm`)
+        and ends disarmed, in the forward, as a package forward hook would keep it out of native
+        loops; unless its denoise checked every step's rows ahead (`StepInvariants.checked`): a
+        `denoise_loop` step, which keeps the overlay its denoise armed before the loop."""
         memo = _STEP_INVARIANTS.get()
-        if memo is None or not memo.checked:
+        looped = memo is not None and memo.checked
+        if not looped:
             self._arm(timestep, timestep_indices, token_tags, attention_kwargs)
-        elif memo.overlay is not None:
-            self._engage(memo.overlay, 0)
         del attention_kwargs  # `apply_lora_scale` consumed its scale
         try:
             sequence_length = position_ids.shape[0]
@@ -392,7 +392,8 @@ class AdaLNPrunedMiniMaxH3Transformer(MiniMaxH3Transformer3DModel):  # type: ign
                 return (video_output, audio_output)
             return MiniMaxH3TransformerOutput(sample=video_output, audio_sample=audio_output)
         finally:
-            self._release()
+            if not looped:
+                self._release()
 
     def install_lora_consumers(self) -> None:
         """Install once during turbo-capable construction, before Runtime fill/fusion."""
