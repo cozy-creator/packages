@@ -105,7 +105,7 @@ class Carry:
     sparse call leaves its own there, and the last dense step's calls seed it (`seeding`; a step
     loop seeds `RequestState.statistics` the same way), so the first sparse step reads one too
     instead of measuring its keys in a second producer pass. Eager
-    reuse decides on `layout.step` in Python, which a recorded step would freeze; the step's phase
+    reuse decides on `layout.step` in Python, which a recorded step would freeze; the step's label
     decides instead (`rolling`, `seeding`)."""
 
     slots: Mapping[int, torch.Tensor]
@@ -344,7 +344,7 @@ def produce(
         state.replay_inputs.pop(key, None)
         carry, seed = _CARRY.get(), None
         if not parallel and producing(layout, call.path):
-            if carry is not None:  # `denoise_loop`: the phase says which step seeds
+            if carry is not None:  # `denoise_loop`: the label says which step seeds
                 seed = KeyMean(carry.slots[id(attn)]) if carry.seeding else None
             elif layout.step == layout.dense_until_step - 1:  # a step loop: the last dense step
                 held = hidden_states.value if isinstance(hidden_states, Owned) else hidden_states
