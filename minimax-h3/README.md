@@ -45,7 +45,7 @@ beats:
       [Shot 2] At 00:27.000, the shot cuts to a low angle.
 ```
 
-In a project, `references` are filled from what the text mentions, each member by its name. A picture with no `asset_type` is loose.
+In a project, `references` are filled from what the text mentions, each member by its name. A picture with no `asset_type` is a character; `follow: loose` makes it a layout to start from.
 
 The result is `video` (768p mp4), `latents` (its own, for `upscale` and `continue_from`) and
 `warnings`. `follow: loose` keeps a picture's arrangement, not its frame (read at 512 px: a world

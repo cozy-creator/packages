@@ -65,6 +65,7 @@ from cozy_runtime.author import MENTION, Node, name_key
 from cozy_runtime.author import Reference as NamedFile
 from msgspec.structs import replace
 from PIL import Image as PILImage
+from PIL import ImageOps
 from safetensors.torch import load as load_tensors
 from safetensors.torch import save as save_tensors
 
@@ -1145,11 +1146,11 @@ def _keep_frames(out: Outputs, last: list[ImageFile], pixels: Any) -> None:
 
 
 def _anchors(
-    first: ImageFile | None, last: ImageFile | None
+    first: ImageFile | None, last: ImageFile | None, native: bool
 ) -> list[tuple[Image, Literal["first", "last"]]]:
     """A Ref2VA call's keyframes, read: anchored as ComfyUI's Add Guide anchors them."""
     pairs: list[tuple[ImageFile | None, Literal["first", "last"]]] = [(first, "first"), (last, "last")]
-    return [(image, at) for asset, at in pairs if (image := _frame(asset, f"{at}_frame")) is not None]
+    return [(image, at) for asset, at in pairs if (image := _frame(asset, native)) is not None]
 
 
 # --- segments ----------------------------------------------------------------------------
@@ -1197,6 +1198,8 @@ class Ref2VAInput(msgspec.Struct):
     #: Keyframes, anchored as ComfyUI's Add Guide anchors them (`anchor_rows`).
     first_frame: FrameImage = None
     last_frame: FrameImage = None
+    #: The shot asked for its shape: the keyframes fill H3's own canvas, rather than set one.
+    native: bool = False
     #: Each picture's short edge in packed order; 0 sizes it as usual.
     picture_edges: tuple[int, ...] = ()
     #: Return the delivered latents (`SegmentOutput.latents`).
@@ -1339,7 +1342,7 @@ async def ref2va_segment(
         turbo_lora=lora, context=context, delivery=plan,
         expected_context_provenance=context_provenance(payload.previous_provenance or observed),
         completed=handed if handed.wanted else None,
-        anchors=_anchors(payload.first_frame, payload.last_frame),
+        anchors=_anchors(payload.first_frame, payload.last_frame, payload.native),
         ended=partial(_keep_frames, out, ended),
         earlier=earlier, sound=sound,
     )  # fmt: skip
@@ -1377,16 +1380,21 @@ class FL2VAInput(msgspec.Struct, kw_only=True):
     preset: Preset = "balanced"
     first_frame: FrameImage = None
     last_frame: FrameImage = None
+    #: The shot asked for its shape: the keyframes fill H3's own canvas, rather than set one.
+    native: bool = False
     next_context_frames: ContextFrames = 0
     next_context_audio: bool = False
     #: Return the delivered latents (`SegmentOutput.latents`).
     latents: bool = False
 
 
-def _frame(asset: ImageFile | None, field: str) -> Image | None:
+def _frame(asset: ImageFile | None, native: bool) -> Image | None:
+    """A keyframe as a segment reads it: `native`, filling H3's own canvas with its middle, else its own shape."""
     if asset is None:
         return None
     image = asset.read()
+    if native:
+        return ImageOps.fit(image, (1344, 768), method=PILImage.Resampling.BICUBIC)
     width, height = within_ratio(image.width, image.height)
     left, top = (image.width - width) // 2, (image.height - height) // 2
     return image.crop((left, top, left + width, top + height))
@@ -1431,7 +1439,7 @@ async def fl2va_segment(
         ctx, "fl2va" if lora is None else "fl2va_turbo", base_model, out, tel,
         prompt=encoder_prompt("fl2va", payload.prompt), seed=payload.seed,
         duration_s=payload.duration_s, steps=payload.steps,
-        first=_frame(payload.first_frame, "first_frame"), last=_frame(payload.last_frame, "last_frame"),
+        first=_frame(payload.first_frame, payload.native), last=_frame(payload.last_frame, payload.native),
         turbo_lora=lora, preset=payload.preset, delivery=plan if plan.successor else None,
         completed=handed if handed.wanted else None,
         ended=partial(_keep_frames, out, ended),
@@ -1589,9 +1597,9 @@ _BEAT_S = 15.0
 _TRANSPARENT = 0.05
 #: A kept video reaches its shot's end if less than this is left.
 _REACHES_S = 1.0
-#: The kind each `asset_type` is to H3. Any other picture is loose: a layout to start from, read at 512 px only by a segment whose text
-#: names it, not a look to reproduce.
-_KINDS = {"character": "character", "prop": "prop", "environment": "background"}
+#: The kind each `asset_type` is to H3, a picture that says none being a character. Any other is loose: a layout to start from, read at
+#: 512 px only by a segment whose text names it, not a look to reproduce.
+_KINDS = {"": "character", "character": "character", "prop": "prop", "environment": "background"}
 
 
 class Beat(msgspec.Struct, kw_only=True):
@@ -1603,7 +1611,7 @@ class Beat(msgspec.Struct, kw_only=True):
 
 class Mentioned(NamedFile, kw_only=True):
     """What the shot's text names as `<name>`: a person, a thing, a place, a clip or a sound. `asset_type` says how a picture is read: a
-    `character` or `prop` as pictured, an `environment` as the set. `follow: loose` keeps only its arrangement. A clip guides second for
+    `character`, which is what one that says nothing is, or `prop` as pictured, an `environment` as the set. `follow: loose` keeps only its arrangement. A clip guides second for
     second with the shot (`shot_windows`), its sound only with `use_audio`. `voice` is a character's voice's timbre (H3's `reference`
     retention), and a bare `audio` is sound the soundtrack reuses (H3's `partially_copy`). With no file it's only words."""
 
@@ -1881,14 +1889,15 @@ def _reference(ref: Mentioned, warned: list[str]) -> StoryReference:
     if ref.image is None:
         return StoryReference(name=ref.name, kind="audio", audio=ref.audio)
     described = f"{ref.description.strip()}\n" if ref.description.strip() else ""
-    if ref.asset_type in ("character", "prop") and ref.alpha < _TRANSPARENT and ref.made_by:
+    kind = _KINDS.get(ref.asset_type)
+    if kind in ("character", "prop") and ref.alpha < _TRANSPARENT and ref.made_by:
         # Only a drawn picture: an imported one may be opaque on purpose.
         warned.append(f"<{ref.name}>'s picture is opaque, so its background goes into the shot: draw it on a blank background, or "
                       "take its background off with a tool")  # fmt: skip
-    if ref.asset_type not in _KINDS or ref.follow == "loose":
+    if kind is None or ref.follow == "loose":
         return StoryReference(name=ref.name, kind="world_state", image=ref.image, description=described)
-    voice = (ref.voice if ref.voice is not None else ref.audio) if ref.asset_type == "character" else None
-    return StoryReference(name=ref.name, kind=_KINDS[ref.asset_type], image=ref.image, description=described, voice=voice)
+    voice = (ref.voice if ref.voice is not None else ref.audio) if kind == "character" else None
+    return StoryReference(name=ref.name, kind=kind, image=ref.image, description=described, voice=voice)
 
 
 def _continued(resumed: Continue | None, end: float, warned: list[str]) -> Continue | None:
@@ -1955,7 +1964,7 @@ def _written(payload: GenerateInput) -> _Shot:
     kept = [ref for ref in payload.references if _has_media(ref) and (verbatim or name_key(ref.name) in said)]
     kept.sort(key=lambda ref: ref.image is None)
     references = [_reference(ref, warned) for ref in kept]
-    return _Shot(prompt, at, references, any(ref.asset_type == "character" for ref in kept), _continued(payload.continue_from, at, warned), warned)
+    return _Shot(prompt, at, references, any(ref.kind == "character" for ref in references), _continued(payload.continue_from, at, warned), warned)
 
 
 def segment_seed(seed: int | None, request_id: str, index: int) -> int:
@@ -2074,20 +2083,30 @@ async def generate(ctx: Context, payload: GenerateInput, out: Outputs, tel: Tele
                                          carried=resumed is not None, carry=carry)  # fmt: skip
     references = shot.references if payload.plate is None else [*shot.references, StoryReference(name="Plate", kind="anchor_video", video=payload.plate.video)]
     warnings += [*unique_names(references), *timing, *planned]
+    # The shape asked for beats a keyframe's. A take goes on at its own, which its carry holds, and a plate sets its own.
+    holder = resumed.video if resumed is not None else payload.plate.video if payload.plate is not None else None
+    native = payload.aspect_ratio is not None and holder is None
+    if payload.aspect_ratio is not None and holder is not None:
+        probed = holder.probe()
+        if not _is_native(f"{probed.width}/{probed.height}"):
+            warnings.append(f"{'this take' if resumed is not None else 'the plate'} is {probed.width}x{probed.height} and sets the shape, not {payload.aspect_ratio}")
     for name, keyframe in (("first_frame", opening), ("last_frame", ending)):
         if keyframe is not None:
             shape = (keyframe.probe().width, keyframe.probe().height)
-            if within_ratio(*shape) != shape:
+            if native and not _is_native(f"{shape[0]}/{shape[1]}"):
+                ratio = Fraction(*shape).limit_denominator(32)
+                warnings.append(f"{name} is {ratio.numerator}:{ratio.denominator}; its middle is used for 16:9")
+            elif not native and within_ratio(*shape) != shape:
                 warnings.append(f"{name} is past 4:1; its middle is used")
     retained = own_retention(shot.prompt)
     if not _FIRST_SHOT.search(shot.prompt):
         warnings.append("this prompt has no `[Shot 1]`, which MiniMax's guide opens a shot with; it goes as written")
-    if payload.aspect_ratio is not None and not _is_native(payload.aspect_ratio):
+    if native and not _is_native(cast(str, payload.aspect_ratio)):
         warnings.append(f"minimax-h3 renders 1344x768 for now, not {payload.aspect_ratio}")
     steps = None if turbo else payload.steps
     count = len(segments)
     # Each segment reads its carry from the one before, so this can't be found out after one has rendered.
-    if opening is not None and count > 1:
+    if opening is not None and count > 1 and not native:
         probed = opening.probe()
         height, width = clip_size(probed.width, probed.height, guide=True)
         if not carries(height, width):
@@ -2199,7 +2218,7 @@ async def generate(ctx: Context, payload: GenerateInput, out: Outputs, tel: Tele
                             context_frames=cast(ContextFrames, plan.carried.frames),
                             context_audio=plan.carried.audio,
                             next_context_frames=cast(ContextFrames, plan.successor.frames),
-                            next_context_audio=plan.successor.audio, first_frame=first, last_frame=last,
+                            next_context_audio=plan.successor.audio, first_frame=first, last_frame=last, native=native,
                             latents=True,
                             earlier_latents=(*before[0], *(r.latents for r in returned)) if end_segment else (),
                             earlier_videos=(*before[1], *(r.video for r in returned)) if end_segment else (),
@@ -2212,7 +2231,7 @@ async def generate(ctx: Context, payload: GenerateInput, out: Outputs, tel: Tele
                     result = await fl2va_segment(  # type: ignore[call-arg]
                         payload=FL2VAInput(
                             prompt=call.prompt, seed=seeds[index], duration_s=segments[index], steps=steps,
-                            turbo=turbo, preset=payload.preset, first_frame=first, last_frame=last,
+                            turbo=turbo, preset=payload.preset, first_frame=first, last_frame=last, native=native,
                             next_context_frames=cast(ContextFrames, plan.successor.frames),
                             next_context_audio=plan.successor.audio, latents=True,
                         ),
