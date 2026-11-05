@@ -2027,8 +2027,8 @@ async def generate(ctx: Context, payload: GenerateInput, out: Outputs, tel: Tele
         warnings.append("continue_from goes on from where it was: last_frame is ignored")
         ending = None
     if resumed is not None and resumed.latents is not None and (why := _unusable(resumed)):
-        warnings.append(f"continue_from's latents can't be used: {why}")
-        resumed = replace(resumed, latents=None)
+        raise InvalidRequest(f"continue_from's latents can't be used: {why}, so nothing is made: render the whole shot again, or leave "
+                             "latents out for a new video opening on that video's last frame", fields=["continue_from"])  # fmt: skip
     if resumed is not None and resumed.latents is None:
         # Nothing carries in without latents: a new video opens on the old one's last frame.
         warnings.append("continue_from has no latents, so this is a new video opening on its last frame, and it comes "
