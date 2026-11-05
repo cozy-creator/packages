@@ -79,6 +79,7 @@ from minimax_h3.continuation import (
     ContinuationPlan,
     RenderProvenance,
     audio_ticks,
+    carries,
     context_provenance,
     decode_context,
     encode_context,
@@ -121,6 +122,7 @@ from minimax_h3.official import (
     reference_video_vision_tokens,
     shown_width,
     validate_reference_policy,
+    clip_size,
     within_ratio,
 )
 from seedvr2 import Resolution as RestorationResolution
@@ -1260,12 +1262,17 @@ class _Segments:
                  latents: bool) -> None:  # fmt: skip
         self.out, self.model, self.plan, self.observed, self.latents = out, model, plan, observed, latents
         self.saved: dict[str, File] = {}
+        self.warnings: list[str] = []
 
     def __call__(self, state: Any) -> None:
         if self.plan.successor:
-            carried = self.model.pipe.export_context(state, provenance=context_provenance(self.observed))
-            assert carried is not None
-            self.saved["context"] = self.out.save_bytes(encode_context(carried), media_type="application/octet-stream")
+            # What's denoised is worth more than what comes after it: a video stands without its carry, which only a later take reads.
+            try:
+                carried = self.model.pipe.export_context(state, provenance=context_provenance(self.observed))
+                assert carried is not None
+                self.saved["context"] = self.out.save_bytes(encode_context(carried), media_type="application/octet-stream")
+            except InvalidRequest as refused:
+                self.warnings.append(f"New take from here isn't available for this video: {refused.message}")
         if self.latents:
             # The head is whole VAE cycles (`continuation`), so what follows it joins the
             # previous segment's latents in phase.
@@ -1336,7 +1343,7 @@ async def ref2va_segment(
         ended=partial(_keep_frames, out, ended),
         earlier=earlier, sound=sound,
     )  # fmt: skip
-    return SegmentOutput(segment.video, list(segment.warnings), observed, handed.file("context"), ended[0], handed.file("latents"))
+    return SegmentOutput(segment.video, [*segment.warnings, *handed.warnings], observed, handed.file("context"), ended[0], handed.file("latents"))
 
 
 app.child_task(ref2va_segment)
@@ -1429,7 +1436,7 @@ async def fl2va_segment(
         completed=handed if handed.wanted else None,
         ended=partial(_keep_frames, out, ended),
     )  # fmt: skip
-    return SegmentOutput(shot.video, list(shot.warnings), observed, handed.file("context"), ended[0], handed.file("latents"))
+    return SegmentOutput(shot.video, [*shot.warnings, *handed.warnings], observed, handed.file("context"), ended[0], handed.file("latents"))
 
 
 app.child_task(fl2va_segment)
@@ -2079,6 +2086,13 @@ async def generate(ctx: Context, payload: GenerateInput, out: Outputs, tel: Tele
         warnings.append(f"minimax-h3 renders 1344x768 for now, not {payload.aspect_ratio}")
     steps = None if turbo else payload.steps
     count = len(segments)
+    # Each segment reads its carry from the one before, so this can't be found out after one has rendered.
+    if opening is not None and count > 1:
+        probed = opening.probe()
+        height, width = clip_size(probed.width, probed.height, guide=True)
+        if not carries(height, width):
+            raise InvalidRequest(f"a {width}x{height} first frame can't carry from one segment to the next, so nothing is made: "
+                                 "crop it nearer 16:9, or keep the shot to one segment", fields=["first_frame"])  # fmt: skip
     # Every segment carries into a successor, its last too: the video's latents keep that carry, which
     # a `continue_from` of it resumes.
     plans = [ContinuationPlan(length, carry if index or resumed else Carry(), carry)

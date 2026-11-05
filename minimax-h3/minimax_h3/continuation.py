@@ -49,6 +49,11 @@ def _refuse(message: str) -> NoReturn:
     raise InvalidRequest(message, code="h3_continuation", fields=["context"])
 
 
+def carries(height: int, width: int) -> bool:
+    """Whether a context can hold a canvas of this size."""
+    return min(height, width) >= 32 and not height % 32 and not width % 32 and height * width <= MAX_CONTEXT_PIXELS
+
+
 def video_tokens(frames: int) -> int:
     """Video latents of a `17k + 5` frame run."""
     return 5 * ((frames - 5) // 17) + 2
@@ -201,10 +206,7 @@ class AVContext:
                 or shape[:2] != (1, 24)
                 or shape[2] not in {video_tokens(n) for n in CONTEXT_FRAMES}
                 or canvas is None
-                or min(canvas) < 32
-                or canvas[0] % 32
-                or canvas[1] % 32
-                or canvas[0] * canvas[1] > MAX_CONTEXT_PIXELS
+                or not carries(*canvas)
             ):
                 _refuse("context picture is outside the qualified H3 window or canvas")
         if self.audio is not None and tuple(self.audio.shape) != (2 * AUDIO_TICKS, 32):
