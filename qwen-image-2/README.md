@@ -23,7 +23,7 @@ asset reports its actual media type; clients should use it rather than assume a 
 extension.
 
 The size is upstream's `calculate_dimensions` at `megapixels` (held to 1–4 MP), in multiples of 32 px;
-text-to-image defaults to `1:1` at 4 MP, the model's native 2048×2048. A ratio past the model's rotary
+text-to-image defaults to `1:1` at 2 MP; 4 MP is the model's native 2048×2048. A ratio past the model's rotary
 range (a 32768 px side) is served at the nearest size it admits, reported as a `clamp` adjustment.
 
 ## Transparent images

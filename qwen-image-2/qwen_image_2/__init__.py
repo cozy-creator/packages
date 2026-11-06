@@ -31,11 +31,13 @@ from .model import QwenImage21Model
 
 app = App()
 
-#: The pixel counts Qwen serves: upstream's 1 MP default to its native 2K (4 MP), the default without
-#: references; upstream's rotary table centres at most 2048 tokens of 16 px on an axis.
+#: The pixel counts Qwen serves: upstream's 1 MP default to its native 2K (4 MP);
+#: upstream's rotary table centres at most 2048 tokens of 16 px on an axis.
 MIN_MEGAPIXELS = 1.0
 MAX_MEGAPIXELS = 4.0
 SIZES = Sizes((MIN_MEGAPIXELS, MAX_MEGAPIXELS), (32, 2048 * 16), 32, "the 1-4 MP Qwen-Image serves")
+#: The size without references (Paul, 11-06: "2 megapixels is a good default").
+DEFAULT_MEGAPIXELS = 2
 #: The full model's steps; Turbo's are its schedule's.
 _STEPS = 40
 #: Qwen-Image-2.1-Turbo's distilled schedule, its `model_index.json` `sample_sigmas`
@@ -135,7 +137,7 @@ def _generate(
     # What is not given is the first reference's (upstream takes the LAST reference's; every Cozy
     # image package takes the first, the image being edited).
     first = reference_images[0].size if reference_images else None
-    width, height = payload.size(adj, first, SIZES, megapixels=SIZES.megapixels[1])
+    width, height = payload.size(adj, first, SIZES, megapixels=DEFAULT_MEGAPIXELS)
     with tel.stage("encoding prompt", overall_range=(0.08 if reference_images else 0.0, 0.1)):
         if reference_images is None:
             embeds, mask = model.encode(prompt)
@@ -205,8 +207,8 @@ class ImageBox(msgspec.Struct, kw_only=True):
     turbo: bool = True
     #: `ImageRequest.target`; Qwen's rotary range holds it to 1:16 through 16:1 (`SIZES.fit`).
     aspect_ratio: Annotated[AspectRatio, Ratios(min=1 / 16, max=16)] | None = None
-    #: `SIZES.pixels`: Qwen Image 2.1 renders at 1, 2 or 4 MP (Paul, 11-06), by default its native 2K.
-    megapixels: Literal[1, 2, 4] = 4
+    #: `SIZES.pixels`: Qwen Image 2.1 renders at 1, 2 or 4 MP, by default 2 (Paul, 11-06).
+    megapixels: Literal[1, 2, 4] = DEFAULT_MEGAPIXELS
     seed: Seed | None = None
 
 
