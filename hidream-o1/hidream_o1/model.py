@@ -12,7 +12,7 @@ everything, every step. Runtime constructs and fills the modules and owns their 
 from __future__ import annotations
 
 import math
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from typing import Any
 
@@ -387,10 +387,11 @@ class Prefix:
     sin: torch.Tensor
     again: Callable[[], Prefix] | None = None
 
-    def layers(self) -> list[tuple[torch.Tensor, torch.Tensor]]:
-        if self.again is not None:
-            return [state.get() for state in self.again().kv]
-        return [state.get() for state in self.kv]
+    def layers(self) -> Iterator[tuple[torch.Tensor, torch.Tensor]]:
+        """Each layer's keys and values in turn, read as its layer runs: a held layer is resident
+        only while it is read."""
+        for state in (self.again().kv if self.again is not None else self.kv):
+            yield state.get()
 
 
 class _Held:
