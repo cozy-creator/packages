@@ -4,7 +4,7 @@ eagerly or natively.
 The step is the official loop step (`MiniMaxH3LoopDenoiser`, then `MiniMaxH3LoopSchedulerStep`)
 over tensors alone. It reads its timesteps and sigmas from tables at the step index, and takes
 every host decision from its label: its attention layout, how many distinct timesteps its rows
-hold, the turbo head it serves, and whether the Kitchen producer's sites reuse the previous
+hold, and whether the Kitchen producer's sites reuse the previous
 step's key means, which it carries in one slot per site (`producer.Carry`); the last dense step
 seeds them. Across ranks the loop runs eagerly: each step has its own layout and the producer
 decides as a step loop does. The loop reaches every per-call tensor through its inputs, so the
@@ -33,7 +33,6 @@ class Label:
     rows: int
     rolling: bool
     seeding: bool
-    head: int = 0
 
 
 def denoise(
@@ -51,7 +50,7 @@ def denoise(
 ) -> None:
     """One rank's denoise of the loop's block `state` on its `trunk`'s DiT, its latents advanced in
     place: under the turbo bank `selector` names, its overlay armed before the loop and each
-    step's head its label's, and under the preset's step `cache`. A ref2va's clip rows (`clips`)
+    step's head read from a table at its index, and under the preset's step `cache`. A ref2va's clip rows (`clips`)
     leave before its first sparse step, so its sparse steps are a second loop over the rows left."""
     overlay = (selector or {}).get(OVERLAY_KWARG)
     steps = len(state.row_timestep_plan)
@@ -92,8 +91,8 @@ def _loop(
     cache: stepcache.Policy | None,
 ) -> None:
     """The steps `part` of `state`'s plan as one `denoise_loop`. Their rows are checked against
-    the tables they read, and each turbo head found, before it (`_arm`): its steps read nothing
-    on the host. A part after the first starts its producer slots unwritten (`producer.present`)."""
+    the tables they read, and each step's turbo head found, before it (`_arm`): its steps read
+    nothing on the host. A part after the first starts its producer slots unwritten (`producer.present`)."""
     plan = state.row_timestep_plan
     fields = state.denoiser_input_fields
     position_ids, tags = fields["position_ids"], fields["token_tags"]
@@ -108,13 +107,15 @@ def _loop(
         timesteps[index, : times.numel()] = times
     indices = torch.stack([rows for _, rows in plan])
     heads = overlay is not None and overlay.heads
+    table = torch.tensor(
+        [overlay.schedule.step(times) if heads else 0 for times, _ in plan], device=device
+    )
     labels = tuple(
         Label(
             layout_at(index if parallel else dense_steps if index >= dense_steps else 0),
             plan[index][0].numel(),
             bool(sites) and index >= max(dense_steps, 1) and index > part.start,
             bool(sites) and index == dense_steps - 1,
-            overlay.schedule.step(plan[index][0]) if heads else 0,
         )
         for index in part
     )
@@ -124,14 +125,15 @@ def _loop(
         state.prompt_embeds, timesteps, indices, tags, position_ids, fields["video_indices"],
         fields["audio_indices"], fields["text_indices"], state.timesteps,
         state.audio_timesteps, schedulers.scheduler.sigmas, schedulers.audio_scheduler.sigmas,
+        table,
     )  # fmt: skip
 
     def step(i: torch.Tensor, video: Any, audio: Any, *rest: Any, label: Label) -> None:
         means, given = rest[: len(keys)], rest[len(keys) :]
         prompt, times, rows, tags, positions, at_video, at_audio, at_text, *schedule = given
-        video_t, audio_t, video_sigmas, audio_sigmas = schedule
+        video_t, audio_t, video_sigmas, audio_sigmas, table = schedule
         if heads:
-            transformer._engage(overlay, label.head)
+            transformer._engage(overlay, table.index_select(0, i))
         carry = producer.Carry(dict(zip(keys, means, strict=True)), label.rolling, label.seeding)
         with attention_scope(label.layout), producer.carrying(carry) if keys else nullcontext():
             velocity, audio_velocity = transformer(
@@ -152,7 +154,7 @@ def _loop(
         euler(audio[audio_rows:], audio_velocity.float(), i, audio_t, audio_sigmas)
 
     if overlay is not None:  # armed before the loop, as `denoise_loop` requires
-        transformer._engage(overlay, labels[0].head)
+        transformer._engage(overlay, table[part.start])
     try:
         denoise_loop(
             step,

@@ -112,7 +112,7 @@ class _Armed:
 
     __slots__ = ("source", "step")
 
-    def __init__(self, source: Any, step: int = 0) -> None:
+    def __init__(self, source: Any, step: Any = 0) -> None:
         self.source = source
         self.step = step
 
@@ -455,7 +455,7 @@ class AdaLNPrunedMiniMaxH3Transformer(MiniMaxH3Transformer3DModel):  # type: ign
             self._release()
             raise
 
-    def _engage(self, overlay: Overlay, step: int) -> None:
+    def _engage(self, overlay: Overlay, step: Any) -> None:
         self._arming = OverlayArming(overlay, step)
         self.time_proj._armed = _Armed(overlay)
         for block, source in zip(self.transformer_blocks, overlay.transformer_blocks, strict=True):
