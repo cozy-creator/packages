@@ -186,7 +186,7 @@ def reconcile(text: str, locked: list[Row]) -> str:
 class UpsamplerGraph:
     def __init__(self, config: Config) -> None:
         # Every parameter in its stored dtype: Qwen3.5 keeps A_log and its gated norms in f32.
-        self.components: dict[str, torch.nn.Module] = {COMPONENT: vlm.construct(config.mapping(), config)[0]}
+        self.components: dict[str, torch.nn.Module] = {COMPONENT: vlm.construct(config.mapping(), config)}
 
 
 def _floor(value: float) -> int:

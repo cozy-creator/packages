@@ -5,11 +5,10 @@ CPU, with small random-weight models.
 
 The files dir holds a Qwen3.6 checkpoint's `config.json`, `generation_config.json`, tokenizer, processor
 configs and chat template (`Qwen/Qwen3.6-35B-A3B@995ad96e`). For the dense and the MoE layout, one
-shrunken config builds Transformers' model (fused experts) and the package's (one block per expert, the
-multi-token-prediction head attached) from the same float32 weights. Each case asks with an image and a
-video: the processor's tensors must equal Transformers' own chat-template path, the logits match within
-float32 noise, and the greedy answers equal Transformers' `generate`, with and without the draft head; a
-sampled answer replays from its seed, drafted or not, and another seed gives another.
+shrunken config builds Transformers' model (fused experts) and the package's (one block per expert) from
+the same float32 weights. Each case asks with an image and a video: the processor's tensors must equal
+Transformers' own chat-template path, the logits match within float32 noise, and the greedy answer equals
+Transformers' `generate`; a sampled answer replays from its seed, and another seed gives another.
 """
 
 from __future__ import annotations
@@ -25,7 +24,7 @@ import torch
 from PIL import Image
 from transformers import AutoConfig, AutoModelForImageTextToText, GenerationConfig
 
-from cozy_runtime import lm, moe, vlm
+from cozy_runtime import moe, vlm
 
 FILES = Path(sys.argv[1])
 
@@ -81,10 +80,10 @@ def reference(config: dict[str, Any]) -> torch.nn.Module:
     return model.eval()
 
 
-def package(config: dict[str, Any], ref: torch.nn.Module) -> tuple[torch.nn.Module, Any]:
+def package(config: dict[str, Any], ref: torch.nn.Module) -> torch.nn.Module:
     """Runtime's construction, filled with the reference's weights the way the per-expert checkpoint
-    stores them; the draft head random."""
-    model, draft = vlm.construct(config, Stored(config))
+    stores them."""
+    model = vlm.construct(config, Stored(config))
     ours = dict(model.named_parameters())
     filled = set()
     for name, tensor in ref.state_dict().items():
@@ -98,19 +97,14 @@ def package(config: dict[str, Any], ref: torch.nn.Module) -> tuple[torch.nn.Modu
         else:
             ours[name].data.copy_(tensor)
             filled.add(name)
-    torch.manual_seed(1)
-    for name, parameter in ours.items():
-        if name not in filled:
-            assert name.startswith("mtp."), name
-            parameter.data.normal_(0, 0.05)
-    assert set(ours) - filled == {n for n in ours if n.startswith("mtp.")}
-    return model, draft
+    assert set(ours) == filled, sorted(set(ours) - filled)[:5]
+    return model
 
 
-def asker(model: torch.nn.Module, draft: Any) -> vlm.VisionLM:
+def asker(model: torch.nn.Module) -> vlm.VisionLM:
     asking = vlm.VisionLM.__new__(vlm.VisionLM)
     asking.pipe = vlm.Pipeline.__new__(vlm.Pipeline)
-    asking.pipe.components, asking.pipe.draft = {vlm.COMPONENT: model}, draft
+    asking.pipe.components = {vlm.COMPONENT: model}
     asking.processor = vlm.processor(Files())
     model.generation_config = GenerationConfig(**json.loads((FILES / "generation_config.json").read_text()))
     return asking
@@ -127,10 +121,10 @@ def case(name: str, moe_layout: bool) -> None:
     started = time.perf_counter()
     config = shrunk(moe_layout)
     ref = reference(config)
-    model, draft = package(config, ref)
+    model = package(config, ref)
     split = sum(isinstance(m, moe.Experts) for m in model.modules())
-    assert split == (5 if moe_layout else 0), split  # 4 layers and the MTP layer
-    asking = asker(model, draft)
+    assert split == (4 if moe_layout else 0), split
+    asking = asker(model)
     q = question()
     text = asking._chat(q, "Answer briefly.", False)
     expected = asking.processor.apply_chat_template(
@@ -156,26 +150,25 @@ def case(name: str, moe_layout: bool) -> None:
         return vlm.VisionLM.ask.__wrapped__(asking, [q], system="Answer briefly.", thinking=False, stop=[],
                                             max_new_tokens=12, presence_penalty=0.0, **sampling)
 
-    drafted = answer()
+    plain = answer()
+    assert plain == [want], (plain, want)
     sampled = answer(temperature=1.0, top_p=0.9, seed=11)
     assert answer(temperature=1.0, top_p=0.9, seed=11) == sampled != answer(temperature=1.0, top_p=0.9, seed=12)
-    lm.release(model)  # the next call builds a fresh engine, undrafted
-    asking.pipe.draft = None
-    plain = answer()
-    assert drafted == plain == [want], (drafted, plain, want)
-    assert answer(temperature=1.0, top_p=0.9, seed=11) == sampled, "a seed replays drafted or not"
     print(f"{name}: logits max |Δ| {worst:.2e}, answer {want!r} ({len(want)} chars), {time.perf_counter() - started:.1f} s")
 
 
 def census() -> None:
-    """The full-size 35B-A3B tree, built on the meta device, names exactly the per-expert checkpoint."""
+    """The full-size 35B-A3B tree, built on the meta device, names exactly the per-expert checkpoint less
+    its multi-token-prediction head (`mtp.*`, not built)."""
     config = json.loads((FILES / "config.json").read_text())
     with torch.device("meta"):
-        model, _ = vlm.construct(config, Stored(config))
+        model = vlm.construct(config, Stored(config))
     names = set(model.state_dict())
     index = json.loads((FILES / "model.safetensors.index.json").read_text())["weight_map"]
     stored = set()
     for key in index:
+        if key.startswith("mtp."):
+            continue
         if key.endswith(("experts.gate_up_proj", "experts.down_proj")):
             stem, _, kind = key.rpartition(".")
             role = "gate_and_up_proj" if kind == "gate_up_proj" else "down_proj"
@@ -183,7 +176,7 @@ def census() -> None:
         else:
             stored.add(key)
     assert names == stored, (sorted(names - stored)[:5], sorted(stored - names)[:5])
-    print(f"census: {len(names)} tensors, the per-expert checkpoint's exactly")
+    print(f"census: {len(names)} tensors, the per-expert checkpoint's less its MTP head")
 
 
 torch.set_num_threads(2)
