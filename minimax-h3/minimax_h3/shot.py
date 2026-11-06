@@ -50,7 +50,7 @@ from safetensors.torch import load as load_tensors
 
 from minimax_h3 import shot_latents
 from minimax_h3.continuation import AUDIO_TICKS_PER_S, Carry, ContinuationPlan, audio_ticks, carries, decode_context
-from minimax_h3.official import FPS, MAX_FRAMES, MIN_FRAMES, clip_size, shown_width, within_ratio
+from minimax_h3.official import FPS, MAX_FRAMES, clip_size, shown_width, within_ratio
 from story import _HEADER, MENTION, MIN_CLIP_SECONDS, StoryReference, description_span, name_key, without_sections
 
 #: An output's or latents' byte bound: TensorD's output allowance reads it (256 MiB where none is declared), and the
@@ -93,7 +93,7 @@ class ShotPickup(Pickup, kw_only=True):
     piece: `shot_latents.nearest_join`), and the seconds into this shot's beats it starts at."""
 
     take: ShotVideo
-    out_frame: Annotated[int, Snap(17, offset=5, first=MIN_FRAMES)]
+    out_frame: Annotated[int, Snap(17, offset=5, first=124)]  # `official.MIN_FRAMES`, 5 s on the grid
     #: Unset: the cut's time on this box's own take, whose clock the beats share, else 0.
     beats_from: float | None = None
 
@@ -413,8 +413,8 @@ def segment_texts(prompt: str, starts: Sequence[float], *, continued: bool = Fal
             lines = []
             for at, marked, said in timed:
                 if at == opens or start < at < end:
-                    head = carry.head_frames / FPS if index or carried else 0.0
-                    time = f"At {clock(at - start + head)}, " if at > max(opens, start) else ""
+                    lead = carry.head_frames / FPS if index or carried else 0.0
+                    time = f"At {clock(at - start + lead)}, " if at > max(opens, start) else ""
                     lines.append(f"{'[Shot 1] ' if marked else ''}{time}{said if time else said[:1].upper() + said[1:]}")
             number = iter(range(1, len(body) + 2))
             description = _OWN_SHOT.sub(lambda _: f"[Shot {next(number)}]", "\n".join(line for line in lines if line))

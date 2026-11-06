@@ -1105,7 +1105,7 @@ def _keep_frames(out: Outputs, last: list[ImageFile], pixels: Any) -> None:
 
 
 def _anchors(
-    first: ImageFile | None, last: ImageFile | None, shape: tuple[int, int]
+    first: ImageFile | None, last: ImageFile | None, shape: tuple[int, ...]
 ) -> list[tuple[PILImage.Image, Literal["first", "last"]]]:
     """A Ref2VA call's keyframes, read: anchored as ComfyUI's Add Guide anchors them."""
     pairs: list[tuple[ImageFile | None, Literal["first", "last"]]] = [(first, "first"), (last, "last")]
@@ -1147,6 +1147,8 @@ class Ref2VAInput(msgspec.Struct):
     frames: int
     #: How the segment uses each of its videos, in packed order.
     videos: tuple[VideoUse, ...]
+    #: The (width, height) its keyframes fill: the shot's canvas (`shot.canvas`).
+    canvas: tuple[int, ...]
     #: What this segment carries from its predecessor, and what its successor carries.
     context_frames: ContextFrames = 0
     context_audio: bool = False
@@ -1157,8 +1159,6 @@ class Ref2VAInput(msgspec.Struct):
     #: Keyframes, anchored as ComfyUI's Add Guide anchors them (`anchor_rows`).
     first_frame: FrameImage = None
     last_frame: FrameImage = None
-    #: The (width, height) the keyframes fill: the shot's canvas (`shot.canvas`).
-    canvas: tuple[int, int] = NATIVE
     #: Each picture's short edge in packed order; 0 sizes it as usual.
     picture_edges: tuple[int, ...] = ()
     #: Each picture's name in packed order where it is a character, whose opaque background is said; else "".
@@ -1330,14 +1330,14 @@ class FL2VAInput(msgspec.Struct, kw_only=True):
     first_frame: FrameImage = None
     last_frame: FrameImage = None
     #: The (width, height) the keyframes fill: the shot's canvas (`shot.canvas`).
-    canvas: tuple[int, int] = NATIVE
+    canvas: tuple[int, ...]
     next_context_frames: ContextFrames = 0
     next_context_audio: bool = False
     #: Return the delivered latents (`SegmentOutput.latents`).
     latents: bool = False
 
 
-def _frame(asset: ImageFile | None, shape: tuple[int, int]) -> PILImage.Image | None:
+def _frame(asset: ImageFile | None, shape: tuple[int, ...]) -> PILImage.Image | None:
     """A keyframe as a segment reads it: its middle, scaled to fill the shot's canvas (`shape`)."""
     if asset is None:
         return None
@@ -1776,7 +1776,7 @@ class Upscale(msgspec.Struct, kw_only=True):
     video: ShotVideo
     to: Literal["1080p", "1440p", "2160p"] = "1440p"
     #: How much of the take the refine redraws, as its start noise: 0.7, 0.8 or 0.909 (NVIDIA's).
-    strength: Annotated[float, Range(REGENERATE_STRENGTHS[0], REGENERATE_STRENGTHS[-1]), Advanced()] = REGENERATE_STRENGTH
+    strength: Annotated[float, Range(0.7, 0.909), Advanced()] = REGENERATE_STRENGTH
 
 
 class UpscaleOutput(msgspec.Struct):
