@@ -97,3 +97,19 @@ SVDQ_NVFP4 = Recipe(
     ),
     calibrate=calibrate,
 )
+
+
+#: The text encoder in 4 bits too (Paul, 11-06): every linear `INT8` takes, the DiT blocks and the
+#: text encoder's 36 language layers, in `w4a8.convrot`. Turbo's is 12.4 GB against w4a8's 15.5 and
+#: int8's 18.5; its prompt embeddings sit at cosine 0.93-0.96 to bf16's (int8's: 0.997), 0.81 on
+#: the edit path (outputs/qwen-w4a8, 11-06).
+W4A8_TE = Recipe(
+    lane="w4a8-te",
+    model=QwenImage21Model,
+    plan=QuantizationPlan(
+        encoding="w4a8.convrot",
+        components=INT8.plan.components,
+        include=INT8.plan.include,
+        output_precision="preserve",
+    ),
+)
