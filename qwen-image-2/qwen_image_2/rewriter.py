@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Callable
 from dataclasses import dataclass
 from importlib.resources import files
 from typing import Any, Literal
@@ -127,10 +128,11 @@ def parse(answer: str, pictures: int) -> Rewrite | None:
 
 
 def rewrite(
-    enhancer: VisionLM, prompt: str, images: list[Image.Image], creativity: Creativity, seed: int
+    enhancer: VisionLM, prompt: str, images: list[Image.Image], creativity: Creativity, seed: int,
+    progress: Callable[[float], None],
 ) -> tuple[Rewrite | None, str]:
     """The enhancer's rewrite of `prompt` (`<imageN>` for two or more pictures, as its system prompt asks), and
-    its raw answer."""
+    its raw answer; `progress` is told the share of its token budget decoded."""
     task = "edit" if images else "t2i"
     profile = PROFILES[task]
     steer = _STEER[task].get(creativity, "")
@@ -138,5 +140,6 @@ def rewrite(
     answer = enhancer.ask(
         [question], system=profile.system, thinking=True, stop=[], max_new_tokens=profile.max_new_tokens,
         presence_penalty=profile.presence_penalty, temperature=TEMPERATURE, top_p=TOP_P, seed=seed,
+        progress=lambda tokens: progress(min(tokens / profile.max_new_tokens, 1.0)),
     )[0]
     return parse(answer, len(images)), answer

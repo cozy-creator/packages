@@ -123,7 +123,8 @@ def _upsampled(
     """The request as Qwen's enhancer rewrites it, sampled from the render's `seed`, and the canvas it chose
     when the request names none (upstream passes `wh_ratio` and `ratio_follow` to the renderer)."""
     with tel.stage("upsampling prompt", overall_range=(0.0, 0.3)):
-        found, answer = rewrite(enhancer, prompt, images, payload.creativity, seed)
+        found, answer = rewrite(enhancer, prompt, images, payload.creativity, seed,
+                                lambda done: tel.progress(done, stage="upsampling prompt"))
     if found is None:
         adj.warn("prompt_upsampling", "Qwen's prompt enhancer gave no rewrite, so the prompt goes as written")
         tel.log("upsampled prompt", parsed=False, answer=answer[:2000])
