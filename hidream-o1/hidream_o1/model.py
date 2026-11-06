@@ -494,8 +494,8 @@ class HiDreamO1(Model[O1Graph], encoded_leaves="accept"):
             # Every caption's prefix K/V is read by every step: the Runtime holds it (on the card
             # while there is room, else refilled from pinned host memory), or each step recomputes it.
             config = body.language_model.config
-            width = 2 * config.num_key_value_heads * config.head_dim * torch.bfloat16.itemsize
-            nbytes = sum(seq.prefix for seq in seqs) * width * config.num_hidden_layers
+            per_token = 2 * config.num_key_value_heads * config.head_dim * torch.bfloat16.itemsize
+            nbytes = sum(seq.prefix for seq in seqs) * per_token * config.num_hidden_layers
             held = None if retained is None else retained(nbytes)
             prefixes = []
             for seq in seqs:
