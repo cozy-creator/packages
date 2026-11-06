@@ -31,7 +31,7 @@ cozy run flux-3-klein/generate prompt='Make <Lighthouse> night, the lamp lit' \
   pictures:='[{"name": "Lighthouse", "image": "lighthouse.png"}]'
 ```
 
-Inputs: `prompt`, `pictures`, placed by their `box`, `aspect_ratio` (any W:H), `megapixels` (any size, 1024² pixels each), `seed`, `steps`, `prompt_upsampling`, `regions` (below) and `prompt_drafting`; `generate` also takes `guidance` and `negative_prompt`, since the distilled Klein samples without CFG. Left out, each
+Inputs: `prompt`, `pictures`, placed by their `box`, `aspect_ratio` (any W:H), `megapixels` (any size, 1024² pixels each), `seed`, `steps`, `prompt_upsampling` and `regions` (below); `generate` also takes `guidance` and `negative_prompt`, since the distilled Klein samples without CFG. Left out, each
 is the default in the table, no negative prompt (Base's CFG), upsampling on and a random seed; steps run
 1–200 (Base) or 1–100, guidance 1–20. Without references the default is 1:1 at 1 MP (1024×1024, BFL's `default_size`); the size is
 that area at that ratio, rounded to 32 px. With references, what is not given is the first reference's: given neither,
