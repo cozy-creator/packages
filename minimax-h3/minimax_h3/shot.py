@@ -164,15 +164,13 @@ class Said(NamedTuple):
 
 class Script(NamedTuple):
     """What `written` makes of a shot: MiniMax's text on the video's clock, where its last beat ends, its texts, each
-    mention's name in the text, the references in H3's order, each voice's character per text, and each clip's
-    window."""
+    mention's name in the text, the references in H3's order, and each clip's window."""
 
     prompt: str
     duration_s: float
     said: list[Said]
     names: dict[str, str]
     order: list[str]
-    voices: list[dict[str, str]]
     clips: dict[str, tuple[VideoFile, float, float]]
     people: bool
     soundscape: str
@@ -185,28 +183,8 @@ def _spoken(key: str) -> str:
     return " ".join(key.partition("@")[0].replace(".", " ").split())
 
 
-def pair_voices(references: Mapping[str, Mentioned]) -> tuple[dict[str, str], list[str]]:
-    """H3's convention, until Paul decides one: an audio box `<X_voice>` mentioned in the same text as `<X>`'s picture
-    is X's voice. Each such voice's character, and a warning for a voice without its character, which goes as a sound
-    to reuse."""
-    # `<Amy>` or a version of hers, `<Amy.2>`.
-    pictures = {name_key(key.partition(".")[0]): key for key, value in references.items() if isinstance(value, Image)}
-    paired: dict[str, str] = {}
-    warnings = []
-    for key, value in references.items():
-        spoken = name_key(key)
-        if not isinstance(value, Audio) or not spoken.endswith(" voice"):
-            continue
-        owner = spoken.removesuffix(" voice")
-        if owner in pictures:
-            paired[key] = pictures[owner]
-        else:
-            warnings.append(f"<{key}> is a voice, but <{key[: -len('_voice')]}> isn't in the same text, so it goes as a sound to reuse")
-    return paired, warnings
-
-
 def h3_reference(name: str, value: Mentioned, voice: AudioFile | None = None) -> StoryReference:
-    """A mention as H3 reads it: a picture is a character, with its voice when it has one; a clip is motion and camera;
+    """A mention as H3 reads it: a picture is a character, with its `voice` when it has one; a clip is motion and camera;
     a sound is reused in the soundtrack."""
     if isinstance(value, Image):
         return StoryReference(name=name, kind="character", image=value.file, description=value.description, voice=voice)
@@ -217,16 +195,12 @@ def h3_reference(name: str, value: Mentioned, voice: AudioFile | None = None) ->
 
 def here(script: Script, start: float, end: float) -> list[StoryReference]:
     """A segment's references, from `start` to `end` on the video's clock: those of the whole shot's texts and of the
-    beats its time covers, in H3's order, each character with the voice a text of these pairs it with."""
+    beats its time covers, in H3's order."""
     keys: dict[str, Mentioned] = {}
-    voiced: dict[str, AudioFile] = {}
-    for said, voices in zip(script.said, script.voices, strict=True):
+    for said in script.said:
         if said.start < end and said.end > start:
             keys |= said.references
-            voiced |= {owner: said.references[voice].file for voice, owner in voices.items()}  # type: ignore[misc]
-    paired = {voice for said, voices in zip(script.said, script.voices, strict=True) for voice in voices
-              if said.start < end and said.end > start}  # fmt: skip
-    return [h3_reference(script.names[key], keys[key], voiced.get(key)) for key in script.order if key in keys and key not in paired]
+    return [h3_reference(script.names[key], keys[key]) for key in script.order if key in keys]
 
 
 def _named(texts: Sequence[Said]) -> tuple[list[str], dict[str, str]]:
@@ -245,16 +219,9 @@ def _named(texts: Sequence[Said]) -> tuple[list[str], dict[str, str]]:
     return order, names
 
 
-def _in_names(said: Said, names: Mapping[str, str], voices: Mapping[str, str]) -> str:
-    """A text with each mention as its name, and a voice as its character's (`story.voices`)."""
-
-    def name(found: re.Match[str]) -> str:
-        key = found[1]
-        if key in voices:
-            return f"<{names[voices[key]]}'s voice>"
-        return f"<{names[key]}>" if key in said.references else found[0]
-
-    return MENTION.sub(name, said.text)
+def _in_names(said: Said, names: Mapping[str, str]) -> str:
+    """A text with each mention as its name."""
+    return MENTION.sub(lambda found: f"<{names[found[1]]}>" if found[1] in said.references else found[0], said.text)
 
 
 def kept(text: str) -> str:
@@ -291,20 +258,15 @@ def written(shot: Shot, *, offset: float = 0.0, length: float | None = None) -> 
     said = [Said(beat.description.text, beat.description.references, start, end) for beat, start, end in beats]
     whole = [Said(prompt.text, prompt.references) for prompt in (shot.music, shot.soundscape, shot.summary)]
     order, names = _named([*said, *whole])
-    voices = []
-    for text in [*said, *whole]:
-        paired, unpaired = pair_voices(text.references)
-        voices.append(paired)
-        warned += unpaired
-    music, soundscape, summary = (_in_names(text, names, paired) for text, paired in zip(whole, voices[len(said):], strict=True))
+    music, soundscape, summary = (_in_names(text, names) for text in whole)
     told: list[str] = []
-    for text, paired, (_, start, _) in zip(said, voices, beats, strict=True):
+    for text, (_, start, _) in zip(said, beats, strict=True):
         # A beat with no words yet is only a length: a box opens with one.
-        if said_here := kept(_in_names(text, names, paired)):
+        if said_here := kept(_in_names(text, names)):
             told.append(f"{'' if told else '[Shot 1] '}{f'At {clock(start)}, ' if start else ''}{said_here}")
     summary = kept(summary)
     if len(shot.beats) == 1 and not summary:
-        prompt = _in_names(said[0], names, voices[0]) if said else ""
+        prompt = _in_names(said[0], names) if said else ""
     elif told:
         prompt = "\n\n".join(filter(None, (summary and f"summary:\n{summary}", "detailed_description:\n" + "\n".join(told))))
     else:
@@ -317,7 +279,7 @@ def written(shot: Shot, *, offset: float = 0.0, length: float | None = None) -> 
             # beat's, and it's cut at that beat's end.
             first = min((text for text in [*said, *whole] if key in text.references), key=lambda text: text.start)
             clips[names[key]] = (value.file, first.start, first.end)
-    return Script(prompt, beats[-1][2] if beats else 0.0, [*said, *whole], names, order, voices, clips,
+    return Script(prompt, beats[-1][2] if beats else 0.0, [*said, *whole], names, order, clips,
                   any(isinstance(value, Image) for value in values.values()), soundscape, music, warned)  # fmt: skip
 
 

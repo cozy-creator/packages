@@ -15,7 +15,7 @@ summary: <theo> and <juno> fight on <dock>, on 35 mm film, in a warm grade, with
 beats:                                        # what happens, in order, each 1 to 15 s; together, the shot's length
   - {duration: 6, description: The two circle each other.}
   - {duration: 7, description: <juno> feints left and sweeps <theo>'s legs, as in <walk@24-120>.}
-  - {duration: 14, description: The camera drops to a low angle. <theo> rolls and stands. <juno> says, in <juno_voice>, <d><English>Again.<d>}
+  - {duration: 14, description: The camera drops to a low angle. <theo> rolls and stands. <juno> says <d><English>Again.<d>}
 soundscape: gulls, surf, wind, <rain>
 first_frame: <open>                           # and/or last_frame
 turbo: true
@@ -29,8 +29,8 @@ beats: [{duration: 12, description: <kyogre> in place of the man.}]
 ```
 
 **References.** Each text mentions what it uses, and a segment gets only what its own beats, the summary, the soundscape
-and the music mention. A picture is always a character, defined with its description. An audio box `<X_voice>`
-mentioned beside `<X>` is X's voice timbre; any other sound is reused in the soundtrack. A video is motion and camera:
+and the music mention. A picture is always a character, defined with its description. A sound is reused in the
+soundtrack (character voices are pending). A video is motion and camera:
 it lines up with the start of the first beat that mentions it, second for second, and is cut at that beat's end (in the
 summary, with the shot's start). H3 numbers references by first mention in the beats, music, soundscape, then summary.
 
