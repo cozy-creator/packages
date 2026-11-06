@@ -6,6 +6,7 @@ from __future__ import annotations
 from typing import Any
 
 from cozy_runtime.author import Context, EncodingRule, QuantizationPlan, Recipe, Telemetry
+from cozy_runtime.vlm import VisionLM
 
 from .model import QwenImage21Model
 
@@ -96,4 +97,44 @@ SVDQ_NVFP4 = Recipe(
         output_precision="preserve",
     ),
     calibrate=calibrate,
+)
+
+_LM = "model.model.language_model.layers.*"
+
+#: The prompt enhancers' (Qwen3.5-9B fine-tunes, `rewriter.py`) language linears and LM head: the bytes each
+#: decoded token reads. The embedding, the vision tower and the linear-attention gates keep their source bytes.
+ENHANCER_INT8 = Recipe(
+    lane="int8",
+    model=VisionLM,
+    plan=QuantizationPlan(
+        encoding="int8.convrot",
+        components=("model",),
+        include=(
+            f"{_LM}.mlp.*_proj.weight",
+            f"{_LM}.linear_attn.in_proj_qkv.weight",
+            f"{_LM}.linear_attn.in_proj_z.weight",
+            f"{_LM}.linear_attn.out_proj.weight",
+            f"{_LM}.self_attn.[qkvo]_proj.weight",
+            "model.lm_head.weight",
+        ),
+        output_precision="preserve",
+    ),
+)
+
+#: The same in NVFP4 with the vision tower's linears (W4A16 below Blackwell): what fits an 8 GB card's pool.
+ENHANCER_NVFP4 = Recipe(
+    lane="nvfp4",
+    model=VisionLM,
+    plan=QuantizationPlan(
+        encoding="nvfp4",
+        components=("model",),
+        include=(
+            *ENHANCER_INT8.plan.include,
+            "model.model.visual.blocks.*.attn.qkv.weight",
+            "model.model.visual.blocks.*.attn.proj.weight",
+            "model.model.visual.blocks.*.mlp.linear_fc1.weight",
+            "model.model.visual.merger.linear_fc*.weight",
+        ),
+        output_precision="preserve",
+    ),
 )
