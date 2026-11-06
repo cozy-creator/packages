@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Annotated, Any
+from typing import Literal, Annotated, Any
 
 import msgspec
 import torch
@@ -58,7 +58,8 @@ class GenerateInput(PictureRequest):
     )
     #: Bounds for a box, not refusals: past them `_generate` holds it and says so.
     aspect_ratio: Annotated[AspectRatio | None, msgspec.Meta(extra={"min": 0.0625, "max": 16})] = None
-    megapixels: Annotated[float | None, msgspec.Meta(extra={"min": MIN_MEGAPIXELS, "max": MAX_MEGAPIXELS})] = None
+    #: Qwen Image 2.1 renders at 1, 2 or 4 MP: its native 2K by default.
+    megapixels: Literal[1, 2, 4] = 4
 
 
 def label(n: int, picture: Picture) -> str:
