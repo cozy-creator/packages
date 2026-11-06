@@ -184,13 +184,14 @@ def _spoken(key: str) -> str:
 
 
 def h3_reference(name: str, value: Mentioned, voice: AudioFile | None = None) -> StoryReference:
-    """A mention as H3 reads it: a picture is a character, with its `voice` when it has one; a clip is motion and camera;
-    a sound is reused in the soundtrack."""
+    """A mention as H3 reads it: a picture is a character, with its `voice` when something binds one; a clip is motion
+    and camera; a sound is a voice-timbre reference, whose speaker the text names (Paul, 11-06: "it's brought in as a
+    voice-reference")."""
     if isinstance(value, Image):
         return StoryReference(name=name, kind="character", image=value.file, description=value.description, voice=voice)
     if isinstance(value, Video):
         return StoryReference(name=name, kind="video", video=value.file)
-    return StoryReference(name=name, kind="audio", audio=value.file)
+    return StoryReference(name=name, kind="voice", audio=value.file)
 
 
 def here(script: Script, start: float, end: float) -> list[StoryReference]:

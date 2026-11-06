@@ -43,9 +43,9 @@ VIDEO_READ_BYTES = 16 << 30
 IMAGE_READ_BYTES = 64 << 20
 AUDIO_READ_BYTES = 64 << 20
 #: Each kind's file field, its H3 reference kind and its `<Picture|Audio|Video N>` label.
-FILE = {"character": "image", "audio": "audio", "video": "video", "anchor_video": "video", "world_state": "image"}
-_SLOT = {"character": "picture", "audio": "audio", "video": "video", "anchor_video": "video", "world_state": "picture"}
-_POLICY = {"character": "image", "audio": "audio", "video": "video", "anchor_video": "video", "world_state": "image"}
+FILE = {"character": "image", "voice": "audio", "audio": "audio", "video": "video", "anchor_video": "video", "world_state": "image"}
+_SLOT = {"character": "picture", "voice": "audio", "audio": "audio", "video": "video", "anchor_video": "video", "world_state": "picture"}
+_POLICY = {"character": "image", "voice": "audio", "audio": "audio", "video": "video", "anchor_video": "video", "world_state": "image"}
 #: The kinds read from a clip.
 CLIPS = ("video", "anchor_video")
 _SPEAKER = re.compile(r"\s*\((S\d+)\)")
@@ -68,6 +68,7 @@ class StoryReference(msgspec.Struct, kw_only=True):
     """One reference file (`FILE[kind]`) a segment attaches, named as its text names it.
 
     - `character`: a picture, which is always a character, with its voice when it has one.
+    - `voice`: a voice-timbre reference with no owner: the text says who speaks in it (Paul, 11-06).
     - `audio`: a sound the soundtrack reuses.
     - `video`: reference footage, its motion and camera.
     - `anchor_video`: a plate, followed frame by frame (Alissonerdx's head swap and style
@@ -80,7 +81,7 @@ class StoryReference(msgspec.Struct, kw_only=True):
     """
 
     name: str
-    kind: Literal["character", "audio", "video", "anchor_video", "world_state"]
+    kind: Literal["character", "voice", "audio", "video", "anchor_video", "world_state"]
     description: str = ""
     image: ImageFile | None = None
     audio: AudioFile | None = None
@@ -247,7 +248,7 @@ def _segment_call(
         warnings.append(f"Segment {index + 1}: H3 takes at most {MAX_IMAGE_REFERENCES} pictures, {MAX_VIDEO_REFERENCES} "
                         f"videos, {MAX_AUDIO_REFERENCES} sounds, so it goes without "
                         f"{', '.join(f'<{ref.name}>' for ref in left)}.")  # fmt: skip
-    if all(ref.kind == "audio" for ref in used):
+    if all(_POLICY[ref.kind] == "audio" for ref in used):
         # H3's Ref2VA needs a picture: a segment that names none renders from its text and
         # keyframes (FL2VA), which takes no audio reference.
         warnings.append(f"Segment {index + 1} names only audio and no picture, so it renders without references."
@@ -335,13 +336,17 @@ def _segment_call(
     tasks = {"video editing"} if editing else set()
     tasks |= {"video continuation"} if continues else set()
     tasks |= {"keyframe completion"} if keyframes else set()
-    tasks |= {"reference generation"} if any(ref.kind not in ("audio", "anchor_video") for ref in used) else set()
+    tasks |= {"reference generation"} if any(ref.kind not in ("voice", "audio", "anchor_video") for ref in used) else set()
     for ref in used:
         slot = label(ref)
         defined = len(definitions)
         if ref.name in owners:
             owner = f"<{owners[ref.name].name}>"
             definitions.append(f"{slot} is the voice-timbre reference for {owner}{voiced[ref.name]}.")
+            tasks.add("audio reference")
+        elif ref.kind == "voice":
+            # MiniMax's guide, 2.4 and 4.2: its voice timbre, with no owner here; the text says who speaks in it.
+            definitions.append(f"<{ref.name}> is the voice-timbre reference in {slot}.")
             tasks.add("audio reference")
         elif ref.kind == "audio":
             definitions.append(f"{slot} is the supplied audio reference for <{ref.name}>.")
@@ -378,6 +383,9 @@ def _segment_call(
                 retention.append(f"<{ref.name}>: {line}")
             elif FILE[ref.kind] == "image" and ref.kind != "world_state":
                 retention.append(f"<{ref.name}>: {_KEEP_LOOK}")
+            elif ref.kind == "voice":
+                retention.append(f"<{ref.name}>: reference - its voice timbre guides whoever the text says speaks in it, "
+                                 "without copying the original signal.")
     tag = " + ".join(task for task in TASKS if task in tasks)
     given = _tasks(text)
     if given and {task.casefold() for task in given} != tasks:
