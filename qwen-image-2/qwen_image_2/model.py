@@ -56,10 +56,14 @@ from cozy_runtime.author import (
     Telemetry,
     denoise_loop,
     hold_dtype,
-    retained,
     uses_components,
 )
 from cozy_runtime.author.kernels import Plan
+
+try:
+    from cozy_runtime.author import retained
+except ImportError:  # a Runtime without `retained` (0.42.1): the prefix is recomputed each step
+    retained = None
 
 from ._prepared import _FlowEuler, _Layout, _cached_step
 
@@ -542,7 +546,8 @@ class QwenImage21Model(
         prefix = embeds.shape[1] + (0 if reference_latents is None else reference_latents.shape[1])
         config = transformer.config
         width_bytes = config.num_attention_heads * config.attention_head_dim * transformer.dtype.itemsize
-        held = retained(2 * prefix * width_bytes * len(transformer.transformer_blocks))
+        nbytes = 2 * prefix * width_bytes * len(transformer.transformer_blocks)
+        held = None if retained is None else retained(nbytes)
         token = _RETAINED.set(held)
         try:
             with torch.inference_mode():
