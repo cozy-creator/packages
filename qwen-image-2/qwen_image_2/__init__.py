@@ -23,11 +23,13 @@ from cozy_runtime.author import (
     Sizes,
     Telemetry,
     name_label,
+    ratio_of,
     render,
 )
 from PIL import Image
 
 from .model import QwenImage21Model
+from .rewriter import Creativity, Enhancer, rewrite
 from . import quantize as quantize  # its recipes
 
 app = App()
@@ -60,6 +62,10 @@ class GenerateInput(PictureRequest):
     aspect_ratio: Annotated[AspectRatio | None, msgspec.Meta(extra={"min": 0.0625, "max": 16})] = None
     #: Qwen Image 2.1 renders at 1, 2 or 4 MP (its native 2K); 2 by default (Paul, 11-06).
     megapixels: Literal[1, 2, 4] = 2
+    #: Qwen's prompt enhancer rewrites the request first (`rewriter`): an edit from its pictures, else the words.
+    prompt_upsampling: bool = True
+    #: How far the rewrite goes beyond the words; `balanced` is Qwen's own.
+    creativity: Creativity = "balanced"
 
 
 def label(n: int, picture: Picture) -> str:
@@ -102,10 +108,41 @@ def _said(payload: GenerateInput) -> str:
     return "\n\n".join(filter(None, (payload.prompt.strip(), words)))
 
 
+def _upsampled(
+    payload: GenerateInput,
+    prompt: str,
+    images: list[Image.Image],
+    seed: int,
+    enhancer: Enhancer,
+    tel: Telemetry,
+    adj: Adjustments,
+) -> tuple[GenerateInput, str]:
+    """The request as Qwen's enhancer rewrites it, sampled from the render's `seed`, and the canvas it chose
+    when the request names none (upstream passes `wh_ratio` and `ratio_follow` to the renderer)."""
+    with tel.stage("upsampling prompt", overall_range=(0.0, 0.3)):
+        found, answer, thought, said = rewrite(enhancer, prompt, images, payload.creativity, seed,
+                                               lambda done: tel.progress(done, stage="upsampling prompt"))
+    if found is None:
+        adj.warn("prompt_upsampling", "Qwen's prompt enhancer gave no rewrite, so the prompt goes as written")
+        tel.log("upsampled prompt", parsed=False, answer=answer[:2000], thought_tokens=thought, answer_tokens=said)
+        return payload, prompt
+    ratio = found.ratio
+    if found.follow is not None:
+        ratio = "{}:{}".format(*images[found.follow - 1].size)
+    tel.log("upsampled prompt", prompt=found.prompt, seed=seed, creativity=payload.creativity, thought_tokens=thought,
+            answer_tokens=said,
+            wh_ratio=found.ratio or "", ratio_follow=f"<image{found.follow}>" if found.follow else "")
+    if payload.aspect_ratio is None and ratio is not None:
+        payload = msgspec.structs.replace(payload, aspect_ratio=":".join(map(str, ratio_of(ratio))))
+    return payload, found.prompt
+
+
 def _generate(
     ctx: Context,
     payload: GenerateInput,
     model: QwenImage21Model,
+    rewriter: Enhancer,
+    expander: Enhancer,
     out: Outputs,
     tel: Telemetry,
     adj: Adjustments,
@@ -120,31 +157,35 @@ def _generate(
     tel.log("sampling", regime="turbo" if sigmas else "base", steps=steps,
             schedule="distilled sigmas" if sigmas else "uniform, dynamic shift")
     seed = payload.drawn_seed()
+    # Upstream feeds the VAE RGBA; its vision encoder sees alpha composited over white.
+    reference_images = [asset.read(mode="RGBA") for asset in payload.images()] or None
+    if payload.prompt_upsampling:
+        enhancer = rewriter if reference_images else expander
+        payload, prompt = _upsampled(payload, prompt, reference_images or [], seed, enhancer, tel, adj)
     model.hold_vae(tel)
     ctx.raise_if_cancelled()
+    begin = 0.3 if payload.prompt_upsampling else 0.0
     # Phase order for residency: references encode on the VAE first, then the text encoder, the
     # transformer denoise (the `denoise_loop`), and the VAE decode.
     if payload.pictures:
         ctx.plan("vae", "text_encoder", "transformer", "vae")
     else:
         ctx.plan("text_encoder", "transformer", "vae")
-    reference_images, reference_latents, image_pad_mask = None, None, None
-    if payload.pictures:
-        with tel.stage("encoding reference images", overall_range=(0.0, 0.08)):
-            # Upstream feeds the VAE RGBA; its vision encoder sees alpha composited over white.
-            reference_images = [asset.read(mode="RGBA") for asset in payload.images()]
+    reference_latents, image_pad_mask = None, None
+    if reference_images:
+        with tel.stage("encoding reference images", overall_range=(begin, begin + 0.05)):
             conditioning_images, reference_latents = model.encode_reference_images(reference_images)
         ctx.raise_if_cancelled()
     # What is not given is the first reference's (upstream takes the LAST reference's; every Cozy
     # image package takes the first, the image being edited).
     first = reference_images[0].size if reference_images else None
     width, height = payload.size(adj, first, SIZES, megapixels=SIZES.megapixels[1])
-    with tel.stage("encoding prompt", overall_range=(0.08 if reference_images else 0.0, 0.1)):
+    with tel.stage("encoding prompt", overall_range=(begin + 0.05, begin + 0.1)):
         if reference_images is None:
             embeds, mask = model.encode(prompt)
         else:
             embeds, mask, image_pad_mask = model.encode_image_prompt(prompt, conditioning_images)
-    with tel.stage("generating image", overall_range=(0.1, 0.9)):
+    with tel.stage("generating image", overall_range=(begin + 0.1, 0.9)):
         latents = model.denoise(
             embeds,
             mask,
@@ -152,7 +193,7 @@ def _generate(
             height=height,
             steps=steps,
             seed=seed,
-            on_step=tel.step_callback(steps, stage="generating image", overall_range=(0.1, 0.9)),
+            on_step=tel.step_callback(steps, stage="generating image", overall_range=(begin + 0.1, 0.9)),
             cancel=ctx.raise_if_cancelled,
             sigmas=sigmas,
             reference_images=reference_images,
@@ -170,11 +211,21 @@ def _generate(
     return ImageResult(asset, width, height, seed, prompt)
 
 
-_MEMO = ("qwen_image_2", "qwen_image_2.model")
+_MEMO = ("qwen_image_2", "qwen_image_2.model", "qwen_image_2.rewriter")
+#: Each model, then Qwen's prompt enhancers (QwenLM/Qwen-Image-2.1 `prompt_rewrite/`): an edit's, a picture from words'.
+_FULL = {"model": "qwen/qwen-image-2.1@0.1.0", "rewriter": "qwen/qwen-image-2.1-pe-i2i@0.1.0",
+         "expander": "qwen/qwen-image-2.1-pe-t2i@0.1.0"}
+_TURBO = {"model": "qwen/qwen-image-2.1-turbo@0.1.1", "rewriter": "qwen/qwen-image-2.1-pe-i2i@0.1.0",
+          "expander": "qwen/qwen-image-2.1-pe-t2i@0.1.0"}
+_COMPONENTS = {"model": ("text_encoder", "transformer", "vae"), "rewriter": ("model",), "expander": ("model",)}
+#: Built and fetched on first use: an edit never pulls the expander, `prompt_upsampling=False` neither enhancer.
+_ON_DEMAND = ("rewriter", "expander")
 
 
 @app.entrypoint(
-    defaults={"model": "qwen/qwen-image-2.1@0.1.0"},
+    defaults=_FULL,
+    components=_COMPONENTS,
+    on_demand=_ON_DEMAND,
     memoize=Memoize(requires=["seed"]),
     memo_dependencies=_MEMO,
     node=Node(name="image", label="Qwen Image 2", show=["megapixels"]),
@@ -183,16 +234,20 @@ def generate(
     ctx: Context,
     payload: GenerateInput,
     model: QwenImage21Model,
+    rewriter: Enhancer,
+    expander: Enhancer,
     out: Outputs,
     tel: Telemetry,
     adj: Adjustments,
 ) -> ImageResult:
     """Qwen-Image-2.1, the 40-step base model."""
-    return _generate(ctx, payload, model, out, tel, adj, _STEPS, None)
+    return _generate(ctx, payload, model, rewriter, expander, out, tel, adj, _STEPS, None)
 
 
 @app.entrypoint(
-    defaults={"model": "qwen/qwen-image-2.1-turbo@0.1.1"},
+    defaults=_TURBO,
+    components=_COMPONENTS,
+    on_demand=_ON_DEMAND,
     memoize=Memoize(requires=["seed"]),
     memo_dependencies=_MEMO,
     node=Node(name="image", label="Qwen Image 2", variant="Turbo", show=["megapixels"]),
@@ -201,9 +256,11 @@ def generate_turbo(
     ctx: Context,
     payload: GenerateInput,
     model: QwenImage21Model,
+    rewriter: Enhancer,
+    expander: Enhancer,
     out: Outputs,
     tel: Telemetry,
     adj: Adjustments,
 ) -> ImageResult:
     """Qwen-Image-2.1-Turbo: the same inputs, on its 8-step distilled schedule."""
-    return _generate(ctx, payload, model, out, tel, adj, len(TURBO_SIGMAS), TURBO_SIGMAS)
+    return _generate(ctx, payload, model, rewriter, expander, out, tel, adj, len(TURBO_SIGMAS), TURBO_SIGMAS)
