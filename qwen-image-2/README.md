@@ -7,13 +7,32 @@ Runtime owns construction, memory residency and component execution.
 
 Each picture's `description` follows the prompt as `<name>: description`, in the words tuned on this model: a mention reads as `<image3>` alone, and with no words for it a third picture was dropped. In a `cozy project`, `pictures` are filled from what the text mentions, each with its description, and the words of an asset with no file go in the same way.
 
-`prompt` reaches the model as given, then those words. The image keeps the decoder's alpha when anything in it is
+`prompt`, then those words, goes to Qwen's prompt enhancer first (below), and its rewrite reaches the model. The image keeps the decoder's alpha when anything in it is
 transparent, and is RGB otherwise; alpha within 4 levels of 0 or 255 (the decoder's noise) snaps
 to it. `seed` is optional and the chosen seed is
 returned. Seeds range from 0 through 9007199254740991 (the interoperable 53-bit
-integer range); omitting one chooses a random seed in that range. Inputs: `prompt`, `pictures`, `aspect_ratio` (any W:H), `megapixels` (any size, 1024² pixels each) and `seed`. The full model runs 40 steps, Turbo the 8 of its checkpoint
-(its 8 `sample_sigmas`). Qwen runs no CFG and has no upsampler, so it has no `guidance`, `negative_prompt` or
-`prompt_upsampling`. Unknown fields are ignored with a warning. The result is `image`, `width`, `height`, `seed` and `prompt`.
+integer range); omitting one chooses a random seed in that range. Inputs: `prompt`, `pictures`, `aspect_ratio` (any W:H), `megapixels` (any size, 1024² pixels each), `seed`, `prompt_upsampling` and `creativity`. The full model runs 40 steps, Turbo the 8 of its checkpoint
+(its 8 `sample_sigmas`). Qwen runs no CFG, so it has no `guidance` or `negative_prompt`. Unknown fields are ignored with a warning. The result is `image`, `width`, `height`, `seed` and `prompt`, the prompt the image was made from.
+
+## Prompt upsampling
+
+Qwen ships two prompt enhancers with Qwen-Image-2.1 ([`prompt_rewrite/`](https://github.com/QwenLM/Qwen-Image-2.1/tree/ab96caa944157ca28a4f36b695c3047549f48f98/prompt_rewrite)),
+each a Qwen3.5-9B fine-tune: `Qwen-Image-2.1-PE-I2I` rewrites an edit instruction, from its pictures, into a precise
+one that names what changes, pushes it to full strength and holds the rest; `Qwen-Image-2.1-PE-T2I` expands a
+request from words into a long description of the finished picture. `prompt_upsampling` (on by default) runs the
+one that fits before generating; off, the prompt goes as written and neither enhancer is fetched.
+
+Each runs as upstream's `pe_core.py`: its own `system_prompt.txt`, thinking first, then a JSON answer; temperature
+1.0, top-p 0.95, presence penalty 0 for edits and 1.5 for words; each picture over white at most 1 MP. Runtime's
+sampler has no top-k, so upstream's top-k 20 is not applied. The rewrite is sampled from the render's `seed`: a new
+render rewrites anew, and a given seed repeats its rewrite. Qwen3.5-9B's multi-token-prediction head
+(`qwen/qwen3.5-9b-mtp`) drafts the decode. The rewrite is the result's `prompt`, and the run's log has it with its
+seed and canvas. With no `aspect_ratio`, the enhancer's canvas is used, as upstream passes it to the renderer: its
+`wh_ratio`, or the shape of the picture its `ratio_follow` names.
+
+`creativity` steers how far the rewrite goes beyond the words: `balanced` (the default) is Qwen's own rewrite;
+`faithful` and `creative` add one sentence after the request, where the enhancer reads intent: change only what was
+asked, or make a striking new picture, bold with expression, pose, styling, setting, light and camera.
 
 Outputs use lossless WebP to preserve the same decoded pixels and alpha while reducing the
 bytes returned to the client. A canvas with either side at least 16384 pixels uses PNG,
@@ -113,6 +132,16 @@ cozy model upload \
 cozy model publish qwen/qwen-image-2.1-turbo 0.1.0 sha256:COMMIT
 ```
 
+The enhancers are mirrored as uploaded; `ENHANCER_INT8` and `ENHANCER_NVFP4` write their lanes:
+
+```sh
+cozy model upload hf://Qwen/Qwen-Image-2.1-PE-I2I@72927bc08afc99b7888ceb7d7d51a12db3700bbd \
+  qwen/qwen-image-2.1-pe-i2i --lane bf16 --mirror --on YOUR_MACHINE
+cozy model upload hf://Qwen/Qwen-Image-2.1-PE-T2I@f3ed7985c788ad75b3ab7223e0c4c51e2a43545b \
+  qwen/qwen-image-2.1-pe-t2i --lane bf16 --mirror --on YOUR_MACHINE
+cozy model quantize qwen/qwen-image-2.1-pe-i2i@sha256:BF16_COMMIT --lane int8 --package qwen-image-2 --on YOUR_MACHINE
+```
+
 Replace `YOUR_MACHINE` and `COMMIT` with the selected machine name and
 returned commit id. Upload creates the commit; the separate publish
 command creates the package's default release (qwen-image-2.1's with its int8 lane,
@@ -164,6 +193,7 @@ image = await generate(
 
 The Hub package is the first-party `qwen-image-2` (no owner); its callables are `generate` and
 `generate_turbo`. Their default models are `qwen/qwen-image-2.1@0.1.0` and
-`qwen/qwen-image-2.1-turbo@0.1.1`, in Qwen's org.
+`qwen/qwen-image-2.1-turbo@0.1.1`, in Qwen's org; both read `qwen/qwen-image-2.1-pe-i2i@0.1.0` (`rewriter`),
+`qwen/qwen-image-2.1-pe-t2i@0.1.0` (`expander`) and `qwen/qwen3.5-9b-mtp@0.2.0` (`drafter`).
 Installing the wheel alone does not turn GPU execution into an in-process call;
 Cozy supplies the managed caller when composing package functions.
