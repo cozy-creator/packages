@@ -278,14 +278,18 @@ class Overlay(nn.Module):  # type: ignore[misc]
     def rows(self, timestep: torch.Tensor) -> torch.Tensor:
         """Global turbo table rows of exact float32 timesteps; off-plan values refuse."""
         values = timestep.to(dtype=torch.float32).reshape(-1, 1)
-        matches = values == self.timesteps.reshape(1, -1)
-        if not bool(torch.all(matches.sum(dim=1) == 1)):
+        if not bool(torch.all((values == self.timesteps.reshape(1, -1)).sum(dim=1) == 1)):
             raise ConformanceError(
                 f"timestep rows are not covered exactly by the {self.bank} plan: "
                 f"{timestep.detach().float().cpu().tolist()}",
                 code="artifact_config",
             )
-        return matches.to(dtype=torch.int64).argmax(dim=1)
+        return self.lookup(timestep)
+
+    def lookup(self, timestep: torch.Tensor) -> torch.Tensor:
+        """The rows, on the device, of timesteps `rows` checked before the forward reading them."""
+        values = timestep.to(dtype=torch.float32).reshape(-1, 1)
+        return (values == self.timesteps.reshape(1, -1)).to(dtype=torch.int64).argmax(dim=1)
 
 
 class OverlayArming:

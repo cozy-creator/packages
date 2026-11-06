@@ -56,19 +56,16 @@ class StepInvariants:
     """What one denoise computes once rather than every step: the rotary tables of its packed
     positions and its refined text rows. Each is kept while the same input tensors come back
     unmodified (the same objects at the same in-place version) under the same turbo overlay, so
-    a layout change (a clip's rows leaving before the first sparse step) recomputes it.
-    `checked`: the denoise checked every step's rows before its loop, so its forwards read no
-    device value on the host (a `denoise_loop` step). `overlay`: the one overlay that loop's every
-    forward is served under, engaged for each (it has no per-step heads). A value computed while a
-    CUDA graph records is that graph's alone: another graph of the loop (a `denoise_loop` records
-    one per label) computes its own, since it may run first."""
+    a layout change (a clip's rows leaving before the first sparse step) recomputes it. Its
+    denoise checked every step's rows before its loop, so the forwards inside read no device
+    value on the host (a `denoise_loop` step) and serve the overlay engaged before it. A value
+    computed while a CUDA graph records is that graph's alone: another graph of the loop (a
+    `denoise_loop` records one per label) computes its own, since it may run first."""
 
-    __slots__ = ("checked", "held", "overlay")
+    __slots__ = ("held",)
 
-    def __init__(self, checked: bool = False, overlay: Overlay | None = None) -> None:
+    def __init__(self) -> None:
         self.held: dict[object, tuple[tuple[tuple[object, int], ...], Any]] = {}
-        self.checked = checked
-        self.overlay = overlay
 
     def get(self, name: str, inputs: tuple[object, ...], compute: Callable[[], Any]) -> Any:
         key = tuple((value, getattr(value, "_version", 0)) for value in inputs)
@@ -98,16 +95,9 @@ _STEP_INVARIANTS: ContextVar[StepInvariants | None] = ContextVar(
 
 
 @contextmanager
-def step_invariants(
-    *, checked: bool = False, overlay: Overlay | None = None
-) -> Iterator[StepInvariants]:
+def step_invariants() -> Iterator[StepInvariants]:
     """One denoise loop's step invariants, dropped when it ends."""
-    if overlay is not None and (overlay.heads or not checked):
-        raise ConformanceError(
-            "a denoise loop engages only a checked overlay without per-step heads",
-            code="artifact_config",
-        )
-    memo = StepInvariants(checked, overlay)
+    memo = StepInvariants()
     token = _STEP_INVARIANTS.set(memo)
     try:
         yield memo
@@ -140,7 +130,7 @@ class _AdaLNPrunedTimestepLookup(nn.Module):  # type: ignore[misc]
     def forward(self, timestep: torch.Tensor) -> torch.Tensor:
         """The rows, on the device: the transformer checked them (`rows`) before its forward."""
         if self._armed is not None:
-            return cast(torch.Tensor, self._armed.source.rows(timestep))
+            return cast(torch.Tensor, self._armed.source.lookup(timestep))
         return self._lookup(timestep)
 
     def _lookup(self, timestep: torch.Tensor) -> torch.Tensor:
@@ -313,10 +303,9 @@ class AdaLNPrunedMiniMaxH3Transformer(MiniMaxH3Transformer3DModel):  # type: ign
         them to its end, the video's float32 rows (2.25 GB a GPU at H3 15 s, degree 2) through
         every block. It checks the rows and arms a turbo bank `attention_kwargs` names (`_arm`)
         and ends disarmed, in the forward, as a package forward hook would keep it out of native
-        loops; unless its denoise checked every step's rows ahead (`StepInvariants.checked`): a
+        loops; unless its denoise checked every step's rows ahead (`StepInvariants`): a
         `denoise_loop` step, which keeps the overlay its denoise armed before the loop."""
-        memo = _STEP_INVARIANTS.get()
-        looped = memo is not None and memo.checked
+        looped = _STEP_INVARIANTS.get() is not None
         if not looped:
             self._arm(timestep, timestep_indices, token_tags, attention_kwargs)
         del attention_kwargs  # `apply_lora_scale` consumed its scale

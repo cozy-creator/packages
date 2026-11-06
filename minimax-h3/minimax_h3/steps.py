@@ -1,17 +1,20 @@
-"""FL2VA's denoise as an `author.denoise_loop`: the Runtime runs it eagerly or natively.
+"""H3's denoise as an `author.denoise_loop`: FL2VA or ref2va, full or turbo; the Runtime runs it
+eagerly or natively.
 
 The step is the official loop step (`MiniMaxH3LoopDenoiser`, then `MiniMaxH3LoopSchedulerStep`)
 over tensors alone. It reads its timesteps and sigmas from tables at the step index, and takes
-every host decision from its label: dense or sparse attention, how many distinct timesteps its
-rows hold, and whether the Kitchen producer's sites reuse the previous step's key means, which
-it carries in one slot per site (`producer.Carry`); the last dense step seeds them. FL2VA's loop
-reaches every per-call tensor through its inputs, so the Runtime keeps its program for the next
-call of the same key.
+every host decision from its label: its attention layout, how many distinct timesteps its rows
+hold, the turbo head it serves, and whether the Kitchen producer's sites reuse the previous
+step's key means, which it carries in one slot per site (`producer.Carry`); the last dense step
+seeds them. Across ranks the loop runs eagerly: each step has its own layout and the producer
+decides as a step loop does. The loop reaches every per-call tensor through its inputs, so the
+Runtime keeps its program for the next call of the same key.
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping, Sequence
+from contextlib import nullcontext
 from dataclasses import dataclass
 from typing import Any
 
@@ -26,93 +29,144 @@ from .overlay import ATTENTION_KWARG, OVERLAY_KWARG
 
 @dataclass(frozen=True, slots=True)
 class Label:
-    sparse: bool
+    layout: AttentionLayout
     rows: int
     rolling: bool
     seeding: bool
+    head: int = 0
 
 
-def denoise_fl2va(
+def denoise(
     transformer: Any,
     schedulers: Any,
     state: Any,
     layout_at: Callable[[int], AttentionLayout],
-    sol_dense_steps: int,
+    dense_steps: int,
     on_step: Callable[[int], None],
     *,
+    trunk: str,
+    selector: Mapping[str, Any] | None = None,
+    clips: Any = None,
     cache: stepcache.Policy | None = None,
 ) -> None:
-    """One rank's FL2VA denoise of the loop's block `state`, its latents advanced in place,
-    its DiT's stack under `cache` when a preset names one."""
+    """One rank's denoise of the loop's block `state` on its `trunk`'s DiT, its latents advanced in
+    place: under the turbo bank `selector` names, its overlay armed before the loop and each
+    step's head its label's, and under the preset's step `cache`. A ref2va's clip rows (`clips`)
+    leave before its first sparse step, so its sparse steps are a second loop over the rows left."""
+    overlay = (selector or {}).get(OVERLAY_KWARG)
+    steps = len(state.row_timestep_plan)
+    parallel = getattr(transformer, "_parallel_config", None) is not None
+    with torch.no_grad(), step_invariants() as memo:
+        sites = () if parallel else producer_sites(transformer)
+        slots = tuple(torch.zeros(s.module.heads, 128, device=state.latents.device) for s in sites)
+        parts = [range(steps)]
+        if clips is not None and dense_steps < steps and bool((clips.frame >= 0).any()):
+            parts = [range(dense_steps), range(dense_steps, steps)]
+        for part in parts:
+            if part.start:
+                clips.release(state)
+            _loop(
+                transformer, schedulers, state, layout_at, dense_steps, on_step, part, memo,
+                trunk=trunk, selector=selector, overlay=overlay, sites=sites, slots=slots,
+                parallel=parallel, cache=cache,
+            )  # fmt: skip
+    state.noise_pred = state.audio_noise_pred = None  # the official loop's outputs; none reads them
+
+
+def _loop(
+    transformer: Any,
+    schedulers: Any,
+    state: Any,
+    layout_at: Callable[[int], AttentionLayout],
+    dense_steps: int,
+    on_step: Callable[[int], None],
+    part: range,
+    memo: Any,
+    *,
+    trunk: str,
+    selector: Mapping[str, Any] | None,
+    overlay: Any,
+    sites: Sequence[Any],
+    slots: tuple[torch.Tensor, ...],
+    parallel: bool,
+    cache: stepcache.Policy | None,
+) -> None:
+    """The steps `part` of `state`'s plan as one `denoise_loop`. Their rows are checked against
+    the tables they read, and each turbo head found, before it (`_arm`): its steps read nothing
+    on the host. A part after the first starts its producer slots unwritten (`producer.present`)."""
     plan = state.row_timestep_plan
     fields = state.denoiser_input_fields
     position_ids, tags = fields["position_ids"], fields["token_tags"]
     device = state.latents.device
-    with torch.no_grad(), step_invariants(checked=True) as memo:
-        for times, rows in plan:  # an uncovered row refuses here, never inside the loop
-            transformer._arm(times, rows, tags, None)
-        transformer._release()
-        sites = producer_sites(transformer)
-        rotary = memo.get("rope", (position_ids,), lambda: transformer.rope(position_ids))
-        producer.present(sites, rotary, tags.numel())
-        timesteps = torch.zeros(len(plan), max(t.numel() for t, _ in plan), device=device)
-        for index, (times, _) in enumerate(plan):
-            timesteps[index, : times.numel()] = times
-        indices = torch.stack([rows for _, rows in plan])
-        labels = tuple(
-            Label(
-                index >= sol_dense_steps,
-                times.numel(),
-                bool(sites) and index >= max(sol_dense_steps, 1),
-                bool(sites) and index == sol_dense_steps - 1,
-            )
-            for index, (times, _) in enumerate(plan)
+    for index in part:  # an uncovered row refuses here, never inside the loop
+        transformer._arm(*plan[index], tags, selector)
+    transformer._release()
+    rotary = memo.get("rope", (position_ids,), lambda: transformer.rope(position_ids))
+    producer.present(sites, rotary, tags.numel())
+    timesteps = torch.zeros(len(plan), max(t.numel() for t, _ in plan), device=device)
+    for index, (times, _) in enumerate(plan):
+        timesteps[index, : times.numel()] = times
+    indices = torch.stack([rows for _, rows in plan])
+    heads = overlay is not None and overlay.heads
+    labels = tuple(
+        Label(
+            layout_at(index if parallel else dense_steps if index >= dense_steps else 0),
+            plan[index][0].numel(),
+            bool(sites) and index >= max(dense_steps, 1) and index > part.start,
+            bool(sites) and index == dense_steps - 1,
+            overlay.schedule.step(plan[index][0]) if heads else 0,
         )
-        layouts = {sparse: layout_at(sol_dense_steps if sparse else 0) for sparse in (False, True)}
-        keys = tuple(id(site.module) for site in sites)
-        slots = tuple(torch.zeros(site.module.heads, 128, device=device) for site in sites)
-        video_rows, audio_rows = state.num_condition_video_rows, state.num_condition_audio_rows
-        inputs = (
-            state.prompt_embeds, timesteps, indices, tags, position_ids, fields["video_indices"],
-            fields["audio_indices"], fields["text_indices"], state.timesteps,
-            state.audio_timesteps, schedulers.scheduler.sigmas, schedulers.audio_scheduler.sigmas,
-        )  # fmt: skip
+        for index in part
+    )
+    keys = tuple(id(site.module) for site in sites)
+    video_rows, audio_rows = state.num_condition_video_rows, state.num_condition_audio_rows
+    inputs = (
+        state.prompt_embeds, timesteps, indices, tags, position_ids, fields["video_indices"],
+        fields["audio_indices"], fields["text_indices"], state.timesteps,
+        state.audio_timesteps, schedulers.scheduler.sigmas, schedulers.audio_scheduler.sigmas,
+    )  # fmt: skip
 
-        def step(i: torch.Tensor, video: Any, audio: Any, *rest: Any, label: Label) -> None:
-            means, given = rest[: len(keys)], rest[len(keys) :]
-            prompt, times, rows, tags, positions, at_video, at_audio, at_text, *schedule = given
-            video_t, audio_t, video_sigmas, audio_sigmas = schedule
-            carry = producer.Carry(dict(zip(keys, means, strict=True)), label.rolling, label.seeding)
-            with attention_scope(layouts[label.sparse]), producer.carrying(carry):
-                velocity, audio_velocity = transformer(
-                    hidden_states=video[None],
-                    audio_hidden_states=audio[None],
-                    encoder_hidden_states=prompt,
-                    timestep=times.index_select(0, i)[0, : label.rows],
-                    timestep_indices=rows.index_select(0, i)[0],
-                    token_tags=tags,
-                    position_ids=positions,
-                    video_indices=at_video,
-                    audio_indices=at_audio,
-                    text_indices=at_text,
-                    return_dict=False,
-                )
-            velocity, audio_velocity = velocity[0, video_rows:], audio_velocity[0, audio_rows:]
-            euler(video[video_rows:], velocity.float(), i, video_t, video_sigmas)
-            euler(audio[audio_rows:], audio_velocity.float(), i, audio_t, audio_sigmas)
+    def step(i: torch.Tensor, video: Any, audio: Any, *rest: Any, label: Label) -> None:
+        means, given = rest[: len(keys)], rest[len(keys) :]
+        prompt, times, rows, tags, positions, at_video, at_audio, at_text, *schedule = given
+        video_t, audio_t, video_sigmas, audio_sigmas = schedule
+        if heads:
+            transformer._engage(overlay, label.head)
+        carry = producer.Carry(dict(zip(keys, means, strict=True)), label.rolling, label.seeding)
+        with attention_scope(label.layout), producer.carrying(carry) if keys else nullcontext():
+            velocity, audio_velocity = transformer(
+                hidden_states=video[None],
+                audio_hidden_states=audio[None],
+                encoder_hidden_states=prompt,
+                timestep=times.index_select(0, i)[0, : label.rows],
+                timestep_indices=rows.index_select(0, i)[0],
+                token_tags=tags,
+                position_ids=positions,
+                video_indices=at_video,
+                audio_indices=at_audio,
+                text_indices=at_text,
+                return_dict=False,
+            )
+        velocity, audio_velocity = velocity[0, video_rows:], audio_velocity[0, audio_rows:]
+        euler(video[video_rows:], velocity.float(), i, video_t, video_sigmas)
+        euler(audio[audio_rows:], audio_velocity.float(), i, audio_t, audio_sigmas)
 
+    if overlay is not None:  # armed before the loop, as `denoise_loop` requires
+        transformer._engage(overlay, labels[0].head)
+    try:
         denoise_loop(
             step,
-            range(len(plan)),
+            part,
             state=(state.latents, state.audio_latents),
             carried=slots,
             inputs=inputs,
             labels=labels,
-            key=("minimax-h3.fl2va/1", layouts[False], layouts[True], video_rows, audio_rows),
+            key=("minimax-h3.denoise/1", trunk, video_rows, audio_rows),
             on_step=on_step,
             cache=cache,
         )
-    state.noise_pred = state.audio_noise_pred = None  # the official loop's outputs; none reads them
+    finally:
+        transformer._release()
 
 
 def denoise_refine(
@@ -142,7 +196,7 @@ def denoise_refine(
     position_ids, tags = fields["position_ids"], fields["token_tags"]
     device = video.device
     selector = {ATTENTION_KWARG: overlay.bank, OVERLAY_KWARG: overlay}
-    with torch.no_grad(), step_invariants(checked=True, overlay=overlay) as memo:
+    with torch.no_grad(), step_invariants() as memo:
         for times, rows in plan:  # an uncovered row refuses here, never inside the loop
             transformer._arm(times, rows, tags, selector)
         transformer._release()
@@ -156,11 +210,10 @@ def denoise_refine(
         # windows compute their own statistics.
         single = bool(sites) and len(windows) == 1
         labels = tuple(
-            Label(index >= dense_steps, int(times.numel()), single and index >= max(dense_steps, 1),
-                  single and index == dense_steps - 1)  # fmt: skip
+            Label(layout_at(dense_steps if index >= dense_steps else 0), int(times.numel()),
+                  single and index >= max(dense_steps, 1), single and index == dense_steps - 1)  # fmt: skip
             for index, (times, _) in enumerate(plan)
         )
-        layouts = {sparse: layout_at(dense_steps if sparse else 0) for sparse in (False, True)}
         keys = tuple(id(site.module) for site in sites)
         slots = tuple(torch.zeros(site.module.heads, 128, device=device) for site in sites)
 
@@ -168,7 +221,7 @@ def denoise_refine(
             carry = producer.Carry(dict(zip(keys, means, strict=True)), label.rolling, label.seeding)
             velocity = torch.zeros_like(rows)
             for (start, count), weight in zip(windows, weights, strict=True):
-                with attention_scope(layouts[label.sparse]), producer.carrying(carry):
+                with attention_scope(label.layout), producer.carrying(carry):
                     predicted, _ = transformer(
                         hidden_states=rows[None, start : start + count],
                         audio_hidden_states=audio[None],

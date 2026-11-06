@@ -18,7 +18,7 @@ import threading
 import warnings
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from concurrent.futures import CancelledError, Future
-from contextlib import contextmanager, nullcontext, suppress
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass, replace
 from fractions import Fraction
 from itertools import pairwise
@@ -66,14 +66,13 @@ from cozy_runtime.author import (
     InvalidRequest,
     ModelAssets,
     ThreadPoolExecutor,
-    attention_scope,
     canonical_json,
     expect_attention,
     spread,
 )
 from h3_tables.table_layout import TableLayout
 
-from .adaln_pruned import AdaLNPrunedMiniMaxH3Transformer, step_invariants
+from .adaln_pruned import AdaLNPrunedMiniMaxH3Transformer
 from .cell_texture import CellEqualizer
 from .conditioner import FinalHiddenState, PresentationLength, build_text_conditioner
 from .continuation import (
@@ -87,7 +86,7 @@ from .continuation import (
 )
 from .guide_rows import ANCHOR_LATENTS, ANCHORS, GUIDE, GUIDE_LATENTS, GuideClip, anchor_rows, guide_rows
 from .reference_rows import ClipRows, motion_size, public_video
-from .steps import denoise_fl2va
+from .steps import denoise
 from .overlay import ATTENTION_KWARG, REGENERATE_BANK, TURBO_BANK, Overlay, TurboSchedule
 from .vae_tiles import TileBatchedVideoVAE, encode_condition
 
@@ -1489,7 +1488,6 @@ class OfficialH3Pipeline:
         state: Any,
         *,
         on_step: Callable[[int], None],
-        cancel: Callable[[], None],
         sol_dense_steps: int = 10,
         tau: float = 1.0,
         cache: stepcache.Policy | None = None,
@@ -1539,36 +1537,18 @@ class OfficialH3Pipeline:
             references, latents = state.normalized_references, state.condition_latents
             clips = ClipRows(block_state, references, latents, scoped.patch_size, start=guided)
             clips.thin(block_state)
-        if (
-            task == "fl2va"
-            and clips is None
-            and context is None
-            and not block_state.attention_kwargs
-            and getattr(scoped.transformer, "_parallel_config", None) is None
-        ):
-            denoise_fl2va(
-                scoped.transformer,
-                scoped,
-                block_state,
-                lambda step: _attention_layout(block_state, step, sol_dense_steps=sol_dense_steps, tau=tau),
-                sol_dense_steps,
-                on_step,
-                cache=cache,
-            )
-        else:
-            caching = stepcache.running(cache, len(block_state.timesteps)) if cache else nullcontext()
-            with step_invariants(), caching as run:
-                for index, timestep in enumerate(block_state.timesteps):
-                    cancel()
-                    if run is not None:
-                        run.begin(index)
-                    if clips is not None and index == sol_dense_steps:
-                        clips.release(block_state)
-                    with attention_scope(
-                        _attention_layout(block_state, index, sol_dense_steps=sol_dense_steps, tau=tau)
-                    ):
-                        _, block_state = loop.loop_step(scoped, block_state, i=index, t=timestep)
-                    on_step(index)
+        denoise(
+            scoped.transformer,
+            scoped,
+            block_state,
+            lambda step: _attention_layout(block_state, step, sol_dense_steps=sol_dense_steps, tau=tau),
+            sol_dense_steps,
+            on_step,
+            trunk=_TRUNK[task],
+            selector=block_state.attention_kwargs,
+            clips=clips,
+            cache=cache,
+        )
         loop.set_block_state(state, block_state)
         self._run_with(task, scoped, "denoise.after_denoise", state)
         return facts

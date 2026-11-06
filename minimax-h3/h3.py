@@ -1026,7 +1026,6 @@ def _render_keyframes(
         schedule = sample(
             state,
             on_step=tel.step_callback(steps, stage="denoise", overall_range=(0.15, 0.85)),
-            cancel=ctx.raise_if_cancelled,
         )
     result = _finish(
         model, task, state, schedule, duration_s=duration_s, out=out, tel=tel,
@@ -1130,7 +1129,6 @@ def _references_to_video(
         schedule = sample(
             state,
             on_step=tel.step_callback(steps, stage="denoise", overall_range=(0.15, 0.85)),
-            cancel=ctx.raise_if_cancelled,
         )
     result = _finish(
         model, task, state, schedule, duration_s=payload.duration_s, out=out, tel=tel,

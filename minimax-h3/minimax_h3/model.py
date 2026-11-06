@@ -247,15 +247,15 @@ class H3Model(
 
     @uses_components("transformer")
     def sample_fl2va(
-        self, state: Any, *, on_step: Any, cancel: Any, recipe: FullRecipe = FULL_BALANCED
+        self, state: Any, *, on_step: Any, recipe: FullRecipe = FULL_BALANCED
     ) -> ScheduleFacts:
-        return self.pipe.denoise("fl2va", state, on_step=on_step, cancel=cancel, **recipe.denoise())
+        return self.pipe.denoise("fl2va", state, on_step=on_step, **recipe.denoise())
 
     @uses_components("transformer_ref")
     def sample_ref2va(
-        self, state: Any, *, on_step: Any, cancel: Any, recipe: FullRecipe = FULL_BALANCED
+        self, state: Any, *, on_step: Any, recipe: FullRecipe = FULL_BALANCED
     ) -> ScheduleFacts:
-        return self.pipe.denoise("ref2va", state, on_step=on_step, cancel=cancel, **recipe.denoise())
+        return self.pipe.denoise("ref2va", state, on_step=on_step, **recipe.denoise())
 
 
 class H3TurboBase(H3Model, encoded_leaves="accept"):
@@ -280,14 +280,12 @@ class H3TurboBase(H3Model, encoded_leaves="accept"):
         *,
         turbo_lora: H3TurboLoRA,
         on_step: Any,
-        cancel: Any,
         sol_dense_steps: int = 4,
     ) -> ScheduleFacts:
         return turbo_lora.sample_fl2va(
             self,
             state,
             on_step=on_step,
-            cancel=cancel,
             sol_dense_steps=sol_dense_steps,
         )
 
@@ -319,14 +317,12 @@ class H3TurboBase(H3Model, encoded_leaves="accept"):
         *,
         turbo_lora: H3TurboLoRA,
         on_step: Any,
-        cancel: Any,
         sol_dense_steps: int = 4,
     ) -> ScheduleFacts:
         return turbo_lora.sample_ref2va(
             self,
             state,
             on_step=on_step,
-            cancel=cancel,
             sol_dense_steps=sol_dense_steps,
         )
 
@@ -351,7 +347,6 @@ class H3TurboLoRA(Model[OfficialH3TurboLoRA], encoded_leaves="accept"):
         state: Any,
         *,
         on_step: Any,
-        cancel: Any,
         sol_dense_steps: int = 4,
     ) -> ScheduleFacts:
         return self._sample(
@@ -359,7 +354,6 @@ class H3TurboLoRA(Model[OfficialH3TurboLoRA], encoded_leaves="accept"):
             "fl2va",
             state,
             on_step=on_step,
-            cancel=cancel,
             sol_dense_steps=sol_dense_steps,
         )
 
@@ -370,7 +364,6 @@ class H3TurboLoRA(Model[OfficialH3TurboLoRA], encoded_leaves="accept"):
         state: Any,
         *,
         on_step: Any,
-        cancel: Any,
         sol_dense_steps: int = 4,
     ) -> ScheduleFacts:
         return self._sample(
@@ -378,7 +371,6 @@ class H3TurboLoRA(Model[OfficialH3TurboLoRA], encoded_leaves="accept"):
             "ref2va",
             state,
             on_step=on_step,
-            cancel=cancel,
             sol_dense_steps=sol_dense_steps,
         )
 
@@ -389,7 +381,6 @@ class H3TurboLoRA(Model[OfficialH3TurboLoRA], encoded_leaves="accept"):
         state: Any,
         *,
         on_step: Any,
-        cancel: Any,
         sol_dense_steps: int,
     ) -> ScheduleFacts:
         _validate_sol_dense_steps(sol_dense_steps)
@@ -406,7 +397,7 @@ class H3TurboLoRA(Model[OfficialH3TurboLoRA], encoded_leaves="accept"):
         )
         try:
             return base.pipe.denoise(
-                task, state, on_step=on_step, cancel=cancel, sol_dense_steps=sol_dense_steps
+                task, state, on_step=on_step, sol_dense_steps=sol_dense_steps
             )
         finally:
             state.set("attention_kwargs", original)
