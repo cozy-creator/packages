@@ -10,12 +10,14 @@ import torch
 from cozy_runtime.author import (
     MENTION,
     Adjustments,
+    Advanced,
     App,
     AspectRatio,
     Context,
     Image,
     ImageRequest,
     ImageResult,
+    Label,
     Memoize,
     OutputError,
     Outputs,
@@ -24,11 +26,14 @@ from cozy_runtime.author import (
     Seed,
     Sizes,
     Telemetry,
+    ratio_of,
 )
+from cozy_runtime.vlm import VisionLM
 from PIL import Image as PILImage
 
 from . import quantize as quantize  # its recipes
 from .model import QwenImage21Model
+from .rewriter import Creativity, rewrite
 from .turbo import FunAccLoRA
 
 app = App()
@@ -51,6 +56,10 @@ MAX_PICTURES = 10
 class GenerateInput(ImageRequest):
     #: Its text, and the pictures it mentions, in the order it first mentions them.
     prompt: Prompt[Image] = Prompt()
+    #: Qwen's prompt enhancer rewrites the request first (`rewriter`): an edit from its pictures, else the words.
+    prompt_upsampling: bool = True
+    #: How far the rewrite goes beyond the words; `balanced` is Qwen's own.
+    creativity: Creativity = "balanced"
 
 
 def label(n: int, key: str, count: int) -> str:
@@ -102,10 +111,39 @@ def _said(prompt: Prompt[Image], adj: Adjustments) -> tuple[str, list[Image]]:
     return MENTION.sub(lambda found: labels.get(found[1], found[0]), said), [prompt.references[key] for key in keys]
 
 
+def _upsampled(
+    payload: GenerateInput,
+    prompt: str,
+    images: list[PILImage.Image],
+    seed: int,
+    enhancer: VisionLM,
+    tel: Telemetry,
+    adj: Adjustments,
+) -> tuple[GenerateInput, str]:
+    """The request as Qwen's enhancer rewrites it, sampled from the render's `seed`, and the canvas it chose
+    when the request names none (upstream passes `wh_ratio` and `ratio_follow` to the renderer)."""
+    with tel.stage("upsampling prompt", overall_range=(0.0, 0.3)):
+        found, answer = rewrite(enhancer, prompt, images, payload.creativity, seed)
+    if found is None:
+        adj.warn("prompt_upsampling", "Qwen's prompt enhancer gave no rewrite, so the prompt goes as written")
+        tel.log("upsampled prompt", parsed=False, answer=answer[:2000])
+        return payload, prompt
+    ratio = found.ratio
+    if found.follow is not None:
+        ratio = "{}:{}".format(*images[found.follow - 1].size)
+    tel.log("upsampled prompt", prompt=found.prompt, seed=seed, creativity=payload.creativity,
+            wh_ratio=found.ratio or "", ratio_follow=f"<image{found.follow}>" if found.follow else "")
+    if payload.aspect_ratio is None and ratio is not None:
+        payload = msgspec.structs.replace(payload, aspect_ratio=":".join(map(str, ratio_of(ratio))))
+    return payload, found.prompt
+
+
 def _generate(
     ctx: Context,
     payload: GenerateInput,
     model: QwenImage21Model,
+    rewriter: VisionLM,
+    expander: VisionLM,
     out: Outputs,
     tel: Telemetry,
     adj: Adjustments,
@@ -118,31 +156,35 @@ def _generate(
     tel.log("sampling", regime="turbo (Fun Acc)" if turbo else "base", steps=steps,
             schedule="PDD grid, a head per step" if turbo else "uniform, dynamic shift")
     seed = payload.drawn_seed()
+    # Upstream feeds the VAE RGBA; its vision encoder sees alpha composited over white.
+    reference_images = [picture.file.read(mode="RGBA") for picture in pictures] or None
+    if payload.prompt_upsampling:
+        enhancer = rewriter if reference_images else expander
+        payload, prompt = _upsampled(payload, prompt, reference_images or [], seed, enhancer, tel, adj)
     model.hold_vae(tel)
     ctx.raise_if_cancelled()
+    begin = 0.3 if payload.prompt_upsampling else 0.0
     # Phase order for residency: references encode on the VAE first, then the text encoder, the
     # transformer denoise (the `denoise_loop`), and the VAE decode.
     if pictures:
         ctx.plan("vae", "text_encoder", "transformer", "vae")
     else:
         ctx.plan("text_encoder", "transformer", "vae")
-    reference_images, reference_latents, image_pad_mask = None, None, None
-    if pictures:
-        with tel.stage("encoding reference images", overall_range=(0.0, 0.08)):
-            # Upstream feeds the VAE RGBA; its vision encoder sees alpha composited over white.
-            reference_images = [picture.file.read(mode="RGBA") for picture in pictures]
+    reference_latents, image_pad_mask = None, None
+    if reference_images:
+        with tel.stage("encoding reference images", overall_range=(begin, begin + 0.05)):
             conditioning_images, reference_latents = model.encode_reference_images(reference_images)
         ctx.raise_if_cancelled()
     # What is not given is the first reference's (upstream takes the LAST reference's; every Cozy
     # image package takes the first, the image being edited).
     first = reference_images[0].size if reference_images else None
     width, height = payload.size(adj, first, SIZES, megapixels=DEFAULT_MEGAPIXELS)
-    with tel.stage("encoding prompt", overall_range=(0.08 if reference_images else 0.0, 0.1)):
+    with tel.stage("encoding prompt", overall_range=(begin + 0.05, begin + 0.1)):
         if reference_images is None:
             embeds, mask = model.encode(prompt)
         else:
             embeds, mask, image_pad_mask = model.encode_image_prompt(prompt, conditioning_images)
-    with tel.stage("generating image", overall_range=(0.1, 0.9)):
+    with tel.stage("generating image", overall_range=(begin + 0.1, 0.9)):
         denoise = model.denoise if turbo is None else partial(turbo.denoise, model)
         latents = denoise(
             embeds,
@@ -151,7 +193,7 @@ def _generate(
             height=height,
             steps=steps,
             seed=seed,
-            on_step=tel.step_callback(steps, stage="generating image", overall_range=(0.1, 0.9)),
+            on_step=tel.step_callback(steps, stage="generating image", overall_range=(begin + 0.1, 0.9)),
             cancel=ctx.raise_if_cancelled,
             reference_images=reference_images,
             reference_latents=reference_latents,
@@ -168,37 +210,47 @@ def _generate(
     return ImageResult(asset, width, height, seed, prompt)
 
 
-_MEMO = ("qwen_image_2", "qwen_image_2.model", "qwen_image_2.turbo")
+_MEMO = ("qwen_image_2", "qwen_image_2.model", "qwen_image_2.turbo", "qwen_image_2.rewriter")
 _FULL = "qwen/qwen-image-2.1@0.1.0"
 _TURBO = "alibaba-pai/qwen-image-2.1-fun-acc@0.1.0"
+#: Qwen's prompt enhancers (QwenLM/Qwen-Image-2.1 `prompt_rewrite/`): an edit's, a picture from words'.
+_REWRITER = "qwen/qwen-image-2.1-pe-i2i@0.1.0"
+_EXPANDER = "qwen/qwen-image-2.1-pe-t2i@0.1.0"
+#: Built and fetched on first use: an edit never pulls the expander, `prompt_upsampling=False` neither enhancer.
+_ENHANCERS = ("rewriter", "expander")
 
 
-@app.entrypoint(defaults={"model": _FULL}, memoize=Memoize(requires=["seed"]), memo_dependencies=_MEMO)
+@app.entrypoint(defaults={"model": _FULL, "rewriter": _REWRITER, "expander": _EXPANDER}, on_demand=_ENHANCERS,
+                memoize=Memoize(requires=["seed"]), memo_dependencies=_MEMO)  # fmt: skip
 def generate(
     ctx: Context,
     payload: GenerateInput,
     model: QwenImage21Model,
+    rewriter: VisionLM,
+    expander: VisionLM,
     out: Outputs,
     tel: Telemetry,
     adj: Adjustments,
 ) -> ImageResult:
     """Qwen-Image-2.1, the 40-step base model."""
-    return _generate(ctx, payload, model, out, tel, adj, None)
+    return _generate(ctx, payload, model, rewriter, expander, out, tel, adj, None)
 
 
-@app.entrypoint(defaults={"model": _FULL, "turbo_lora": _TURBO}, memoize=Memoize(requires=["seed"]),
-                memo_dependencies=_MEMO)  # fmt: skip
+@app.entrypoint(defaults={"model": _FULL, "turbo_lora": _TURBO, "rewriter": _REWRITER, "expander": _EXPANDER},
+                on_demand=_ENHANCERS, memoize=Memoize(requires=["seed"]), memo_dependencies=_MEMO)  # fmt: skip
 def generate_turbo(
     ctx: Context,
     payload: GenerateInput,
     model: QwenImage21Model,
     turbo_lora: FunAccLoRA,
+    rewriter: VisionLM,
+    expander: VisionLM,
     out: Outputs,
     tel: Telemetry,
     adj: Adjustments,
 ) -> ImageResult:
     """Qwen-Image-2.1 with Alibaba PAI's Fun Acc: the same inputs, in 4 steps."""
-    return _generate(ctx, payload, model, out, tel, adj, turbo_lora)
+    return _generate(ctx, payload, model, rewriter, expander, out, tel, adj, turbo_lora)
 
 
 class ImageBox(msgspec.Struct, kw_only=True):
@@ -211,22 +263,34 @@ class ImageBox(msgspec.Struct, kw_only=True):
     #: `SIZES.pixels`: Qwen Image 2.1 renders at 1, 2 or 4 MP, by default 2 (Paul, 11-06).
     megapixels: Literal[1, 2, 4] = DEFAULT_MEGAPIXELS
     seed: Seed | None = None
+    #: `GenerateInput.prompt_upsampling`: Qwen's prompt enhancer rewrites the instructions first.
+    prompt_upsampling: Annotated[bool, Advanced()] = True
+    #: `GenerateInput.creativity`: how far the rewrite goes beyond the words (`rewriter._STEER`).
+    creativity: Annotated[Creativity, Label("Creativity", {
+        "faithful": ("Faithful", "Changes only what you asked"),
+        "balanced": ("Balanced", "Qwen's own rewrite"),
+        "creative": ("Creative", "A bold, imaginative take, well beyond your words"),
+    }), Advanced()] = "balanced"
 
 
-# The Turbo overlay is built, and its weights fetched, only when a box asks for it; a LoRA dropped on the
-# box adapts the base model either way.
-@app.tool(label="Qwen Image 2", named="image", defaults={"model": _FULL, "turbo_lora": _TURBO},
-          on_demand=("turbo_lora",), memoize=Memoize(requires=["seed"]), memo_dependencies=_MEMO)  # fmt: skip
+# The Turbo overlay and the enhancers are built, and their weights fetched, only when a box asks for them; a LoRA
+# dropped on the box adapts the base model either way.
+@app.tool(label="Qwen Image 2", named="image",
+          defaults={"model": _FULL, "turbo_lora": _TURBO, "rewriter": _REWRITER, "expander": _EXPANDER},
+          on_demand=("turbo_lora", "rewriter", "expander"), memoize=Memoize(requires=["seed"]), memo_dependencies=_MEMO)  # fmt: skip
 def image(
     ctx: Context,
     payload: ImageBox,
     model: QwenImage21Model,
     turbo_lora: FunAccLoRA,
+    rewriter: VisionLM,
+    expander: VisionLM,
     out: Outputs,
     tel: Telemetry,
     adj: Adjustments,
 ) -> ImageResult:
     """Qwen Image 2 on a canvas: Turbo (the base model and its Fun Acc overlay), or the full 40 steps."""
     request = GenerateInput(prompt=payload.instructions, aspect_ratio=payload.aspect_ratio,
-                            megapixels=payload.megapixels, seed=payload.seed)  # fmt: skip
-    return _generate(ctx, request, model, out, tel, adj, turbo_lora if payload.turbo else None)
+                            megapixels=payload.megapixels, seed=payload.seed,
+                            prompt_upsampling=payload.prompt_upsampling, creativity=payload.creativity)  # fmt: skip
+    return _generate(ctx, request, model, rewriter, expander, out, tel, adj, turbo_lora if payload.turbo else None)
