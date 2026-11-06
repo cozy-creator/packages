@@ -2,11 +2,13 @@
 
 The architecture and sampling are Diffusers' (`QwenImage21Pipeline`, Diffusers 0.41.0). Runtime
 constructs and fills the modules and owns their residency; no Diffusers weight loader, device
-placement, or offload hook takes part in serving.
+placement, or offload hook takes part in serving. A caller's LoRAs adapt the DiT through Runtime's PEFT
+layers (`__adapter_compatibility__`).
 """
 
 from __future__ import annotations
 
+import math
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from typing import Any
 
@@ -45,6 +47,7 @@ from transformers.modeling_utils import local_torch_dtype
 
 from cozy_runtime import fusion, rng, tiles, vlm
 from cozy_runtime.author import (
+    AdapterCompatibility,
     Config,
     ConformanceError,
     Loader,
@@ -246,6 +249,9 @@ class QwenImage21Model(
     # two thirds of a 4 MP step. A 16-bit request attends exactly.
     attention_bits={"transformer.transformer_blocks.": 8},
 ):
+    #: Caller LoRAs on the DiT, at any strength: the Runtime bakes them into the weights.
+    __adapter_compatibility__ = (AdapterCompatibility("lora", "", ("transformer",), -math.inf, math.inf),)
+
     graph: QwenImage21Graph
     processor: Any
 
