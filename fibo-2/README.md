@@ -16,7 +16,7 @@ mention reads as Bria's `<image_1>`…`<image_4>` (the edit's `image_N` keys); a
 name ([references](../docs/references.md)).
 Bria ships Edit Turbo for editing; it also renders text-to-image.
 
-`image` is the canvas tool, one box for both: `turbo` (on by default) picks Edit Turbo, else Dev; `aspect_ratio`,
+`image` is the canvas tool, its prompt `instructions`, one box for both: `turbo` (on by default) picks Edit Turbo, else Dev; `aspect_ratio`,
 `megapixels`, `seed` and `prompt_upsampling`. Each checkpoint and VLM loads only when a render asks for it.
 
 Write the request in a file, `request.yaml`:

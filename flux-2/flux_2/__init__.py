@@ -156,7 +156,7 @@ def generate_turbo(ctx: Context, payload: TurboInput, model: Flux2, turbo_lora: 
 
 class ImageBox(msgspec.Struct, kw_only=True):
     #: What to make, and the pictures it edits (`_said`).
-    prompt: Prompt[Image] = Prompt()
+    instructions: Prompt[Image] = Prompt()
     #: [dev] with fal's Turbo LoRA, 8 steps at guidance 2.5, else 50 at guidance 4 (`_generate`).
     turbo: bool = True
     #: `ImageRequest.target`, held to the model's sizes (`SIZES.fit`).
@@ -174,6 +174,6 @@ class ImageBox(msgspec.Struct, kw_only=True):
 def image(ctx: Context, payload: ImageBox, model: Flux2, turbo_lora: Flux2TurboLoRA, upsampler: Flux2Upsampler,
           out: Outputs, tel: Telemetry, adj: Adjustments) -> ImageResult:
     """FLUX.2 [dev] on a canvas: with its Turbo LoRA, which loads only when asked for, or without."""
-    request = GenerateInput(prompt=payload.prompt, aspect_ratio=payload.aspect_ratio, megapixels=payload.megapixels,
+    request = GenerateInput(prompt=payload.instructions, aspect_ratio=payload.aspect_ratio, megapixels=payload.megapixels,
                             seed=payload.seed, prompt_upsampling=payload.prompt_upsampling)  # fmt: skip
     return _generate(ctx, request, model, turbo_lora if payload.turbo else None, upsampler, out, tel, adj)

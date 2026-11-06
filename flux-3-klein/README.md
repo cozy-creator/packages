@@ -9,7 +9,7 @@ to ten reference images. Its text encoder is Qwen3-VL-4B.
 | `generate_turbo` | Klein (distilled flow map) | 16 | none |
 
 Each makes an image from the prompt, or edits and composes up to ten pictures it mentions, in the order it
-first mentions them. `image` is the canvas tool: one box, Turbo (the distilled model) or Base, upsampled,
+first mentions them. `image` is the canvas tool, its prompt `instructions`: one box, Turbo (the distilled model) or Base, upsampled,
 which loads only the checkpoint a render asks for.
 
 Write the request in a file, `request.yaml`:

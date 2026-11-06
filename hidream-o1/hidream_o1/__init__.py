@@ -185,7 +185,7 @@ def generate_turbo(ctx: Context, payload: TurboInput, model: HiDreamO1, out: Out
 
 class ImageBox(msgspec.Struct, kw_only=True):
     #: What to make, and the pictures it mentions (`pictures`, `_generate`).
-    prompt: Prompt[Image] = Prompt()
+    instructions: Prompt[Image] = Prompt()
     #: HiDream-O1-Image-Dev's 28 distilled steps, else the full model's 50 with CFG (`_generate`).
     turbo: bool = True
     #: `layout`, through `ImageRequest.target`; `SIZES.fit` holds it to `WIDEST` either way.
@@ -204,6 +204,6 @@ def image(ctx: Context, payload: ImageBox, full: HiDreamO1, model: HiDreamO1, ou
           adj: Adjustments) -> ImageResult:
     """HiDream-O1-Image on a canvas: Dev, or the full model, which loads only when asked for."""
     kind = TurboInput if payload.turbo else GenerateInput
-    request = kind(prompt=payload.prompt, aspect_ratio=payload.aspect_ratio, megapixels=payload.megapixels,
+    request = kind(prompt=payload.instructions, aspect_ratio=payload.aspect_ratio, megapixels=payload.megapixels,
                    seed=payload.seed)  # fmt: skip
     return _generate(ctx, request, model if payload.turbo else full, out, tel, adj)

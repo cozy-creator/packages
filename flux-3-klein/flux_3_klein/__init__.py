@@ -284,7 +284,7 @@ def generate_turbo(ctx: Context, payload: TurboInput, drafter: Drafter, model: K
 
 class ImageBox(msgspec.Struct, kw_only=True):
     #: What to make, and the pictures it mentions (`pictures`, `worded`).
-    prompt: Prompt[Image] = Prompt()
+    instructions: Prompt[Image] = Prompt()
     #: The distilled Klein's 16 steps, else Base's 50 with CFG 4 (`_generate`).
     turbo: bool = True
     #: `_layout`, through `ImageRequest.target`; `SIZES.fit` holds it to 1:16 through 16:1.
@@ -304,6 +304,6 @@ def image(ctx: Context, payload: ImageBox, drafter: Drafter, full: Klein, model:
           out: Outputs, tel: Telemetry, adj: Adjustments) -> ImageResult:
     """FLUX.3 Image Klein on a canvas, upsampled: the distilled model, or Base, which loads only when asked for."""
     kind, function, klein = (TurboInput, "generate_turbo", model) if payload.turbo else (GenerateInput, "generate", full)
-    request = kind(prompt=payload.prompt, aspect_ratio=payload.aspect_ratio, megapixels=payload.megapixels,
+    request = kind(prompt=payload.instructions, aspect_ratio=payload.aspect_ratio, megapixels=payload.megapixels,
                    seed=payload.seed)  # fmt: skip
     return _generate(ctx, function, request, drafter, klein, upsampler, out, tel, adj)

@@ -181,7 +181,7 @@ def generate_turbo(ctx: Context, payload: TurboInput, edit_model: QwenImageTrans
 
 class ImageBox(msgspec.Struct, kw_only=True):
     #: What to make, and the pictures it edits or composes (`_said`).
-    prompt: Prompt[Image] = Prompt()
+    instructions: Prompt[Image] = Prompt()
     #: Each DiT with its 8-step Lightning LoRA (`_turbo`), else true CFG at 50 or 40 steps (`_full`).
     turbo: bool = True
     #: `ImageRequest.target`, held to the model's sizes (`SIZES.fit`).
@@ -200,7 +200,7 @@ class ImageBox(msgspec.Struct, kw_only=True):
 def image(ctx: Context, payload: ImageBox, edit_model: QwenImageTransformer, edit_turbo_lora: QwenImageLoRA,
           model: QwenImage, turbo_lora: QwenImageLoRA, out: Outputs, tel: Telemetry, adj: Adjustments) -> ImageResult:
     """Qwen Image on a canvas: Lightning, or the full models."""
-    request = GenerateInput(prompt=payload.prompt, aspect_ratio=payload.aspect_ratio, megapixels=payload.megapixels,
+    request = GenerateInput(prompt=payload.instructions, aspect_ratio=payload.aspect_ratio, megapixels=payload.megapixels,
                             seed=payload.seed)  # fmt: skip
     if payload.turbo:
         return _turbo(ctx, request, edit_model, edit_turbo_lora, model, turbo_lora, out, tel, adj)

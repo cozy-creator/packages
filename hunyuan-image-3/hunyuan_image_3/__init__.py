@@ -138,7 +138,7 @@ def generate(ctx: Context, payload: HunyuanRequest, model: HunyuanImage3, out: O
 
 class ImageBox(msgspec.Struct, kw_only=True):
     #: What to make, and the pictures it edits or fuses (`_said`).
-    prompt: Prompt[Image] = Prompt()
+    instructions: Prompt[Image] = Prompt()
     #: Instruct-Distil, 8 steps, else Instruct, 50 steps with CFG (`_generate`).
     turbo: bool = True
     #: `requested_size`: Tencent's sizes run 1:4 to 4:1. Unset, the model picks its size.
@@ -156,7 +156,7 @@ class ImageBox(msgspec.Struct, kw_only=True):
 def image(ctx: Context, payload: ImageBox, full: HunyuanImage3, model: HunyuanImage3, out: Outputs, tel: Telemetry,
           adj: Adjustments) -> ImageResult:
     """HunyuanImage 3.0 on a canvas: Instruct-Distil, or Instruct."""
-    request = HunyuanRequest(prompt=payload.prompt, aspect_ratio=payload.aspect_ratio, seed=payload.seed,
+    request = HunyuanRequest(prompt=payload.instructions, aspect_ratio=payload.aspect_ratio, seed=payload.seed,
                              prompt_upsampling=payload.prompt_upsampling)
     if payload.turbo:
         return _generate(ctx, request, DISTIL_STEPS, model, out, tel, adj)

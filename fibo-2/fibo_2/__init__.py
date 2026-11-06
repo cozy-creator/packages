@@ -207,7 +207,7 @@ def generate_turbo(ctx: Context, payload: TurboInput, edit_upsampler: Captioner,
 
 class ImageBox(msgspec.Struct, kw_only=True):
     #: What to make, and the pictures it edits (`_said`).
-    prompt: Prompt[Image] = Prompt()
+    instructions: Prompt[Image] = Prompt()
     #: Edit Turbo, 4 steps without guidance, else Dev, 50 steps with CFG 5 (`_generate`).
     turbo: bool = True
     #: `ImageRequest.target`, held to the model's sizes (`SIZES.fit`).
@@ -229,6 +229,6 @@ def image(ctx: Context, payload: ImageBox, edit_upsampler: Captioner, full: Fibo
           out: Outputs, tel: Telemetry, adj: Adjustments) -> ImageResult:
     """Fibo 2.0 on a canvas: Edit Turbo, or Dev."""
     kind, function, dit = (TurboInput, "generate_turbo", model) if payload.turbo else (GenerateInput, "generate", full)
-    request = kind(prompt=payload.prompt, aspect_ratio=payload.aspect_ratio, megapixels=payload.megapixels,
+    request = kind(prompt=payload.instructions, aspect_ratio=payload.aspect_ratio, megapixels=payload.megapixels,
                    seed=payload.seed, prompt_upsampling=payload.prompt_upsampling)
     return _generate(ctx, function, request, dit, upsampler, edit_upsampler, out, tel, adj)

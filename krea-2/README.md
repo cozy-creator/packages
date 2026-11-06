@@ -12,7 +12,7 @@ for each:
 Krea recommends training LoRAs on Raw and running them on Turbo. The function sets the regime: `generate`
 samples as Raw (CFG, the token count's shift), `generate_turbo` as Turbo (no CFG, shift 1.15). The two
 checkpoints have identical configs, so pass a fine-tune of each to its own function (`model.model=`).
-`image` is the canvas tool: one box, Turbo or Raw, which loads only the checkpoint a render asks for.
+`image` is the canvas tool, its prompt `instructions`: one box, Turbo or Raw, which loads only the checkpoint a render asks for.
 
 Write the request in a file, `request.yaml`:
 

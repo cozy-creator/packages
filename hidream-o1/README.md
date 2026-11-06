@@ -13,7 +13,7 @@ patches attend to everything (tech report arXiv:2605.11061 §3.3).
 One function does both jobs: with pictures its prompt mentions, it edits them, or composes several in
 the order it first mentions them. HiDream recommends the full model, `generate`, for editing. A pose is one more reference: upstream's
 try-on example passes a face, a background, an OpenPose skeleton and three garments, in that order.
-`image` is the canvas tool: one box, Turbo (Dev) or the full model, which loads only the checkpoint a
+`image` is the canvas tool, its prompt `instructions`: one box, Turbo (Dev) or the full model, which loads only the checkpoint a
 render asks for.
 
 Write the request in a file, `request.yaml`:

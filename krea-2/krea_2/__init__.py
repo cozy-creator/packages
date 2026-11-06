@@ -104,7 +104,7 @@ def generate_turbo(ctx: Context, payload: TurboInput, model: Krea2, out: Outputs
 
 class ImageBox(msgspec.Struct, kw_only=True):
     #: What to make (`_generate`): Krea 2 takes no pictures, so its prompt is words.
-    prompt: str = ""
+    instructions: str = ""
     #: Krea 2 Turbo's 8 steps at 2048², else Raw's 52 with CFG at 1 MP (`_generate`).
     turbo: bool = True
     #: `ImageRequest.size`; `SIZES.fit` holds it to 1:16 through 16:1.
@@ -123,6 +123,6 @@ def image(ctx: Context, payload: ImageBox, full: Krea2, model: Krea2, out: Outpu
           adj: Adjustments) -> ImageResult:
     """Krea 2 on a canvas: Turbo, or Raw, which loads only when asked for."""
     kind = TurboInput if payload.turbo else GenerateInput
-    request = kind(prompt=payload.prompt, aspect_ratio=payload.aspect_ratio, megapixels=payload.megapixels,
+    request = kind(prompt=payload.instructions, aspect_ratio=payload.aspect_ratio, megapixels=payload.megapixels,
                    seed=payload.seed)  # fmt: skip
     return _generate(ctx, request, model if payload.turbo else full, out, tel, adj, distilled=payload.turbo)
