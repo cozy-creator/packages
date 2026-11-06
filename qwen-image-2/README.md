@@ -1,8 +1,9 @@
 # Qwen Image 2
 
 `generate` creates or edits one lossless image using Qwen-Image-2.1, and `generate_turbo` does
-the same with Qwen-Image-2.1-Turbo. Both take the same inputs. On a canvas they're one tool, `image` (Qwen Image 2):
-its `instructions`, a Turbo toggle (the full model loads only when asked for), `aspect_ratio`, `megapixels` and `seed`. The model checkpoint is selected
+the same with Alibaba PAI's Fun Acc overlay on it (`alibaba-pai/qwen-image-2.1-fun-acc`, a 330 MiB
+4-step distillation). Both take the same inputs. On a canvas they're one tool, `image` (Qwen Image 2):
+its `instructions`, a Turbo toggle (the overlay loads only when asked for), `aspect_ratio`, `megapixels` and `seed`. The model checkpoint is selected
 independently from the package. TensorFS owns model downloads and bytes;
 Runtime owns construction, memory residency and component execution.
 
@@ -12,8 +13,8 @@ Each picture's `description` follows the prompt as `<name>: description`, in the
 transparent, and is RGB otherwise; alpha within 4 levels of 0 or 255 (the decoder's noise) snaps
 to it. `seed` is optional and the chosen seed is
 returned. Seeds range from 0 through 9007199254740991 (the interoperable 53-bit
-integer range); omitting one chooses a random seed in that range. Inputs: `prompt` (its text and the pictures it mentions), `aspect_ratio` (any W:H), `megapixels` (any size, 1024² pixels each) and `seed`. The full model runs 40 steps, Turbo the 8 of its checkpoint
-(its 8 `sample_sigmas`). Qwen runs no CFG and has no upsampler, so it has no `guidance`, `negative_prompt` or
+integer range); omitting one chooses a random seed in that range. Inputs: `prompt` (its text and the pictures it mentions), `aspect_ratio` (any W:H), `megapixels` (any size, 1024² pixels each) and `seed`. The full model runs 40 steps, Turbo 4 on Fun Acc's
+grid, with its own output head each step and an F32 state (`qwenimage21_pdd.py`). Qwen runs no CFG and has no upsampler, so it has no `guidance`, `negative_prompt` or
 `prompt_upsampling`. Unknown fields are ignored with a warning. The result is `image`, `width`, `height`, `seed` and `prompt`.
 
 Outputs use lossless WebP to preserve the same decoded pixels and alpha while reducing the
@@ -78,7 +79,7 @@ With references, what is not given is the FIRST reference's (the image being edi
 (reported as a `clamp` adjustment when held). Upstream takes the LAST reference's; every Cozy image
 package takes the first.
 
-The VAE runs in bf16 on GPUs that compute it natively (Turbo stores it so; the base release
+The VAE runs in bf16 on GPUs that compute it natively (the base release
 stores F32), else in its stored dtype. It decodes the whole canvas, each block in strips of rows
 (exact, as ComfyUI does), so its working set stays a few GB at 4 MP and the DiT and text encoder
 stay resident beside it on a 24 GB card.
@@ -94,6 +95,14 @@ The licence and Notice ship in this package (`qwen_image_2/LICENSE.model.txt`, `
 The architecture is Diffusers' (Apache-2.0), at the release `pyproject.toml` pins.
 
 
+## LoRAs
+
+Any Qwen-Image 2.1 LoRA in Diffusers', PEFT's, kohya's or ComfyUI's spelling uploads with
+`cozy model upload` (TensorFS's `qwenimage21.lora`) and adapts the DiT, Turbo or not, at any
+strength: `model.lora=<org/name>` on a run, or dropped on the box. Runtime bakes it into the
+weights. A step-distillation LoRA (Lightning, Turbo8) is trained for its own schedule, which these
+functions don't run.
+
 ## Prepare the checkpoint
 
 Use an existing rental to download, convert and upload the model. The checkpoint
@@ -105,9 +114,9 @@ cozy model upload \
   hf://Qwen/Qwen-Image-2.1@790c92633540aa0cb11d9abf19eb46d861714758 \
   qwen-image-2.1 --lane bf16 --on YOUR_MACHINE
 cozy model upload \
-  hf://Qwen/Qwen-Image-2.1-Turbo@fc13ba1986fcb905854dc8de2f52eee395f49b5b \
-  qwen-image-2.1-turbo --lane bf16 --on YOUR_MACHINE
-cozy model publish qwen/qwen-image-2.1-turbo 0.1.0 sha256:COMMIT
+  hf://alibaba-pai/Qwen-Image-2.1-Fun-Acc-LoRAs@f7545234760e1847cd8e89e52bd951cb0b7e327f/models/Qwen-Image-2.1-Fun-Acc-4Step.safetensors \
+  alibaba-pai/qwen-image-2.1-fun-acc --lane bf16 --mirror --on YOUR_MACHINE
+cozy model publish alibaba-pai/qwen-image-2.1-fun-acc 0.1.0 sha256:COMMIT
 ```
 
 Replace `YOUR_MACHINE` and `COMMIT` with the selected machine name and
@@ -160,7 +169,7 @@ image = await generate(
 ```
 
 The Hub package is the first-party `qwen-image-2` (no owner); its callables are `generate`,
-`generate_turbo` and the tool `image`. Their default models are `qwen/qwen-image-2.1@0.1.0` and
-`qwen/qwen-image-2.1-turbo@0.1.1`, in Qwen's org.
+`generate_turbo` and the tool `image`. Their default models are `qwen/qwen-image-2.1@0.1.0` and,
+for Turbo, `alibaba-pai/qwen-image-2.1-fun-acc@0.1.0`.
 Installing the wheel alone does not turn GPU execution into an in-process call;
 Cozy supplies the managed caller when composing package functions.

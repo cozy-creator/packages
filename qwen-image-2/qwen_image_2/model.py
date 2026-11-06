@@ -3,15 +3,23 @@
 The architecture and sampling are Diffusers' (`QwenImage21Pipeline`, Diffusers 0.41.0). Runtime
 constructs and fills the modules and owns their residency; no Diffusers weight loader, device
 placement, or offload hook takes part in serving.
+
+A caller's LoRAs adapt the DiT through Runtime's PEFT layers (`__adapter_compatibility__`). The
+Turbo overlay (`turbo.FunAccLoRA`) reaches the DiT's linears through permanent hooks
+(`cozy_runtime.lora.Hook`), which Runtime bakes into the resident weights while it is armed.
 """
 
 from __future__ import annotations
 
+import math
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+from functools import partial
 from typing import Any
 
 import numpy as np
 import torch
+from torch import nn
+from torch.nn import functional as F
 from diffusers import (
     AutoencoderKLQwenImage21,
     FlowMatchEulerDiscreteScheduler,
@@ -43,8 +51,9 @@ from transformers import (
 from transformers import initialization as transformer_init
 from transformers.modeling_utils import local_torch_dtype
 
-from cozy_runtime import fusion, rng, tiles, vlm
+from cozy_runtime import fusion, lora, rng, tiles, vlm
 from cozy_runtime.author import (
+    AdapterCompatibility,
     Config,
     ConformanceError,
     Loader,
@@ -138,6 +147,36 @@ class _Progress[T]:
 
 _DTYPES = {"f32": torch.float32, "bf16": torch.bfloat16, "f16": torch.float16}
 
+#: The DiT's linears an overlay adapts, (in, out): every one but the output projection, which a
+#: parallel decoder replaces per step (Fun Acc adapts all 231).
+_BLOCK_SITES = {
+    "attn.to_q": (4096, 4096),
+    "attn.to_k": (4096, 4096),
+    "attn.to_v": (4096, 4096),
+    "attn.to_out.0": (4096, 4096),
+    "img_mlp.gate_layer": (4096, 12288),
+    "img_mlp.proj": (4096, 12288),
+    "img_mlp.out": (12288, 4096),
+}
+SITES: dict[str, tuple[int, int]] = {
+    "img_in": (64, 4096),
+    "txt_in.in_layer": (4096, 4096),
+    "txt_in.out_layer": (4096, 4096),
+    "modulation.1": (4096, 16384),
+    "time_text_embed.timestep_embedder.linear_1": (256, 4096),
+    "time_text_embed.timestep_embedder.linear_2": (4096, 4096),
+    "norm_out.linear": (4096, 4096),
+    **{f"transformer_blocks.{i}.{site}": io for i in range(32) for site, io in _BLOCK_SITES.items()},
+}
+#: The output projection's (out, in).
+PROJ_OUT = (64, 4096)
+
+
+def _armed(transformer: nn.Module, path: str) -> nn.Module | None:
+    """The overlay's factors at `path` while one is armed (`_cozy_overlay`), else None."""
+    armed = getattr(transformer, "_cozy_overlay", None)
+    return None if armed is None else armed.get(path)
+
 
 def _stored(config: Config, component: str, module: torch.nn.Module) -> torch.dtype:
     """The one dtype the checkpoint stores `component`'s parameters in; f32 built from config alone.
@@ -164,6 +203,9 @@ class QwenImage21Graph:
                 transformer = QwenImage21Transformer2DModel.from_config(
                     config.section("transformer").mapping()
                 )
+            transformer._cozy_overlay = None
+            for path in SITES:
+                transformer.get_submodule(path).register_forward_hook(lora.Hook(partial(_armed, transformer, path)))
             self.components: dict[str, Any] = {
                 "transformer": transformer,
                 "text_encoder": AutoModelForImageTextToText.from_config(
@@ -246,6 +288,9 @@ class QwenImage21Model(
     # two thirds of a 4 MP step. A 16-bit request attends exactly.
     attention_bits={"transformer.transformer_blocks.": 8},
 ):
+    #: Caller LoRAs on the DiT, at any strength: the Runtime bakes them into the weights.
+    __adapter_compatibility__ = (AdapterCompatibility("lora", "", ("transformer",), -math.inf, math.inf),)
+
     graph: QwenImage21Graph
     processor: Any
 
@@ -275,11 +320,16 @@ class QwenImage21Model(
             hold_dtype(vae, VAE_DTYPE)
             tel.log("vae representation", dtype="bfloat16")
 
-    def _pipeline(self, sigmas: Sequence[float] | None = None) -> _StagedPipeline:
+    def _pipeline(
+        self, sigmas: Sequence[float] | None = None, scheduler: Mapping[str, Any] | None = None
+    ) -> _StagedPipeline:
+        """`scheduler`: fields an overlay's sampling sets over the checkpoint's scheduler."""
         pipeline = _StagedPipeline(
             **self.graph.components,
             processor=self.processor,
-            scheduler=FlowMatchEulerDiscreteScheduler.from_config(self.graph.scheduler_config),
+            scheduler=FlowMatchEulerDiscreteScheduler.from_config(
+                {**self.graph.scheduler_config, **(scheduler or {})}
+            ),
             sample_sigmas=None if sigmas is None else list(sigmas),
         )
         pipeline.device_placed = torch.device(str(self.device))
@@ -343,18 +393,22 @@ class QwenImage21Model(
         on_step: Callable[[int], None],
         cancel: Callable[[], None],
         sigmas: Sequence[float] | None = None,
+        scheduler: Mapping[str, Any] | None = None,
+        heads: torch.Tensor | None = None,
         reference_images: list[Any] | None = None,
         reference_latents: torch.Tensor | None = None,
         image_pad_mask: torch.Tensor | None = None,
     ) -> Any:
         """Text-to-image with an unpadded prompt runs the cached loop; edits and
         padded prompts run the Diffusers pipeline, uncached. `sigmas`: a distilled schedule (its
-        length is `steps`), else the pipeline's uniform spacing."""
+        length is `steps`), else the pipeline's uniform spacing; `scheduler`, an overlay's fields
+        over the checkpoint's. `heads`: a parallel decoder's output projection per step (PDD),
+        whose prediction, and so the state, is F32."""
         cancel()
         if reference_latents is None and reference_images is None and mask is None:
             return self._denoise_cached(
                 embeds, width=width, height=height, steps=steps, seed=seed, on_step=on_step,
-                sigmas=sigmas,
+                sigmas=sigmas, scheduler=scheduler, heads=heads,
             )
         return self._denoise_eager(
             embeds,
@@ -364,6 +418,8 @@ class QwenImage21Model(
             steps=steps,
             seed=seed,
             sigmas=sigmas,
+            scheduler=scheduler,
+            heads=heads,
             on_step=on_step,
             cancel=cancel,
             reference_images=reference_images,
@@ -381,6 +437,8 @@ class QwenImage21Model(
         seed: int,
         on_step: Callable[[int], None],
         sigmas: Sequence[float] | None = None,
+        scheduler: Mapping[str, Any] | None = None,
+        heads: torch.Tensor | None = None,
     ) -> Any:
         """Extract step 0 eagerly, then steps ``1..N-1`` in cached mode as one `denoise_loop`.
 
@@ -390,7 +448,7 @@ class QwenImage21Model(
         """
         transformer = self.graph.components["transformer"]
         device = torch.device(str(self.device))
-        pipeline = self._pipeline(sigmas)
+        pipeline = self._pipeline(sigmas, scheduler)
         scheduler = pipeline.scheduler
         multiple_of = pipeline.vae_scale_factor * 2
         width = width // multiple_of * multiple_of
@@ -436,19 +494,29 @@ class QwenImage21Model(
             # Step 0 prefills the prefix K/V over the full joint sequence.
             kv_cache = QwenImage21KVCache(len(transformer.transformer_blocks))
             timestep = timesteps[0:1].to(transformer.dtype) / 1000
-            noise = transformer(
-                hidden_states=latents,
-                timestep=timestep,
-                encoder_hidden_states=embeds,
-                encoder_hidden_states_mask=None,
-                img_shapes=img_shapes,
-                img_mask=image_pad_mask,
-                attention_kwargs={},
-                kv_cache=kv_cache,
-                kv_cache_mode="extract",
-                return_dict=False,
-            )[0]
+            first = None
+            if heads is not None:
+                first = transformer.proj_out.register_forward_hook(lambda _m, a, _o: F.linear(a[0], heads[0]))
+            try:
+                noise = transformer(
+                    hidden_states=latents,
+                    timestep=timestep,
+                    encoder_hidden_states=embeds,
+                    encoder_hidden_states_mask=None,
+                    img_shapes=img_shapes,
+                    img_mask=image_pad_mask,
+                    attention_kwargs={},
+                    kv_cache=kv_cache,
+                    kv_cache_mode="extract",
+                    return_dict=False,
+                )[0]
+            finally:
+                if first is not None:
+                    first.remove()
             noise = noise[:, -latents.shape[1] :]
+            # A parallel decoder's prediction is F32, and so is the state from here (PDD's
+            # `native_time_fp32_state`); the DiT reads it in its own dtype.
+            noise = noise if heads is None else noise.float()
             latents = scheduler.step(noise, timesteps[0], latents, return_dict=False)[0]
             on_step(0)
             if steps < 2:
@@ -460,7 +528,7 @@ class QwenImage21Model(
 
         def step(i: torch.Tensor, latents: torch.Tensor) -> None:
             with torch.no_grad():
-                hidden = transformer.img_in(latents)
+                hidden = transformer.img_in(latents.to(transformer.dtype))
                 temb = transformer.time_text_embed(euler.timestep(i), hidden)
                 modulation = transformer.modulation(temb)
                 for index, block in enumerate(blocks):
@@ -477,7 +545,10 @@ class QwenImage21Model(
                         key_valid=None,
                     )
                 hidden = transformer.norm_out(hidden, temb, target)
-                noise = transformer.proj_out(hidden)
+                if heads is None:
+                    noise = transformer.proj_out(hidden)
+                else:
+                    noise = F.linear(hidden, heads.index_select(0, i)[0]).float()
                 latents.copy_((latents.float() + euler.delta(i) * noise).to(latents.dtype))
 
         denoise_loop(step, range(1, steps), state=(latents,), on_step=on_step)
@@ -495,34 +566,58 @@ class QwenImage21Model(
         on_step: Callable[[int], None],
         cancel: Callable[[], None],
         sigmas: Sequence[float] | None = None,
+        scheduler: Mapping[str, Any] | None = None,
+        heads: torch.Tensor | None = None,
         reference_images: list[Any] | None = None,
         reference_latents: torch.Tensor | None = None,
         image_pad_mask: torch.Tensor | None = None,
     ) -> Any:
         transformer = self.graph.components["transformer"]
         device = torch.device(str(self.device))
-        pipeline = self._pipeline(sigmas)
+        pipeline = self._pipeline(sigmas, scheduler)
         pipeline.reference_latents = reference_latents
         if image_pad_mask is not None:
             pipeline.reference_pad_mask = image_pad_mask.to(device=device)
+        at = [0]
 
         def observed(_pipeline: Any, step: int, _timestep: Any, values: Any) -> Any:
+            at[0] = step + 1
             cancel()
             on_step(step)
             return values
 
-        with torch.inference_mode():
-            return pipeline(
-                image=reference_images,
-                prompt_embeds=embeds.to(device=device, dtype=transformer.dtype),
-                prompt_embeds_mask=None if mask is None else mask.to(device=device),
-                width=width,
-                height=height,
-                num_inference_steps=steps,
-                generator=rng.generator(seed),
-                output_type="latent",
-                callback_on_step_end=observed,
-            ).images
+        hooks = []
+        if heads is not None:
+            # PDD's reference glue (`qwenimage21_pdd.py`): each step's head, the DiT read in its
+            # dtype at the grid's bf16 time, and an F32 prediction (so an F32 state).
+            def native(_module: Any, args: tuple[Any, ...], kwargs: dict[str, Any]) -> Any:
+                dtype = kwargs["encoder_hidden_states"].dtype
+                sigma = pipeline.scheduler.sigmas[at[0]].to(device)
+                kwargs["timestep"] = ((sigma * 1000).to(dtype) / 1000).expand(kwargs["hidden_states"].shape[0])
+                kwargs["hidden_states"] = kwargs["hidden_states"].to(dtype)
+                return args, kwargs
+
+            hooks = [
+                transformer.register_forward_pre_hook(native, with_kwargs=True),
+                transformer.register_forward_hook(lambda _m, _a, out: (out[0].float(), *out[1:])),
+                transformer.proj_out.register_forward_hook(lambda _m, a, _o: F.linear(a[0], heads[at[0]])),
+            ]
+        try:
+            with torch.inference_mode():
+                return pipeline(
+                    image=reference_images,
+                    prompt_embeds=embeds.to(device=device, dtype=transformer.dtype),
+                    prompt_embeds_mask=None if mask is None else mask.to(device=device),
+                    width=width,
+                    height=height,
+                    num_inference_steps=steps,
+                    generator=rng.generator(seed),
+                    output_type="latent",
+                    callback_on_step_end=observed,
+                ).images
+        finally:
+            for hook in hooks:
+                hook.remove()
 
     @uses_components("vae")
     def decode(self, latents: Any, *, width: int, height: int) -> Any:

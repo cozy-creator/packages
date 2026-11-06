@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from functools import partial
 from typing import Annotated, Any, Literal
 
 import msgspec
@@ -28,6 +29,7 @@ from PIL import Image as PILImage
 
 from . import quantize as quantize  # its recipes
 from .model import QwenImage21Model
+from .turbo import FunAccLoRA
 
 app = App()
 
@@ -38,12 +40,8 @@ MAX_MEGAPIXELS = 4.0
 SIZES = Sizes((MIN_MEGAPIXELS, MAX_MEGAPIXELS), (32, 2048 * 16), 32, "the 1-4 MP Qwen-Image serves")
 #: The size without references (Paul, 11-06: "2 megapixels is a good default").
 DEFAULT_MEGAPIXELS = 2
-#: The full model's steps; Turbo's are its schedule's.
+#: The full model's steps; Turbo's are its overlay's (`turbo.STEPS`).
 _STEPS = 40
-#: Qwen-Image-2.1-Turbo's distilled schedule, its `model_index.json` `sample_sigmas`
-#: (hf://Qwen/Qwen-Image-2.1-Turbo@fc13ba19). The Runtime's model config holds components only,
-#: so the function, not the checkpoint, names the regime.
-TURBO_SIGMAS = (1.0, 0.978453, 0.95418, 0.926626, 0.89508, 0.845148, 0.704534, 0.414568)
 
 
 #: The pictures Qwen-Image-2.1 takes: past them the last mentioned go, with a warning.
@@ -111,13 +109,14 @@ def _generate(
     out: Outputs,
     tel: Telemetry,
     adj: Adjustments,
-    steps: int,
-    sigmas: tuple[float, ...] | None,
+    turbo: FunAccLoRA | None,
 ) -> ImageResult:
-    """Every function's body: `sigmas` is the distilled schedule (Turbo), else the base model's uniform spacing."""
+    """Every function's body: with `turbo`, its overlay on the base model and its 4-step grid, else the
+    base model's 40 steps of uniform spacing."""
     prompt, pictures = _said(payload.prompt, adj)
-    tel.log("sampling", regime="turbo" if sigmas else "base", steps=steps,
-            schedule="distilled sigmas" if sigmas else "uniform, dynamic shift")
+    steps = turbo.steps if turbo else _STEPS
+    tel.log("sampling", regime="turbo (Fun Acc)" if turbo else "base", steps=steps,
+            schedule="PDD grid, a head per step" if turbo else "uniform, dynamic shift")
     seed = payload.drawn_seed()
     model.hold_vae(tel)
     ctx.raise_if_cancelled()
@@ -144,7 +143,8 @@ def _generate(
         else:
             embeds, mask, image_pad_mask = model.encode_image_prompt(prompt, conditioning_images)
     with tel.stage("generating image", overall_range=(0.1, 0.9)):
-        latents = model.denoise(
+        denoise = model.denoise if turbo is None else partial(turbo.denoise, model)
+        latents = denoise(
             embeds,
             mask,
             width=width,
@@ -153,7 +153,6 @@ def _generate(
             seed=seed,
             on_step=tel.step_callback(steps, stage="generating image", overall_range=(0.1, 0.9)),
             cancel=ctx.raise_if_cancelled,
-            sigmas=sigmas,
             reference_images=reference_images,
             reference_latents=reference_latents,
             image_pad_mask=image_pad_mask,
@@ -169,9 +168,9 @@ def _generate(
     return ImageResult(asset, width, height, seed, prompt)
 
 
-_MEMO = ("qwen_image_2", "qwen_image_2.model")
+_MEMO = ("qwen_image_2", "qwen_image_2.model", "qwen_image_2.turbo")
 _FULL = "qwen/qwen-image-2.1@0.1.0"
-_TURBO = "qwen/qwen-image-2.1-turbo@0.1.1"
+_TURBO = "alibaba-pai/qwen-image-2.1-fun-acc@0.1.0"
 
 
 @app.entrypoint(defaults={"model": _FULL}, memoize=Memoize(requires=["seed"]), memo_dependencies=_MEMO)
@@ -184,26 +183,28 @@ def generate(
     adj: Adjustments,
 ) -> ImageResult:
     """Qwen-Image-2.1, the 40-step base model."""
-    return _generate(ctx, payload, model, out, tel, adj, _STEPS, None)
+    return _generate(ctx, payload, model, out, tel, adj, None)
 
 
-@app.entrypoint(defaults={"model": _TURBO}, memoize=Memoize(requires=["seed"]), memo_dependencies=_MEMO)
+@app.entrypoint(defaults={"model": _FULL, "turbo_lora": _TURBO}, memoize=Memoize(requires=["seed"]),
+                memo_dependencies=_MEMO)  # fmt: skip
 def generate_turbo(
     ctx: Context,
     payload: GenerateInput,
     model: QwenImage21Model,
+    turbo_lora: FunAccLoRA,
     out: Outputs,
     tel: Telemetry,
     adj: Adjustments,
 ) -> ImageResult:
-    """Qwen-Image-2.1-Turbo: the same inputs, on its 8-step distilled schedule."""
-    return _generate(ctx, payload, model, out, tel, adj, len(TURBO_SIGMAS), TURBO_SIGMAS)
+    """Qwen-Image-2.1 with Alibaba PAI's Fun Acc: the same inputs, in 4 steps."""
+    return _generate(ctx, payload, model, out, tel, adj, turbo_lora)
 
 
 class ImageBox(msgspec.Struct, kw_only=True):
     #: What to make, and the pictures it mentions (`_said`).
     instructions: Prompt[Image] = Prompt()
-    #: Qwen-Image-2.1-Turbo's 8 steps, else the 40-step base model.
+    #: The base model with its Fun Acc overlay in 4 steps, else its 40.
     turbo: bool = True
     #: `ImageRequest.target`; Qwen's rotary range holds it to 1:16 through 16:1 (`SIZES.fit`).
     aspect_ratio: Annotated[AspectRatio, Ratios(min=1 / 16, max=16)] | None = None
@@ -212,21 +213,20 @@ class ImageBox(msgspec.Struct, kw_only=True):
     seed: Seed | None = None
 
 
-# Each checkpoint is built, and its weights fetched, only when a box asks for it.
-@app.tool(label="Qwen Image 2", named="image", defaults={"model": _TURBO, "full": _FULL}, on_demand=("full", "model"),
-          memoize=Memoize(requires=["seed"]), memo_dependencies=_MEMO)  # fmt: skip
+# The Turbo overlay is built, and its weights fetched, only when a box asks for it; a LoRA dropped on the
+# box adapts the base model either way.
+@app.tool(label="Qwen Image 2", named="image", defaults={"model": _FULL, "turbo_lora": _TURBO},
+          on_demand=("turbo_lora",), memoize=Memoize(requires=["seed"]), memo_dependencies=_MEMO)  # fmt: skip
 def image(
     ctx: Context,
     payload: ImageBox,
-    full: QwenImage21Model,
     model: QwenImage21Model,
+    turbo_lora: FunAccLoRA,
     out: Outputs,
     tel: Telemetry,
     adj: Adjustments,
 ) -> ImageResult:
-    """Qwen Image 2 on a canvas: Turbo, or the full model, which loads only when asked for."""
+    """Qwen Image 2 on a canvas: Turbo (the base model and its Fun Acc overlay), or the full 40 steps."""
     request = GenerateInput(prompt=payload.instructions, aspect_ratio=payload.aspect_ratio,
                             megapixels=payload.megapixels, seed=payload.seed)  # fmt: skip
-    if payload.turbo:
-        return _generate(ctx, request, model, out, tel, adj, len(TURBO_SIGMAS), TURBO_SIGMAS)
-    return _generate(ctx, request, full, out, tel, adj, _STEPS, None)
+    return _generate(ctx, request, model, out, tel, adj, turbo_lora if payload.turbo else None)
