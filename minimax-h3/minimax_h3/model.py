@@ -102,13 +102,13 @@ def condition_references(model: H3Model, task: Task, state: Any, *, tel: Telemet
     tel.log("h3 conditioning", wall_ms=round((time.perf_counter() - started) * 1000, 1))
 
 
-#: The DiT's block stack for step caching (`stepcache`): the full model's `preset` (`FullRecipe`).
+#: The DiT's block stack for step caching (`stepcache`): the full model's `quality` (`FullRecipe`).
 STACK = stepcache.Stack(MiniMaxH3Transformer3DModel, blocks="transformer_blocks", carried=(0,))
 
 
 @dataclass(frozen=True)
 class FullRecipe:
-    """The full model's sampling for a `preset` (h3.py `FULL_RECIPES`): its first `dense_steps`
+    """The full model's sampling for a `quality` (h3.py `FULL_RECIPES`): its first `dense_steps`
     dense, the rest sparse at Sol `tau`, and its DiT stack under `cache`, if any."""
 
     dense_steps: int = 10
@@ -303,13 +303,13 @@ class H3TurboBase(H3Model, encoded_leaves="accept"):
         audio: Any,
         schedule: Schedule,
         seed: int,
-        preset: str,
+        quality: str,
         on_step: Any,
     ) -> Any:
         """The Regenerate refine of normalized latents at their canvas, on the FL2VA DiT."""
         return overlay.refine(
             self, latents, prompt_embeds=prompt_embeds, text_tags=text_tags, spans=spans,
-            audio=audio, schedule=schedule, seed=seed, preset=preset, on_step=on_step,
+            audio=audio, schedule=schedule, seed=seed, quality=quality, on_step=on_step,
         )  # fmt: skip
 
     @uses_components("transformer_ref")
@@ -439,12 +439,12 @@ class H3RegenerateLoRA(Model[OfficialH3RegenerateLoRA], encoded_leaves="accept")
         audio: Any,
         schedule: Schedule,
         seed: int,
-        preset: str,
+        quality: str,
         on_step: Any,
     ) -> Any:
         return regenerate.refine(
             base.pipe.components["transformer"],
             self.pipe.overlay(base.pipe),
             latents=latents, prompt_embeds=prompt_embeds, text_tags=text_tags, spans=spans,
-            audio=audio, schedule=schedule, seed=seed, preset=preset, on_step=on_step,
+            audio=audio, schedule=schedule, seed=seed, quality=quality, on_step=on_step,
         )  # fmt: skip

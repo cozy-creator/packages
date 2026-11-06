@@ -7,18 +7,13 @@ from collections.abc import Mapping, Sequence
 from itertools import pairwise
 from typing import Literal, NamedTuple
 
-from cozy_runtime.author import (
-    MENTION,
-    AudioFile,
-    AudioPreparation,
-    ImageFile,
-    Reference,
-    VideoFile,
-    name_key,
-)
+import msgspec
+from cozy_runtime.author import AudioFile, AudioPreparation, ImageFile, VideoFile
 
 from minimax_h3.official import MAX_AUDIO_REFERENCES, MAX_IMAGE_REFERENCES, MAX_REFERENCES, MAX_VIDEO_REFERENCES, Task
 
+#: A mention: `<`, any text without brackets or line breaks, `>`.
+MENTION = re.compile(r"<([^<>\n]+)>")
 #: MiniMax's full-reference sections in their canonical order. Anything else a person writes, such
 #: as a `style:` line, is words where it stands.
 SECTIONS = (
@@ -48,12 +43,9 @@ VIDEO_READ_BYTES = 16 << 30
 IMAGE_READ_BYTES = 64 << 20
 AUDIO_READ_BYTES = 64 << 20
 #: Each kind's file field, its H3 reference kind and its `<Picture|Audio|Video N>` label.
-FILE = {"character": "image", "prop": "image", "background": "image", "audio": "audio", "video": "video",
-        "anchor_video": "video", "world_state": "image"}
-_SLOT = {"character": "picture", "prop": "picture", "background": "picture", "audio": "audio", "video": "video",
-         "anchor_video": "video", "world_state": "picture"}
-_POLICY = {"character": "image", "prop": "image", "background": "image", "audio": "audio", "video": "video",
-           "anchor_video": "video", "world_state": "image"}
+FILE = {"character": "image", "audio": "audio", "video": "video", "anchor_video": "video", "world_state": "image"}
+_SLOT = {"character": "picture", "audio": "audio", "video": "video", "anchor_video": "video", "world_state": "picture"}
+_POLICY = {"character": "image", "audio": "audio", "video": "video", "anchor_video": "video", "world_state": "image"}
 #: The kinds read from a clip.
 CLIPS = ("video", "anchor_video")
 _SPEAKER = re.compile(r"\s*\((S\d+)\)")
@@ -67,27 +59,32 @@ TASKS = ("video editing", "video continuation", "keyframe completion", "referenc
          "audio reuse", "audio reference")
 
 
-class StoryReference(Reference, kw_only=True):
-    """One reference file (`FILE[kind]`) a segment attaches.
+def name_key(name: str) -> str:
+    """How a token matches a name: any case, with `_`, `-` and space alike."""
+    return " ".join(re.sub(r"[_-]", " ", name).split()).casefold()
 
-    - `background`: the environment, the shot's setup plate.
+
+class StoryReference(msgspec.Struct, kw_only=True):
+    """One reference file (`FILE[kind]`) a segment attaches, named as its text names it.
+
+    - `character`: a picture, which is always a character, with its voice when it has one.
+    - `audio`: a sound the soundtrack reuses.
     - `video`: reference footage, its motion and camera.
     - `anchor_video`: a plate, followed frame by frame (Alissonerdx's head swap and style
       transfer; ComfyUI's Add Guide): every latent frame at the render's own canvas, on every
       step, and the render takes its canvas (`guide_rows`). Never named in a prompt, one per call,
       no longer than the render. It costs what a second render does: per `reference_rows`, about
       5.5x the denoise for a 12 s clip beside a 15 s render.
-    - `world_state`: a soft picture of the set, read at 512 px (or a text-only shot's previous
-      segment's last frame), with its layout as its `description`.
+    - `world_state`: a picture cozy adds at a join, the previous segment's last frame or a plate's
+      first, read at 512 px.
     """
 
-    kind: Literal["character", "prop", "background", "audio", "video", "anchor_video", "world_state"]
+    name: str
+    kind: Literal["character", "audio", "video", "anchor_video", "world_state"]
     description: str = ""
     image: ImageFile | None = None
     audio: AudioFile | None = None
     video: VideoFile | None = None
-    #: A video's own sound: dropped unless set, so the clip guides motion alone.
-    use_audio: bool = False
     #: A character's voice: a timbre reference wherever the character is named.
     voice: AudioFile | None = None
 
@@ -104,24 +101,6 @@ def voices(references: Sequence[StoryReference]) -> tuple[list[StoryReference], 
             pool.append(voice)
             owners[voice.name] = ref
     return pool, owners
-
-
-def unique_names(references: Sequence[StoryReference]) -> list[str]:
-    """One name per reference, and a warning for each that had to move: a second <Bob> is <Bob 2>, so
-    a mention of <Bob> means the first. The H3 limits are per call (`_within_limits`)."""
-    taken: set[str] = set()
-    warnings = []
-    for reference in references:
-        name, number = reference.name, 1
-        while name_key(name) in taken:
-            number += 1
-            name = f"{reference.name} {number}"
-        if number > 1:
-            warnings.append(f"two references are named <{reference.name}>: <{reference.name}> means the first, and the "
-                            f"other is <{name}>")  # fmt: skip
-            reference.name = name
-        taken.add(name_key(name))
-    return warnings
 
 
 def _within_limits(
@@ -160,14 +139,6 @@ class SegmentCall(NamedTuple):
     warnings: list[str]
 
 
-def named_in(text: str, references: Sequence[StoryReference]) -> frozenset[str]:
-    """The names of the references `text` names, as a segment's call reads its tokens: by name, else by global label."""
-    pool = voices(references)[0]
-    by_key = {name_key(ref.name): ref for ref in pool}
-    by_slot = _numbering(pool)
-    return frozenset(ref.name for token in MENTION.finditer(text) if (ref := _named(token, by_key, by_slot)))
-
-
 def _named(
     token: re.Match[str], by_key: Mapping[str, StoryReference], by_slot: Mapping[tuple[str, int], StoryReference]
 ) -> StoryReference | None:
@@ -193,22 +164,22 @@ def segment_call(
     keyframes: bool = False,
     continues: bool = False,
 ) -> SegmentCall:
-    """A Ref2VA segment's text and references: `text` with its music section, then what only cozy knows or a field set
-    (`_segment_call`). `retained`: `own_retention` of the shot's text. `added`: the references cozy adds at a join.
-    `keyframes`: it has a first or last frame. `continues`: it continues a source video."""
-    text = _fill(text, {"non_diegetic_music": music.strip() or "N/A"})
-    return _segment_call(text, references, soundscape.strip(), index, forced, retained, added, keyframes, continues)
+    """A Ref2VA segment's text and references: `text` with its music and soundscape sections, whose mentions name
+    references too, then what only cozy knows or a field set (`_segment_call`). `retained`: `own_retention` of the
+    shot's text. `added`: the references cozy adds at a join. `keyframes`: it has a first or last frame. `continues`: it
+    goes on from a take."""
+    text = _fill(text, {"overall_soundscape": soundscape.strip() or "N/A", "non_diegetic_music": music.strip() or "N/A"})
+    return _segment_call(text, references, "", index, forced, retained, added, keyframes, continues)
 
 
 def _numbering(references: Sequence[StoryReference]) -> dict[tuple[str, int], StoryReference]:
     """`<Picture N>`, `<Audio N>` and `<Video N>`: each kind counted in the given order, as H3
-    labels them. A `use_audio` clip's soundtrack takes an `<Audio N>` just before its video."""
+    labels them."""
     counts = dict.fromkeys(("picture", "audio", "video"), 0)
     slots: dict[tuple[str, int], StoryReference] = {}
     for ref in references:
-        for slot in ("audio", "video") if ref.kind in CLIPS and ref.use_audio else (_SLOT[ref.kind],):
-            counts[slot] += 1
-            slots[slot, counts[slot]] = ref
+        counts[_SLOT[ref.kind]] += 1
+        slots[_SLOT[ref.kind], counts[_SLOT[ref.kind]]] = ref
     return slots
 
 
@@ -381,12 +352,6 @@ def _segment_call(
             who = f" for {names(motion[ref.name])}" if motion.get(ref.name) else ""
             definitions.append(f"{slot} is the {role}{who}." if _MEDIA.fullmatch(ref.name)
                                else f"<{ref.name}> is the {role} in {slot}{who}.")
-            if ref.use_audio:
-                sound = label(ref, "audio")
-                if (ref.name, "audio") not in own:
-                    definitions.append(f"{sound} is the synchronized audio track of {slot}.")
-                if (ref.name, "audio") not in retained:
-                    tasks.add("audio reuse")
         elif ref.kind == "world_state":
             # People are named only where the call has a character (se-089): a world state of a test pattern
             # that said "each person" grew people (25176).
@@ -394,15 +359,9 @@ def _segment_call(
                 f"<{ref.name}> is the world state shown in {slot}: how the set is arranged and "
                 + ("where each person and object stands." if characters else "where everything in it stands.")
             )
-            if ref.name in added:
-                kept = "each person's and object's position" if characters else "where everything in it stands"
-                retention.append(f"<{ref.name}>: attribute_transfer - keep the set's arrangement and {kept} "
-                                 f"from {slot}, not its exact frame, framing or moment.")
-            elif (ref.name, "picture") not in retained and not author.get(name_key(ref.name)):
-                # A plain image: a layout to start from, never a look to keep (Paul, 11-03).
-                layout = "characters and background" if characters else "the set"
-                retention.append(f"<{ref.name}>: attribute_transfer - use the layout of {layout} in {slot} as a starting point, "
-                                 "not its exact frame, framing or moment.")
+            kept = "each person's and object's position" if characters else "where everything in it stands"
+            retention.append(f"<{ref.name}>: attribute_transfer - keep the set's arrangement and {kept} "
+                             f"from {slot}, not its exact frame, framing or moment.")
         else:
             moves = [f"<{clip.name}>" if not _MEDIA.fullmatch(clip.name) else label(clip)
                      for clip in clips

@@ -1,39 +1,25 @@
-# References and `<Name>` mentions
+# References and `<name>` mentions
 
-A reference is a file given to a function to guide its output, named so its prompt can mention it.
-Every first-party image package takes its pictures in one shape, and its prompt names them the same way:
+A prompt is its text, as typed, plus the references that text mentions (`cozy_runtime.author.Prompt`):
 
 ```yaml
-pictures:
-  - {name: Person 1, image: ./persona.png}
-  - {name: Pose,     image: ./pose.png}
-prompt: "<Person 1> standing in the pose of <Pose>"
+prompt: "<amy> standing in the pose of <pose>"
 ```
 
 ```sh
-cozy run qwen-image-2/generate --input request.yaml
-cozy run qwen-image-2/generate prompt='<Person 1> standing in the pose of <Pose>' \
-  pictures:='[{"name": "Person 1", "image": "persona.png"}, {"name": "Pose", "image": "pose.png"}]'
+cozy run qwen-image-2/generate --input request.yaml     # in a project: each <name> is that box
 ```
 
-A file is the attached file itself (`image`, `video`, `audio`, `--file`).
+The function receives `Prompt(text, references)`: `references` maps each key, spelled exactly as its `<key>` in the
+text, to what it names, `Image(file, description)` (or `Video`, `Audio`), in order of first mention. Calcifer fills it
+and checks every mention names something, so a package only replaces `<key>` with its model's words.
 
-## The rules
-
-- **A picture** is `{name, image, box?}`. `name` is required and unique.
-- **A mention** is `<Name>` anywhere in the prompt.
-  - Names match in any case, with `_`, `-` and space treated alike, so `<person_1>` names `Person 1`.
-  - A mention of no reference stays as written, with a warning.
-  - Two references with one name are refused.
-- **The package renders each mention** in its model's own words for the Nth picture: the wording
-  the model was trained on (table below). A model with no such wording reads the name itself.
-  The result's `prompt` is the text the model read.
-- **Image packages:**
-  - The first picture sets the default aspect ratio and pixel count.
-  - `box` (`[x0, y0, x1, y1]`, 0–1) places a picture, on the models with layout control.
-  - Text-only packages take no pictures.
-- **Shot functions** (minimax-h3) take one `references` list tagged by `kind` (`character`, `prop`,
-  `environment`, `video`, `audio`); see the package README.
+- `<amy>` is the box's approved picture, else its newest; `<amy.2>` is version 2; `<walk@48-120>` frames 48 to 120 of
+  a video, cut before sending.
+- A text box is put in the text as its words; it is not a reference.
+- A picture model takes `Prompt[Image]`: a mentioned video stays as its name in the text, with a warning.
+- Each package words a reference in its model's own words for the Nth one (below). A dotted key a model reads by name
+  reads `kyogre.2` as `kyogre 2`. The result's `prompt` is the text the model read.
 
 | package | the Nth picture reads as | source |
 |---|---|---|
@@ -44,27 +30,16 @@ A file is the attached file itself (`image`, `video`, `audio`, `--file`).
 | flux-2 | `image N` | BFL's prompting guide |
 | hunyuan-image-3 | `图N` | Tencent's documented prompts |
 | hidream-o1 | its name | no convention upstream |
+| minimax-h3 | `<Picture N>`, `<Video N>`, `<Audio N>` per segment; see its README | MiniMax's reference guide |
 | anima, ideogram-4, krea-2, moss-image, sdxl | (takes no pictures) | text to image only |
 
-## For package authors
-
-The convention lives in `cozy_runtime.author`, and it is opt-in. Nothing below the author library
-knows it, so a package may declare any input shape it likes.
-
 ```python
-from cozy_runtime.author import Picture, PictureRequest, Reference, VideoFile, render
+from cozy_runtime.author import Image, ImageRequest, Prompt
 
-class GenerateInput(PictureRequest):  # pictures: list[Picture]; narrow the count with Meta(max_length=N)
-    ...
+class GenerateInput(ImageRequest):
+    prompt: Prompt[Image] = Prompt()
 
-def label(n: int, picture: Picture) -> str:
-    return f"Picture {n}"  # how the model refers to the Nth picture
-
-prompt = payload.rendered(adj, label)  # or render(text, references, label, adj=adj) for any list
-
-class Clip(Reference):  # a new reference type: its media and fields are its own
-    video: VideoFile
-    strength: float = 1.0
+text = payload.prompt.text
+for n, key in enumerate(payload.prompt.references, 1):
+    text = text.replace(f"<{key}>", f"Picture {n}")   # how the model refers to the Nth picture
 ```
-
-Each package README states its label and how its first picture sets the size.

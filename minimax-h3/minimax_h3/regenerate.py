@@ -46,9 +46,9 @@ UPSCALER_CEILING = (1440, 2560)
 #: steps that run dense (None: every one), and the Sol `tau` of the sparse ones. A sparse step's every
 #: block is sparse, its text and audio rows exact; the token refiner stays dense.
 PRESETS: dict[str, tuple[int | None, float]] = {
-    "quality": (None, 1.0),  # `standard`
-    "balanced": (1, 1.0),  # `sol_engine`
-    "fast": (0, 1.75),  # `sol_engine_fast`
+    "full": (None, 1.0),  # `standard`
+    "standard": (1, 1.0),  # `sol_engine`
+    "draft": (0, 1.75),  # `sol_engine_fast`
 }
 #: The VAE posterior sample `infer.py --input-video` draws (`--vae-seed`).
 POSTERIOR_SEED = 42
@@ -162,7 +162,7 @@ def refine(
     audio: torch.Tensor,
     schedule: Schedule,
     seed: int,
-    preset: str,
+    quality: str,
     on_step: Callable[[int], None],
 ) -> torch.Tensor:
     """Refine normalized `(1, 24, T, H, W)` latents at their size over `spans` (`plan_windows`),
@@ -214,7 +214,7 @@ def refine(
         )
         for timestep in schedule.video_timesteps
     ]
-    dense, tau = PRESETS[preset]
+    dense, tau = PRESETS[quality]
     dense = len(plan) if dense is None else dense
     denoise_refine(
         transformer,
