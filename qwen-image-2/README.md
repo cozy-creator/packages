@@ -132,14 +132,14 @@ cozy model upload \
 cozy model publish qwen/qwen-image-2.1-turbo 0.1.0 sha256:COMMIT
 ```
 
-The enhancers are mirrored as uploaded; `ENHANCER_INT8` and `ENHANCER_NVFP4` write their lanes:
+The enhancers are mirrored as uploaded, and `qwen3.5`'s int8 recipe writes their lane (the same Qwen3.5-9B):
 
 ```sh
 cozy model upload hf://Qwen/Qwen-Image-2.1-PE-I2I@72927bc08afc99b7888ceb7d7d51a12db3700bbd \
   qwen/qwen-image-2.1-pe-i2i --lane bf16 --mirror --on YOUR_MACHINE
 cozy model upload hf://Qwen/Qwen-Image-2.1-PE-T2I@f3ed7985c788ad75b3ab7223e0c4c51e2a43545b \
   qwen/qwen-image-2.1-pe-t2i --lane bf16 --mirror --on YOUR_MACHINE
-cozy model quantize qwen/qwen-image-2.1-pe-i2i@sha256:BF16_COMMIT --lane int8 --package qwen-image-2 --on YOUR_MACHINE
+cozy model quantize qwen/qwen-image-2.1-pe-i2i@sha256:BF16_COMMIT --lane int8 --package qwen3.5 --on YOUR_MACHINE
 ```
 
 Replace `YOUR_MACHINE` and `COMMIT` with the selected machine name and
