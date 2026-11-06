@@ -20,7 +20,6 @@ from cozy_runtime.author import (
     NegativePrompt,
     Outputs,
     Prompt,
-    Range,
     Ratios,
     Seed,
     Sizes,
@@ -212,8 +211,6 @@ class ImageBox(msgspec.Struct, kw_only=True):
     turbo: bool = True
     #: `ImageRequest.target`, held to the model's sizes (`SIZES.fit`).
     aspect_ratio: Annotated[AspectRatio, Ratios(min=1 / 16, max=16)] | None = None
-    #: `SIZES.pixels`: Fibo 2.0's 0.25-1 MP.
-    megapixels: Annotated[float, Range(MIN_MEGAPIXELS, MAX_MEGAPIXELS, unit="MP")] | None = None
     #: `ImageRequest.drawn_seed`.
     seed: Seed | None = None
     #: Bria's VLMs write the JSON caption from the prompt (`_caption`).
@@ -229,6 +226,6 @@ def image(ctx: Context, payload: ImageBox, edit_upsampler: Captioner, full: Fibo
           out: Outputs, tel: Telemetry, adj: Adjustments) -> ImageResult:
     """Fibo 2.0 on a canvas: Edit Turbo, or Dev."""
     kind, function, dit = (TurboInput, "generate_turbo", model) if payload.turbo else (GenerateInput, "generate", full)
-    request = kind(prompt=payload.instructions, aspect_ratio=payload.aspect_ratio, megapixels=payload.megapixels,
+    request = kind(prompt=payload.instructions, aspect_ratio=payload.aspect_ratio,
                    seed=payload.seed, prompt_upsampling=payload.prompt_upsampling)
     return _generate(ctx, function, request, dit, upsampler, edit_upsampler, out, tel, adj)

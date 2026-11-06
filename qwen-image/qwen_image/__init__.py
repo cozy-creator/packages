@@ -21,7 +21,6 @@ from cozy_runtime.author import (
     NegativePrompt,
     Outputs,
     Prompt,
-    Range,
     Ratios,
     Seed,
     Sizes,
@@ -186,8 +185,6 @@ class ImageBox(msgspec.Struct, kw_only=True):
     turbo: bool = True
     #: `ImageRequest.target`, held to the model's sizes (`SIZES.fit`).
     aspect_ratio: Annotated[AspectRatio, Ratios(min=1 / 16, max=16)] | None = None
-    #: `SIZES.pixels`: 256² to 2 MiP.
-    megapixels: Annotated[float, Range(MIN_MEGAPIXELS, MAX_MEGAPIXELS, unit="MP")] | None = None
     #: `ImageRequest.drawn_seed`.
     seed: Seed | None = None
 
@@ -200,7 +197,7 @@ class ImageBox(msgspec.Struct, kw_only=True):
 def image(ctx: Context, payload: ImageBox, edit_model: QwenImageTransformer, edit_turbo_lora: QwenImageLoRA,
           model: QwenImage, turbo_lora: QwenImageLoRA, out: Outputs, tel: Telemetry, adj: Adjustments) -> ImageResult:
     """Qwen Image on a canvas: Lightning, or the full models."""
-    request = GenerateInput(prompt=payload.instructions, aspect_ratio=payload.aspect_ratio, megapixels=payload.megapixels,
+    request = GenerateInput(prompt=payload.instructions, aspect_ratio=payload.aspect_ratio,
                             seed=payload.seed)  # fmt: skip
     if payload.turbo:
         return _turbo(ctx, request, edit_model, edit_turbo_lora, model, turbo_lora, out, tel, adj)

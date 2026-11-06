@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Annotated
+from typing import Annotated, Literal
 
 import msgspec
 import torch
@@ -15,11 +15,11 @@ from cozy_runtime.author import (
     ImageFrame,
     ImageRequest,
     ImageResult,
+    Label,
     Memoize,
     NegativePrompt,
     Outputs,
     QuantizationPlan,
-    Range,
     Ratios,
     Recipe,
     Seed,
@@ -188,8 +188,8 @@ class ImageBox(msgspec.Struct, kw_only=True):
     instructions: str = ""
     #: `generate`, through `ImageRequest.size`; held to 1:16 through 16:1.
     aspect_ratio: Annotated[AspectRatio, Ratios(min=1 / 16, max=16)] | None = None
-    #: `generate`, through `SIZES.pixels`: Anima's 1 MP training size to its 1536 class.
-    megapixels: Annotated[float, Range(1.0, 2.25, unit="MP")] | None = None
+    #: `generate`, through `SIZES.pixels`: Anima's 1 MP training size and its 1536² class (README, Sizes; `SIZES`).
+    megapixels: Annotated[Literal["1", "2.25"], Label("", options={"1": "1 MP", "2.25": "2.25 MP"})] | None = None
     #: `generate`: unset, the model card's.
     negative_prompt: str | None = None
     seed: Seed | None = None
@@ -198,6 +198,7 @@ class ImageBox(msgspec.Struct, kw_only=True):
 @app.tool(label="Anima", named="image", defaults={"model": "circlestone-labs/anima@1.0.0"}, memoize=Memoize(requires=["seed"]))
 def image(ctx: Context, payload: ImageBox, model: AnimaModel, out: Outputs, tel: Telemetry, adj: Adjustments) -> ImageResult:
     """Anima on a canvas: `generate` from the box."""
-    request = GenerateInput(prompt=payload.instructions, aspect_ratio=payload.aspect_ratio, megapixels=payload.megapixels,
+    megapixels = None if payload.megapixels is None else float(payload.megapixels)
+    request = GenerateInput(prompt=payload.instructions, aspect_ratio=payload.aspect_ratio, megapixels=megapixels,
                             seed=payload.seed, negative_prompt=payload.negative_prompt)  # fmt: skip
     return generate(ctx, request, model, out, tel, adj)

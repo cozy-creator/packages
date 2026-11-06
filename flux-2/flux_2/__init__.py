@@ -4,7 +4,7 @@ ordered pictures."""
 from __future__ import annotations
 
 from functools import partial
-from typing import Annotated
+from typing import Annotated, Literal
 
 import msgspec
 from cozy_runtime.author import (
@@ -19,7 +19,6 @@ from cozy_runtime.author import (
     Memoize,
     Outputs,
     Prompt,
-    Range,
     Ratios,
     Seed,
     Sizes,
@@ -161,8 +160,8 @@ class ImageBox(msgspec.Struct, kw_only=True):
     turbo: bool = True
     #: `ImageRequest.target`, held to the model's sizes (`SIZES.fit`).
     aspect_ratio: Annotated[AspectRatio, Ratios(min=1 / 16, max=16)] | None = None
-    #: `SIZES.pixels`: 64² px to 4 MiP.
-    megapixels: Annotated[float, Range(MIN_MEGAPIXELS, MAX_MEGAPIXELS, unit="MP")] | None = None
+    #: `SIZES.pixels`: BFL's 1 MP default up to FLUX.2's 4 MP (README, Sizes).
+    megapixels: Literal[1, 2, 4] | None = None
     #: `ImageRequest.drawn_seed`.
     seed: Seed | None = None
     #: BFL's upsampler rewrites the prompt first (`_generate`).

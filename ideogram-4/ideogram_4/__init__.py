@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 import msgspec
 import numpy as np
@@ -18,7 +18,6 @@ from cozy_runtime.author import (
     ImageResult,
     Memoize,
     Outputs,
-    Range,
     Ratios,
     Region,
     Seed,
@@ -163,8 +162,8 @@ class ImageBox(msgspec.Struct, kw_only=True):
     instructions: str = ""
     #: `generate`, through `ImageRequest.size`; held to 1:6 through 6:1.
     aspect_ratio: Annotated[AspectRatio, Ratios(min=1 / 6, max=6)] | None = None
-    #: `generate`, through `SIZES.pixels`: 256² to 4 MP.
-    megapixels: Annotated[float, Range(0.0625, 4.0, unit="MP")] | None = None
+    #: `generate`, through `SIZES.pixels`: the reference CLI's 1 MP default up to its 4 MP, 2048 px sides (README).
+    megapixels: Literal[1, 2, 4] | None = None
     #: `caption`: Auto or on has the upsampler write a plain prompt's caption.
     prompt_upsampling: bool | None = None
     seed: Seed | None = None

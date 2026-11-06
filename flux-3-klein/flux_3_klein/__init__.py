@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable
-from typing import Annotated
+from typing import Annotated, Literal
 
 import msgspec
 from cozy_runtime.author import (
@@ -22,7 +22,6 @@ from cozy_runtime.author import (
     NegativePrompt,
     Outputs,
     Prompt,
-    Range,
     Ratios,
     Region,
     Seed,
@@ -289,8 +288,8 @@ class ImageBox(msgspec.Struct, kw_only=True):
     turbo: bool = True
     #: `_layout`, through `ImageRequest.target`; `SIZES.fit` holds it to 1:16 through 16:1.
     aspect_ratio: Annotated[AspectRatio, Ratios(min=1 / 16, max=16)] | None = None
-    #: `_layout`, through `SIZES.pixels`: one 64 px square to BFL's 4 MiP.
-    megapixels: Annotated[float, Range(MIN_MEGAPIXELS, MAX_MEGAPIXELS, unit="MP")] | None = None
+    #: `_layout`, through `SIZES.pixels`: BFL's 1 MP `default_size` up to Klein's 4 MP (README).
+    megapixels: Literal[1, 2, 4] | None = None
     #: `_generate`'s `drawn_seed`.
     seed: Seed | None = None
 

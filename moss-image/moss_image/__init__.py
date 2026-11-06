@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import math
-from typing import Annotated
+from typing import Annotated, Literal
 
 import msgspec
 from cozy_runtime.author import (
@@ -18,7 +18,6 @@ from cozy_runtime.author import (
     Memoize,
     NegativePrompt,
     Outputs,
-    Range,
     Ratios,
     Region,
     Seed,
@@ -114,8 +113,8 @@ class ImageBox(msgspec.Struct, kw_only=True):
     instructions: str = ""
     #: `generate`, through `ImageRequest.size`; held to 1:16 through 16:1.
     aspect_ratio: Annotated[AspectRatio, Ratios(min=1 / 16, max=16)] | None = None
-    #: `generate`, through `SIZES.pixels`: 0.25 to 4 MP.
-    megapixels: Annotated[float, Range(0.25, 4.0, unit="MP")] | None = None
+    #: `generate`, through `SIZES.pixels`: the 1-2 MP the user guide recommends (README, Sizes).
+    megapixels: Literal[1, 2] | None = None
     #: `generate`'s negative branch, encoded only with guidance above 1.
     negative_prompt: str | None = None
     seed: Seed | None = None

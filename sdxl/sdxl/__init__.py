@@ -33,7 +33,7 @@ import functools
 import json
 import math
 from pathlib import Path
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 import msgspec
 import torch
@@ -60,7 +60,6 @@ from cozy_runtime.author import (
     Outputs,
     Preflight,
     QuantizationPlan,
-    Range,
     Ratios,
     Recipe,
     Seed,
@@ -674,8 +673,9 @@ class ImageBox(msgspec.Struct, kw_only=True):
     instructions: str = ""
     #: `resolve_generate`, held to SDXL's 1:4 through 4:1 buckets.
     aspect_ratio: Annotated[AspectRatio, Ratios(min=1 / 4, max=4)] | None = None
-    #: `resolve_generate`: 1 to 8 MP, 16 at 1:1.
-    megapixels: Annotated[float, Range(1.0, 16.0, unit="MP")] | None = None
+    #: `resolve_generate`: base SDXL's 1 MP, HiDiffusion's 2048² and 8 MP classes, and its 4096² flagship at 1:1 only
+    #: (this module's docstring, `_SIZES`).
+    megapixels: Literal[1, 4, 8, 16] | None = None
     #: `_negative_prompt`.
     negative_prompt: str | None = None
     #: `resolve_generate`: Auto runs HiDiffusion above 1 MP.

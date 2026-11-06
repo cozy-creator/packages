@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Annotated
+from typing import Annotated, Literal
 
 import msgspec
 from cozy_runtime.author import (
@@ -16,7 +16,6 @@ from cozy_runtime.author import (
     Memoize,
     NegativePrompt,
     Outputs,
-    Range,
     Ratios,
     Seed,
     Sizes,
@@ -109,8 +108,9 @@ class ImageBox(msgspec.Struct, kw_only=True):
     turbo: bool = True
     #: `ImageRequest.size`; `SIZES.fit` holds it to 1:16 through 16:1.
     aspect_ratio: Annotated[AspectRatio, Ratios(min=1 / 16, max=16)] | None = None
-    #: `ImageRequest.size`, through `SIZES.pixels`: Krea's 0.25-4 MP.
-    megapixels: Annotated[float, Range(MIN_MEGAPIXELS, MAX_MEGAPIXELS, step=0.25, unit="MP")] | None = None
+    #: `ImageRequest.size`, through `SIZES.pixels`: Raw's 1 MP up to Turbo's 2048² (README, Sizes); unset is each
+    #: checkpoint's own.
+    megapixels: Literal[1, 2, 4] | None = None
     #: `_generate`'s `drawn_seed`.
     seed: Seed | None = None
 

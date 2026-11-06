@@ -20,7 +20,6 @@ from cozy_runtime.author import (
     NegativePrompt,
     Outputs,
     Prompt,
-    Range,
     Ratios,
     Seed,
     Sizes,
@@ -190,8 +189,6 @@ class ImageBox(msgspec.Struct, kw_only=True):
     turbo: bool = True
     #: `layout`, through `ImageRequest.target`; `SIZES.fit` holds it to `WIDEST` either way.
     aspect_ratio: Annotated[AspectRatio, Ratios(min=1 / WIDEST, max=WIDEST)] | None = None
-    #: `layout`, through `SIZES.pixels`: the 3.52-4 MP upstream serves.
-    megapixels: Annotated[float, Range(MIN_MEGAPIXELS, MAX_MEGAPIXELS, unit="MP")] | None = None
     #: `_generate`'s `drawn_seed`.
     seed: Seed | None = None
 
@@ -204,6 +201,6 @@ def image(ctx: Context, payload: ImageBox, full: HiDreamO1, model: HiDreamO1, ou
           adj: Adjustments) -> ImageResult:
     """HiDream-O1-Image on a canvas: Dev, or the full model, which loads only when asked for."""
     kind = TurboInput if payload.turbo else GenerateInput
-    request = kind(prompt=payload.instructions, aspect_ratio=payload.aspect_ratio, megapixels=payload.megapixels,
+    request = kind(prompt=payload.instructions, aspect_ratio=payload.aspect_ratio,
                    seed=payload.seed)  # fmt: skip
     return _generate(ctx, request, model if payload.turbo else full, out, tel, adj)

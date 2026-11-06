@@ -10,8 +10,8 @@ DiT changes between requests.
 | `generate` | `qwen/qwen-image-2512@0.1.1` | `qwen/qwen-image-edit-2511@0.1.0` | 50 / 40 | true CFG 4.0 |
 | `generate_turbo` | the same, with `lightx2v/qwen-image-2512-lightning-lora@0.1.0` | the same, with `lightx2v/qwen-image-edit-2511-lightning-lora@0.1.0` | 8 | none |
 
-`image` is the canvas tool, its prompt `instructions`, one box for both: `turbo` (on by default), `aspect_ratio`, `megapixels` and
-`seed`. Each DiT and LoRA loads only when a render asks for it.
+`image` is the canvas tool, its prompt `instructions`, one box for both: `turbo` (on by default), `aspect_ratio` and `seed`, at
+the card's 1328² class. Each DiT and LoRA loads only when a render asks for it.
 
 Write the request in a file, `request.yaml`:
 

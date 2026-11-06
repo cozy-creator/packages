@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 import msgspec
 import torch
@@ -19,7 +19,6 @@ from cozy_runtime.author import (
     OutputError,
     Outputs,
     Prompt,
-    Range,
     Ratios,
     Seed,
     Sizes,
@@ -206,8 +205,8 @@ class ImageBox(msgspec.Struct, kw_only=True):
     turbo: bool = True
     #: `ImageRequest.target`; Qwen's rotary range holds it to 1:16 through 16:1 (`SIZES.fit`).
     aspect_ratio: Annotated[AspectRatio, Ratios(min=1 / 16, max=16)] | None = None
-    #: `SIZES.pixels`: upstream's 1 MP default to its native 2K.
-    megapixels: Annotated[float, Range(MIN_MEGAPIXELS, MAX_MEGAPIXELS, step=0.5, unit="MP")] | None = None
+    #: `SIZES.pixels`: Qwen Image 2.1 renders at 1, 2 or 4 MP (Paul, 11-06); unset is Auto.
+    megapixels: Literal[1, 2, 4] | None = None
     seed: Seed | None = None
 
 
