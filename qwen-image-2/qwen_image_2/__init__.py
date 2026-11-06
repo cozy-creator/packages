@@ -58,8 +58,8 @@ class GenerateInput(PictureRequest):
     )
     #: Bounds for a box, not refusals: past them `_generate` holds it and says so.
     aspect_ratio: Annotated[AspectRatio | None, msgspec.Meta(extra={"min": 0.0625, "max": 16})] = None
-    #: Qwen Image 2.1 renders at 1, 2 or 4 MP: its native 2K by default.
-    megapixels: Literal[1, 2, 4] = 4
+    #: Qwen Image 2.1 renders at 1, 2 or 4 MP (its native 2K); 2 by default (Paul, 11-06).
+    megapixels: Literal[1, 2, 4] = 2
 
 
 def label(n: int, picture: Picture) -> str:
