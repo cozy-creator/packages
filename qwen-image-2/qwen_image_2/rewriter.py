@@ -17,7 +17,7 @@ import re
 from collections.abc import Callable
 from dataclasses import dataclass
 from importlib.resources import files
-from typing import Any, Literal
+from typing import Literal
 
 from cozy_runtime.vlm import Question, VisionLM
 from PIL import Image
