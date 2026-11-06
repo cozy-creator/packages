@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from typing import Annotated
 
 import msgspec
@@ -10,27 +11,31 @@ from cozy_runtime.author import (
     MEGAPIXEL,
     Adjustments,
     App,
+    AspectRatio,
+    Box,
     Context,
     Guidance,
+    Image,
+    ImageRequest,
     ImageResult,
     Memoize,
     NegativePrompt,
     Outputs,
-    Picture,
-    PictureRequest,
-    PlacedPicture,
+    Prompt,
+    Range,
+    Ratios,
     Region,
+    Seed,
     Sizes,
     Steps,
     Telemetry,
     corners,
     held,
-    placements,
+    name_key,
 )
-from PIL import Image
+from PIL import Image as PILImage
 
 from .klein import (
-    MATCH_MAX_PIXELS,
     MAX_SIDE,
     MIN_SIDE,
     Klein,
@@ -39,7 +44,7 @@ from .klein import (
     reference_canvas,
 )
 from . import quantize as quantize  # its recipes
-from .upsampler import Drafter, Row, Upsampler, canvas_box, is_finished, with_table
+from .upsampler import MAX_REFERENCES, Drafter, Row, Upsampler, canvas_box, is_finished, with_table
 
 app = App()
 
@@ -48,15 +53,21 @@ _STEPS = {"generate": (50, 200), "generate_turbo": (16, 100)}
 _GUIDANCE, _MAX_GUIDANCE = 4.0, 20.0
 
 
-#: BFL's 64-4096 px sides and 4 MiP.
-SIZES = Sizes((MIN_SIDE**2 / MEGAPIXEL, MATCH_MAX_PIXELS / MEGAPIXEL), (MIN_SIDE, MAX_SIDE), 32,
-              "the sizes Klein admits")
+#: BFL's 64-4096 px sides and 4 MiP: from one 64 px square to 4 MP.
+MIN_MEGAPIXELS = 64**2 / (1 << 20)
+MAX_MEGAPIXELS = 4.0
+SIZES = Sizes((MIN_MEGAPIXELS, MAX_MEGAPIXELS), (MIN_SIDE, MAX_SIDE), 32, "the sizes Klein admits")
 
 
-class TurboInput(PictureRequest):
-    pictures: Annotated[list[PlacedPicture], msgspec.Meta(max_length=10)] = msgspec.field(
-        default_factory=list
-    )
+#: A picture's corners on the output, 0-1: `[x0, y0, x1, y1]`.
+Corners = tuple[float, float, float, float]
+
+
+class TurboInput(ImageRequest):
+    #: Its text, and the pictures it mentions, in the order it first mentions them: up to ten.
+    prompt: Prompt[Image] = Prompt()
+    #: Where a mentioned picture goes in the output, by its key. Placed, the pictures are elements, not the canvas.
+    boxes: dict[str, Box] = msgspec.field(default_factory=dict)
     steps: Steps = None
     prompt_upsampling: bool | None = None
     #: Elements and rendered text placed by box, described in words.
@@ -83,8 +94,8 @@ def _render(
     prompt: str,
     upsample: bool,
     draft: bool,
-    images: list[Image.Image],
-    prepared: list[Image.Image],
+    images: list[PILImage.Image],
+    prepared: list[PILImage.Image],
     size: tuple[int, int],
     crop: tuple[int, int, int, int] | None,
     canvas: str | None,
@@ -134,8 +145,8 @@ def _render(
 
 
 def _layout(
-    adj: Adjustments, payload: TurboInput, images: list[Image.Image], placed: bool
-) -> tuple[list[Image.Image], tuple[int, int], tuple[int, int, int, int] | None, str | None]:
+    adj: Adjustments, payload: TurboInput, images: list[PILImage.Image], placed: bool
+) -> tuple[list[PILImage.Image], tuple[int, int], tuple[int, int, int, int] | None, str | None]:
     """The prepared references, the output size, the crop after decoding and the upsampler's canvas.
     No references, or references placed by box (elements, not the canvas): the ratio (1:1) at the
     size (1 MP). Otherwise what is not given is the first reference's: given neither, its own size,
@@ -161,26 +172,52 @@ def _layout(
 _ORDINALS = ("first", "second", "third", "fourth", "fifth", "sixth", "seventh", "eighth", "ninth", "tenth")
 
 
-def ordinal(n: int, picture: Picture) -> str:
+def ordinal(n: int) -> str:
     """The Nth picture as BFL's upsampler is told of them: "the first image", "the second image", ..."""
     return f"the {_ORDINALS[n - 1]} image"
 
 
-def ref_id(n: int, picture: Picture) -> str:
+def ref_id(n: int) -> str:
     """The Nth picture as Klein's layout record names it, from 0: `ref_image_0`, ..."""
     return f"ref_image_{n - 1}"
 
 
-def tagged(n: int, picture: Picture) -> str:
+def tagged(n: int) -> str:
     """The Nth picture in a prompt Klein reads directly, from 0: `<ref_image_0>`, ... (Diffusers' Flux3 docs)."""
     return f"<ref_image_{n - 1}>"
 
 
-def layout_rows(payload: TurboInput) -> list[Row]:
+def pictures(adj: Adjustments, payload: TurboInput) -> dict[str, Corners | None]:
+    """The pictures Klein takes, by key in order of first mention, each with its box or None. Past ten the last
+    mentioned go, with a warning. A box's key matches as a mention does: any case, `_`, `-` and space alike."""
+    keys = list(payload.prompt.references)
+    if len(keys) > MAX_REFERENCES:
+        adj.warn("prompt", f"Klein takes {MAX_REFERENCES} pictures, so it goes without "
+                           f"{', '.join(f'<{key}>' for key in keys[MAX_REFERENCES:])}")
+        keys = keys[:MAX_REFERENCES]
+    given = {name_key(key): key for key in payload.boxes}
+    placed: dict[str, Corners | None] = {}
+    for key in keys:
+        named = given.pop(name_key(key), None)
+        placed[key] = None if named is None else corners(payload.boxes[named], f"boxes.{named}")
+    if given:
+        adj.warn("boxes", f"ignored: {', '.join(f'<{key}>' for key in given.values())} names no picture Klein takes")
+    return placed
+
+
+def worded(prompt: Prompt[Image], placed: dict[str, Corners | None], label: Callable[[int], str]) -> str:
+    """The prompt as Klein's reader takes it: each mention of the Nth picture in its words (`label`)."""
+    text = prompt.text
+    for n, key in enumerate(placed, 1):
+        text = text.replace(f"<{key}>", label(n))
+    return text
+
+
+def layout_rows(payload: TurboInput, placed: dict[str, Corners | None]) -> list[Row]:
     """Klein's table rows for the request's boxes: a placed picture is `ref_image_<i>` at its box (the
     upsampler describes it from the image); a region is a new element, its text quoted in the desc."""
     rows: list[Row] = []
-    for i, box in enumerate(placements(payload.pictures)):
+    for i, box in enumerate(placed.values()):
         if box is not None:
             rows.append({"id": f"obj_{len(rows) + 1}", "from": f"ref_image_{i}", "src_bbox": None,
                          "tgt_bbox": canvas_box(box), "desc": ""})
@@ -189,7 +226,7 @@ def layout_rows(payload: TurboInput) -> list[Row]:
         desc = f'{region.prompt.strip()} "{region.text}"' if region.text else region.prompt.strip()
         row_id = f"obj_{len(rows) + 1}"
         rows.append({"id": row_id, "from": "target", "src_bbox": None, "tgt_bbox": grid, "desc": desc}
-                    if payload.pictures else {"id": row_id, "bbox": grid, "desc": desc})
+                    if placed else {"id": row_id, "bbox": grid, "desc": desc})
     return rows
 
 
@@ -203,14 +240,14 @@ def _generate(ctx: Context, function: str, payload: TurboInput, drafter: Drafter
         given = _GUIDANCE if payload.guidance is None else payload.guidance
         guidance = held(adj, "guidance", given, 1.0, _MAX_GUIDANCE)
         negative = payload.negative_prompt or ""
-    rows = layout_rows(payload)
-    images = [asset.read() for asset in payload.images()]
-    placed = any(picture.box is not None for picture in payload.pictures)
-    prepared, size, crop, canvas = _layout(adj, payload, images, placed)
+    placed = pictures(adj, payload)
+    rows = layout_rows(payload, placed)
+    images = [payload.prompt.references[key].file.read() for key in placed]
+    prepared, size, crop, canvas = _layout(adj, payload, images, any(box is not None for box in placed.values()))
     upsample = True if payload.prompt_upsampling is None else payload.prompt_upsampling
     # The upsampler is told the references' order in words, or as the layout record's ids; Klein
     # reading the prompt itself was trained on `<ref_image_N>`.
-    prompt = payload.rendered(adj, (ref_id if rows else ordinal) if upsample else tagged)
+    prompt = worded(payload.prompt, placed, (ref_id if rows else ordinal) if upsample else tagged)
     return _render(ctx, model, upsampler, drafter, out, tel, adj, prompt=prompt, upsample=upsample,
                    draft=payload.prompt_drafting, images=images, prepared=prepared, size=size, crop=crop,
                    canvas=canvas, rows=rows, steps=steps, guidance=guidance, negative=negative,
@@ -219,29 +256,54 @@ def _generate(ctx: Context, function: str, payload: TurboInput, drafter: Drafter
 
 # Qwen3.5-9B's MTP head alone (`drafter_head` makes it): BFL's upsampler checkpoint has none.
 _DRAFTER = "qwen/qwen3.5-9b-mtp@0.2.0"
-_DISTILLED = {"model": "black-forest-labs/flux-3-klein@0.1.0", "upsampler": "black-forest-labs/flux-3-klein-upsampler@0.2.0", "drafter": _DRAFTER}
-_BASE = {"model": "black-forest-labs/flux-3-klein-base@0.1.0", "upsampler": "black-forest-labs/flux-3-klein-upsampler@0.2.0", "drafter": _DRAFTER}
-_COMPONENTS = {
-    "model": ("transformer", "text_encoder", "vae"),
-    "upsampler": ("model",),
-    "drafter": ("model",),
-}
+_UPSAMPLER = "black-forest-labs/flux-3-klein-upsampler@0.2.0"
+_DISTILLED = "black-forest-labs/flux-3-klein@0.1.0"
+_BASE = "black-forest-labs/flux-3-klein-base@0.1.0"
+_KLEIN = ("transformer", "text_encoder", "vae")
+_COMPONENTS = {"drafter": ("model",), "model": _KLEIN, "upsampler": ("model",)}
 #: Built and fetched on first use: `prompt_upsampling=False` never pulls the upsampler, and
 #: `prompt_drafting=False` never pulls the drafter.
-_ON_DEMAND = ("upsampler", "drafter")
+_ON_DEMAND = ("drafter", "upsampler")
 
 
-@app.entrypoint(defaults=_BASE, components=_COMPONENTS, on_demand=_ON_DEMAND,
-                memoize=Memoize(requires=["seed"]))
+@app.entrypoint(defaults={"drafter": _DRAFTER, "model": _BASE, "upsampler": _UPSAMPLER}, components=_COMPONENTS,
+                on_demand=_ON_DEMAND, memoize=Memoize(requires=["seed"]))
 def generate(ctx: Context, payload: GenerateInput, drafter: Drafter, model: Klein, upsampler: Upsampler,
              out: Outputs, tel: Telemetry, adj: Adjustments) -> ImageResult:
     """Klein Base, 50 steps with CFG 4: text to image, or an edit of up to ten ordered pictures."""
     return _generate(ctx, "generate", payload, drafter, model, upsampler, out, tel, adj)
 
 
-@app.entrypoint(defaults=_DISTILLED, components=_COMPONENTS, on_demand=_ON_DEMAND,
-                memoize=Memoize(requires=["seed"]))
+@app.entrypoint(defaults={"drafter": _DRAFTER, "model": _DISTILLED, "upsampler": _UPSAMPLER}, components=_COMPONENTS,
+                on_demand=_ON_DEMAND, memoize=Memoize(requires=["seed"]))
 def generate_turbo(ctx: Context, payload: TurboInput, drafter: Drafter, model: Klein, upsampler: Upsampler,
                    out: Outputs, tel: Telemetry, adj: Adjustments) -> ImageResult:
     """The distilled Klein, 16 steps, no guidance: text to image, or an edit of up to ten ordered pictures."""
     return _generate(ctx, "generate_turbo", payload, drafter, model, upsampler, out, tel, adj)
+
+
+class ImageBox(msgspec.Struct, kw_only=True):
+    #: What to make, and the pictures it mentions (`pictures`, `worded`).
+    prompt: Prompt[Image] = Prompt()
+    #: The distilled Klein's 16 steps, else Base's 50 with CFG 4 (`_generate`).
+    turbo: bool = True
+    #: `_layout`, through `ImageRequest.target`; `SIZES.fit` holds it to 1:16 through 16:1.
+    aspect_ratio: Annotated[AspectRatio, Ratios(min=1 / 16, max=16)] | None = None
+    #: `_layout`, through `SIZES.pixels`: one 64 px square to BFL's 4 MiP.
+    megapixels: Annotated[float, Range(MIN_MEGAPIXELS, MAX_MEGAPIXELS, unit="MP")] | None = None
+    #: `_generate`'s `drawn_seed`.
+    seed: Seed | None = None
+
+
+# Each checkpoint is built, and its weights fetched, only when a box asks for it.
+@app.tool(label="FLUX.3 Image Klein", named="image",
+          defaults={"drafter": _DRAFTER, "full": _BASE, "model": _DISTILLED, "upsampler": _UPSAMPLER},
+          components={"drafter": ("model",), "full": _KLEIN, "model": _KLEIN, "upsampler": ("model",)},
+          on_demand=("drafter", "full", "model", "upsampler"), memoize=Memoize(requires=["seed"]))  # fmt: skip
+def image(ctx: Context, payload: ImageBox, drafter: Drafter, full: Klein, model: Klein, upsampler: Upsampler,
+          out: Outputs, tel: Telemetry, adj: Adjustments) -> ImageResult:
+    """FLUX.3 Image Klein on a canvas, upsampled: the distilled model, or Base, which loads only when asked for."""
+    kind, function, klein = (TurboInput, "generate_turbo", model) if payload.turbo else (GenerateInput, "generate", full)
+    request = kind(prompt=payload.prompt, aspect_ratio=payload.aspect_ratio, megapixels=payload.megapixels,
+                   seed=payload.seed)  # fmt: skip
+    return _generate(ctx, function, request, drafter, klein, upsampler, out, tel, adj)

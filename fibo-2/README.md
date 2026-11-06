@@ -11,10 +11,13 @@ open-weights models on Artificial Analysis (2026-10-20).
 | `generate` | Fibo 2.0 Dev | 50 | `guidance` 5.0 (CFG), `negative_prompt` |
 | `generate_turbo` | Fibo 2.0 Edit Turbo, distilled from Dev | 4 | none |
 
-Both generate from text, or edit when `pictures` are given (up to four). With two or more, a `<Name>`
+Both generate from text, or edit the pictures the prompt mentions (up to four). With two or more, a `<name>`
 mention reads as Bria's `<image_1>`…`<image_4>` (the edit's `image_N` keys); a lone picture's reads as its
 name ([references](../docs/references.md)).
 Bria ships Edit Turbo for editing; it also renders text-to-image.
+
+`image` is the canvas tool, one box for both: `turbo` (on by default) picks Edit Turbo, else Dev; `aspect_ratio`,
+`megapixels`, `seed` and `prompt_upsampling`. Each checkpoint and VLM loads only when a render asks for it.
 
 Write the request in a file, `request.yaml`:
 
@@ -32,11 +35,10 @@ Inline inputs work too, and override the file's:
 
 ```sh
 cozy run fibo-2/generate prompt='An origami whale swimming through paper clouds' aspect_ratio=16:9 seed=7
-cozy run fibo-2/generate_turbo prompt='Replace the jacket with a red leather one' \
-  pictures:='[{"name": "Photo", "image": "photo.jpg"}]'
+cozy run fibo-2/generate_turbo prompt='Replace the jacket in <photo> with a red leather one'   # in a project
 ```
 
-Both take `prompt`, `pictures`, `aspect_ratio`, `megapixels`, `seed`, `steps` and `prompt_upsampling`, and
+Both take `prompt` (with the pictures it mentions), `aspect_ratio`, `megapixels`, `seed`, `steps` and `prompt_upsampling`, and
 `generate` also `guidance` and `negative_prompt`: Turbo samples without guidance. Unset knobs take Fibo's
 defaults: `steps` 50 (Dev) or 4 (Turbo), `guidance` 5.0 and `negative_prompt` Bria's, and `prompt_upsampling` on. A `seed` is drawn when omitted and returned. Fibo 2.0 was trained at about 1 MP on a
 16 px grid (model card). Text-to-image defaults to 1:1 at 1024×1024. With references, the output takes the

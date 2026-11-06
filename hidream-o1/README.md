@@ -10,9 +10,11 @@ patches attend to everything (tech report arXiv:2605.11061 §3.3).
 | `generate` | HiDream-O1-Image | 50 | `guidance` 5.0 (CFG) |
 | `generate_turbo` | HiDream-O1-Image-Dev (distilled) | 28 (its only schedule) | none |
 
-One function does both jobs: with `pictures`, it edits them, or composes several in order.
-HiDream recommends the full model, `generate`, for editing. A pose is one more reference: upstream's
+One function does both jobs: with pictures its prompt mentions, it edits them, or composes several in
+the order it first mentions them. HiDream recommends the full model, `generate`, for editing. A pose is one more reference: upstream's
 try-on example passes a face, a background, an OpenPose skeleton and three garments, in that order.
+`image` is the canvas tool: one box, Turbo (Dev) or the full model, which loads only the checkpoint a
+render asks for.
 
 Write the request in a file, `request.yaml`:
 
@@ -28,10 +30,10 @@ Inline inputs work too, and override the file's:
 
 ```sh
 cozy run hidream-o1/generate_turbo prompt='A dog holds a sign that says "HiDream-O1-Image release."'
-cozy run hidream-o1/generate prompt='remove the earphones' pictures:='[{"name": "Photo", "image": "photo.jpg"}]'
+cozy run hidream-o1/generate prompt='remove the earphones from <photo>'   # in a project: <photo> is that box
 ```
 
-Inputs: `prompt`, `pictures`, `aspect_ratio` (any W:H), `megapixels` (any size, 1024² pixels each), `seed`; `generate` also takes `steps`, `guidance`, `negative_prompt` and `guidance_interval` (below). `pictures` are up to 10, and a picture's `box` places it (below). HiDream-O1 has no words of its own for its references (upstream's prompts describe them, "the provided clothing"), so a `<Name>` mention reads as the name itself ([references](../docs/references.md)). Left out, each
+Inputs: `prompt` (its text and the pictures it mentions, up to 10), `boxes` (below), `aspect_ratio` (any W:H), `megapixels` (any size, 1024² pixels each), `seed`; `generate` also takes `steps`, `guidance`, `negative_prompt` and `guidance_interval` (below). HiDream-O1 has no words of its own for its references (upstream's prompts describe them, "the provided clothing"), so a `<name>` mention reads as the name itself, `kyogre.2` as `kyogre 2` ([references](../docs/references.md)). Left out, each
 is the model's default: 50 steps (1–200) at guidance 5.0 (1–20) for `generate`, upstream's unconditional
 caption (a single space) as the negative prompt, and a random seed. `generate_turbo` runs its 28 distilled
 steps without CFG. Unknown fields are dropped with a warning.
@@ -40,24 +42,23 @@ The result has the image, its `width` and `height`, the `seed`, and `prompt`: th
 
 ## Placing references
 
-A picture's `box` is `[x0, y0, x1, y1]`, corners from 0 to 1 on the output, origin top-left; an
-picture without one is placed by the model itself. This is upstream's layout
+`boxes` maps a mentioned picture's name to its box, `[x0, y0, x1, y1]`, corners from 0 to 1 on the
+output, origin top-left; a picture without one is placed by the model itself. This is upstream's layout
 pipeline (`--layout_bboxes`), exactly: each reference is framed in its box's colour, and a black canvas
 with the coloured boxes follows the references as one more. Only the five largest boxes are drawn.
 Placed references are elements, not the canvas: the output is 1:1 at 4 MP unless `aspect_ratio` or
 `megapixels` says otherwise, and the full model samples at shift 1.
 
 Placement is soft. HiDream-O1 matches references to boxes mostly by their order, not by the frame
-colours, so list the references in the boxes' left-to-right order. In three two-person tests that
+colours, so mention the references in the boxes' left-to-right order. In three two-person tests that
 asked for the opposite of the reference order, the right person landed in each box once in three as
 upstream orders them, and twice in three with the references sorted by their boxes. Upstream's own code
 puts the same people in the same wrong boxes, and its examples only place references in their own order.
 Our layout inputs are pixel-identical to upstream's, and a single pass matches its code at 40–57 dB.
 
 ```sh
-cozy run hidream-o1/generate prompt='City council members pose on a sunlit terrace' \
-  pictures:='[{"name": "A", "image": "a.jpg", "box": [0.205, 0.488, 0.439, 0.742]},
-                {"name": "B", "image": "b.jpg", "box": [0.576, 0.088, 0.801, 0.342]}]'
+cozy run hidream-o1/generate prompt='City council members <a> and <b> pose on a sunlit terrace' \
+  'boxes:={"a": [0.205, 0.488, 0.439, 0.742], "b": [0.576, 0.088, 0.801, 0.342]}'
 ```
 
 ## Sizes

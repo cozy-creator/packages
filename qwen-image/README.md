@@ -1,7 +1,7 @@
 # Qwen Image
 
 Qwen's 20B dual-stream DiT with a Qwen2.5-VL-7B text encoder. One function generates from text with
-Qwen-Image-2512, or edits and composes `pictures` with Qwen-Image-Edit-2511. The two
+Qwen-Image-2512, or edits and composes the pictures its prompt mentions with Qwen-Image-Edit-2511. The two
 checkpoints store the same text encoder and VAE byte for byte, so one copy serves both, and only the
 DiT changes between requests.
 
@@ -9,6 +9,9 @@ DiT changes between requests.
 | --- | --- | --- | --- | --- |
 | `generate` | `qwen/qwen-image-2512@0.1.1` | `qwen/qwen-image-edit-2511@0.1.0` | 50 / 40 | true CFG 4.0 |
 | `generate_turbo` | the same, with `lightx2v/qwen-image-2512-lightning-lora@0.1.0` | the same, with `lightx2v/qwen-image-edit-2511-lightning-lora@0.1.0` | 8 | none |
+
+`image` is the canvas tool, one box for both: `turbo` (on by default), `aspect_ratio`, `megapixels` and
+`seed`. Each DiT and LoRA loads only when a render asks for it.
 
 Write the request in a file, `request.yaml`:
 
@@ -25,14 +28,13 @@ Inline inputs work too, and override the file's:
 
 ```sh
 cozy run qwen-image/generate prompt='A red vintage bicycle against a pastel wall' aspect_ratio=3:2
-cozy run qwen-image/generate prompt='Make <Guitarist> play a violin instead of the guitar' \
-  pictures:='[{"name": "Guitarist", "image": "guitarist.png"}]' seed=42
-cozy run qwen-image/generate_turbo prompt='<Cat> wearing the space suit from <Astronaut>' \
-  pictures:='[{"name": "Cat", "image": "cat.jpg"}, {"name": "Astronaut", "image": "astronaut.jpg"}]'
+# in a project, each <name> is that box's picture
+cozy run qwen-image/generate prompt='Make <guitarist> play a violin instead of the guitar' seed=42
+cozy run qwen-image/generate_turbo prompt='<cat> wearing the space suit from <astronaut>'
 ```
 
-Inputs: `prompt`, `pictures` (ordered, up to ten; Qwen recommends
-one to three; each `<Name>` mention reads as Qwen-Image-Edit's own "Picture N", the label its template
+Inputs: `prompt` (with the pictures it mentions, up to ten in order of first mention; Qwen recommends
+one to three; each `<name>` reads as Qwen-Image-Edit's own "Picture N", the label its template
 writes before each image, [references](../docs/references.md)), `aspect_ratio`
 (any `W:H`), `megapixels` (1024² pixels each), `steps`, `seed` (random when omitted, returned).
 `generate` also takes `guidance` and `negative_prompt`; by default each model card's: Qwen-Image-2512's

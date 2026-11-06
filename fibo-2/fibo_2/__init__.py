@@ -3,28 +3,33 @@
 from __future__ import annotations
 
 import json
+import re
 from typing import Annotated
 
 import msgspec
 from cozy_runtime.author import (
     Adjustments,
     App,
+    AspectRatio,
     Context,
     Guidance,
+    Image,
+    ImageRequest,
     ImageResult,
     Memoize,
     NegativePrompt,
     Outputs,
-    Picture,
-    PictureRequest,
+    Prompt,
+    Range,
+    Ratios,
+    Seed,
     Sizes,
     Steps,
     Telemetry,
     UnsupportedInput,
     held,
-    name_label,
 )
-from PIL import Image
+from PIL import Image as PILImage
 
 from .model import Fibo2
 from . import quantize as quantize  # its recipes
@@ -35,7 +40,11 @@ app = App()
 #: Fibo 2.0 was trained at about 1 MP (model card: "multiples of 16 at about one megapixel").
 #: 0.25-1 MP on the 16 px grid; Diffusers' smallest side (4 latent patches) to the RoPE table's 512
 #: positions an axis.
-SIZES = Sizes((0.25, 1.0), (4 * 16, 512 * 16), 16, "Fibo 2.0's 0.25-1 MP")
+MIN_MEGAPIXELS = 0.25
+MAX_MEGAPIXELS = 1.0
+SIZES = Sizes((MIN_MEGAPIXELS, MAX_MEGAPIXELS), (4 * 16, 512 * 16), 16, "Fibo 2.0's 0.25-1 MP")
+#: The pictures Fibo 2.0 edits: past them the last mentioned go, with a warning.
+MAX_PICTURES = 4
 #: Each function's steps when none is given, and the most it admits; Dev's CFG scale (the card's 5.0).
 _STEPS = {"generate": (50, 200), "generate_turbo": (4, 50)}
 GUIDANCE = 5.0
@@ -53,10 +62,9 @@ NEGATIVE_T2I = (
     '"artistic_style":""}'
 )
 
-class TurboInput(PictureRequest):
-    pictures: Annotated[list[Picture], msgspec.Meta(max_length=4)] = msgspec.field(
-        default_factory=list
-    )
+class TurboInput(ImageRequest):
+    #: Its text, and the pictures it edits, in order of first mention.
+    prompt: Prompt[Image] = Prompt()
     steps: Steps = None
     prompt_upsampling: bool | None = None
 
@@ -66,11 +74,19 @@ class GenerateInput(TurboInput):
     negative_prompt: NegativePrompt = None
 
 
-def label(n: int, picture: Picture) -> str:
-    """Fibo's word for the Nth of several pictures: the edit wraps them as `image_1`, `image_2`,
-    ... (Diffusers `BriaFibo2Pipeline`), and Bria's instructions name them `<image_N>`. A lone
-    picture is the edit's `image`, so it keeps its name."""
-    return f"<image_{n}>"
+def _said(prompt: Prompt[Image], adj: Adjustments) -> tuple[str, list[Image]]:
+    """Its text in Fibo's words, and the pictures. Several read as `<image_N>`: the edit wraps them as
+    `image_1`, `image_2`, ... (Diffusers `BriaFibo2Pipeline`), and Bria's instructions name them so. A lone
+    picture is the edit's `image`, so it reads as its name, `kyogre.2` as `kyogre 2`."""
+    keys = list(prompt.references)
+    if len(keys) > MAX_PICTURES:
+        adj.warn("prompt", f"Fibo 2.0 edits {MAX_PICTURES} pictures, so it goes without "
+                           f"{', '.join(f'<{key}>' for key in keys[MAX_PICTURES:])}")
+        keys = keys[:MAX_PICTURES]
+    words = {f"<{key}>": f"<image_{n}>" if len(keys) > 1 else key.replace(".", " ") for n, key in enumerate(keys, 1)}
+    # In one pass, so an `<image_1>` put in is never read again as a box named `image_1`.
+    said = re.sub("|".join(map(re.escape, words)), lambda found: words[found[0]], prompt.text) if words else prompt.text
+    return said, [prompt.references[key] for key in keys]
 
 
 def _json_object(prompt: str) -> dict[str, object] | None:
@@ -82,7 +98,7 @@ def _json_object(prompt: str) -> dict[str, object] | None:
 
 
 def _caption(
-    prompt: str, images: list[Image.Image], upsample: bool, upsampler: Captioner, edit_upsampler: Captioner,
+    prompt: str, images: list[PILImage.Image], upsample: bool, upsampler: Captioner, edit_upsampler: Captioner,
     adj: Adjustments,
 ) -> str:
     """The prompt Fibo 2.0 reads. A JSON object is already structured; otherwise Bria's VLMs write
@@ -128,8 +144,8 @@ def _generate(
     model.hold_vae(tel)
     default, most = _STEPS[function]
     steps = held(adj, "steps", payload.steps or default, 1, most)
-    prompt = payload.rendered(adj, label if len(payload.pictures) > 1 else name_label)
-    images = [asset.read() for asset in payload.images()]
+    prompt, pictures = _said(payload.prompt, adj)
+    images = [picture.file.read() for picture in pictures]
     if isinstance(payload, GenerateInput):
         guidance = held(adj, "guidance", GUIDANCE if payload.guidance is None else payload.guidance, 1.0, 20.0)
         negative = payload.negative_prompt or (None if images else NEGATIVE_T2I)
@@ -164,12 +180,16 @@ def _generate(
 
 
 _MODEL = ("transformer", "text_encoder", "vae")
+_DEV = "briaai/fibo-2-dev@0.1.0"
+_TURBO = "briaai/fibo-2-edit-turbo@0.1.0"
+_VLM = "briaai/fibo-vlm@0.1.0"
+_EDIT_VLM = "briaai/fibo-edit-vlm@0.1.0"
+_COMPONENTS = {"model": _MODEL, "upsampler": ("model",), "edit_upsampler": ("model",)}
 
 
 # A VLM is built and fetched on first use: a request that skips upsampling never pulls one. Model
 # parameters are in name order: Runtime refuses a binding set whose paths are not sorted.
-@app.entrypoint(defaults={"model": "briaai/fibo-2-dev@0.1.0", "upsampler": "briaai/fibo-vlm@0.1.0", "edit_upsampler": "briaai/fibo-edit-vlm@0.1.0"},
-                components={"model": _MODEL, "upsampler": ("model",), "edit_upsampler": ("model",)},
+@app.entrypoint(defaults={"model": _DEV, "upsampler": _VLM, "edit_upsampler": _EDIT_VLM}, components=_COMPONENTS,
                 on_demand=("upsampler", "edit_upsampler"), memoize=Memoize(requires=["seed"]))
 def generate(ctx: Context, payload: GenerateInput, edit_upsampler: Captioner, model: Fibo2, upsampler: Captioner,
              out: Outputs, tel: Telemetry, adj: Adjustments) -> ImageResult:
@@ -177,11 +197,38 @@ def generate(ctx: Context, payload: GenerateInput, edit_upsampler: Captioner, mo
     return _generate(ctx, "generate", payload, model, upsampler, edit_upsampler, out, tel, adj)
 
 
-@app.entrypoint(defaults={"model": "briaai/fibo-2-edit-turbo@0.1.0", "upsampler": "briaai/fibo-vlm@0.1.0",
-                          "edit_upsampler": "briaai/fibo-edit-vlm@0.1.0"},
-                components={"model": _MODEL, "upsampler": ("model",), "edit_upsampler": ("model",)},
+@app.entrypoint(defaults={"model": _TURBO, "upsampler": _VLM, "edit_upsampler": _EDIT_VLM}, components=_COMPONENTS,
                 on_demand=("upsampler", "edit_upsampler"), memoize=Memoize(requires=["seed"]))
 def generate_turbo(ctx: Context, payload: TurboInput, edit_upsampler: Captioner, model: Fibo2,
                    upsampler: Captioner, out: Outputs, tel: Telemetry, adj: Adjustments) -> ImageResult:
     """Fibo 2.0 Edit Turbo, 4 steps without guidance: text to image, or an edit of up to four ordered pictures."""
     return _generate(ctx, "generate_turbo", payload, model, upsampler, edit_upsampler, out, tel, adj)
+
+
+class ImageBox(msgspec.Struct, kw_only=True):
+    #: What to make, and the pictures it edits (`_said`).
+    prompt: Prompt[Image] = Prompt()
+    #: Edit Turbo, 4 steps without guidance, else Dev, 50 steps with CFG 5 (`_generate`).
+    turbo: bool = True
+    #: `ImageRequest.target`, held to the model's sizes (`SIZES.fit`).
+    aspect_ratio: Annotated[AspectRatio, Ratios(min=1 / 16, max=16)] | None = None
+    #: `SIZES.pixels`: Fibo 2.0's 0.25-1 MP.
+    megapixels: Annotated[float, Range(MIN_MEGAPIXELS, MAX_MEGAPIXELS, unit="MP")] | None = None
+    #: `ImageRequest.drawn_seed`.
+    seed: Seed | None = None
+    #: Bria's VLMs write the JSON caption from the prompt (`_caption`).
+    prompt_upsampling: bool = True
+
+
+# Each checkpoint and VLM is built, and its weights fetched, only when a render asks for it.
+@app.tool(label="Fibo 2.0", named="image",
+          defaults={"model": _TURBO, "full": _DEV, "upsampler": _VLM, "edit_upsampler": _EDIT_VLM},
+          components={"model": _MODEL, "full": _MODEL, "upsampler": ("model",), "edit_upsampler": ("model",)},
+          on_demand=("edit_upsampler", "full", "model", "upsampler"), memoize=Memoize(requires=["seed"]))
+def image(ctx: Context, payload: ImageBox, edit_upsampler: Captioner, full: Fibo2, model: Fibo2, upsampler: Captioner,
+          out: Outputs, tel: Telemetry, adj: Adjustments) -> ImageResult:
+    """Fibo 2.0 on a canvas: Edit Turbo, or Dev."""
+    kind, function, dit = (TurboInput, "generate_turbo", model) if payload.turbo else (GenerateInput, "generate", full)
+    request = kind(prompt=payload.prompt, aspect_ratio=payload.aspect_ratio, megapixels=payload.megapixels,
+                   seed=payload.seed, prompt_upsampling=payload.prompt_upsampling)
+    return _generate(ctx, function, request, dit, upsampler, edit_upsampler, out, tel, adj)

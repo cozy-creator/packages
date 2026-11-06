@@ -8,7 +8,9 @@ to ten reference images. Its text encoder is Qwen3-VL-4B.
 | `generate` | Klein Base | 50 | `guidance` 4 (CFG) |
 | `generate_turbo` | Klein (distilled flow map) | 16 | none |
 
-Each makes an image from the prompt, or edits and composes up to ten ordered `pictures`.
+Each makes an image from the prompt, or edits and composes up to ten pictures it mentions, in the order it
+first mentions them. `image` is the canvas tool: one box, Turbo (the distilled model) or Base, upsampled,
+which loads only the checkpoint a render asks for.
 
 Write the request in a file, `request.yaml`:
 
@@ -27,11 +29,10 @@ Inline inputs work too, and override the file's:
 ```sh
 cozy run flux-3-klein/generate_turbo prompt='A lighthouse on a basalt cliff in a winter storm' \
   aspect_ratio=16:9 seed=7
-cozy run flux-3-klein/generate prompt='Make <Lighthouse> night, the lamp lit' \
-  pictures:='[{"name": "Lighthouse", "image": "lighthouse.png"}]'
+cozy run flux-3-klein/generate prompt='Make <lighthouse> night, the lamp lit'   # in a project: <lighthouse> is that box
 ```
 
-Inputs: `prompt`, `pictures`, placed by their `box`, `aspect_ratio` (any W:H), `megapixels` (any size, 1024² pixels each), `seed`, `steps`, `prompt_upsampling`, `regions` (below) and `prompt_drafting`; `generate` also takes `guidance` and `negative_prompt`, since the distilled Klein samples without CFG. Left out, each
+Inputs: `prompt` (its text and the pictures it mentions), `boxes` (below), `aspect_ratio` (any W:H), `megapixels` (any size, 1024² pixels each), `seed`, `steps`, `prompt_upsampling`, `regions` (below) and `prompt_drafting`; `generate` also takes `guidance` and `negative_prompt`, since the distilled Klein samples without CFG. Left out, each
 is the default in the table, no negative prompt (Base's CFG), upsampling on and a random seed; steps run
 1–200 (Base) or 1–100, guidance 1–20. Without references the default is 1:1 at 1 MP (1024×1024, BFL's `default_size`); the size is
 that area at that ratio, rounded to 32 px. With references, what is not given is the first reference's: given neither,
@@ -40,7 +41,7 @@ or its pixel count. Sides stay within BFL's 64–4096 px; a size moved to fit is
 adjustment. The result returns the image, its size, the seed and `prompt`: the caption the image was made
 from.
 
-A `<Name>` mention of a picture ([references](../docs/references.md)) reads as the upsampler is told of
+A `<name>` mention of a picture ([references](../docs/references.md)) reads as the upsampler is told of
 them: "the first image", "the second image", … (BFL's scaffold), or `ref_image_0`, … when boxes or regions
 make a layout table. With `prompt_upsampling=false` Klein reads the prompt itself, and a mention reads as
 `<ref_image_0>`, … (from 0, as Diffusers' Flux3 docs).
@@ -51,9 +52,9 @@ Klein places elements by box natively: it is trained on captions that cite each 
 end with a JSON table of boxes (BFL's `flux3/bbox.py`). A box is `[x0, y0, x1, y1]`, 0–1 of the output,
 origin top-left.
 
-- a picture's `box`: where it goes in the output; none places it nowhere in particular. When any
-  picture is placed, the pictures are elements, not the canvas: the size defaults to text-to-image's
-  (1:1 at 1 MP).
+- `boxes`: `{name: box}`, where a mentioned picture goes in the output, keyed as the prompt mentions it;
+  a picture without one goes nowhere in particular. When any picture is placed, the pictures are
+  elements, not the canvas: the size defaults to text-to-image's (1:1 at 1 MP).
 - `regions`: `[{box, prompt, text?}]`, elements described in words; `text` is the literal string to render
   there.
 
@@ -61,8 +62,8 @@ origin top-left.
 cozy run flux-3-klein/generate_turbo prompt='A picnic on a hillside' \
   'regions:=[{"box": [0.05, 0.55, 0.45, 0.95], "prompt": "a wicker basket"},
              {"box": [0.1, 0.05, 0.9, 0.2], "prompt": "a hand-painted banner", "text": "SUMMER FAIR"}]'
-cozy run flux-3-klein/generate_turbo prompt='The mug on a desk by a window' \
-  pictures:='[{"name": "Mug", "image": "mug.png", "box": [0.55, 0.5, 0.85, 0.9]}]'
+cozy run flux-3-klein/generate_turbo prompt='<mug> on a desk by a window' \
+  'boxes:={"mug": [0.55, 0.5, 0.85, 0.9]}'
 ```
 
 The boxes become table rows on BFL's 0–1000 canvas (`[y_min, x_min, y_max, x_max]`). The upsampler then

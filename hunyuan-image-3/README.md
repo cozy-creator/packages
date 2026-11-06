@@ -11,6 +11,9 @@ three ordered reference images. Use `generate_turbo`.
 | `generate_turbo` | Instruct-Distil | 8 | the value the distilled model is conditioned on |
 | `generate` | Instruct | 50 | classifier-free (both halves run every step) |
 
+`image` is the canvas tool, one box for both: `turbo` (on by default) picks Instruct-Distil, else Instruct;
+`aspect_ratio`, `seed` and `prompt_upsampling`. Each checkpoint loads only when a render asks for it.
+
 Write the request in a file, `request.yaml`:
 
 ```yaml
@@ -26,14 +29,13 @@ Inline inputs work too, and override the file's:
 
 ```sh
 cozy run hunyuan-image-3/generate_turbo prompt='A paper boat sailing down a rain gutter at dusk' seed=7
-cozy run hunyuan-image-3/generate_turbo prompt='Put <Cat> in a tiny astronaut suit' \
-  pictures:='[{"name": "Cat", "image": "cat.png"}]'
+cozy run hunyuan-image-3/generate_turbo prompt='Put <cat> in a tiny astronaut suit'   # in a project
 ```
 
-Inputs: `prompt`, `pictures` (0–3, in order), `aspect_ratio` (any `W:H`; unset, the model picks), `steps`,
+Inputs: `prompt` (with the pictures it mentions, 0–3 in order of first mention), `aspect_ratio` (any `W:H`; unset, the model picks), `steps`,
 `guidance`, `seed` (random when omitted, returned) and `prompt_upsampling` (unset: on). There's no
 `megapixels`, since the model makes about 1 MP, and no `negative_prompt`, since its unconditional branch is
-the prompt dropped. A `<Name>` mention of a picture reads as 图1, 图2, 图3, the way every prompt Tencent documents
+the prompt dropped. A `<name>` mention of a picture reads as 图1, 图2, 图3, the way every prompt Tencent documents
 names them ([references](../docs/references.md)); the images precede the prompt with no label of their own. The result's `prompt` is the caption the image was made from: the model's rewrite when it thought.
 
 ## Sizes

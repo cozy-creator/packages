@@ -2,12 +2,15 @@
 
 Black Forest Labs' FLUX.2 open weights in one package: [dev] (32B, Mistral-Small-3.2 text encoder), fal's
 [dev] Turbo LoRA, and [klein] 9B and 4B (Qwen3 text encoders), each distilled or Base. One function per
-speed generates an image, or edits when `pictures` are given (up to ten, in order).
+speed generates an image, or edits the pictures its prompt mentions (up to ten, in order of first mention).
 
 | function | default model | other models (`model.model=`) |
 | --- | --- | --- |
 | `generate` | [dev]: 50 steps, guidance 4 | [klein] Base: `flux-2-klein-9b-base`, `flux-2-klein-4b-base` (50 steps, CFG 4) |
 | `generate_turbo` | [dev] + fal's Turbo LoRA: 8 steps, guidance 2.5 | [klein]: `flux-2-klein-9b`, `flux-2-klein-4b` (4 steps, no guidance) |
+
+`image` is the canvas tool, one box for [dev]: `turbo` (on by default) adds the Turbo LoRA; `aspect_ratio`,
+`megapixels`, `seed` and `prompt_upsampling`. The LoRA and the upsampler load only when a render asks for them.
 
 The function sets the regime: `generate` runs a [klein] as Base, `generate_turbo` as distilled, so give each its
 own checkpoint. Klein 4B (Apache-2.0,
@@ -30,16 +33,16 @@ Inline inputs work too, and override the file's:
 cozy run flux-2/generate_turbo model.model=flux-2-klein-4b \
   prompt='A lighthouse on a basalt cliff in a winter storm' aspect_ratio=16:9
 cozy run flux-2/generate_turbo model.model=flux-2-klein-9b \
-  prompt='Make <Lighthouse> night, the lamp lit' pictures:='[{"name": "Lighthouse", "image": "lighthouse.png"}]'
+  prompt='Make <lighthouse> night, the lamp lit'   # in a project, <lighthouse> is that box's picture
 cozy run flux-2/generate model.model=flux-2-klein-4b-base prompt='...'
 cozy run flux-2/generate prompt='...'          # [dev]
 cozy run flux-2/generate_turbo prompt='...'    # [dev] Turbo
 ```
 
-Inputs: `prompt`, `pictures`, `aspect_ratio` (any W:H), `megapixels` (any size, 1024² pixels each), `seed`, `guidance` and `prompt_upsampling`, and `steps` on `generate` (Turbo always runs its schedule). Left out, each is the checkpoint's default: steps as above,
+Inputs: `prompt` (with the pictures it mentions), `aspect_ratio` (any W:H), `megapixels` (any size, 1024² pixels each), `seed`, `guidance` and `prompt_upsampling`, and `steps` on `generate` (Turbo always runs its schedule). Left out, each is the checkpoint's default: steps as above,
 guidance 4 ([dev]'s embedded guidance, 2.5 with Turbo; [klein] Base's CFG scale), no upsampling, a
 random seed. Steps 1–100, guidance 1–20; a distilled [klein] warns that it has no use for `guidance`, and
-unknown fields are dropped with a warning. A `<Name>` mention
+unknown fields are dropped with a warning. A `<name>` mention
 of a picture reads as "image N", the wording of BFL's prompting guide ("subject from image 1, style
 from image 2"; [references](../docs/references.md)); the text encoder sees no image, so the pictures
 bind by order. With pictures, a size input you leave out is the first picture's. The result is `image`, `width`, `height`, `seed`

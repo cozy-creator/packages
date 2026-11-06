@@ -12,6 +12,7 @@ for each:
 Krea recommends training LoRAs on Raw and running them on Turbo. The function sets the regime: `generate`
 samples as Raw (CFG, the token count's shift), `generate_turbo` as Turbo (no CFG, shift 1.15). The two
 checkpoints have identical configs, so pass a fine-tune of each to its own function (`model.model=`).
+`image` is the canvas tool: one box, Turbo or Raw, which loads only the checkpoint a render asks for.
 
 Write the request in a file, `request.yaml`:
 
@@ -28,7 +29,7 @@ cozy run krea-2/generate_turbo --input request.yaml --lora <org/krea-2-lora>,0.8
 
 Fields: `prompt`, `aspect_ratio` (any `W:H`, default 1:1), `megapixels` (Raw 1, Turbo 4), `steps` (1–100) and
 `seed` (random when omitted, returned). `generate` also takes `guidance` (0–20; 0 runs no negative branch) and
-`negative_prompt` (default empty, as Krea's): Turbo samples without guidance. Krea 2 makes images from text only, so a `<Name>` in its prompt stays as written, with a warning ([references](../docs/references.md)).
+`negative_prompt` (default empty, as Krea's): Turbo samples without guidance. Krea 2 makes images from text only, so its `prompt` is words: a mentioned text box goes in as its words, and a mentioned picture as its name, with a warning ([references](../docs/references.md)).
 Unknown fields are dropped with a warning. The result is `image`, `width`, `height`, `seed` and `prompt`.
 
 Guidance is Krea's: `cond + g·(cond − uncond)`, so Krea's 3.5 is ComfyUI's cfg 4.5, and Turbo's 0 is

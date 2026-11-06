@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+from typing import Annotated
+
+import msgspec
 from cozy_runtime.author import (
     Adjustments,
     App,
+    AspectRatio,
     Context,
     Guidance,
     ImageRequest,
@@ -12,6 +16,9 @@ from cozy_runtime.author import (
     Memoize,
     NegativePrompt,
     Outputs,
+    Range,
+    Ratios,
+    Seed,
     Sizes,
     Steps,
     Telemetry,
@@ -24,7 +31,9 @@ from .model import PATCH, Krea2
 app = App()
 
 #: Krea: Raw is trained to 1 MP, Turbo makes 1-4 MP; 256 px sides at the least, on the 16 px grid.
-SIZES = Sizes((0.25, 4.0), (256, 4096), PATCH, "Krea 2's 0.25-4 MP")
+MIN_MEGAPIXELS = 0.25
+MAX_MEGAPIXELS = 4.0
+SIZES = Sizes((MIN_MEGAPIXELS, MAX_MEGAPIXELS), (256, 4096), PATCH, "Krea 2's 0.25-4 MP")
 #: Krea's settings (steps, guidance, megapixels): Raw 52 steps at guidance 3.5 at its 1 MP, Turbo 8 steps
 #: without guidance at its 2048² (`krea-ai/krea-2` README).
 RAW, TURBO = (52, 3.5, 1.0), (8, 0.0, 4.0)
@@ -42,7 +51,7 @@ class GenerateInput(TurboInput):
 def _generate(ctx: Context, payload: TurboInput, model: Krea2, out: Outputs, tel: Telemetry,
               adj: Adjustments, *, distilled: bool) -> ImageResult:
     model.hold_vae()
-    prompt = payload.rendered(adj)
+    prompt = payload.prompt
     steps, guidance, megapixels = TURBO if distilled else RAW
     steps = held(adj, "steps", payload.steps or steps, 1, 100, "Krea 2's 1-100 steps")
     words = ""
@@ -71,11 +80,13 @@ def _generate(ctx: Context, payload: TurboInput, model: Krea2, out: Outputs, tel
     return ImageResult(asset, width, height, seed, prompt)
 
 
-_COMPONENTS = {"model": ("transformer", "text_encoder", "vae")}
+_RAW_MODEL = "krea/krea-2@0.1.0"
+_TURBO_MODEL = "krea/krea-2-turbo@0.1.0"
+_KREA = ("transformer", "text_encoder", "vae")
 _MEMO = ("krea_2", "krea_2.model")
 
 
-@app.entrypoint(defaults={"model": "krea/krea-2@0.1.0"}, components=_COMPONENTS, memoize=Memoize(requires=["seed"]),
+@app.entrypoint(defaults={"model": _RAW_MODEL}, components={"model": _KREA}, memoize=Memoize(requires=["seed"]),
                 memo_dependencies=_MEMO)
 def generate(ctx: Context, payload: GenerateInput, model: Krea2, out: Outputs, tel: Telemetry,
              adj: Adjustments) -> ImageResult:
@@ -83,9 +94,35 @@ def generate(ctx: Context, payload: GenerateInput, model: Krea2, out: Outputs, t
     return _generate(ctx, payload, model, out, tel, adj, distilled=False)
 
 
-@app.entrypoint(defaults={"model": "krea/krea-2-turbo@0.1.0"}, components=_COMPONENTS,
-                memoize=Memoize(requires=["seed"]), memo_dependencies=_MEMO)
+@app.entrypoint(defaults={"model": _TURBO_MODEL}, components={"model": _KREA}, memoize=Memoize(requires=["seed"]),
+                memo_dependencies=_MEMO)
 def generate_turbo(ctx: Context, payload: TurboInput, model: Krea2, out: Outputs, tel: Telemetry,
                    adj: Adjustments) -> ImageResult:
     """The fast model, Krea 2 Turbo (or a fine-tune of it): 8 steps without guidance at its fixed shift, 2048²."""
     return _generate(ctx, payload, model, out, tel, adj, distilled=True)
+
+
+class ImageBox(msgspec.Struct, kw_only=True):
+    #: What to make (`_generate`): Krea 2 takes no pictures, so its prompt is words.
+    prompt: str = ""
+    #: Krea 2 Turbo's 8 steps at 2048², else Raw's 52 with CFG at 1 MP (`_generate`).
+    turbo: bool = True
+    #: `ImageRequest.size`; `SIZES.fit` holds it to 1:16 through 16:1.
+    aspect_ratio: Annotated[AspectRatio, Ratios(min=1 / 16, max=16)] | None = None
+    #: `ImageRequest.size`, through `SIZES.pixels`: Krea's 0.25-4 MP.
+    megapixels: Annotated[float, Range(MIN_MEGAPIXELS, MAX_MEGAPIXELS, step=0.25, unit="MP")] | None = None
+    #: `_generate`'s `drawn_seed`.
+    seed: Seed | None = None
+
+
+# Each checkpoint is built, and its weights fetched, only when a box asks for it.
+@app.tool(label="Krea 2", named="image", defaults={"full": _RAW_MODEL, "model": _TURBO_MODEL},
+          components={"full": _KREA, "model": _KREA}, on_demand=("full", "model"),
+          memoize=Memoize(requires=["seed"]), memo_dependencies=_MEMO)  # fmt: skip
+def image(ctx: Context, payload: ImageBox, full: Krea2, model: Krea2, out: Outputs, tel: Telemetry,
+          adj: Adjustments) -> ImageResult:
+    """Krea 2 on a canvas: Turbo, or Raw, which loads only when asked for."""
+    kind = TurboInput if payload.turbo else GenerateInput
+    request = kind(prompt=payload.prompt, aspect_ratio=payload.aspect_ratio, megapixels=payload.megapixels,
+                   seed=payload.seed)  # fmt: skip
+    return _generate(ctx, request, model if payload.turbo else full, out, tel, adj, distilled=payload.turbo)

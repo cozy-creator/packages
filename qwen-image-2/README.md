@@ -1,17 +1,18 @@
 # Qwen Image 2
 
 `generate` creates or edits one lossless image using Qwen-Image-2.1, and `generate_turbo` does
-the same with Qwen-Image-2.1-Turbo. Both take the same inputs, and on a canvas they're one box with a Turbo toggle. The model checkpoint is selected
+the same with Qwen-Image-2.1-Turbo. Both take the same inputs. On a canvas they're one tool, `image` (Qwen Image 2):
+its `instructions`, a Turbo toggle (the full model loads only when asked for), `aspect_ratio`, `megapixels` and `seed`. The model checkpoint is selected
 independently from the package. TensorFS owns model downloads and bytes;
 Runtime owns construction, memory residency and component execution.
 
-Each picture's `description` follows the prompt as `<name>: description`, in the words tuned on this model: a mention reads as `<image3>` alone, and with no words for it a third picture was dropped. In a `cozy project`, `pictures` are filled from what the text mentions, each with its description, and the words of an asset with no file go in the same way.
+Each picture's `description` follows the prompt as `<name>: description`, in the words tuned on this model: a mention reads as `<image3>` alone, and with no words for it a third picture was dropped. In a `cozy project`, each `<name>` the text mentions is that box's picture and description, and a text box goes in as its words.
 
 `prompt` reaches the model as given, then those words. The image keeps the decoder's alpha when anything in it is
 transparent, and is RGB otherwise; alpha within 4 levels of 0 or 255 (the decoder's noise) snaps
 to it. `seed` is optional and the chosen seed is
 returned. Seeds range from 0 through 9007199254740991 (the interoperable 53-bit
-integer range); omitting one chooses a random seed in that range. Inputs: `prompt`, `pictures`, `aspect_ratio` (any W:H), `megapixels` (any size, 1024² pixels each) and `seed`. The full model runs 40 steps, Turbo the 8 of its checkpoint
+integer range); omitting one chooses a random seed in that range. Inputs: `prompt` (its text and the pictures it mentions), `aspect_ratio` (any W:H), `megapixels` (any size, 1024² pixels each) and `seed`. The full model runs 40 steps, Turbo the 8 of its checkpoint
 (its 8 `sample_sigmas`). Qwen runs no CFG and has no upsampler, so it has no `guidance`, `negative_prompt` or
 `prompt_upsampling`. Unknown fields are ignored with a warning. The result is `image`, `width`, `height`, `seed` and `prompt`.
 
@@ -52,23 +53,19 @@ cozy run qwen-image-2/generate seed=42 \
 
 ## Image editing and references
 
-Set `pictures` to one through ten named pictures and describe the desired edit or
-composition in `prompt`, naming them as `<Name>` ([references](../docs/references.md)). Omit them
-for ordinary text-to-image generation. With two or more, each mention reads as Qwen-Image-2.1's
+Mention one through ten pictures in `prompt` as `<name>` and describe the desired edit or composition
+([references](../docs/references.md)); past ten, the last mentioned go, with a warning. Mention none for
+ordinary text-to-image generation. With two or more, each mention reads as Qwen-Image-2.1's
 own `<image1>`, `<image2>`, …, the tags its template writes before each image; a lone picture's
 mention reads as its name, as Qwen's prompt rewriter writes one. The same
 Qwen-Image-2.1 checkpoint handles both modes; editing runs its complete instruction
 sampling schedule, with no image-to-image strength parameter.
 
 ```sh
-cozy run qwen-image-2/generate \
-  prompt='Change the background to a sunset beach; preserve the person and clothing.' \
-  pictures:='[{"name": "Portrait", "image": "portrait.png"}]' seed=42
-
-cozy run qwen-image-2/generate \
-  prompt='Place <Person> in <Room>.' \
-  pictures:='[{"name": "Person", "image": "person.png"}, {"name": "Room", "image": "room.png"}]' \
-  seed=42
+# in a project with boxes `portrait`, `person` and `room`
+cozy run qwen-image-2/generate seed=42 \
+  prompt='Change the background of <portrait> to a sunset beach; preserve the person and clothing.'
+cozy run qwen-image-2/generate seed=42 prompt='Place <person> in <room>.'
 ```
 
 References are ordered. Each is any image Runtime decodes, up to 32 MiB encoded, read upright
@@ -162,8 +159,8 @@ image = await generate(
 )
 ```
 
-The Hub package is the first-party `qwen-image-2` (no owner); its callables are `generate` and
-`generate_turbo`. Their default models are `qwen/qwen-image-2.1@0.1.0` and
+The Hub package is the first-party `qwen-image-2` (no owner); its callables are `generate`,
+`generate_turbo` and the tool `image`. Their default models are `qwen/qwen-image-2.1@0.1.0` and
 `qwen/qwen-image-2.1-turbo@0.1.1`, in Qwen's org.
 Installing the wheel alone does not turn GPU execution into an in-process call;
 Cozy supplies the managed caller when composing package functions.
