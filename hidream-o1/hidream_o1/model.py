@@ -31,6 +31,11 @@ from transformers.models.qwen3_vl.modeling_qwen3_vl import Qwen3VLTextModel, Qwe
 
 from .sampling import Euler, Flash, UniPC
 
+try:
+    from cozy_runtime.author import retained
+except ImportError:  # a Runtime without `retained`: each step recomputes the prefix
+    retained = None
+
 COMPONENT = "model"
 PATCH = 32
 #: Upstream's noise scale: the initial noise is this many standard normals, and the Dev sampler
@@ -373,18 +378,37 @@ def _layer(
 
 @dataclass
 class Prefix:
-    """A caption's causal prefix, computed once: each layer's keys and values, and the bf16 RoPE
-    tables of the tokens after it."""
+    """A caption's causal prefix: each layer's keys and values as the Runtime holds them
+    (`retained`), and the bf16 RoPE tables of the tokens after it. With no store, `kv` is empty
+    and `again` recomputes them for each step."""
 
-    kv: list[tuple[torch.Tensor, torch.Tensor]]
+    kv: list[Any]
     cos: torch.Tensor
     sin: torch.Tensor
+    again: Callable[[], Prefix] | None = None
+
+    def layers(self) -> list[tuple[torch.Tensor, torch.Tensor]]:
+        if self.again is not None:
+            return [state.get() for state in self.again().kv]
+        return [state.get() for state in self.kv]
+
+
+class _Held:
+    """A layer's keys and values kept as they are: a recomputed prefix lives one step."""
+
+    def __init__(self, k: torch.Tensor, v: torch.Tensor) -> None:
+        self.kv = k, v
+
+    def get(self) -> tuple[torch.Tensor, torch.Tensor]:
+        return self.kv
 
 
 def _prefix(body: Body, seq: Sequence, vision: tuple[torch.Tensor, list[torch.Tensor]] | None,
-            image_token: int, device: torch.device) -> Prefix:
+            image_token: int, device: torch.device, held: Any = None) -> Prefix:
     """The prefix's keys and values, the vision tower's tokens in place of its image pads and its
-    deepstack features added after the first layers, as Qwen3-VL's text model adds them."""
+    deepstack features added after the first layers, as Qwen3-VL's text model adds them. Each
+    layer's go to the Runtime's store `held` as they are made, so none outlives its layer as a
+    plain tensor."""
     text = body.language_model
     ids = seq.ids[:, : seq.prefix].to(device)
     h = text.embed_tokens(ids)
@@ -395,7 +419,7 @@ def _prefix(body: Body, seq: Sequence, vision: tuple[torch.Tensor, list[torch.Te
     kv = []
     for index, layer in enumerate(text.layers):
         h, k, v = _layer(layer, h, cos[:, : seq.prefix], sin[:, : seq.prefix], None)
-        kv.append((k, v))
+        kv.append(_Held(k, v) if held is None else held.put(k, v))
         if vision is not None and index < len(vision[1]):
             h[0, mask] = h[0, mask] + vision[1][index].to(h.dtype)
     return Prefix(kv, cos[:, seq.prefix :], sin[:, seq.prefix :])
@@ -406,7 +430,7 @@ def _predict(body: Body, prefix: Prefix, t: torch.Tensor, inputs: torch.Tensor, 
     timestep `t` and the noisy target's and the references' patches."""
     text = body.language_model
     h = torch.cat([body.t_embedder1(t.view(1))[:, None], body.x_embedder(inputs)], dim=1)
-    for layer, past in zip(text.layers, prefix.kv, strict=True):
+    for layer, past in zip(text.layers, prefix.layers(), strict=True):
         h = _layer(layer, h, prefix.cos, prefix.sin, past)[0]
     return body.final_layer2(text.norm(h[:, 1 : 1 + n]))
 
@@ -465,13 +489,25 @@ class HiDreamO1(Model[O1Graph], encoded_leaves="accept"):
         captions = [caption] if negative is None else [caption, negative]
         with torch.inference_mode():
             vision = None
+            seqs = [sequence(self.processor, text, conditions, grids, rows, columns) for text in captions]
+            # Every caption's prefix K/V is read by every step: the Runtime holds it (on the card
+            # while there is room, else refilled from pinned host memory), or each step recomputes it.
+            config = body.language_model.config
+            width = 2 * config.num_key_value_heads * config.head_dim * torch.bfloat16.itemsize
+            nbytes = sum(seq.prefix for seq in seqs) * width * config.num_hidden_layers
+            held = None if retained is None else retained(nbytes)
             prefixes = []
-            for text in captions:
-                seq = sequence(self.processor, text, conditions, grids, rows, columns)
+            for seq in seqs:
                 if seq.pixel_values is not None and seq.grid is not None and vision is None:
                     out = body.visual(seq.pixel_values.to(device, torch.bfloat16), grid_thw=seq.grid.to(device))
                     vision = (out.pooler_output, out.deepstack_features)
-                prefixes.append(_prefix(body, seq, vision, image_token, device))
+                prefix = _prefix(body, seq, vision, image_token, device, held)
+                if held is None:
+                    prefix = Prefix([], prefix.cos, prefix.sin, again=lambda seq=seq, vision=vision: _prefix(
+                        body, seq, vision, image_token, device))
+                prefixes.append(prefix)
+            if held is not None:
+                vision = out = None  # read by the prefixes alone
             refs = (torch.cat([patches(r) for r in references]).to(device, torch.bfloat16)[None]
                     if references else None)
             # One stream: the flash sampler's noise follows the initial noise's.
