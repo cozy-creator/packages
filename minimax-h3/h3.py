@@ -1721,15 +1721,16 @@ class EditLoRA(NamedTuple):
 
 
 #: Alissonerdx's guide-edit LoRAs on Ref2VA, each taking the plate through `MiniMaxH3AddGuide` at frame 0
-#: (hf://Alissonerdx/Minimax-H3-ComfyUI README.md: its LoRA table gives each trigger, and line 97 the guide). Each
-#: one's guide starts at strength 1.0 (docs/character-swap.md:14, head-swap.md:28, style-transfer.md:13, vfx-edit.md:6,
-#: motion-transfer.md:55). Live Wallpaper animates pictures without a plate, so it isn't an edit.
+#: (hf://Alissonerdx/Minimax-H3-ComfyUI README.md: its LoRA table gives each trigger, and line 97 the guide), at the
+#: Hub's mirror releases, whose cards carry the same triggers. Each one's guide starts at strength 1.0
+#: (docs/character-swap.md:14, head-swap.md:28, style-transfer.md:13, vfx-edit.md:6, motion-transfer.md:55). Live
+#: Wallpaper animates pictures without a plate, so it isn't an edit.
 EDITS: dict[str, EditLoRA] = {
-    "character_swap": EditLoRA("alissonerdx/minimax-h3-character-swap", "body_swap:"),
-    "head_swap": EditLoRA("alissonerdx/minimax-h3-head-swap", "head_swap:"),
-    "style_transfer": EditLoRA("alissonerdx/minimax-h3-style-transfer", "style_transfer:"),
-    "vfx_edit": EditLoRA("alissonerdx/minimax-h3-vfx-edit", "vfx_edit:"),
-    "motion_transfer": EditLoRA("alissonerdx/minimax-h3-motion-transfer", "motion_transfer:"),
+    "character_swap": EditLoRA("alissonerdx/minimax-h3-character-swap@0.1.0", "body_swap:"),
+    "head_swap": EditLoRA("alissonerdx/minimax-h3-head-swap@0.1.0", "head_swap:"),
+    "style_transfer": EditLoRA("alissonerdx/minimax-h3-style-transfer@0.1.0", "style_transfer:"),
+    "vfx_edit": EditLoRA("alissonerdx/minimax-h3-vfx-edit@0.1.0", "vfx_edit:"),
+    "motion_transfer": EditLoRA("alissonerdx/minimax-h3-motion-transfer@0.1.0", "motion_transfer:"),
 }
 ShotFootage = Annotated[VideoFile, FileBound(max_decoded_bytes=VIDEO_READ_BYTES)]
 
