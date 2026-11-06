@@ -25,8 +25,7 @@ one that fits before generating; off, the prompt goes as written and neither enh
 Each runs as upstream's `pe_core.py`: its own `system_prompt.txt`, thinking first, then a JSON answer; temperature
 1.0, top-p 0.95, presence penalty 0 for edits and 1.5 for words; each picture over white at most 1 MP. Runtime's
 sampler has no top-k, so upstream's top-k 20 is not applied. The rewrite is sampled from the render's `seed`: a new
-render rewrites anew, and a given seed repeats its rewrite. Qwen3.5-9B's multi-token-prediction head
-(`qwen/qwen3.5-9b-mtp`) drafts the decode. The rewrite is the result's `prompt`, and the run's log has it with its
+render rewrites anew, and a given seed repeats its rewrite. The rewrite is the result's `prompt`, and the run's log has it with its
 seed and canvas. With no `aspect_ratio`, the enhancer's canvas is used, as upstream passes it to the renderer: its
 `wh_ratio`, or the shape of the picture its `ratio_follow` names.
 
@@ -193,7 +192,7 @@ image = await generate(
 
 The Hub package is the first-party `qwen-image-2` (no owner); its callables are `generate` and
 `generate_turbo`. Their default models are `qwen/qwen-image-2.1@0.1.0` and
-`qwen/qwen-image-2.1-turbo@0.1.1`, in Qwen's org; both read `qwen/qwen-image-2.1-pe-i2i@0.1.0` (`rewriter`),
-`qwen/qwen-image-2.1-pe-t2i@0.1.0` (`expander`) and `qwen/qwen3.5-9b-mtp@0.2.0` (`drafter`).
+`qwen/qwen-image-2.1-turbo@0.1.1`, in Qwen's org; both read `qwen/qwen-image-2.1-pe-i2i@0.1.0` (`rewriter`)
+and `qwen/qwen-image-2.1-pe-t2i@0.1.0` (`expander`).
 Installing the wheel alone does not turn GPU execution into an in-process call;
 Cozy supplies the managed caller when composing package functions.

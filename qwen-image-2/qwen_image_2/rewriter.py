@@ -6,7 +6,8 @@ Qwen3.5-9B fine-tunes, `Qwen-Image-2.1-PE-I2I`, which rewrites an edit instructi
 
 Sampling is upstream's (`pe_core.PROFILES`): temperature 1.0, top-p 0.95, presence penalty 1.5 (t2i) or 0
 (edit), thinking on, 16256 or 24000 new tokens. Runtime's sampler has no top-k, so upstream's top-k 20 is not
-applied. The seed is the render's: a new render rewrites anew, and a given seed repeats its rewrite.
+applied. The seed is the render's: a new render rewrites anew, and a given seed repeats its rewrite. The decode is
+plain and graphed: Runtime's drafted decode ran eager, about 2.5x slower (run 37180), and leaves with varena v2.
 """
 
 from __future__ import annotations
@@ -17,14 +18,8 @@ from dataclasses import dataclass
 from importlib.resources import files
 from typing import Any, Literal
 
-import torch
-from cozy_runtime import lm
-from cozy_runtime.author import Config, Loader, Model, uses_components
 from cozy_runtime.vlm import Question, VisionLM
 from PIL import Image
-from transformers import AutoConfig
-from transformers.initialization import no_init_weights
-from transformers.models.qwen3_5 import modeling_qwen3_5
 
 #: How far the rewrite goes beyond the words: `balanced` is Qwen's own rewrite; the others say so after the
 #: request, where the enhancer reads intent.
@@ -71,29 +66,6 @@ class Rewrite:
     #: The canvas the enhancer chose: `W:H`, or the 1-based picture whose shape the output follows.
     ratio: str | None
     follow: int | None
-
-
-class DrafterGraph:
-    def __init__(self, config: Config) -> None:
-        # The head-only lane keeps Qwen3.5-9B's config (`drafter_head`).
-        with no_init_weights():
-            head = lm.Draft(AutoConfig.for_model(**config.mapping()), modeling_qwen3_5)
-        self.components: dict[str, torch.nn.Module] = {"model": head.to(torch.bfloat16).eval()}
-
-
-class Drafter(Model[DrafterGraph], encoded_leaves="accept"):
-    """Qwen3.5-9B's multi-token-prediction head: the enhancers are that model fine-tuned without it. Their
-    decode drafts tokens with it and keeps the ones it agrees with."""
-
-    graph: DrafterGraph
-
-    def load(self, loader: Loader) -> None:
-        self.graph = loader.construct(DrafterGraph, factory=DrafterGraph)
-
-    @uses_components("model")
-    def drafting(self, body: Any) -> Any:
-        with lm.drafting(self.graph.components["model"]):
-            return body()
 
 
 def reference(image: Image.Image) -> Image.Image:
@@ -155,20 +127,16 @@ def parse(answer: str, pictures: int) -> Rewrite | None:
 
 
 def rewrite(
-    enhancer: VisionLM, drafter: Drafter, prompt: str, images: list[Image.Image], creativity: Creativity, seed: int
+    enhancer: VisionLM, prompt: str, images: list[Image.Image], creativity: Creativity, seed: int
 ) -> tuple[Rewrite | None, str]:
     """The enhancer's rewrite of `prompt` (`<imageN>` for two or more pictures, as its system prompt asks), and
-    its raw answer; `drafter` drafts the decode."""
+    its raw answer."""
     task = "edit" if images else "t2i"
     profile = PROFILES[task]
     steer = _STEER[task].get(creativity, "")
     question = Question("\n\n".join(filter(None, (prompt.strip(), steer))), [reference(image) for image in images])
-
-    def run() -> str:
-        return enhancer.ask(
-            [question], system=profile.system, thinking=True, stop=[], max_new_tokens=profile.max_new_tokens,
-            presence_penalty=profile.presence_penalty, temperature=TEMPERATURE, top_p=TOP_P, seed=seed,
-        )[0]
-
-    answer = drafter.drafting(run)
+    answer = enhancer.ask(
+        [question], system=profile.system, thinking=True, stop=[], max_new_tokens=profile.max_new_tokens,
+        presence_penalty=profile.presence_penalty, temperature=TEMPERATURE, top_p=TOP_P, seed=seed,
+    )[0]
     return parse(answer, len(images)), answer

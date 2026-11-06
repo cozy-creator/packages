@@ -30,7 +30,7 @@ from cozy_runtime.vlm import VisionLM
 from PIL import Image
 
 from .model import QwenImage21Model
-from .rewriter import Creativity, Drafter, rewrite
+from .rewriter import Creativity, rewrite
 from . import quantize as quantize  # its recipes
 
 app = App()
@@ -115,14 +115,13 @@ def _upsampled(
     images: list[Image.Image],
     seed: int,
     enhancer: VisionLM,
-    drafter: Drafter,
     tel: Telemetry,
     adj: Adjustments,
 ) -> tuple[GenerateInput, str]:
     """The request as Qwen's enhancer rewrites it, sampled from the render's `seed`, and the canvas it chose
     when the request names none (upstream passes `wh_ratio` and `ratio_follow` to the renderer)."""
     with tel.stage("upsampling prompt", overall_range=(0.0, 0.3)):
-        found, answer = rewrite(enhancer, drafter, prompt, images, payload.creativity, seed)
+        found, answer = rewrite(enhancer, prompt, images, payload.creativity, seed)
     if found is None:
         adj.warn("prompt_upsampling", "Qwen's prompt enhancer gave no rewrite, so the prompt goes as written")
         tel.log("upsampled prompt", parsed=False, answer=answer[:2000])
@@ -143,7 +142,6 @@ def _generate(
     model: QwenImage21Model,
     rewriter: VisionLM,
     expander: VisionLM,
-    drafter: Drafter,
     out: Outputs,
     tel: Telemetry,
     adj: Adjustments,
@@ -162,7 +160,7 @@ def _generate(
     reference_images = [asset.read(mode="RGBA") for asset in payload.images()] or None
     if payload.prompt_upsampling:
         enhancer = rewriter if reference_images else expander
-        payload, prompt = _upsampled(payload, prompt, reference_images or [], seed, enhancer, drafter, tel, adj)
+        payload, prompt = _upsampled(payload, prompt, reference_images or [], seed, enhancer, tel, adj)
     model.hold_vae(tel)
     ctx.raise_if_cancelled()
     begin = 0.3 if payload.prompt_upsampling else 0.0
@@ -213,16 +211,14 @@ def _generate(
 
 
 _MEMO = ("qwen_image_2", "qwen_image_2.model", "qwen_image_2.rewriter")
-#: Each model, then Qwen's prompt enhancers (QwenLM/Qwen-Image-2.1 `prompt_rewrite/`: an edit's, a picture from
-#: words') and Qwen3.5-9B's MTP head drafting their decode.
+#: Each model, then Qwen's prompt enhancers (QwenLM/Qwen-Image-2.1 `prompt_rewrite/`): an edit's, a picture from words'.
 _FULL = {"model": "qwen/qwen-image-2.1@0.1.0", "rewriter": "qwen/qwen-image-2.1-pe-i2i@0.1.0",
-         "expander": "qwen/qwen-image-2.1-pe-t2i@0.1.0", "drafter": "qwen/qwen3.5-9b-mtp@0.2.0"}
+         "expander": "qwen/qwen-image-2.1-pe-t2i@0.1.0"}
 _TURBO = {"model": "qwen/qwen-image-2.1-turbo@0.1.1", "rewriter": "qwen/qwen-image-2.1-pe-i2i@0.1.0",
-          "expander": "qwen/qwen-image-2.1-pe-t2i@0.1.0", "drafter": "qwen/qwen3.5-9b-mtp@0.2.0"}
-_COMPONENTS = {"model": ("text_encoder", "transformer", "vae"), "rewriter": ("model",), "expander": ("model",),
-               "drafter": ("model",)}
+          "expander": "qwen/qwen-image-2.1-pe-t2i@0.1.0"}
+_COMPONENTS = {"model": ("text_encoder", "transformer", "vae"), "rewriter": ("model",), "expander": ("model",)}
 #: Built and fetched on first use: an edit never pulls the expander, `prompt_upsampling=False` neither enhancer.
-_ON_DEMAND = ("rewriter", "expander", "drafter")
+_ON_DEMAND = ("rewriter", "expander")
 
 
 @app.entrypoint(
@@ -239,13 +235,12 @@ def generate(
     model: QwenImage21Model,
     rewriter: VisionLM,
     expander: VisionLM,
-    drafter: Drafter,
     out: Outputs,
     tel: Telemetry,
     adj: Adjustments,
 ) -> ImageResult:
     """Qwen-Image-2.1, the 40-step base model."""
-    return _generate(ctx, payload, model, rewriter, expander, drafter, out, tel, adj, _STEPS, None)
+    return _generate(ctx, payload, model, rewriter, expander, out, tel, adj, _STEPS, None)
 
 
 @app.entrypoint(
@@ -262,10 +257,9 @@ def generate_turbo(
     model: QwenImage21Model,
     rewriter: VisionLM,
     expander: VisionLM,
-    drafter: Drafter,
     out: Outputs,
     tel: Telemetry,
     adj: Adjustments,
 ) -> ImageResult:
     """Qwen-Image-2.1-Turbo: the same inputs, on its 8-step distilled schedule."""
-    return _generate(ctx, payload, model, rewriter, expander, drafter, out, tel, adj, len(TURBO_SIGMAS), TURBO_SIGMAS)
+    return _generate(ctx, payload, model, rewriter, expander, out, tel, adj, len(TURBO_SIGMAS), TURBO_SIGMAS)
