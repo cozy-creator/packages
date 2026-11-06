@@ -289,7 +289,7 @@ class ImageBox(msgspec.Struct, kw_only=True):
     #: `_layout`, through `ImageRequest.target`; `SIZES.fit` holds it to 1:16 through 16:1.
     aspect_ratio: Annotated[AspectRatio, Ratios(min=1 / 16, max=16)] | None = None
     #: `_layout`, through `SIZES.pixels`: BFL's 1 MP `default_size` up to Klein's 4 MP (README).
-    megapixels: Literal[1, 2, 4] | None = None
+    megapixels: Literal[1, 2, 4] = 1
     #: `_generate`'s `drawn_seed`.
     seed: Seed | None = None
 

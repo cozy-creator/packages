@@ -675,7 +675,7 @@ class ImageBox(msgspec.Struct, kw_only=True):
     aspect_ratio: Annotated[AspectRatio, Ratios(min=1 / 4, max=4)] | None = None
     #: `resolve_generate`: base SDXL's 1 MP, HiDiffusion's 2048² and 8 MP classes, and its 4096² flagship at 1:1 only
     #: (this module's docstring, `_SIZES`).
-    megapixels: Literal[1, 4, 8, 16] | None = None
+    megapixels: Literal[1, 4, 8, 16] = 1
     #: `_negative_prompt`.
     negative_prompt: str | None = None
     #: `resolve_generate`: Auto runs HiDiffusion above 1 MP.

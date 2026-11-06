@@ -163,7 +163,7 @@ class ImageBox(msgspec.Struct, kw_only=True):
     #: `generate`, through `ImageRequest.size`; held to 1:6 through 6:1.
     aspect_ratio: Annotated[AspectRatio, Ratios(min=1 / 6, max=6)] | None = None
     #: `generate`, through `SIZES.pixels`: the reference CLI's 1 MP default up to its 4 MP, 2048 px sides (README).
-    megapixels: Literal[1, 2, 4] | None = None
+    megapixels: Literal[1, 2, 4] = 1
     #: `caption`: Auto or on has the upsampler write a plain prompt's caption.
     prompt_upsampling: bool | None = None
     seed: Seed | None = None

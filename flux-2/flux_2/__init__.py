@@ -161,7 +161,7 @@ class ImageBox(msgspec.Struct, kw_only=True):
     #: `ImageRequest.target`, held to the model's sizes (`SIZES.fit`).
     aspect_ratio: Annotated[AspectRatio, Ratios(min=1 / 16, max=16)] | None = None
     #: `SIZES.pixels`: BFL's 1 MP default up to FLUX.2's 4 MP (README, Sizes).
-    megapixels: Literal[1, 2, 4] | None = None
+    megapixels: Literal[1, 2, 4] = 1
     #: `ImageRequest.drawn_seed`.
     seed: Seed | None = None
     #: BFL's upsampler rewrites the prompt first (`_generate`).

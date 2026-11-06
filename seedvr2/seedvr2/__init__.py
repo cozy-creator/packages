@@ -7,7 +7,7 @@ from collections import deque
 from collections.abc import Iterator
 from dataclasses import replace
 from enum import StrEnum
-from typing import Annotated, Literal
+from typing import Annotated
 
 import msgspec
 import torch
@@ -15,12 +15,14 @@ from PIL import Image, ImageOps
 from torchvision.transforms import functional as vision
 from cozy_runtime.author import (
     App,
+    AspectRatio,
     FileBound,
     Context,
     DecodedAudioChunk,
     DecodedMediaHeader,
     DecodedVideoFrame,
     Outputs,
+    Ratios,
     Seed,
     Shape,
     Telemetry,
@@ -74,8 +76,8 @@ class UpscaleInput(Tuning, kw_only=True):
     resolution: Annotated[Resolution, Shape(pixels=_RESOLUTIONS)] = Resolution.HD
     #: `restore_window`.
     seed: Seed = 42
-    #: `output_sizes`: the source's shape, or a letterboxed 16:9 canvas.
-    aspect_ratio: Literal["source", "16:9"] = "source"
+    #: `output_sizes`: the box's shape, a letterboxed 16:9 canvas; unset, the source's shape.
+    aspect_ratio: Annotated[AspectRatio, Ratios("16:9")] | None = None
 
 
 class UpscaleOutput(msgspec.Struct):
@@ -94,13 +96,13 @@ class UpscaleOutput(msgspec.Struct):
 
 
 def output_sizes(
-    width: int, height: int, edge: int, aspect_ratio: Literal["source", "16:9"]
+    width: int, height: int, edge: int, aspect_ratio: AspectRatio | None
 ) -> tuple[tuple[int, int], tuple[int, int]]:
     """Restore at the fitted size; the encoder receives the requested even-sized canvas."""
     canvas = (edge * 16 // 9, edge)
     scale = min(canvas[0] / width, canvas[1] / height)
     restored = (max(2, 2 * round(width * scale / 2)), max(2, 2 * round(height * scale / 2)))
-    return restored, canvas if aspect_ratio == "16:9" else restored
+    return restored, restored if aspect_ratio is None else canvas
 
 
 @app.tool(

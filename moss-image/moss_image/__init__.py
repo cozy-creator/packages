@@ -114,7 +114,7 @@ class ImageBox(msgspec.Struct, kw_only=True):
     #: `generate`, through `ImageRequest.size`; held to 1:16 through 16:1.
     aspect_ratio: Annotated[AspectRatio, Ratios(min=1 / 16, max=16)] | None = None
     #: `generate`, through `SIZES.pixels`: the 1-2 MP the user guide recommends (README, Sizes).
-    megapixels: Literal[1, 2] | None = None
+    megapixels: Literal[1, 2] = 1
     #: `generate`'s negative branch, encoded only with guidance above 1.
     negative_prompt: str | None = None
     seed: Seed | None = None
