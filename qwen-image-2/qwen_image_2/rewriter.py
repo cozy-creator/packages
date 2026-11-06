@@ -73,7 +73,7 @@ THINK_TOKENS = 128
 _BRIEF = {"edit": "Write the rewrite in at most 80 words.", "t2i": ""}
 #: The answer: a rewrite runs 600-2600 characters (runs 37180-37379), well inside this.
 MAX_ANSWER = 2048
-#: Qwen3's words for closing a thought at its budget (Qwen3 README, "thinking budget").
+#: Qwen3's words for closing a thought at its budget (qwen.readthedocs.io quickstart, `early_stopping_text`).
 CLOSE = "\n\nConsidering the limited time by the user, I have to give the solution based on the thinking directly now.\n</think>\n\n"
 #: Each picture as the enhancer was trained on it: RGB, at most 1 MP (`pe_core.load_image`).
 MAX_PIXELS = 1024 * 1024
