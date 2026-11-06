@@ -21,6 +21,7 @@ from cozy_runtime.author import (
     DecodedMediaHeader,
     DecodedVideoFrame,
     Outputs,
+    Seed,
     Shape,
     Telemetry,
     VideoFile,
@@ -50,19 +51,30 @@ _RESOLUTIONS: dict[Resolution, tuple[int, int]] = {
 class Tuning(msgspec.Struct, kw_only=True):
     """The ComfyUI SeedVR2 Video Upscaler node's controls, under its names (README: Tuning)."""
 
+    #: `restore_window`'s `correction`.
     color_correction: Correction = "lab"
+    #: `restore_window`'s `input_noise`.
     input_noise_scale: Annotated[float, msgspec.Meta(ge=0, le=1)] = 0.0
+    #: `restore_window`'s `latent_noise`.
     latent_noise_scale: Annotated[float, msgspec.Meta(ge=0, le=1)] = 0.0
+    #: `upscale`'s window size.
     batch_size: Annotated[int, msgspec.Meta(ge=1)] | None = None
+    #: `restore`: the last window padded to `batch_size`.
     uniform_batch_size: bool = False
+    #: `upscale`'s `overlap`, crossfaded in `flush`.
     temporal_overlap: Annotated[int, msgspec.Meta(ge=0, le=16)] = 0
+    #: `events`: mirrored, restored, then dropped.
     prepend_frames: Annotated[int, msgspec.Meta(ge=0, le=32)] = 0
 
 
 class UpscaleInput(Tuning, kw_only=True):
+    #: `events`' stream.
     video: Annotated[VideoFile, FileBound(max_decoded_bytes=2 << 30)]
+    #: `events`: the canvas's height (`output_sizes`).
     resolution: Annotated[Resolution, Shape(pixels=_RESOLUTIONS)] = Resolution.HD
-    seed: Annotated[int, msgspec.Meta(ge=0, le=9007199254740991)] = 42
+    #: `restore_window`.
+    seed: Seed = 42
+    #: `output_sizes`: the source's shape, or a letterboxed 16:9 canvas.
     aspect_ratio: Literal["source", "16:9"] = "source"
 
 
@@ -91,7 +103,8 @@ def output_sizes(
     return restored, canvas if aspect_ratio == "16:9" else restored
 
 
-@app.entrypoint(
+@app.tool(
+    label="SeedVR2",
     defaults={"model": "bytedance-seed/seedvr2-7b@0.1.0"},
     memoize=True,
 )

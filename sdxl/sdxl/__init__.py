@@ -99,9 +99,10 @@ _NATIVE = 1.5
 class GenerateInput(ImageRequest):
     steps: Steps = None
     guidance: Guidance = None
+    #: `_negative_prompt`, with HiDiffusion's recipe after it.
     negative_prompt: NegativePrompt = None
-    #: None runs HiDiffusion where base SDXL cannot go: above 1 MP. An explicit choice always
-    #: runs, and the run warns where it is known to hurt.
+    #: `resolve_generate`: None runs HiDiffusion where base SDXL cannot go, above 1 MP. An explicit
+    #: choice always runs, and the run warns where it is known to hurt.
     hidiffusion: bool | None = None
 
 
@@ -609,7 +610,8 @@ def resolve_generate(payload: GenerateInput) -> GenerateFacts:
     )
 
 
-@app.entrypoint(
+@app.tool(
+    label="SDXL",
     defaults={"model": "stabilityai/sdxl@1.0.0"},
     memoize=Memoize(requires=["seed"]),
     preflight=resolve_generate,
@@ -628,7 +630,7 @@ def generate(
     Tokenize, encode, denoise, decode, encode the WebP."""
     ctx.plan({"text_encoder", "text_encoder_2"}, "unet", "vae")
     hold_decode_dtype(model.pipe.components["vae"], tel)
-    prompt = payload.rendered(adj)
+    prompt = payload.prompt
     adj.extend(facts.adjustments)
     seed = payload.drawn_seed()
     width, height = facts.width, facts.height

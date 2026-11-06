@@ -41,6 +41,7 @@ STEPS, GUIDANCE = 48, 7.0
 class GenerateInput(ImageRequest):
     steps: Steps = None
     guidance: Guidance = None
+    #: `caption`: None or on has the upsampler write a plain prompt's caption.
     prompt_upsampling: bool | None = None
     #: Elements placed by box, in order: an object (`prompt`), or rendered text (`text`, styled as `prompt` says).
     regions: list[Region] = msgspec.field(default_factory=list)
@@ -110,7 +111,8 @@ def refusal_card(image: Any) -> bool:
 
 # The upsampler is built and fetched only for a plain prompt with `prompt_upsampling` on. Model
 # parameters are in name order: Runtime refuses a binding set whose paths are not sorted.
-@app.entrypoint(
+@app.tool(
+    label="Ideogram 4",
     defaults={"model": "ideogram-ai/ideogram-4@0.1.0", "text_encoder": "qwen/qwen3-vl-8b-instruct@0.1.1",
               "upsampler": "qwen/qwen3-vl-8b-instruct@0.1.1"},
     components={"model": ("transformer", "unconditional_transformer", "vae"), "text_encoder": ("model",),
@@ -124,7 +126,7 @@ def generate(ctx: Context, payload: GenerateInput, model: Ideogram4, text_encode
 
     Guidance is 3 on the last steps; the upsampler expands a prompt into the caption."""
     model.hold_vae(tel)
-    prompt = payload.rendered(adj)
+    prompt = payload.prompt
     steps = held(adj, "steps", payload.steps or STEPS, 1, 200)
     weight = held(adj, "guidance", GUIDANCE if payload.guidance is None else payload.guidance, 1.0, 20.0)
     seed = payload.drawn_seed()

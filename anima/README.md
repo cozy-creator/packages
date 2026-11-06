@@ -32,7 +32,7 @@ Inputs: `prompt`, `aspect_ratio` (any W:H), `megapixels` (any size, 1024² pixel
 uses guidance, default 0.15–0.70) and `first_block_cache` (0 = off). Left out, each is Anima's
 default: 1:1 at its 1536 class (1536², 2.25 MP), 30 steps at guidance 4.5, the card's negative
 prompt, a random seed. Sizes round to 32 px within 1–2.25 MP and the rotary range (2048 px sides);
-steps 8–50, guidance 1–10. Out of range clamps with a `clamp` adjustment. Anima makes images from text only, so a `<Name>` in its prompt stays as written, with a warning ([references](../docs/references.md)). The result is `image` (a WebP in
+steps 8–50, guidance 1–10. Out of range clamps with a `clamp` adjustment. Anima makes images from text only: its prompt is words, so a picture mentioned in it goes as its name ([references](../docs/references.md)). The result is `image` (a WebP in
 `~/.cozy/outputs`), `width`, `height`, `seed` and `prompt`.
 
 GPU: any NVIDIA card with 8 GB. The default 8-bit lane is 3.2 GiB (`circlestone-labs/anima@1.0.0`); the

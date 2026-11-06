@@ -57,19 +57,20 @@ CARD_NEGATIVE = (
 class GenerateInput(ImageRequest):
     steps: Steps = None
     guidance: Guidance = None
+    #: `generate`: None is the card's (`CARD_NEGATIVE`).
     negative_prompt: NegativePrompt = None
-    #: CFG interval (cr-086 arm 1, Kynkäänniemi et al., NeurIPS 2024): guidance helps only
-    #: in a middle band of the noise schedule, so the uncond forward is skipped outside
-    #: [start, stop) of the step fraction. (0, 1) is full-range CFG. The banked default is
+    #: CFG interval, `AnimaModel.render`'s guider (cr-086 arm 1, Kynkäänniemi et al., NeurIPS
+    #: 2024): guidance helps only in a middle band of the noise schedule, so the uncond forward is
+    #: skipped outside [start, stop) of the step fraction. (0, 1) is full-range CFG. The banked default is
     #: ON (se-026, 2026-09-03): at the default 1536 class it cut the denoise loop from 205 s
     #: to 156 s on an sm89 4070, and the same-seed image was at least as good — the paper's
     #: own claim is that the omitted band costs nothing. Subtractive and bounded: every block
     #: still runs on every step, so its failure mode is uniform rather than structural.
     cfg_interval_start: Annotated[float, msgspec.Meta(ge=0.0, le=1.0)] = 0.15
     cfg_interval_stop: Annotated[float, msgspec.Meta(ge=0.0, le=1.0)] = 0.7
-    #: First-block cache (cr-086 arm 2, FBCache): when the first transformer block's
-    #: residual moves less than this threshold between steps, the remaining 27 blocks are
-    #: skipped and the cached tail residual is reused. Cond and uncond passes keep separate
+    #: First-block cache (cr-086 arm 2, FBCache, `_apply_first_block_cache`): when the first
+    #: transformer block's residual moves less than this threshold between steps, the remaining
+    #: 27 blocks are skipped and the cached tail residual is reused. Cond and uncond passes keep separate
     #: cache states, so a request with it on runs CFG as two batch-1 forwards.
     #:
     #: DEFAULT OFF, deliberately (se-026, 2026-09-03). Measured at 0.075 rather than assumed:
@@ -87,7 +88,7 @@ def warmup() -> None:
     `import anima` already paid the cost and nothing is left to defer."""
 
 
-@app.entrypoint(defaults={"model": "circlestone-labs/anima@1.0.0"}, memoize=Memoize(requires=["seed"]))
+@app.tool(label="Anima", defaults={"model": "circlestone-labs/anima@1.0.0"}, memoize=Memoize(requires=["seed"]))
 def generate(
     ctx: Context,
     payload: GenerateInput,
@@ -100,7 +101,7 @@ def generate(
     model.hold_vae(tel)
     # Both prompt branches are conditioned before the repeated transformer phase.
     ctx.plan("text_encoder", "text_conditioner", "transformer", "vae")
-    prompt = payload.rendered(adj)
+    prompt = payload.prompt
     width, height = payload.size(adj, None, SIZES, megapixels=SIZES.megapixels[1])
     steps = held(adj, "steps", payload.steps or _STEPS[0], *_STEPS[1:])
     guidance = held(adj, "guidance", _GUIDANCE[0] if payload.guidance is None else payload.guidance,

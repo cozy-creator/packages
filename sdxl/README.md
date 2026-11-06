@@ -25,7 +25,7 @@ Inputs: `prompt`, `aspect_ratio` (any W:H), `megapixels` (any size, 1024² pixel
 guidance 7 (HiDiffusion's 30 at 7.5 above 1 MP, where it runs unless `hidiffusion=false`), no
 negative prompt, a random seed. Sizes snap to the 64 px stride and stay within 1–8 MP (16 MP at
 1:1), 1:4–4:1 and 4096 px sides; steps 1–50, guidance 0–20. Out of range clamps with a `clamp`
-adjustment. SDXL makes images from text only, so a `<Name>` in its prompt stays as written, with a warning ([references](../docs/references.md)). The
+adjustment. SDXL makes images from text only: its prompt is words, so a picture mentioned in it goes as its name ([references](../docs/references.md)). The
 result is `image` (a WebP in `~/.cozy/outputs`), `width`, `height`, `seed` and `prompt`.
 
 GPU: any NVIDIA card with 8 GB. The default 8-bit lane is 3.8 GiB (`stabilityai/sdxl@1.0.0`);

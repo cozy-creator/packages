@@ -35,7 +35,7 @@ cozy run ideogram-4/generate prompt='A bakery storefront at dawn' \
 Inputs: `prompt`, `aspect_ratio` (any `W:H`), `megapixels`, `steps`,
 `guidance`, `seed` (random when omitted, returned) and `prompt_upsampling` (default on). Text to image
 defaults to 1:1 at 1 MP (1024×1024, the reference CLI's); sizes are held to 256–2048 px sides, at most
-6:1 and 4 MP, on the 16 px grid, and anything outside is a `clamp` adjustment. Ideogram 4 is text to image only, so a `<Name>` in its prompt stays as written, with a warning ([references](../docs/references.md)). It has no
+6:1 and 4 MP, on the 16 px grid, and anything outside is a `clamp` adjustment. Ideogram 4 is text to image only: its prompt is words, so a picture mentioned in it goes as its name ([references](../docs/references.md)). It has no
 `negative_prompt`: its unconditional DiT reads no text. Outputs: `image` (PNG), `width`, `height`, `seed`
 and `prompt`, the caption the image was made from.
 

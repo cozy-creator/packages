@@ -15,6 +15,7 @@ app = App()
 
 
 class RemoveBackgroundInput(msgspec.Struct):
+    #: `remove_background`: the picture whose subject is kept.
     image: Annotated[
         ImageFile,
         FileBound(max_decoded_bytes=256 << 20),
@@ -38,7 +39,8 @@ def white_background(image: Image.Image, mask: Image.Image) -> Image.Image:
     return Image.composite(image, Image.new("RGB", image.size, "white"), mask)
 
 
-@app.entrypoint(
+@app.tool(
+    label="Remove Background",
     defaults={"model": "zhengpeng7/birefnet@0.1.0"},
     memoize=True,
 )

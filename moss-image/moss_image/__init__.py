@@ -38,6 +38,7 @@ GUIDANCE = 3.0
 class GenerateInput(ImageRequest):
     steps: Steps = None
     guidance: Guidance = None
+    #: `generate`'s negative branch, encoded only with guidance above 1.
     negative_prompt: NegativePrompt = None
     #: Elements and rendered text placed by box, described in words (`\n` in `text` breaks a line); the
     #: prompt describes the whole image.
@@ -72,8 +73,9 @@ def layout_prompt(prompt: str, regions: list[Region] | None, width: int, height:
 _MEMO = ("moss_image", "moss_image.model")
 
 
-@app.entrypoint(defaults={"model": "openmoss-team/moss-image@0.1.0"}, components={"model": ("transformer", "text_encoder", "vae")},
-                memoize=Memoize(requires=["seed"]), memo_dependencies=_MEMO)
+@app.tool(label="MOSS-Image", defaults={"model": "openmoss-team/moss-image@0.1.0"},
+          components={"model": ("transformer", "text_encoder", "vae")}, memoize=Memoize(requires=["seed"]),
+          memo_dependencies=_MEMO)
 def generate(ctx: Context, payload: GenerateInput, model: MossImage, out: Outputs, tel: Telemetry,
              adj: Adjustments) -> ImageResult:
     """MOSS-Image SFT, 50 Euler steps at CFG 3, with `regions` laid out as upstream's layout JSON.
@@ -85,7 +87,7 @@ def generate(ctx: Context, payload: GenerateInput, model: MossImage, out: Output
                     "MOSS-Image's CFG 1-20")
     seed = payload.drawn_seed()
     width, height = payload.size(adj, None, SIZES, megapixels=1.0)
-    prompt = layout_prompt(payload.rendered(adj), payload.regions, width, height)
+    prompt = layout_prompt(payload.prompt, payload.regions, width, height)
     ctx.raise_if_cancelled()
     with tel.stage("encoding prompt", overall_range=(0.0, 0.05)):
         positive = model.encode(prompt)
