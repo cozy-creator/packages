@@ -10,12 +10,15 @@ from cozy_runtime.author import (
     Adjustments,
     App,
     Context,
-    Picture,
-    ImageRequest,
+    Guidance,
     ImageResult,
     Memoize,
+    NegativePrompt,
     Outputs,
+    Picture,
+    PictureRequest,
     Sizes,
+    Steps,
     Telemetry,
     UnsupportedInput,
     held,
@@ -50,10 +53,17 @@ NEGATIVE_T2I = (
     '"artistic_style":""}'
 )
 
-class GenerateInput(ImageRequest):
+class TurboInput(PictureRequest):
     pictures: Annotated[list[Picture], msgspec.Meta(max_length=4)] = msgspec.field(
         default_factory=list
     )
+    steps: Steps = None
+    prompt_upsampling: bool | None = None
+
+
+class GenerateInput(TurboInput):
+    guidance: Guidance = None
+    negative_prompt: NegativePrompt = None
 
 
 def label(n: int, picture: Picture) -> str:
@@ -107,7 +117,7 @@ def _caption(
 def _generate(
     ctx: Context,
     function: str,
-    payload: GenerateInput,
+    payload: TurboInput,
     model: Fibo2,
     upsampler: Captioner,
     edit_upsampler: Captioner,
@@ -118,15 +128,13 @@ def _generate(
     model.hold_vae(tel)
     default, most = _STEPS[function]
     steps = held(adj, "steps", payload.steps or default, 1, most)
-    payload.unplaced(adj, "Fibo 2.0 has no layout control")
     prompt = payload.rendered(adj, label if len(payload.pictures) > 1 else name_label)
     images = [asset.read() for asset in payload.images()]
-    if function == "generate":
+    if isinstance(payload, GenerateInput):
         guidance = held(adj, "guidance", GUIDANCE if payload.guidance is None else payload.guidance, 1.0, 20.0)
         negative = payload.negative_prompt or (None if images else NEGATIVE_T2I)
     else:
         guidance, negative = 1.0, None
-        payload.ignored(adj, "guidance", "negative_prompt", reason="Edit Turbo is distilled to sample without guidance")
     seed = payload.drawn_seed()
     width, height = payload.size(adj, images[0].size if images else None, SIZES, megapixels=1.0)
     upsample = True if payload.prompt_upsampling is None else payload.prompt_upsampling
@@ -173,7 +181,7 @@ def generate(ctx: Context, payload: GenerateInput, edit_upsampler: Captioner, mo
                           "edit_upsampler": "briaai/fibo-edit-vlm@0.1.0"},
                 components={"model": _MODEL, "upsampler": ("model",), "edit_upsampler": ("model",)},
                 on_demand=("upsampler", "edit_upsampler"), memoize=Memoize(requires=["seed"]))
-def generate_turbo(ctx: Context, payload: GenerateInput, edit_upsampler: Captioner, model: Fibo2,
+def generate_turbo(ctx: Context, payload: TurboInput, edit_upsampler: Captioner, model: Fibo2,
                    upsampler: Captioner, out: Outputs, tel: Telemetry, adj: Adjustments) -> ImageResult:
     """Fibo 2.0 Edit Turbo, 4 steps without guidance: text to image, or an edit of up to four ordered pictures."""
     return _generate(ctx, "generate_turbo", payload, model, upsampler, edit_upsampler, out, tel, adj)

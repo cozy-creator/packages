@@ -31,14 +31,12 @@ cozy run qwen-image/generate_turbo prompt='<Cat> wearing the space suit from <As
   pictures:='[{"name": "Cat", "image": "cat.jpg"}, {"name": "Astronaut", "image": "astronaut.jpg"}]'
 ```
 
-Inputs are the shared image request: `prompt`, `pictures` (ordered, up to ten; Qwen recommends
+Inputs: `prompt`, `pictures` (ordered, up to ten; Qwen recommends
 one to three; each `<Name>` mention reads as Qwen-Image-Edit's own "Picture N", the label its template
 writes before each image, [references](../docs/references.md)), `aspect_ratio`
 (any `W:H`), `megapixels` (1024² pixels each), `steps`, `seed` (random when omitted, returned).
 `generate` also takes `guidance` and `negative_prompt`; by default each model card's: Qwen-Image-2512's
-Chinese quality negative, and Qwen-Image-Edit-2511's single space. A picture's `box` and
-`prompt_upsampling` are accepted and ignored with a warning: the model has no layout control or
-upsampler. With pictures, a size input you leave out is the first picture's. Unknown fields are ignored with a warning. Outputs: `image` (PNG), `width`, `height`,
+Chinese quality negative, and Qwen-Image-Edit-2511's single space. With pictures, a size input you leave out is the first picture's. Unknown fields are ignored with a warning. Outputs: `image` (PNG), `width`, `height`,
 `seed` and `prompt`.
 
 ## Slots

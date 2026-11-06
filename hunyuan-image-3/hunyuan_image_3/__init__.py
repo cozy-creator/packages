@@ -3,19 +3,25 @@ model's own think-and-rewrite stage. `generate_turbo` is Instruct-Distil (8 step
 
 from __future__ import annotations
 
+import secrets
 from typing import Annotated
 
 import msgspec
 from cozy_runtime.author import (
     Adjustments,
     App,
+    AspectRatio,
     Context,
-    Picture,
-    ImageRequest,
+    Guidance,
     ImageResult,
     Memoize,
     Outputs,
+    Picture,
+    Seed,
+    Steps,
     Telemetry,
+    ratio_of,
+    render,
 )
 
 from .model import GUIDANCE, MAX_NEW_TOKENS, HunyuanImage3, caption
@@ -33,11 +39,17 @@ _WIDEST = max(r.w / r.h for r in SIZES.data)
 _TALLEST = min(r.w / r.h for r in SIZES.data)
 
 
-class HunyuanRequest(ImageRequest, forbid_unknown_fields=True):
-    """The shared image request. With no `aspect_ratio` the model picks its size, as Tencent's
-    `image_size="auto"`; it makes about 1 MP whatever `megapixels` asks."""
+class HunyuanRequest(msgspec.Struct):
+    """No `megapixels`: the model makes about 1 MP. With no `aspect_ratio` it picks its size, as Tencent's
+    `image_size="auto"`."""
 
+    prompt: str
     pictures: Annotated[list[Picture], msgspec.Meta(max_length=3)] = msgspec.field(default_factory=list)
+    aspect_ratio: AspectRatio | None = None
+    steps: Steps = None
+    guidance: Guidance = None
+    seed: Seed | None = None
+    prompt_upsampling: bool | None = None
 
 
 def label(n: int, picture: Picture) -> str:
@@ -48,27 +60,18 @@ def label(n: int, picture: Picture) -> str:
 
 def requested_size(adj: Adjustments, ratio: str) -> tuple[int, int]:
     """The model size nearest `W:H` (Tencent's `get_target_size`); a ratio past 1:4 or 4:1 is a `clamp`."""
-    w, h = map(int, ratio.split(":"))
+    w, h = ratio_of(ratio)
     width, height = SIZES.get_target_size(w, h)
     if not _TALLEST <= w / h <= _WIDEST:
         adj.clamp("aspect_ratio", ratio, f"{width}:{height}", "the model's sizes run from 1:4 to 4:1")
     return width, height
 
 
-def check_pixels(adj: Adjustments, megapixels: float | None, size: tuple[int, int]) -> None:
-    """The model makes about 1 MP: `megapixels` more than 10% off the size made is a `clamp`."""
-    made = size[0] * size[1]
-    if megapixels is not None and abs(megapixels * (1 << 20) - made) > 0.1 * made:
-        adj.clamp("megapixels", megapixels, round(made / (1 << 20), 2), "HunyuanImage 3.0 makes about 1 MP")
-
-
 def _generate(ctx: Context, payload: HunyuanRequest, steps: int, model: HunyuanImage3, out: Outputs,
               tel: Telemetry, adj: Adjustments) -> ImageResult:
-    payload.ignored(adj, "negative_prompt", reason="HunyuanImage 3.0's unconditional branch is the prompt dropped")
-    payload.unplaced(adj, "HunyuanImage 3.0 has no layout control")
-    prompt = payload.rendered(adj, label)
-    seed = payload.drawn_seed()
-    references = [asset.read() for asset in payload.images()]
+    prompt = render(payload.prompt, payload.pictures, label, adj=adj, listed="pictures")
+    seed = payload.seed if payload.seed is not None else secrets.randbits(53)
+    references = [picture.image.read() for picture in payload.pictures]
     guidance = payload.guidance if payload.guidance is not None else GUIDANCE
     # No aspect ratio: the model picks its size, as Tencent's `image_size="auto"`.
     size = requested_size(adj, payload.aspect_ratio) if payload.aspect_ratio else None
@@ -84,7 +87,6 @@ def _generate(ctx: Context, payload: HunyuanRequest, steps: int, model: HunyuanI
     if size is None:
         with tel.stage("picking size", overall_range=(0.0, 0.05)):
             size = model.pick_size(prompt, references, seed=seed)
-    check_pixels(adj, payload.megapixels, size)
     with tel.stage("generating image", overall_range=(0.3, 0.97)):
         image, routing = model.paint(
             prompt, references, cot, size=size, steps=steps, guidance=guidance, seed=seed,

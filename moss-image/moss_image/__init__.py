@@ -11,13 +11,15 @@ from cozy_runtime.author import (
     Adjustments,
     App,
     Context,
-    Picture,
+    Guidance,
     ImageRequest,
     ImageResult,
     Memoize,
+    NegativePrompt,
     Outputs,
     Region,
     Sizes,
+    Steps,
     Telemetry,
     corners,
     held,
@@ -34,10 +36,9 @@ STEPS, MOST_STEPS = 50, 200
 GUIDANCE = 3.0
 
 class GenerateInput(ImageRequest):
-    #: MOSS-Image makes images from text only; place elements with `regions`.
-    pictures: Annotated[list[Picture], msgspec.Meta(max_length=0)] = msgspec.field(
-        default_factory=list
-    )
+    steps: Steps = None
+    guidance: Guidance = None
+    negative_prompt: NegativePrompt = None
     #: Elements and rendered text placed by box, described in words (`\n` in `text` breaks a line); the
     #: prompt describes the whole image.
     regions: Annotated[list[Region], msgspec.Meta(max_length=64)] | None = None
@@ -79,7 +80,6 @@ def generate(ctx: Context, payload: GenerateInput, model: MossImage, out: Output
 
     The negative branch skips block 22."""
     model.hold_vae(tel)
-    payload.ignored(adj, "prompt_upsampling", reason="MOSS-Image has no prompt upsampler")
     steps = held(adj, "steps", payload.steps or STEPS, 1, MOST_STEPS, "MOSS-Image's 1-200 steps")
     guidance = held(adj, "guidance", GUIDANCE if payload.guidance is None else payload.guidance, 1.0, 20.0,
                     "MOSS-Image's CFG 1-20")

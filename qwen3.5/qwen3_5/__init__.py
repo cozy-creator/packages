@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import msgspec
 from cozy_runtime import vlm
 from cozy_runtime.author import App, Context, QuantizationPlan, Recipe, Telemetry
 from cozy_runtime.vlm import AskRequest, AskResult, VisionLM
@@ -32,3 +33,13 @@ INT8 = Recipe(
 def ask(ctx: Context, payload: AskRequest, model: VisionLM, tel: Telemetry) -> AskResult:
     """Answer each prompt about its text, images and videos, all prompts in one pass."""
     return vlm.ask(ctx, payload, model, tel)
+
+
+#: What a description asks: what it is, for whatever mentions it to read, and nothing of how it looks as a picture.
+_CAPTION = "Say what this shows, in one or two plain sentences, for someone who can't see it: who or what it is and how it looks. Say only what you can see."
+
+
+@app.entrypoint(defaults={"model": "qwen/qwen3.5-9b@0.2.0"}, memoize=True, memo_version="caption-v1")
+def caption(ctx: Context, payload: AskRequest, model: VisionLM, tel: Telemetry) -> AskResult:
+    """What a picture or a video shows, in this package's own question: `images` or `videos`, and nothing to ask."""
+    return vlm.ask(ctx, msgspec.structs.replace(payload, prompt=_CAPTION), model, tel)

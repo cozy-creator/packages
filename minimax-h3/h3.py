@@ -29,15 +29,11 @@ from cozy_runtime import stepcache
 from cozy_runtime.author import (
     App,
     AspectRatio,
-    AudioReference,
-    CharacterReference,
     ContinueFrom,
-    EnvironmentReference,
+    Follow,
     Plate,
-    PropReference,
     Seed,
     ShotResult,
-    VideoReference,
     AudioFile,
     ChildCallError,
     Context,
@@ -65,20 +61,11 @@ from cozy_runtime.author import (
     invocable,
     prefetch,
 )
-from cozy_runtime.author import (
-    MENTION,
-    Invocation,
-    Keep,
-    Operation,
-    OperationFile,
-    Read,
-    Refuse,
-    ShotFields,
-    name_key,
-    spoken,
-)
+from cozy_runtime.author import MENTION, Node, name_key
+from cozy_runtime.author import Reference as NamedFile
 from msgspec.structs import replace
 from PIL import Image as PILImage
+from PIL import ImageOps
 from safetensors.torch import load as load_tensors
 from safetensors.torch import save as save_tensors
 
@@ -93,6 +80,7 @@ from minimax_h3.continuation import (
     ContinuationPlan,
     RenderProvenance,
     audio_ticks,
+    carries,
     context_provenance,
     decode_context,
     encode_context,
@@ -135,6 +123,7 @@ from minimax_h3.official import (
     reference_video_vision_tokens,
     shown_width,
     validate_reference_policy,
+    clip_size,
     within_ratio,
 )
 from seedvr2 import Resolution as RestorationResolution
@@ -1151,20 +1140,17 @@ def _references_to_video(
     return H3VideoOutput(result.video, notes + result.warnings)
 
 
-def _keep_frames(
-    out: Outputs, exports: Sequence[int], last: list[ImageFile], exported: list[ImageFile], pixels: Any
-) -> None:
-    """A call's delivered `(frames, H, W, 3)` RGB8: its last frame, and the `exports` it returns."""
+def _keep_frames(out: Outputs, last: list[ImageFile], pixels: Any) -> None:
+    """A call's delivered `(frames, H, W, 3)` RGB8: its last frame."""
     last.append(out.save_image(PILImage.fromarray(pixels[-1].numpy())))
-    exported.extend(out.save_image(PILImage.fromarray(pixels[index].numpy())) for index in exports)
 
 
 def _anchors(
-    first: ImageFile | None, last: ImageFile | None
+    first: ImageFile | None, last: ImageFile | None, native: bool
 ) -> list[tuple[Image, Literal["first", "last"]]]:
     """A Ref2VA call's keyframes, read: anchored as ComfyUI's Add Guide anchors them."""
     pairs: list[tuple[ImageFile | None, Literal["first", "last"]]] = [(first, "first"), (last, "last")]
-    return [(image, at) for asset, at in pairs if (image := _frame(asset, f"{at}_frame")) is not None]
+    return [(image, at) for asset, at in pairs if (image := _frame(asset, native)) is not None]
 
 
 # --- segments ----------------------------------------------------------------------------
@@ -1212,8 +1198,8 @@ class Ref2VAInput(msgspec.Struct):
     #: Keyframes, anchored as ComfyUI's Add Guide anchors them (`anchor_rows`).
     first_frame: FrameImage = None
     last_frame: FrameImage = None
-    #: Delivered frames to return (`SegmentOutput.frames`), by index.
-    exports: tuple[int, ...] = ()
+    #: The shot asked for its shape: the keyframes fill H3's own canvas, rather than set one.
+    native: bool = False
     #: Each picture's short edge in packed order; 0 sizes it as usual.
     picture_edges: tuple[int, ...] = ()
     #: Return the delivered latents (`SegmentOutput.latents`).
@@ -1235,8 +1221,6 @@ class SegmentOutput(msgspec.Struct):
     #: The segment's last delivered frame. A child's result is a granted input of the parent,
     #: so it may feed the next segment (a picture the parent saved itself may not, run 20651).
     last_frame: ImageFile
-    #: The delivered frames the call's `exports` asks for, in order.
-    frames: list[ImageFile]
     #: Its delivered video latents when the call asks (`latents`), else empty: a shot's last
     #: segment decodes them with its own as one.
     latents: LatentFile
@@ -1281,12 +1265,17 @@ class _Segments:
                  latents: bool) -> None:  # fmt: skip
         self.out, self.model, self.plan, self.observed, self.latents = out, model, plan, observed, latents
         self.saved: dict[str, File] = {}
+        self.warnings: list[str] = []
 
     def __call__(self, state: Any) -> None:
         if self.plan.successor:
-            carried = self.model.pipe.export_context(state, provenance=context_provenance(self.observed))
-            assert carried is not None
-            self.saved["context"] = self.out.save_bytes(encode_context(carried), media_type="application/octet-stream")
+            # What's denoised is worth more than what comes after it: a video stands without its carry, which only a later take reads.
+            try:
+                carried = self.model.pipe.export_context(state, provenance=context_provenance(self.observed))
+                assert carried is not None
+                self.saved["context"] = self.out.save_bytes(encode_context(carried), media_type="application/octet-stream")
+            except InvalidRequest as refused:
+                self.warnings.append(f"New take from here isn't available for this video: {refused.message}")
         if self.latents:
             # The head is whole VAE cycles (`continuation`), so what follows it joins the
             # previous segment's latents in phase.
@@ -1348,19 +1337,16 @@ async def ref2va_segment(
         head = video_tokens(plan.carried.frames) if plan.carried.frames else 0
         earlier = _Earlier.read(payload.earlier_latents, payload.earlier_videos, head)
     ended: list[ImageFile] = []
-    exported: list[ImageFile] = []
-    skip = 0 if earlier is None else earlier.frames
     segment = _references_to_video(
         ctx, "ref2va" if lora is None else "ref2va_turbo", payload, assets, base_model, out, tel,
         turbo_lora=lora, context=context, delivery=plan,
         expected_context_provenance=context_provenance(payload.previous_provenance or observed),
         completed=handed if handed.wanted else None,
-        anchors=_anchors(payload.first_frame, payload.last_frame),
-        ended=partial(_keep_frames, out, tuple(skip + index for index in payload.exports), ended, exported),
+        anchors=_anchors(payload.first_frame, payload.last_frame, payload.native),
+        ended=partial(_keep_frames, out, ended),
         earlier=earlier, sound=sound,
     )  # fmt: skip
-    return SegmentOutput(segment.video, list(segment.warnings), observed, handed.file("context"), ended[0], exported,
-                       handed.file("latents"))  # fmt: skip
+    return SegmentOutput(segment.video, [*segment.warnings, *handed.warnings], observed, handed.file("context"), ended[0], handed.file("latents"))
 
 
 app.child_task(ref2va_segment)
@@ -1394,18 +1380,21 @@ class FL2VAInput(msgspec.Struct, kw_only=True):
     preset: Preset = "balanced"
     first_frame: FrameImage = None
     last_frame: FrameImage = None
+    #: The shot asked for its shape: the keyframes fill H3's own canvas, rather than set one.
+    native: bool = False
     next_context_frames: ContextFrames = 0
     next_context_audio: bool = False
-    #: Delivered frames to return (`SegmentOutput.frames`), by index.
-    exports: tuple[int, ...] = ()
     #: Return the delivered latents (`SegmentOutput.latents`).
     latents: bool = False
 
 
-def _frame(asset: ImageFile | None, field: str) -> Image | None:
+def _frame(asset: ImageFile | None, native: bool) -> Image | None:
+    """A keyframe as a segment reads it: `native`, filling H3's own canvas with its middle, else its own shape."""
     if asset is None:
         return None
     image = asset.read()
+    if native:
+        return ImageOps.fit(image, (1344, 768), method=PILImage.Resampling.BICUBIC)
     width, height = within_ratio(image.width, image.height)
     left, top = (image.width - width) // 2, (image.height - height) // 2
     return image.crop((left, top, left + width, top + height))
@@ -1446,18 +1435,16 @@ async def fl2va_segment(
     )  # fmt: skip
     handed = _Segments(out, base_model, plan, observed, payload.latents)
     ended: list[ImageFile] = []
-    exported: list[ImageFile] = []
     shot = _render_keyframes(
         ctx, "fl2va" if lora is None else "fl2va_turbo", base_model, out, tel,
         prompt=encoder_prompt("fl2va", payload.prompt), seed=payload.seed,
         duration_s=payload.duration_s, steps=payload.steps,
-        first=_frame(payload.first_frame, "first_frame"), last=_frame(payload.last_frame, "last_frame"),
+        first=_frame(payload.first_frame, payload.native), last=_frame(payload.last_frame, payload.native),
         turbo_lora=lora, preset=payload.preset, delivery=plan if plan.successor else None,
         completed=handed if handed.wanted else None,
-        ended=partial(_keep_frames, out, payload.exports, ended, exported),
+        ended=partial(_keep_frames, out, ended),
     )  # fmt: skip
-    return SegmentOutput(shot.video, list(shot.warnings), observed, handed.file("context"), ended[0], exported,
-                       handed.file("latents"))  # fmt: skip
+    return SegmentOutput(shot.video, [*shot.warnings, *handed.warnings], observed, handed.file("context"), ended[0], handed.file("latents"))
 
 
 app.child_task(fl2va_segment)
@@ -1584,38 +1571,6 @@ ShotFootage = Annotated[
 ]
 
 
-class Character(CharacterReference, tag="character", kw_only=True):
-    """A person, kept as pictured (or, `follow: loose`, their arrangement). `voice` is their
-    voice's timbre (H3's `reference` retention)."""
-
-    image: ShotImage
-    voice: ShotSound | None = None
-
-
-class Prop(PropReference, tag="prop", kw_only=True):
-    image: ShotImage
-
-
-class Environment(EnvironmentReference, tag="environment", kw_only=True):
-    """A place: its architecture and materials; `follow: loose` keeps only its arrangement (a world
-    state), read at 512 px so the shot does not open on that frame."""
-
-    image: ShotImage
-
-
-class Clip(VideoReference, tag="video", kw_only=True):
-    """A motion and camera guide, read second for second with the shot (`shot_windows`); its sound
-    only with `use_audio`."""
-
-    video: ShotFootage
-
-
-class Sound(AudioReference, tag="audio", kw_only=True):
-    """Sound the soundtrack reuses (H3's `partially_copy`)."""
-
-    audio: ShotSound
-
-
 class EditPlate(Plate, kw_only=True):
     """The video being edited, followed frame by frame (Add Guide rows) across every segment: the
     prompt, or an edit LoRA, decides what changes."""
@@ -1634,53 +1589,71 @@ class Continue(ContinueFrom, kw_only=True):
 class GenerateResult(ShotResult):
     #: With `continue_from`: how many seconds of that video this one keeps, where the new part starts.
     kept_s: float | None = None
-    #: The frames `writes` asked for, in that order.
-    written: list[ImageFile] = msgspec.field(default_factory=list)
 
 
-class WorldWrite(msgspec.Struct, kw_only=True):
-    """A screenshot to keep as the next state of the series `of`: the frame at `at_s` on the video's clock, or its last. From the
-    next segment on, `<of>` (and `<name>`, this one frame) is that picture, loose: the picture is the state, and the text says
-    what's happening. `description`: only what the file says of this revision itself, never its series' words, which may no longer
-    be true. In the segment that holds it, a mention is words only: the model remembers."""
+#: A beat that says no length lasts this.
+_BEAT_S = 15.0
+#: Below this a picture's background reads as part of its subject.
+_TRANSPARENT = 0.05
+#: A kept video reaches its shot's end if less than this is left.
+_REACHES_S = 1.0
+#: The kind each `asset_type` is to H3, a picture that says none being a character. Any other is loose: a layout to start from, read at
+#: 512 px only by a segment whose text names it, not a look to reproduce.
+_KINDS = {"": "character", "character": "character", "prop": "prop", "environment": "background"}
 
-    of: str
-    name: str = ""
-    at_s: float | None = None
+
+class Beat(msgspec.Struct, kw_only=True):
+    """What happens, and for how long. H3 renders at most `max` in one go: past it, a beat is clamped and said."""
+
     description: str = ""
+    duration: Annotated[float, msgspec.Meta(extra={"min": 1, "max": MAX_DURATION_S, "step": 1, "total": True, "unit": "s"})] = _BEAT_S
+
+
+class Mentioned(NamedFile, kw_only=True):
+    """What the shot's text names as `<name>`: a person, a thing, a place, a clip or a sound. `asset_type` says how a picture is read: a
+    `character`, which is what one that says nothing is, or `prop` as pictured, an `environment` as the set. `follow: loose` keeps only its arrangement. A clip guides second for
+    second with the shot (`shot_windows`), its sound only with `use_audio`. `voice` is a character's voice's timbre (H3's `reference`
+    retention), and a bare `audio` is sound the soundtrack reuses (H3's `partially_copy`). With no file it's only words."""
+
+    description: str = ""
+    asset_type: str = ""
+    image: ShotImage | None = None
+    video: ShotFootage | None = None
+    audio: ShotSound | None = None
+    voice: ShotSound | None = None
+    use_audio: bool = False
+    follow: Follow = "exact"
+    #: What's measured of a picture, and what made it, to say so when it's opaque.
+    alpha: float = 0
+    made_by: str = ""
 
 
 class GenerateInput(msgspec.Struct, kw_only=True):
-    """One continuous video of any length (README.md), on the shot contract less its `beats`: `prompt` says what happens
-    and when, its timestamps at line starts (`_TIMED`). `turbo` (the default) runs the turbo LoRA's 8 steps; `turbo: false`
-    the full model at `steps`. `style` holds in every segment, with what must or must not appear ("no person appears")."""
+    """One continuous shot of any length (README.md): a `summary` every segment reads, then what happens, beat by beat, each `beat` on from
+    the last. One beat with no summary goes to the model as written, in MiniMax's own form if it likes (`At MM:SS.mmm` at a line's start,
+    its sections), and its `duration` is then the whole video's, of any length. `turbo` (the default) runs the turbo LoRA's 8 steps; off, or with `steps`, the full model. An empty `soundscape` or
+    `music` goes as N/A."""
 
-    prompt: str
-    duration_s: Annotated[float, msgspec.Meta(
-        gt=0, extra={"max_piece_s": MAX_DURATION_S, "min_piece_s": MIN_DURATION_S},
-        description="Any length; rendered in segments of at most 15 s (max_piece_s), so a longer video needs "
-                    "timestamps in its prompt, or it renders 15 s and warns. With continue_from, its whole length.",
-    )]  # fmt: skip
-    style: str = ""
-    soundscape: str = ""
-    aspect_ratio: AspectRatio | None = None
-    seed: Seed | None = None
-    preset: Preset = "balanced"
-    references: list[Character | Prop | Environment | Clip | Sound] = msgspec.field(default_factory=list)
-    plate: EditPlate | None = None
+    summary: str = ""
+    beats: Annotated[list[Beat], msgspec.Meta(min_length=1)]
+    turbo: bool = True
+    soundscape: Annotated[str, msgspec.Meta(extra={"placeholder": "N/A (silent)"})] = ""
+    music: Annotated[str, msgspec.Meta(extra={"placeholder": "N/A (silent)"})] = ""
+    aspect_ratio: Annotated[AspectRatio | None, msgspec.Meta(extra={"options": ["16:9"]})] = None
     first_frame: FrameImage = None
     last_frame: FrameImage = None
+    plate: EditPlate | None = None
+    references: list[Mentioned] = msgspec.field(default_factory=list)
     continue_from: Continue | None = None
-    music: str = "N/A"
-    turbo: bool = True
-    steps: FullSteps | None = None
     #: `768p` is H3's own size. Above it the finished video is upscaled whole by `upscale.model`
     #: (UPSCALE.md); Regenerate starts from its own latents.
     resolution: RegenerateResolution = Resolution.NATIVE
+    preset: Preset = "balanced"
+    steps: FullSteps | None = None
     upscale: Upscale | None = None
-    writes: list[WorldWrite] = msgspec.field(default_factory=list)
     #: The frames each later segment carries from the one before, of 22, 39 or 56; another number takes the nearest, with a warning.
     context_frames: int = 22
+    seed: Seed | None = None
 
 
 #: What each later segment carries from the one before by default: 22 frames of picture and one second of sound.
@@ -1704,8 +1677,8 @@ _FIRST_SHOT = re.compile(r"\[Shot[ \t]*1\]", re.I)
 _JOIN_S = 17 / FPS
 _SOUNDSCAPE = re.compile(r"^[ \t]*(?:audio|overall[ _-]*soundscape)[ \t]*:", re.I | re.M)
 _REF2VA_HEADING = re.compile(r"^[ \t]*(?:summary|detailed[ _-]*description)[ \t]*:[ \t]*\n?", re.I | re.M)
-_OWN_SECTION = re.compile(r"^[ \t]*(?:subject[ _-]+definitions|summary|style|retention[ _-]+analysis"
-                          r"|(?:integrated[ _-]*multimodal|detailed)[ _-]*description)[ \t]*:", re.I | re.M)  # fmt: skip
+#: A line of a person's text the planner would read as ours: a timestamp or a section. Their line breaks reach the model.
+_OURS = re.compile(rf"(?:{_TIMED.pattern})|(?:{_AFTER.pattern})|(?:{_HEADER.pattern})", re.I | re.M)
 
 
 def _delivered(seconds: int, first: bool, carry: Carry) -> int:
@@ -1770,33 +1743,6 @@ def plan_segments(duration_s: float, marks: Iterable[float], carried: bool = Fal
                                 f"{past / FPS:.1f} s late: update its timing.")  # fmt: skip
         seconds.append(length)
     return ShotPlan(seconds, [start for start, _ in groups], warnings)
-
-
-def place_writes(writes: Sequence[WorldWrite], opens: Sequence[float], starts: Sequence[int], total: int) -> tuple[list[tuple[int, int, int]], list[str]]:
-    """Which frame each write takes, oldest first: (its position in `writes`, its segment, the frame in that segment's delivery).
-    A segment's text runs on from the time it opens (`opens`) at its first frame (`starts`), so that is what a time counts from;
-    a time that opens a segment belongs to the one before, so that segment reads it. Segment -1 is a continued video's kept part,
-    on that video's clock. A write adds no segment."""
-    ends = [*starts[1:], total]
-    landed, warnings = [], []
-    for position, write in enumerate(writes):
-        if write.at_s is None:
-            landed.append((position, len(opens) - 1, total - 1 - starts[-1]))
-        elif write.at_s * FPS < starts[0]:
-            landed.append((position, -1, max(0, round(write.at_s * FPS))))
-        else:
-            segment = max(index for index, opened in enumerate(opens) if index == 0 or opened < write.at_s - 1e-3)
-            frame, last = round((write.at_s - opens[segment]) * FPS), ends[segment] - starts[segment] - 1
-            if frame > last + FPS and segment == len(opens) - 1:
-                warnings.append(f"the write of <{write.of}> at {write.at_s:g} s is past the video's end, so it takes the last frame")
-            landed.append((position, segment, max(0, min(frame, last))))
-    return sorted(landed, key=lambda place: (place[1], place[2])), warnings
-
-
-def _has_people(payload: GenerateInput) -> bool:
-    """Whether a shot's text may name people: it has a character picture. Read from the request's
-    types, never from its prose (se-089)."""
-    return any(isinstance(ref, Character) for ref in payload.references)
 
 
 def _clock(seconds: float) -> str:
@@ -1910,50 +1856,115 @@ def shot_windows(
     return windows, warnings
 
 
-def _fl2va_text(text: str, payload: GenerateInput) -> str:
+def _fl2va_text(text: str, soundscape: str, music: str) -> str:
     """An FL2VA segment's text: its own, with no `summary:` or `detailed_description:` heading (Ref2VA's form, not
-    FL2VA's), opening with the style, with the soundscape as its `audio` line and the music as its `non_diegetic_music`
-    line where it has none."""
+    FL2VA's), with the soundscape as its `audio` line and the music as its `non_diegetic_music` line where it has none."""
     text = _REF2VA_HEADING.sub("", text).strip()
-    if (style := payload.style.strip()) and style.casefold() not in text.casefold():
-        found = _DESCRIPTION.search(text)
-        at = found.end() if found else 0
-        between = "\n" if not found and _OWN_SECTION.match(text) else " "  # a header keeps its line start
-        text = f"{text[:at]}{style.rstrip('.')}.{between}{text[at:].lstrip()}"
     lines = []
     if not _SOUNDSCAPE.search(text):
-        lines.append(f"audio: {payload.soundscape.strip() or 'N/A'}")
+        lines.append(f"audio: {soundscape.strip() or 'N/A'}")
     if "non_diegetic_music" not in text.casefold():
-        lines.append(f"non_diegetic_music: {payload.music.strip() or 'N/A'}")
+        lines.append(f"non_diegetic_music: {music.strip() or 'N/A'}")
     return "\n\n".join([text.rstrip(), *lines])
 
 
-def _shot_references(payload: GenerateInput) -> tuple[list[StoryReference], list[str]]:
-    """Every picture, sound and clip the video attaches, as H3's story kinds (a `loose` picture is
-    an attribute_transfer world state, read at 512 px), and the warnings reading them gives."""
-    refs: list[StoryReference] = []
-    warnings = []
-    for ref in payload.references:
-        match ref:
-            case Clip():
-                silent = ref.use_audio and ref.video.probe().soundtrack is None
-                if silent:
-                    warnings.append(f"<{ref.name}> has no audio track; use_audio ignored")
-                refs.append(StoryReference(name=ref.name, kind="video", video=ref.video, use_audio=ref.use_audio and not silent))
-            case Sound():
-                refs.append(StoryReference(name=ref.name, kind="audio", audio=ref.audio))
-            case _ if ref.follow == "loose":
-                refs.append(StoryReference(name=ref.name, kind="world_state", image=ref.image, description=ref.description))
-            case Character():
-                refs.append(StoryReference(name=ref.name, kind="character", image=ref.image,
-                                           description=ref.description, voice=ref.voice))  # fmt: skip
-            case Prop():
-                refs.append(StoryReference(name=ref.name, kind="prop", image=ref.image, description=ref.description))
-            case Environment():
-                refs.append(StoryReference(name=ref.name, kind="background", image=ref.image, description=ref.description))
-    if payload.plate is not None:
-        refs.append(StoryReference(name="Plate", kind="anchor_video", video=payload.plate.video))
-    return refs, warnings + unique_names(refs)
+def _kept(text: str) -> str:
+    """A person's text as it goes into our form: each line as written, but one that would read as ours doesn't start its
+    line, so it can't set a time or end the description."""
+    return _OURS.sub(lambda line: f"… {line.group(0).lstrip()}", text.strip())
+
+
+def _has_media(ref: Mentioned) -> bool:
+    return ref.image is not None or ref.video is not None or ref.audio is not None
+
+
+def _reference(ref: Mentioned, warned: list[str]) -> StoryReference:
+    """What a shot reads, as H3's story kinds. A loose picture is an attribute_transfer world state, read at 512 px. `description` ends its
+    line in `subject_definitions`, so it keeps its own end."""
+    if ref.video is not None:
+        silent = ref.use_audio and ref.video.probe().soundtrack is None
+        if silent:
+            warned.append(f"<{ref.name}> has no audio track; use_audio ignored")
+        return StoryReference(name=ref.name, kind="video", video=ref.video, use_audio=ref.use_audio and not silent)
+    if ref.image is None:
+        return StoryReference(name=ref.name, kind="audio", audio=ref.audio)
+    described = f"{ref.description.strip()}\n" if ref.description.strip() else ""
+    kind = _KINDS.get(ref.asset_type)
+    if kind in ("character", "prop") and ref.alpha < _TRANSPARENT and ref.made_by:
+        # Only a drawn picture: an imported one may be opaque on purpose.
+        warned.append(f"<{ref.name}>'s picture is opaque, so its background goes into the shot: draw it on a blank background, or "
+                      "take its background off with a tool")  # fmt: skip
+    if kind is None or ref.follow == "loose":
+        return StoryReference(name=ref.name, kind="world_state", image=ref.image, description=described)
+    voice = (ref.voice if ref.voice is not None else ref.audio) if kind == "character" else None
+    return StoryReference(name=ref.name, kind=kind, image=ref.image, description=described, voice=voice)
+
+
+def _continued(resumed: Continue | None, end: float, warned: list[str]) -> Continue | None:
+    """`continue_from` on a shot of `end` seconds, whose latents only this package can read: `generate` lands it on its grid. None: the
+    whole shot renders."""
+    if resumed is None:
+        return None
+    if resumed.at_s is not None and resumed.at_s < MIN_DURATION_S:
+        warned.append(f"continue_from.at_s {resumed.at_s:g} s is under the shortest piece, {MIN_DURATION_S} s: the whole shot renders")
+        return None
+    if resumed.latents is None:
+        return resumed
+    ends = float(resumed.video.probe().duration)
+    if resumed.at_s is not None and resumed.at_s >= min(ends, end):
+        warned.append(f"continue_from.at_s {resumed.at_s:g} s is at or past {min(ends, end):.2f} s: it goes on from that video's end")
+        resumed = replace(resumed, at_s=None)
+    if resumed.at_s is None and end - ends < _REACHES_S:
+        raise InvalidRequest(f"that video already reaches the shot's end ({ends:.2f} s of {end:g} s), so nothing is made: "
+                             "continue it from an earlier time, or lengthen the shot", fields=["continue_from"])  # fmt: skip
+    return resumed
+
+
+class _Shot(NamedTuple):
+    """What `_written` makes of a request: MiniMax's text, the length, and what the model reads beside it."""
+
+    prompt: str
+    duration_s: float
+    references: list[StoryReference]
+    people: bool
+    resumed: Continue | None
+    warnings: list[str]
+
+
+def _written(payload: GenerateInput) -> _Shot:
+    """MiniMax's text for a shot: its summary, its beats on one timeline, and what it mentions. One beat with no summary is as written. A
+    mention with no file behind it, such as an asset that is only words, is words: its name and description, with no reference."""
+    warned: list[str] = []
+    told: list[str] = []
+    at = 0.0
+    for number, beat in enumerate(payload.beats):
+        length = beat.duration or _BEAT_S
+        if length > MAX_DURATION_S and (payload.summary.strip() or len(payload.beats) > 1):
+            warned.append(f"beat {number + 1} is {length:g} s and a beat holds {MAX_DURATION_S} s at most: it lasts {MAX_DURATION_S} s")
+            length = MAX_DURATION_S
+        # A beat with no words yet is only a length: a box opens with one.
+        if said_here := _kept(beat.description):
+            told.append(f"{'' if told else '[Shot 1] '}{f'At {_clock(at)}, ' if at else ''}{said_here}")
+        at += length
+    said = {name_key(name) for text in (payload.summary, *(beat.description for beat in payload.beats)) for name in MENTION.findall(text)}
+    bare = {name_key(ref.name): ref for ref in payload.references if name_key(ref.name) in said and not _has_media(ref)}
+    described = [f"{ref.name}: {_kept(ref.description)}" for ref in bare.values() if ref.description.strip()]
+    summary = "\n".join(filter(None, (_kept(payload.summary), *described)))
+    verbatim = len(payload.beats) == 1 and not summary
+    if verbatim:
+        prompt = payload.beats[0].description
+    elif told:
+        prompt = "\n\n".join(filter(None, (summary and f"summary:\n{summary}", "detailed_description:\n" + "\n".join(told))))
+    else:
+        prompt = f"[Shot 1] {summary}"
+    prompt = MENTION.sub(lambda found: found[1] if name_key(found[1]) in bare else found[0], prompt)
+    warned += [f"<{ref.name}> has a voice and no picture, and H3 takes a voice only beside a character's picture: it isn't sent"
+               for ref in bare.values() if ref.voice is not None]  # fmt: skip
+    # `<Picture N>` in a text as written names a reference by its place, not its name.
+    kept = [ref for ref in payload.references if _has_media(ref) and (verbatim or name_key(ref.name) in said)]
+    kept.sort(key=lambda ref: ref.image is None)
+    references = [_reference(ref, warned) for ref in kept]
+    return _Shot(prompt, at, references, any(ref.kind == "character" for ref in references), _continued(payload.continue_from, at, warned), warned)
 
 
 def segment_seed(seed: int | None, request_id: str, index: int) -> int:
@@ -2010,7 +2021,7 @@ def _cut(resumed: Continue, out: Outputs, carry: Carry) -> tuple[Continue, bool,
 
 
 async def generate(ctx: Context, payload: GenerateInput, out: Outputs, tel: Telemetry) -> GenerateResult:
-    """One continuous video of any length, with sound, from MiniMax H3.
+    """One continuous shot of any length, with sound, from MiniMax H3: a summary, then what happens, beat by beat.
 
     Its segments of at most 15 s render in order, each continuing the last from its carried latents,
     and decode as one video, published as it grows. `continue_from` resumes a video this package
@@ -2018,18 +2029,23 @@ async def generate(ctx: Context, payload: GenerateInput, out: Outputs, tel: Tele
     The run's model stack (`--lora`, `model.base_model`) serves every segment. Returns the video and
     its latents, whose carry a later `continue_from` resumes."""
     ctx.raise_if_cancelled()
-    warnings: list[str] = []
+    shot = _written(payload)
+    warnings = list(shot.warnings)
     # Asking for steps asks for the full model, the only one that has a choice of them.
     turbo = payload.turbo and payload.steps is None
     if payload.turbo and not turbo:
         warnings.append(f"steps {payload.steps} runs the full model, not turbo's 8 steps")
-    resumed, done, opening = payload.continue_from, 0, payload.first_frame
-    if opening is not None and (payload.plate is not None or resumed is not None):
-        warnings.append(f"{'the plate' if payload.plate is not None else 'continue_from'} sets the opening; first_frame is ignored")
+    resumed, done, opening, ending = shot.resumed, 0, payload.first_frame, payload.last_frame
+    if opening is not None and payload.plate is not None:
+        warnings.append("the plate sets the opening; first_frame is ignored")
+    if resumed is not None or payload.plate is not None:
         opening = None
+    if ending is not None and resumed is not None:
+        warnings.append("continue_from goes on from where it was: last_frame is ignored")
+        ending = None
     if resumed is not None and resumed.latents is not None and (why := _unusable(resumed)):
-        warnings.append(f"continue_from's latents can't be used: {why}")
-        resumed = replace(resumed, latents=None)
+        raise InvalidRequest(f"continue_from's latents can't be used: {why}, so nothing is made: render the whole shot again, or leave "
+                             "latents out for a new video opening on that video's last frame", fields=["continue_from"])  # fmt: skip
     if resumed is not None and resumed.latents is None:
         # Nothing carries in without latents: a new video opens on the old one's last frame.
         warnings.append("continue_from has no latents, so this is a new video opening on its last frame, and it comes "
@@ -2040,7 +2056,7 @@ async def generate(ctx: Context, payload: GenerateInput, out: Outputs, tel: Tele
             last = min(last, max(1, round(resumed.at_s * FPS)))
         opening = _resume_frame(resumed.video, last, out)
         resumed = None
-    duration_s = payload.duration_s
+    duration_s = shot.duration_s
     cut = False
     frames = min(CONTEXT_FRAMES, key=lambda held: abs(held - payload.context_frames))
     if frames != payload.context_frames:
@@ -2059,28 +2075,43 @@ async def generate(ctx: Context, payload: GenerateInput, out: Outputs, tel: Tele
         done = shot_latents.delivered(resumed.latents.read_bytes())
         if done >= duration_s * FPS:
             duration_s += done / FPS
-            warnings.append(f"duration_s is the whole length with continue_from, and {payload.duration_s:g} s isn't past its "
-                            f"{done / FPS:.2f} s: {payload.duration_s:g} s are added")  # fmt: skip
+            warnings.append(f"the beats are the whole length with continue_from, and {shot.duration_s:g} s isn't past its "
+                            f"{done / FPS:.2f} s: {shot.duration_s:g} s are added")  # fmt: skip
     begun = done / FPS
-    blocks, timing = _blocks(_prompt_parts(payload.prompt)[1], duration_s)
+    blocks, timing = _blocks(_prompt_parts(shot.prompt)[1], duration_s)
     segments, opens, planned = plan_segments(duration_s - begun, [block.at - begun for block in blocks if block.at > begun + _JOIN_S],
                                          carried=resumed is not None, carry=carry)  # fmt: skip
-    references, reading = _shot_references(payload)
-    warnings += [*reading, *timing, *planned]
-    for name, keyframe in (("first_frame", payload.first_frame), ("last_frame", payload.last_frame)):
+    references = shot.references if payload.plate is None else [*shot.references, StoryReference(name="Plate", kind="anchor_video", video=payload.plate.video)]
+    warnings += [*unique_names(references), *timing, *planned]
+    # The shape asked for beats a keyframe's. A take goes on at its own, which its carry holds, and a plate sets its own.
+    holder = resumed.video if resumed is not None else payload.plate.video if payload.plate is not None else None
+    native = payload.aspect_ratio is not None and holder is None
+    if payload.aspect_ratio is not None and holder is not None:
+        probed = holder.probe()
+        if not _is_native(f"{probed.width}/{probed.height}"):
+            warnings.append(f"{'this take' if resumed is not None else 'the plate'} is {probed.width}x{probed.height} and sets the shape, not {payload.aspect_ratio}")
+    for name, keyframe in (("first_frame", opening), ("last_frame", ending)):
         if keyframe is not None:
             shape = (keyframe.probe().width, keyframe.probe().height)
-            if within_ratio(*shape) != shape:
+            if native and not _is_native(f"{shape[0]}/{shape[1]}"):
+                ratio = Fraction(*shape).limit_denominator(32)
+                warnings.append(f"{name} is {ratio.numerator}:{ratio.denominator}; its middle is used for 16:9")
+            elif not native and within_ratio(*shape) != shape:
                 warnings.append(f"{name} is past 4:1; its middle is used")
-    retained = own_retention(payload.prompt)
-    if not payload.soundscape.strip() and not _SOUNDSCAPE.search(payload.prompt):
-        warnings.append("this prompt has no overall_soundscape and no soundscape, so it goes as N/A, which H3 reads as silence")
-    if not _FIRST_SHOT.search(payload.prompt):
+    retained = own_retention(shot.prompt)
+    if not _FIRST_SHOT.search(shot.prompt):
         warnings.append("this prompt has no `[Shot 1]`, which MiniMax's guide opens a shot with; it goes as written")
-    if payload.aspect_ratio is not None and not _is_native(payload.aspect_ratio):
+    if native and not _is_native(cast(str, payload.aspect_ratio)):
         warnings.append(f"minimax-h3 renders 1344x768 for now, not {payload.aspect_ratio}")
     steps = None if turbo else payload.steps
     count = len(segments)
+    # Each segment reads its carry from the one before, so this can't be found out after one has rendered.
+    if opening is not None and count > 1 and not native:
+        probed = opening.probe()
+        height, width = clip_size(probed.width, probed.height, guide=True)
+        if not carries(height, width):
+            raise InvalidRequest(f"a {width}x{height} first frame can't carry from one segment to the next, so nothing is made: "
+                                 "crop it nearer 16:9, or keep the shot to one segment", fields=["first_frame"])  # fmt: skip
     # Every segment carries into a successor, its last too: the video's latents keep that carry, which
     # a `continue_from` of it resumes.
     plans = [ContinuationPlan(length, carry if index or resumed else Carry(), carry)
@@ -2089,9 +2120,7 @@ async def generate(ctx: Context, payload: GenerateInput, out: Outputs, tel: Tele
     windows, notes = shot_windows(references, [(start - plan.prefix_frames, plan.sample_frames)
                                                for start, plan in zip(starts, plans, strict=True)])  # fmt: skip
     warnings += notes
-    landed, said = place_writes(payload.writes, [begun + at for at in opens], starts, total)
-    warnings += said
-    style, sound, music = payload.style, payload.soundscape, payload.music
+    sound, music = payload.soundscape, payload.music
     # A segment gets what its text names. A continued segment's place, named by the segment before it too, is that
     # segment's last frame, with the setup plate beside it as an attribute_transfer world state: the plate as the place
     # pulls a shot that has moved from its framing back with a cut (run 20996), and the last frame alone lets the place
@@ -2107,46 +2136,12 @@ async def generate(ctx: Context, payload: GenerateInput, out: Outputs, tel: Tele
     calls: list[SegmentCall] = []
     carried: list[frozenset[str]] = []
     named_before: frozenset[str] = frozenset()
-    people = _has_people(payload)
-    here = "who and what" if people else "what"
-    texts = segment_texts(payload.prompt, [begun + at for at in opens], continued=resumed is not None, duration_s=duration_s, carry=carry)
-    # From the segment after a write, its series and its own name are that frame, loose. Its series' description may no
-    # longer be true of it, so that isn't sent.
-    known = {name_key(ref.name): ref for ref in references}
-    series = {name_key(name): write.of for write in payload.writes for name in (write.of, write.name) if name}
-    written: dict[int, File] = {}
-
-    def wrote(position: int, frame: File) -> None:
-        write = payload.writes[position]
-        written[position] = frame
-        for name in filter(None, (write.of, write.name)):
-            files[known[name_key(name)].name if name_key(name) in known else name] = frame
-
-    for position, segment, frame in landed:
-        if segment < 0:
-            assert resumed is not None
-            wrote(position, _resume_frame(resumed.video, frame + 1, out))
+    here = "who and what" if shot.people else "what"
+    texts = segment_texts(shot.prompt, [begun + at for at in opens], continued=resumed is not None, duration_s=duration_s, carry=carry)
     for index, text in enumerate(texts):
         own = [ref for ref in references if ref.kind not in CLIPS or ref.name in windows[index]]
-        states = {}
-        for position, segment, _ in landed:
-            if segment < index:
-                write = payload.writes[position]
-                for name in filter(None, (write.of, write.name)):
-                    base = known.get(name_key(name))
-                    states[name_key(name)] = StoryReference(name=base.name if base else name, kind="world_state", description=write.description)
-        own = [states.get(name_key(ref.name), ref) for ref in own] + [state for key, state in states.items() if key not in known]
-
-        def words_only(token: re.Match[str]) -> str:
-            """A mention of a state with no picture yet: the series' own picture, if it has one, else plain words."""
-            key = name_key(token[1])
-            if key not in series or key in known or key in states:
-                return token[0]
-            return f"<{series[key]}>" if name_key(series[key]) in known | states else series[key]
-
-        text = MENTION.sub(words_only, text)
         named = named_in(text, references)
-        places = frozenset(name for name in plates if name in named and name_key(name) not in states and (index == 0 or name in named_before))
+        places = frozenset(name for name in plates if name in named and (index == 0 or name in named_before))
         named_before = named
         carried.append(places if index else frozenset())
         beside = [plates[name] for name in plates if name in places]
@@ -2165,9 +2160,9 @@ async def generate(ctx: Context, payload: GenerateInput, out: Outputs, tel: Tele
             beside = []
         added = frozenset(ref.name for ref in [*beside, *anchor])
         kept = forced | {ref.name for ref in beside}
-        role = {"keyframes": bool(index == 0 and opening or index + 1 == count and payload.last_frame),
+        role = {"keyframes": bool(index == 0 and opening or index + 1 == count and ending),
                 "continues": index == 0 and resumed is not None}  # fmt: skip
-        call = segment_call(text, own, style=style, soundscape=sound, music=music, index=index, retained=retained, added=added,
+        call = segment_call(text, own, soundscape=sound, music=music, index=index, retained=retained, added=added,
                           forced=kept | ({ref.name for ref in anchor} if index else set()), **role)  # fmt: skip
         if payload.plate is not None and index == 0 and any(ref.kind == "anchor_video" for ref in call.references) and all(
             ref.kind in ("anchor_video", "audio") for ref in call.references
@@ -2177,15 +2172,15 @@ async def generate(ctx: Context, payload: GenerateInput, out: Outputs, tel: Tele
             start = StoryReference(name="Plate opening", kind="world_state",
                                    description=f"This segment starts from it: {here} is where now.")  # fmt: skip
             files[start.name] = _resume_frame(payload.plate.video, 1, out)
-            call = segment_call(text, [*own, start], style=style, soundscape=sound, music=music, index=index,
+            call = segment_call(text, [*own, start], soundscape=sound, music=music, index=index,
                                 retained=retained, added=added | {start.name}, forced=kept | {start.name}, **role)  # fmt: skip
         if not call.references and resumed is not None:
             # A resumed video's first segment carries into Ref2VA, which needs a picture: with none of the request's
             # own, it starts from the continued video's last frame as the same world state (h3a-098, run 25881).
             files[anchor[0].name] = _resume_frame(resumed.video, done, out)
-            call = segment_call(text, [*own, *anchor], style=style, soundscape=sound, music=music, index=index,
+            call = segment_call(text, [*own, *anchor], soundscape=sound, music=music, index=index,
                               retained=retained, added=added, forced=kept | {anchor[0].name}, **role)  # fmt: skip
-        calls.append(call if call.references else SegmentCall(_fl2va_text(text, payload), [], call.warnings))
+        calls.append(call if call.references else SegmentCall(_fl2va_text(text, sound, music), [], call.warnings))
         warnings += call.warnings
     tel.log("h3 shot segments", segments=count, seconds=",".join(map(str, segments)), resumed_at=done,
             boundaries_s=",".join(f"{start / FPS:.2f}" for start in starts[1:]), delivered_frames=total,
@@ -2206,11 +2201,9 @@ async def generate(ctx: Context, payload: GenerateInput, out: Outputs, tel: Tele
     for index, (call, plan) in enumerate(zip(calls, plans, strict=True)):
         ctx.raise_if_cancelled()
         first = opening if index == 0 else None
-        last = payload.last_frame if index + 1 == count else None
+        last = ending if index + 1 == count else None
         end_segment = joined and index + 1 == count
         span = (sum(work[:index]) / sum(work), sum(work[: index + 1]) / sum(work))
-        here_written = [place for place in landed if place[1] == index]
-        exports = tuple(frame for _, _, frame in here_written)
         try:
             with tel.scope(f"Segment {index + 1} of {count}", overall_range=span):
                 log_prompt(tel, "h3 segment prompt", call.prompt, segment=index + 1,
@@ -2225,8 +2218,8 @@ async def generate(ctx: Context, payload: GenerateInput, out: Outputs, tel: Tele
                             context_frames=cast(ContextFrames, plan.carried.frames),
                             context_audio=plan.carried.audio,
                             next_context_frames=cast(ContextFrames, plan.successor.frames),
-                            next_context_audio=plan.successor.audio, first_frame=first, last_frame=last,
-                            latents=True, exports=exports,
+                            next_context_audio=plan.successor.audio, first_frame=first, last_frame=last, native=native,
+                            latents=True,
                             earlier_latents=(*before[0], *(r.latents for r in returned)) if end_segment else (),
                             earlier_videos=(*before[1], *(r.video for r in returned)) if end_segment else (),
                             picture_edges=tuple(_LOOSE_EDGE if ref.kind == "world_state" else 0
@@ -2238,9 +2231,9 @@ async def generate(ctx: Context, payload: GenerateInput, out: Outputs, tel: Tele
                     result = await fl2va_segment(  # type: ignore[call-arg]
                         payload=FL2VAInput(
                             prompt=call.prompt, seed=seeds[index], duration_s=segments[index], steps=steps,
-                            turbo=turbo, preset=payload.preset, first_frame=first, last_frame=last,
+                            turbo=turbo, preset=payload.preset, first_frame=first, last_frame=last, native=native,
                             next_context_frames=cast(ContextFrames, plan.successor.frames),
-                            next_context_audio=plan.successor.audio, latents=True, exports=exports,
+                            next_context_audio=plan.successor.audio, latents=True,
                         ),
                     )  # fmt: skip
         except ChildCallError:
@@ -2252,26 +2245,23 @@ async def generate(ctx: Context, payload: GenerateInput, out: Outputs, tel: Tele
         returned.append(result)
         warnings += result.warnings
         files[f"Segment {index + 1} end"] = result.last_frame
-        for (position, _, _), frame in zip(here_written, result.frames, strict=True):
-            wrote(position, frame)
         out.publish("video", result.video, label="Video" if index + 1 == count else f"Segment {index + 1} of {count}")
-    latents = _shot_latents(out, [*before[0], *(r.latents for r in returned)], total, returned[-1].context,
-                            _upscale_prompt(payload))  # fmt: skip
+    text = _upscale_prompt(shot, sound, music)
+    latents = _shot_latents(out, [*before[0], *(r.latents for r in returned)], total, returned[-1].context, text)
     video = returned[-1].video
     if payload.resolution is not Resolution.NATIVE:
         # Through `upscale`, as every caller: the video's own latents, so Regenerate encodes nothing.
         request = UpscaleInput(video=video, resolution=payload.resolution, upscale=payload.upscale,
-                               prompt=_upscale_prompt(payload), seed=segment_seed(payload.seed, ctx.request_id, count),
+                               prompt=text, seed=segment_seed(payload.seed, ctx.request_id, count),
                                latents=latents, preset=payload.preset)  # fmt: skip
         upscaled = await upscale(ctx, request, out, tel)
         video = upscaled.video
         warnings += upscaled.warnings
         out.publish("video", video, label=f"Video at {payload.resolution.value}")
     ctx.release_gpus()
-    tel.log("h3 shot", segments=count, delivered_frames=total, turbo=turbo, preset=payload.preset, writes=len(written))
+    tel.log("h3 shot", segments=count, delivered_frames=total, turbo=turbo, preset=payload.preset)
     return GenerateResult(video=video, warnings=list(dict.fromkeys(warnings)), latents=latents,
-                          kept_s=done / FPS if resumed is not None else None,
-                          written=[written[position] for position in range(len(payload.writes))])  # fmt: skip
+                          kept_s=done / FPS if resumed is not None else None)  # fmt: skip
 
 
 def _shot_latents(out: Outputs, parts: Sequence[File], frames: int, context: File, text: str) -> File:
@@ -2287,17 +2277,15 @@ def _shot_latents(out: Outputs, parts: Sequence[File], frames: int, context: Fil
     return out.save_bytes(data, media_type="application/octet-stream")
 
 
-def _upscale_prompt(payload: GenerateInput) -> str:
-    """The text a video was made from, for an upscale that re-renders it (Paul, 10-31): the whole
-    video as one segment's text (`segment_texts`) after each reference's description, opening with the
-    style and closing with the soundscape and music as its segments do (`_fl2va_text`). Names lose their
-    brackets: the re-render attaches no reference."""
-    defined = [(ref.name, ref.description) for ref in payload.references if not isinstance(ref, Clip | Sound)]
-    lines = " ".join(f"{name}: {text.strip().rstrip('.')}." for name, text in defined if text.strip())
-    text = segment_texts(payload.prompt, [0.0])[0]
+def _upscale_prompt(shot: _Shot, soundscape: str, music: str) -> str:
+    """The text a video was made from, for an upscale that re-renders it (Paul, 10-31): the whole video as one segment's text
+    (`segment_texts`) after each reference's description, closing with the soundscape and music as its segments do (`_fl2va_text`). Names
+    lose their brackets: the re-render attaches no reference."""
+    lines = " ".join(f"{ref.name}: {ref.description.strip().rstrip('.')}." for ref in shot.references if ref.kind not in ("video", "audio") and ref.description.strip())
+    text = segment_texts(shot.prompt, [0.0])[0]
     if lines:
         text = text.replace("[Shot 1] ", f"{lines} [Shot 1] ", 1) if "[Shot 1] " in text else f"{lines}\n{text}"
-    return re.sub(r"<([^<>]+)>", r"\1", _fl2va_text(text, payload))
+    return re.sub(r"<([^<>]+)>", r"\1", _fl2va_text(text, soundscape, music))
 
 
 # --- upscale: one whole shot (`video/upscale`) ---------------------------------------------
@@ -2311,7 +2299,7 @@ class UpscaleInput(msgspec.Struct, kw_only=True):
     video: Annotated[VideoFile, FileBound(max_decoded_bytes=2 << 30)]
     resolution: RegenerateResolution = Resolution.QHD
     upscale: Upscale | None = None
-    #: regenerate-2k's text; absent, the text `latents` carry (the shot's whole text).
+    #: regenerate-2k's text when no `latents` carry the shot's whole text.
     prompt: str = ""
     seed: int | None = None
     #: The shot's latents (`ShotResult.latents`): regenerate-2k starts from them instead of
@@ -2330,16 +2318,22 @@ class UpscaleOutput(msgspec.Struct):
 async def upscale(ctx: Context, payload: UpscaleInput, out: Outputs, tel: Telemetry) -> UpscaleOutput:
     """A shot upscaled, its sound kept: SeedVR2 restores it, or H3 re-renders it from its prompt.
 
-    The one way in for every caller (`shot` above 768p, projects, `cozy run`): regenerate-2k from
-    its latents when given, else its video; SeedVR2 from its video. The fields its model ignores
-    are logged."""
+    The one way in for every caller (`generate` above 768p, projects, `cozy run`): regenerate-2k from
+    its latents when given, else its video; SeedVR2 from its video. A video already that big comes
+    back as it is. The fields its model ignores are logged."""
     seed = payload.seed if payload.seed is not None else int.from_bytes(
         hashlib.sha256(f"{ctx.request_id}/h3/upscale".encode()).digest()[:4], "big")  # fmt: skip
     method, warnings = (payload.upscale or Upscale()).fitted()
     warnings += method.ignored()
+    probe = payload.video.probe()
+    if min(probe.width, probe.height) >= int(payload.resolution.value[:-1]):
+        warnings.append(f"this video is {probe.width}x{probe.height}, already {payload.resolution.value}: it comes back as it is")
+        with payload.video.stream() as events:
+            return UpscaleOutput(out.save_video_stream(iter(events)).video, warnings)
     if method.model == "regenerate-2k":
-        # The text the video was made from: given, else the one its latents carry.
-        prompt = payload.prompt.strip() or (shot_latents.text(payload.latents.read_bytes()) if payload.latents else "")
+        # The text the video was made from: its latents carry it whole, and with them gone a project's words stand in, names without brackets.
+        carried = shot_latents.text(payload.latents.read_bytes()) if payload.latents else ""
+        prompt = carried or re.sub(r"<([^<>]+)>", r"\1", payload.prompt).strip()
         if not prompt:
             raise InvalidRequest("regenerate-2k re-renders the video from the text it was made from: give prompt, "
                                  "or its latents", fields=["prompt"])  # fmt: skip
@@ -2351,10 +2345,6 @@ async def upscale(ctx: Context, payload: UpscaleInput, out: Outputs, tel: Teleme
         warnings += result.warnings
         tel.log("h3 upscale", model=method.model, warnings="; ".join(warnings))
         return UpscaleOutput(result.video, warnings)
-    if payload.resolution is Resolution.NATIVE:
-        warnings.append("seedvr2 restores above 768p, so at 768p the video comes back as it is")
-        with payload.video.stream() as events:
-            return UpscaleOutput(out.save_video_stream(iter(events)).video, warnings)
     restore = cast(Callable[..., Awaitable[RestorationOutput]], restore_video)
     with tel.scope(f"SeedVR2 upscale to {payload.resolution.value}"):
         restored = await restore(
@@ -2368,126 +2358,16 @@ async def upscale(ctx: Context, payload: UpscaleInput, out: Outputs, tel: Teleme
     return UpscaleOutput(restored.video, warnings)
 
 
-app.entrypoint(generate, emits_media=True, accelerator=False)
-app.entrypoint(upscale, emits_media=True, accelerator=False)
-
-
-# --- project adapters (xs-147): a project's shot and upscale as this package's own calls ------
-
-
-#: A line of a person's text the planner would read as ours: a timestamp or a section. Their line breaks reach the model.
-_OURS = re.compile(rf"(?:{_TIMED.pattern})|(?:{_AFTER.pattern})|(?:{_HEADER.pattern})", re.I | re.M)
-
-
-def _kept(text: str) -> str:
-    """A person's text as it goes into our form: each line as written, but one that would read as ours doesn't start its
-    line, so it can't set a time or end the description."""
-    return _OURS.sub(lambda line: f"… {line.group(0).lstrip()}", text.strip())
-
-
-# --- project adapters (project-graph §3): a shot and an upscale, as this package's own calls -----
-
-
-#: Below this a picture's background reads as part of its subject.
-_TRANSPARENT = 0.05
-#: A beat that says no length lasts this.
-_BEAT_S = 5.0
-#: A kept take reaches its shot's end if less than this is left.
-_REACHES_S = 1.0
-#: What a project's `render` may set for a shot. `style`, `aspect_ratio`, `soundscape` and `music` stand where the shot writes none.
-_SHOT_OPTIONS = ("seed", "turbo", "context_frames", "style", "soundscape", "music", "aspect_ratio", "steps", "preset", "resolution", "upscale")
-#: And for an upscale, which shares a project's `video` defaults with its shots: the rest of those are no news to it.
-_UPSCALE_OPTIONS = ("seed", "upscale", "preset")
-
-
-def _read_named(op: Operation, value: str) -> Read | None:
-    """The read a field's `<name>` names."""
-    key = name_key(value.strip().removeprefix("<").removesuffix(">"))
-    return next((read for read in op.reads if name_key(read.name) == key), None)
-
-
-def _made_here(read_or_take: Read | Keep) -> bool:
-    """Whether this package made it: latents are a package's own."""
-    return f"/{read_or_take.made_by.split('@')[0]}".rsplit("/", 2)[-2] == "minimax-h3"
-
-
-def _reference(read: Read, warned: list[str]) -> dict[str, Any]:
-    """What a shot reads, as `generate` takes it. An entity's kind says what it is: a character or prop as pictured, an environment as
-    the set. A plain image is a loose picture: a layout to start from, read at 512 px only by a segment whose text names it, not a
-    look to reproduce."""
-    entry: dict[str, Any] = {k: v for k, v in read.fields.items() if k in ("use_audio", "follow")}
-    entry["name"] = spoken(f"<{read.name}>")[1:-1]
-
-    def first(field: str) -> OperationFile | None:
-        """`generate` takes one file of a kind per reference."""
-        files = read.files_of(field)
-        if len(files) > 1:
-            warned.append(f"<{read.name}> has {len(files)} files in `{field}`, and H3 takes one per reference: it uses the first")
-        return files[0] if files else None
-
-    if video := first("video"):
-        return entry | {"kind": "video", "video": video.sha256}
-    picture = first("image")
-    if picture is None:
-        sound = first("audio")
-        assert sound is not None  # `_has_media`
-        return entry | {"kind": "audio", "audio": sound.sha256}
-    entry["image"] = picture.sha256
-    if description := read.fields.get("description") or "":
-        entry["description"] = description
-    if read.kind == "environment":
-        return entry | {"kind": "environment"}
-    if read.kind not in ("character", "prop"):
-        return entry | {"kind": "environment", "follow": "loose"}
-    if read.kind == "character" and (voice := first("voice") or first("audio")):
-        entry["voice"] = voice.sha256
-    # Only a drawn picture: an imported one may be opaque on purpose, as `--remove-background` leaves it, on white.
-    if read.kind in ("character", "prop") and picture.alpha < _TRANSPARENT and read.made_by:
-        warned.append(f"<{read.name}>'s picture is opaque, so its background goes into the shot: draw it on a blank background, or "
-                      "import a picture with `cozy project import --remove-background`")  # fmt: skip
-    return entry | {"kind": read.kind}
-
-
-def _has_media(read: Read) -> bool:
-    return any(read.files_of(field) for field in ("image", "video", "audio"))
-
-
-def _kept_take(op: Operation, keep: Keep, end: float, warned: list[str]) -> dict[str, Any] | None:
-    """`--take` and `--in`: the take a new one keeps, whose latents only this package can read. `generate` lands it on its
-    grid. None: the whole shot renders."""
-    at_s, take = keep.at_s, f"{op.asset}: take {keep.take}"
-    if at_s is not None and at_s < MIN_DURATION_S:
-        warned.append(f"{op.asset}: --in {at_s:g} s is under the shortest piece, {MIN_DURATION_S} s: the whole shot renders")
-        return None
-    if keep.latents is None or not _made_here(keep):
-        raise Refuse(f"{take} has no latents this package can read, so it can't continue it: nothing is made; "
-                     f"`cozy project render {op.asset}`, with no --take or --in, renders the whole shot")  # fmt: skip
-    if at_s is not None and at_s >= min(keep.ends_s, end):
-        warned.append(f"{op.asset}: --in {at_s:g} s is at or past {min(keep.ends_s, end):.2f} s: it goes on from take {keep.take}'s end")
-        at_s = None
-    if at_s is None and end - keep.ends_s < _REACHES_S:
-        raise Refuse(f"{take} already reaches the shot's end ({keep.ends_s:.2f} s of {end:g} s), so nothing is made: "
-                     "add `--in <seconds>` to redo its end, or lengthen the shot")  # fmt: skip
-    return {"video": keep.video.sha256, "latents": keep.latents.sha256} | ({"at_s": at_s} if at_s is not None else {})
-
-
-class VideoFields(ShotFields, kw_only=True):
-    """A shot's fields, or a shot taken up: `video` mentions it, `resolution` is its short edge (`1440p`). `instructions` is a shot's
-    text when it has no summary or beats."""
-
-    instructions: str = ""
-    video: str = ""
-    resolution: str | None = None
-
-
-class VideoOperation(Operation, kw_only=True):
-    fields: VideoFields
-
-
-# Its prompt syntax: `<d>` around dialogue and `<scenetrans>`, `<cutoff>`, and the language a line is spoken in, `<d><English>Hello<d>`.
-# MiniMax's guide lists no languages: these are the ones people write dialogue in.
-@app.project_adapter(
-    "video",
+app.entrypoint(generate, emits_media=True, accelerator=False, node=Node(
+    name="shot",
+    label="MiniMax H3",
+    show=["soundscape", "music"],
+    hide=["steps", "upscale", "context_frames", "plate"],
+    fill={"continue_from": "take"},
+    # `shot_latents.nearest_join`, the VAE's `17k + 5`, past `_continued`'s shortest piece of 5 s.
+    cuts={"every": 17, "offset": 5, "first": 124},
+    # Its prompt syntax: `<d>` around dialogue and `<scenetrans>`, `<cutoff>`, and the language a line is spoken in, `<d><English>Hello<d>`.
+    # MiniMax's guide lists no languages: these are the ones people write dialogue in.
     reserved=[
         "d", "scenetrans", "cutoff",
         "english", "chinese", "mandarin", "cantonese", "japanese", "korean", "spanish", "french", "german", "italian", "portuguese",
@@ -2495,88 +2375,10 @@ class VideoOperation(Operation, kw_only=True):
         "filipino", "tagalog", "turkish", "persian", "hebrew", "greek", "dutch", "swedish", "norwegian", "danish", "finnish", "polish",
         "czech", "ukrainian", "romanian", "hungarian", "swahili",
     ],
-)  # fmt: skip
-def adapt_video(op: VideoOperation) -> list[Invocation]:
-    """A video this package makes: by its fields, a shot (`summary`, `beats`), or an upscale (a `video` it reads, with a `resolution`)."""
-    f = op.fields
-    if f.summary or f.beats:
-        made = _shot(op)
-        if f.video:
-            made[0].warnings.append(f"{op.asset} has a summary or beats and a `video`: it's a shot, and `video` is ignored")
-        return made
-    if f.video or (f.resolution and (not f.instructions.strip() or any(read.files_of("video") for read in op.reads))):
-        return _upscale(op)
-    if f.instructions.strip():
-        return _shot(op)
-    raise Refuse(f"{op.asset} says nothing to make: a video needs a summary or beats, a render prompt, or a `video` to upscale")
-
-
-def _shot(op: VideoOperation) -> list[Invocation]:
-    """A shot: its summary, its beats on one timeline, sound, and what it reads. One call of any length: `generate` plans its
-    segments. Its writes go along: `generate` makes those frames and uses them."""
-    options, warned = op.known_options(_SHOT_OPTIONS)
-    f, at, told, moments = op.fields, 0.0, [], {}
-    for number, beat in enumerate(f.beats):
-        if not beat.duration:
-            warned.append(f"{op.asset}'s beat {number + 1} has no duration: it lasts {_BEAT_S:g} s")
-        told.append(f"{'' if number else '[Shot 1] '}{f'At {_clock(at)}, ' if at else ''}{_kept(beat.description)}")
-        length = beat.duration or _BEAT_S
-        moments |= {name_key(write.image): at + (length if write.at is None else write.at) for write in beat.writes}
-        at += length
-    # A mention with no file behind it, such as an entity with no links, is words: its name and description, with no reference.
-    written = f.summary or f.instructions
-    said = {name_key(name) for text in (written, *(beat.description for beat in f.beats)) for name in MENTION.findall(text)}
-    bare = {name_key(read.name): read for read in op.reads if name_key(read.name) in said and not _has_media(read)}
-    described = [f"{spoken(f'<{read.name}>')[1:-1]}: {_kept(text)}" for read in bare.values() if (text := str(read.fields.get("description", "")).strip())]
-    summary, end = "\n".join(filter(None, (_kept(written), *described))), at or 15.0
-    prompt = "\n\n".join(filter(None, (summary and f"summary:\n{summary}", "detailed_description:\n" + "\n".join(told)))) if told else f"[Shot 1] {summary}"  # fmt: skip
-    prompt = MENTION.sub(lambda found: spoken(found[0])[1:-1] if name_key(found[1]) in bare else found[0], prompt)
-    warned += [f"<{read.name}> has a voice and no picture, and H3 takes a voice only beside a character's picture: it isn't sent"
-               for read in bare.values() if read.files_of("voice")]  # fmt: skip
-    reads = [read for read in op.reads if name_key(read.name) in said and _has_media(read)]
-    reads.sort(key=lambda read: not read.files_of("image"))
-    request: dict[str, Any] = {"prompt": spoken(prompt), "duration_s": end, "references": [_reference(read, warned) for read in reads]}
-    for key in ("style", "soundscape", "music", "aspect_ratio"):
-        if value := getattr(f, key) or options.pop(key, ""):
-            request[key] = str(value).strip()
-        options.pop(key, None)
-    request |= options
-    if f.resolution:
-        request["resolution"] = f.resolution
-    kept = _kept_take(op, op.keep, end, warned) if op.keep is not None else None
-    for field in ("first_frame", "last_frame"):
-        if (value := getattr(f, field)) and kept is None and (read := _read_named(op, value)) and read.files_of("image"):
-            request[field] = read.files_of("image")[0].sha256
-    if f.plate and (read := _read_named(op, f.plate.video)) and read.files_of("video"):
-        request["plate"] = {"video": read.files_of("video")[0].sha256} | ({"use_audio": True} if f.plate.use_audio else {})
-    if op.writes:
-        request["writes"] = [{"of": write.name.rpartition(".")[0] if write.name.rpartition(".")[2].isdigit() else write.name,
-                              "name": spoken(f"<{write.name}>")[1:-1], "at_s": moments.get(name_key(write.name), write.at_s),
-                              "description": str(write.fields.get("description", ""))}
-                             for write in op.writes]  # fmt: skip
-    if kept is not None:
-        request["continue_from"] = kept
-    return [Invocation(function="generate", input=request, warnings=warned)]
-
-
-def _upscale(op: VideoOperation) -> list[Invocation]:
-    """A shot's video taken up to `resolution`, from the text it was made from (Paul, 10-31), its names without brackets: the
-    re-render attaches no reference. No run at or above that size: this asset is what it reads."""
-    shot = next((read for read in op.reads if read.files_of("video")), None)
-    if shot is None:
-        raise Refuse(f"{op.asset}: {f'{op.fields.video} has no video yet: render it first' if op.fields.video else 'a `resolution` needs a `video` to take there, or a summary or beats to make one'}")
-    options, warned = op.known_options(_SHOT_OPTIONS)
-    video, wanted = shot.files_of("video")[0], op.fields.resolution or options.get("resolution")
-    if wanted and wanted[:-1].isdigit() and video.height and min(video.width or video.height, video.height) >= int(wanted[:-1]):
-        return []
-    said = [str(shot.fields.get("summary", "")).strip(), *(str(beat.get("description", "")).strip() for beat in shot.fields.get("beats", []))]
-    said += [f"{read.name}: {str(read.fields['description']).strip()}" for read in op.reads
-             if read is not shot and str(read.fields.get("description", "")).strip()]  # fmt: skip
-    text = "\n".join(line for line in said if line).replace("<", "").replace(">", "")
-    style = (op.fields.style or str(shot.fields.get("style", "")) or str(options.get("style", ""))).strip()
-    request: dict[str, Any] = {"video": video.sha256, "prompt": f"Style: {style.rstrip('.')}.\n\n{text}" if style else text}
-    if wanted:
-        request["resolution"] = wanted
-    if "latents" in shot.files and _made_here(shot):
-        request["latents"] = shot.files["latents"].sha256
-    return [Invocation(function="upscale", input=request | {key: value for key, value in options.items() if key in _UPSCALE_OPTIONS}, warnings=warned)]
+))  # fmt: skip
+app.entrypoint(upscale, emits_media=True, accelerator=False, node=Node(
+    name="upscale",
+    label="MiniMax H3 Upscale",
+    hide=["upscale", "preset"],
+    fill={"latents": "video.latents", "prompt": "video.text"},
+))  # fmt: skip

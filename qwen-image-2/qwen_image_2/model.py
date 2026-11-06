@@ -43,7 +43,7 @@ from transformers import (
 from transformers import initialization as transformer_init
 from transformers.modeling_utils import local_torch_dtype
 
-from cozy_runtime import fusion, rng, stepcache, tiles, vlm
+from cozy_runtime import fusion, rng, tiles, vlm
 from cozy_runtime.author import (
     Config,
     ConformanceError,
@@ -101,8 +101,6 @@ BLOCK = fusion.DiTBlock(
 VAE_DTYPE = torch.bfloat16
 #: The VAE's RMS norms in one kernel each, with the SiLU each residual block and each head applies
 #: after them; Diffusers computes them in F32 copies of every activation.
-#: The DiT's block stack for step caching (`stepcache`, `preset="fast"`).
-STACK = stepcache.Stack(QwenImage21Transformer2DModel, blocks="transformer_blocks", carried=("hidden_states",))
 VAE_NORM = fusion.ChannelNorm(
     QwenImage21RMS_norm,
     silu=(
@@ -259,7 +257,6 @@ class QwenImage21Model(
         vae = self.graph.components["vae"]
         installed = (
             fusion.install(plan, BLOCK, self.graph.components["transformer"]),
-            stepcache.install(plan, STACK, self.graph.components["transformer"]),
             fusion.install_norms(plan, VAE_NORM, self.graph.components["vae"]),
             fusion.install_lone_frame(plan, VAE_FRAME, vae.decoder, vae.post_quant_conv),
         )
@@ -349,16 +346,15 @@ class QwenImage21Model(
         reference_images: list[Any] | None = None,
         reference_latents: torch.Tensor | None = None,
         image_pad_mask: torch.Tensor | None = None,
-        cache: stepcache.Policy | None = None,
     ) -> Any:
-        """Text-to-image with an unpadded prompt runs the cached loop, under `cache`; edits and
+        """Text-to-image with an unpadded prompt runs the cached loop; edits and
         padded prompts run the Diffusers pipeline, uncached. `sigmas`: a distilled schedule (its
         length is `steps`), else the pipeline's uniform spacing."""
         cancel()
         if reference_latents is None and reference_images is None and mask is None:
             return self._denoise_cached(
                 embeds, width=width, height=height, steps=steps, seed=seed, on_step=on_step,
-                sigmas=sigmas, cache=cache,
+                sigmas=sigmas,
             )
         return self._denoise_eager(
             embeds,
@@ -385,10 +381,8 @@ class QwenImage21Model(
         seed: int,
         on_step: Callable[[int], None],
         sigmas: Sequence[float] | None = None,
-        cache: stepcache.Policy | None = None,
     ) -> Any:
-        """Extract step 0 eagerly, then steps ``1..N-1`` in cached mode as one `denoise_loop`,
-        its stack under `cache` (`STACK`) when the preset names one.
+        """Extract step 0 eagerly, then steps ``1..N-1`` in cached mode as one `denoise_loop`.
 
         The preparation mirrors `QwenImage21Pipeline.__call__` for the text-to-image case,
         reusing the pipeline's own `prepare_latents`/`calculate_shift`/`retrieve_timesteps` so
@@ -469,7 +463,7 @@ class QwenImage21Model(
         denoise_loop(
             _cached_step(transformer), range(1, steps), state=(latents,),
             inputs=(euler.ts, euler.dt, layout.rotary_emb, layout.modulation_mask, *prefix),
-            key=("qwen-image-2.1.cached/1", len(blocks)), on_step=on_step, cache=cache,
+            key=("qwen-image-2.1.cached/1", len(blocks)), on_step=on_step,
         )
         return latents
 

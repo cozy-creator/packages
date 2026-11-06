@@ -5,6 +5,8 @@ multimodal model. Decoding is greedy unless `temperature` is set; a sampled answ
 its `seed`, so the same request always gives the same answer, and the answer is memoized. The
 request and the model code are Runtime's shared Qwen-VL ones (`cozy_runtime.vlm`), as `qwen3.6`'s.
 
+`caption` says what a picture or a video shows, in its own question, for a project's Caption: `cozy run qwen3.5/caption --file images=./character.png`.
+
 Write the request in a file, `request.yaml`:
 
 ```yaml

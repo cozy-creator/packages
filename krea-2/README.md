@@ -26,10 +26,9 @@ cozy run krea-2/generate prompt='a red fox in fresh snow at golden hour' seed=7
 cozy run krea-2/generate_turbo --input request.yaml --lora <org/krea-2-lora>,0.8
 ```
 
-Fields: `prompt`, `aspect_ratio` (any `W:H`, default 1:1), `megapixels` (Raw 1, Turbo 4), `steps` (1–100),
-`guidance` (0–20; 0 runs no negative branch), `negative_prompt` (default empty, as Krea's) and `seed`
-(random when omitted, returned). Krea 2 makes images from text only: it takes no `pictures` (refused before upload), so a `<Name>` in its prompt stays as written, with a warning ([references](../docs/references.md)). It has no
-prompt upsampler, so `prompt_upsampling` is warned about and ignored.
+Fields: `prompt`, `aspect_ratio` (any `W:H`, default 1:1), `megapixels` (Raw 1, Turbo 4), `steps` (1–100) and
+`seed` (random when omitted, returned). `generate` also takes `guidance` (0–20; 0 runs no negative branch) and
+`negative_prompt` (default empty, as Krea's): Turbo samples without guidance. Krea 2 makes images from text only, so a `<Name>` in its prompt stays as written, with a warning ([references](../docs/references.md)).
 Unknown fields are dropped with a warning. The result is `image`, `width`, `height`, `seed` and `prompt`.
 
 Guidance is Krea's: `cond + g·(cond − uncond)`, so Krea's 3.5 is ComfyUI's cfg 4.5, and Turbo's 0 is

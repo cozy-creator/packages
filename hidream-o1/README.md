@@ -31,11 +31,10 @@ cozy run hidream-o1/generate_turbo prompt='A dog holds a sign that says "HiDream
 cozy run hidream-o1/generate prompt='remove the earphones' pictures:='[{"name": "Photo", "image": "photo.jpg"}]'
 ```
 
-Inputs are the shared image request, the same in every image package: `prompt`, `pictures`, `aspect_ratio` (any W:H), `megapixels` (any size, 1024² pixels each), `steps`, `guidance`, `negative_prompt`, `seed` and `prompt_upsampling`. `pictures` are up to 10, and a picture's `box` places it (below). HiDream-O1 has no words of its own for its references (upstream's prompts describe them, "the provided clothing"), so a `<Name>` mention reads as the name itself ([references](../docs/references.md)). HiDream-O1 adds `guidance_interval` (below). Left out, each
+Inputs: `prompt`, `pictures`, `aspect_ratio` (any W:H), `megapixels` (any size, 1024² pixels each), `seed`; `generate` also takes `steps`, `guidance`, `negative_prompt` and `guidance_interval` (below). `pictures` are up to 10, and a picture's `box` places it (below). HiDream-O1 has no words of its own for its references (upstream's prompts describe them, "the provided clothing"), so a `<Name>` mention reads as the name itself ([references](../docs/references.md)). Left out, each
 is the model's default: 50 steps (1–200) at guidance 5.0 (1–20) for `generate`, upstream's unconditional
 caption (a single space) as the negative prompt, and a random seed. `generate_turbo` runs its 28 distilled
-steps and ignores `guidance`, `negative_prompt` and `guidance_interval` with a warning; neither has a prompt
-upsampler. Unknown fields are dropped with a warning.
+steps without CFG. Unknown fields are dropped with a warning.
 
 The result has the image, its `width` and `height`, the `seed`, and `prompt`: the caption used.
 

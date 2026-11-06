@@ -2,28 +2,28 @@
 
 from __future__ import annotations
 
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any
 
 import msgspec
 import torch
-from cozy_runtime import stepcache
 from cozy_runtime.author import (
-    OutputError,
     Adjustments,
     App,
+    AspectRatio,
     Context,
-    Invocation,
-    Picture,
-    PictureOperation,
-    ImageRequest,
+    ImageFile,
+    ImagePreparation,
     ImageResult,
     Memoize,
+    Node,
+    OutputError,
     Outputs,
+    Picture,
+    PictureRequest,
     Sizes,
     Telemetry,
-    held,
     name_label,
-    spoken,
+    render,
 )
 from PIL import Image
 
@@ -34,31 +34,31 @@ app = App()
 
 #: The pixel counts Qwen serves: upstream's 1 MP default to its native 2K (4 MP), the default without
 #: references; upstream's rotary table centres at most 2048 tokens of 16 px on an axis.
-SIZES = Sizes((1.0, 4.0), (32, 2048 * 16), 32, "the 1-4 MP Qwen-Image serves")
-#: Steps without a checkpoint schedule (Turbo names its own 8), and the most admitted.
-_STEPS, _MAX_STEPS = 40, 100
+MIN_MEGAPIXELS = 1.0
+MAX_MEGAPIXELS = 4.0
+SIZES = Sizes((MIN_MEGAPIXELS, MAX_MEGAPIXELS), (32, 2048 * 16), 32, "the 1-4 MP Qwen-Image serves")
+#: The full model's steps; Turbo's are its schedule's.
+_STEPS = 40
 #: Qwen-Image-2.1-Turbo's distilled schedule, its `model_index.json` `sample_sigmas`
 #: (hf://Qwen/Qwen-Image-2.1-Turbo@fc13ba19). The Runtime's model config holds components only,
 #: so the function, not the checkpoint, names the regime.
 TURBO_SIGMAS = (1.0, 0.978453, 0.95418, 0.926626, 0.89508, 0.845148, 0.704534, 0.414568)
 
 
-class GenerateInput(ImageRequest):
-    pictures: Annotated[list[Picture], msgspec.Meta(max_length=10)] = msgspec.field(
+class Mentioned(Picture, kw_only=True):
+    """A picture, or with no file an asset that's only words, which its `description` gives the model."""
+
+    image: Annotated[ImageFile, ImagePreparation(max_pixels=16 << 20)] | None = None
+    description: str = ""
+
+
+class GenerateInput(PictureRequest):
+    pictures: Annotated[list[Mentioned], msgspec.Meta(max_length=10)] = msgspec.field(
         default_factory=list
     )
-    #: Speed against fidelity: `fast` reuses the transformer's cached residual on steps that
-    #: change it little (`CACHE`); `quality` and `balanced` run every step.
-    preset: Literal["quality", "balanced", "fast"] = "balanced"
-
-
-#: The text-to-image denoise's step cache per preset (`stepcache`): FirstBlockCache 0.08 for
-#: `fast`, NVIDIA sol-engine's aggressive threshold; none otherwise.
-CACHE: dict[str, stepcache.Policy | None] = {
-    "quality": None,
-    "balanced": None,
-    "fast": stepcache.FirstBlockCache(0.08),
-}
+    #: Bounds for a box, not refusals: past them `_generate` holds it and says so.
+    aspect_ratio: Annotated[AspectRatio | None, msgspec.Meta(extra={"min": 0.0625, "max": 16})] = None
+    megapixels: Annotated[float | None, msgspec.Meta(extra={"min": MIN_MEGAPIXELS, "max": MAX_MEGAPIXELS})] = None
 
 
 def label(n: int, picture: Picture) -> str:
@@ -94,6 +94,13 @@ def decoded_image(decoded: Any) -> Image.Image:
     return Image.fromarray(pixels.contiguous().cpu().numpy())
 
 
+def _said(payload: GenerateInput) -> str:
+    """Its text, and what each picture it mentions is: a mention reads as `<image3>` alone, and with no words for it a third picture was
+    dropped in 3 of 3 seeds (runs 27130, 27161, 27174), kept with them (27190, 27200)."""
+    words = "\n".join(f"<{picture.name}>: {picture.description.strip()}" for picture in payload.pictures if picture.description.strip())
+    return "\n\n".join(filter(None, (payload.prompt.strip(), words)))
+
+
 def _generate(
     ctx: Context,
     payload: GenerateInput,
@@ -101,20 +108,14 @@ def _generate(
     out: Outputs,
     tel: Telemetry,
     adj: Adjustments,
+    steps: int,
     sigmas: tuple[float, ...] | None,
 ) -> ImageResult:
     """Both functions' body: `sigmas` is the distilled schedule (`generate_turbo`), else the base
     model's uniform spacing."""
-    payload.ignored(adj, "guidance", "negative_prompt", "prompt_upsampling",
-                    reason="Qwen-Image-2.1 samples without CFG and has no prompt upsampler")
-    payload.unplaced(adj, "Qwen-Image-2.1 has no layout control")
-    prompt = payload.rendered(adj, label if len(payload.pictures) > 1 else name_label)
-    if sigmas:
-        steps = len(sigmas)
-        if payload.steps not in (None, steps):
-            adj.clamp("steps", payload.steps, steps, "Turbo's own distilled schedule")
-    else:
-        steps = held(adj, "steps", payload.steps or _STEPS, 1, _MAX_STEPS)
+    said = _said(payload)
+    payload = msgspec.structs.replace(payload, pictures=[picture for picture in payload.pictures if picture.image is not None])
+    prompt = render(said, payload.pictures, label if len(payload.pictures) > 1 else name_label, adj=adj, listed="pictures")
     tel.log("sampling", regime="turbo" if sigmas else "base", steps=steps,
             schedule="distilled sigmas" if sigmas else "uniform, dynamic shift")
     seed = payload.drawn_seed()
@@ -156,7 +157,6 @@ def _generate(
             reference_images=reference_images,
             reference_latents=reference_latents,
             image_pad_mask=image_pad_mask,
-            cache=CACHE[payload.preset],
         )
     ctx.raise_if_cancelled()
     with tel.stage("decoding image", overall_range=(0.9, 0.98)):
@@ -176,6 +176,7 @@ _MEMO = ("qwen_image_2", "qwen_image_2.model")
     defaults={"model": "qwen/qwen-image-2.1@0.1.0"},
     memoize=Memoize(requires=["seed"]),
     memo_dependencies=_MEMO,
+    node=Node(name="image", label="Qwen Image 2", show=["megapixels"]),
 )
 def generate(
     ctx: Context,
@@ -186,13 +187,14 @@ def generate(
     adj: Adjustments,
 ) -> ImageResult:
     """Qwen-Image-2.1, the 40-step base model."""
-    return _generate(ctx, payload, model, out, tel, adj, None)
+    return _generate(ctx, payload, model, out, tel, adj, _STEPS, None)
 
 
 @app.entrypoint(
     defaults={"model": "qwen/qwen-image-2.1-turbo@0.1.1"},
     memoize=Memoize(requires=["seed"]),
     memo_dependencies=_MEMO,
+    node=Node(name="image", label="Qwen Image 2", variant="Turbo", show=["megapixels"]),
 )
 def generate_turbo(
     ctx: Context,
@@ -203,39 +205,4 @@ def generate_turbo(
     adj: Adjustments,
 ) -> ImageResult:
     """Qwen-Image-2.1-Turbo: the same inputs, on its 8-step distilled schedule."""
-    return _generate(ctx, payload, model, out, tel, adj, TURBO_SIGMAS)
-
-
-# --- project adapter: an image asset, in the words this model was tuned by eye on (cl-726) ------
-
-
-#: `GenerateInput.pictures`' most.
-_MAX_PICTURES = 10
-#: What a project's `render` may set: `turbo` picks the function, `style` and `aspect_ratio` stand where the asset writes none,
-#: and the rest are the function's own fields. Transparency is asked for in the prompt (README).
-_OPTIONS = ("seed", "megapixels", "steps", "guidance", "negative_prompt", "prompt_upsampling", "preset")
-
-
-@app.project_adapter("image")
-def adapt_image(op: PictureOperation) -> list[Invocation]:
-    """The style, what it says, and what each picture it mentions is: a mention reads as `<image3>` alone, and with no words for it a
-    third picture was dropped in 3 of 3 seeds (runs 27130, 27161, 27174), kept with them (27190, 27200). Pictures are all of what it
-    mentions: `<kyogre>` means a read's first, and the rest are `<kyogre 2>`, `<kyogre 3>`."""
-    f = op.fields
-    options, warned = op.known_options(("turbo", "style", "aspect_ratio", *_OPTIONS))
-    said = [f.description.strip(), f.instructions.strip(), "\n".join(
-        f"<{read.name}>: {text}" for read in op.reads if (text := str(read.fields.get("description", "")).strip()))]  # fmt: skip
-    prompt = "\n\n".join(filter(None, said))
-    if style := (f.style or str(options.get("style", ""))).strip():
-        prompt = f"Style: {style.rstrip('.')}.\n\n{prompt}"
-    pictures = [{"name": f"{name} {number + 1}" if number else name, "image": picture.sha256}
-                for read in op.reads for name in (spoken(f"<{read.name}>")[1:-1],)
-                for number, picture in enumerate(read.files_of("image"))]  # fmt: skip
-    if len(pictures) > _MAX_PICTURES:
-        warned.append(f"{op.asset} reads {len(pictures)} pictures and Qwen takes {_MAX_PICTURES}: it uses the first {_MAX_PICTURES}")
-        del pictures[_MAX_PICTURES:]
-    request: dict[str, Any] = {"prompt": spoken(prompt), "pictures": pictures}
-    if aspect_ratio := f.aspect_ratio or options.get("aspect_ratio"):
-        request["aspect_ratio"] = aspect_ratio
-    request |= {key: value for key, value in options.items() if key in _OPTIONS}
-    return [Invocation(function="generate_turbo" if options.get("turbo") else "generate", input=request, warnings=warned)]
+    return _generate(ctx, payload, model, out, tel, adj, len(TURBO_SIGMAS), TURBO_SIGMAS)

@@ -30,11 +30,10 @@ cozy run hunyuan-image-3/generate_turbo prompt='Put <Cat> in a tiny astronaut su
   pictures:='[{"name": "Cat", "image": "cat.png"}]'
 ```
 
-The request and result are the shared image interface (`ImageRequest`, `ImageResult`): `prompt`,
-`pictures` (0–3, in order), `aspect_ratio` (any `W:H`; unset, the model picks), `megapixels`, `steps`,
-`guidance`, `seed` (random when omitted, returned) and `prompt_upsampling` (unset: on). `negative_prompt` and
-a picture's `box` warn and are ignored: the model's unconditional branch is the prompt dropped, and it has no
-layout control. A `<Name>` mention of a picture reads as 图1, 图2, 图3, the way every prompt Tencent documents
+Inputs: `prompt`, `pictures` (0–3, in order), `aspect_ratio` (any `W:H`; unset, the model picks), `steps`,
+`guidance`, `seed` (random when omitted, returned) and `prompt_upsampling` (unset: on). There's no
+`megapixels`, since the model makes about 1 MP, and no `negative_prompt`, since its unconditional branch is
+the prompt dropped. A `<Name>` mention of a picture reads as 图1, 图2, 图3, the way every prompt Tencent documents
 names them ([references](../docs/references.md)); the images precede the prompt with no label of their own. The result's `prompt` is the caption the image was made from: the model's rewrite when it thought.
 
 ## Sizes
@@ -43,8 +42,8 @@ The model makes about 1 MP, at Tencent's sizes for `image_base_size` 1024: 33 ra
 64 px step (width + height = 2048), plus 1024×768, 1280×720 and their portraits. With no `aspect_ratio` the
 model picks the size itself, as Tencent's `image_size="auto"`: after its recaption when `prompt_upsampling` is
 on, else in one greedy step over its size tokens.
-An `aspect_ratio` is served at the nearest size (Tencent's `get_target_size`); one past 1:4 or 4:1, or a
-`megapixels` more than 10% off the size made, is reported as a `clamp` adjustment. Tencent's edit postprocess,
+An `aspect_ratio` is served at the nearest size (Tencent's `get_target_size`); one past 1:4 or 4:1 is reported
+as a `clamp` adjustment. Tencent's edit postprocess,
 which resizes the output to the reference's exact ratio, is not applied: the output is the model's own size.
 
 ## Prompt upsampling

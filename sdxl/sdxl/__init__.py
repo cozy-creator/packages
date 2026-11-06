@@ -33,7 +33,7 @@ import functools
 import json
 import math
 from pathlib import Path
-from typing import Annotated, Any
+from typing import Any
 
 import msgspec
 import torch
@@ -47,19 +47,21 @@ from cozy_runtime.author import (
     App,
     Context,
     EncodingRule,
+    Guidance,
     ImageFrame,
-    Picture,
     ImageRequest,
     ImageResult,
     Loader,
     Memoize,
     Model,
+    NegativePrompt,
     OutputError,
     Outputs,
     Preflight,
     QuantizationPlan,
     Recipe,
     Sizes,
+    Steps,
     Telemetry,
     denoise_loop,
     held,
@@ -95,10 +97,9 @@ _NATIVE = 1.5
 
 
 class GenerateInput(ImageRequest):
-    #: SDXL makes images from text only.
-    pictures: Annotated[list[Picture], msgspec.Meta(max_length=0)] = msgspec.field(
-        default_factory=list
-    )
+    steps: Steps = None
+    guidance: Guidance = None
+    negative_prompt: NegativePrompt = None
     #: None runs HiDiffusion where base SDXL cannot go: above 1 MP. An explicit choice always
     #: runs, and the run warns where it is known to hurt.
     hidiffusion: bool | None = None
@@ -627,7 +628,6 @@ def generate(
     Tokenize, encode, denoise, decode, encode the WebP."""
     ctx.plan({"text_encoder", "text_encoder_2"}, "unet", "vae")
     hold_decode_dtype(model.pipe.components["vae"], tel)
-    payload.ignored(adj, "prompt_upsampling", reason="SDXL has no prompt upsampler")
     prompt = payload.rendered(adj)
     adj.extend(facts.adjustments)
     seed = payload.drawn_seed()

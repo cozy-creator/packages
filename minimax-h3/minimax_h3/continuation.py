@@ -40,12 +40,18 @@ AUDIO_TICKS = 40
 AUDIO_TICKS_PER_S = 40
 MAX_FRAMES = 362
 MAX_CONTEXT_BYTES = 16 << 20
-MAX_CONTEXT_PIXELS = 1344 * 768
+#: A canvas's area, with room for its sides rounding up to the 32 px grid past H3's 1344x768 (a 1280x2784 picture).
+MAX_CONTEXT_PIXELS = 1344 * 768 * 5 // 4
 CONTEXT_SCHEMA = "cozy.minimax-h3.av-context/3"
 
 
 def _refuse(message: str) -> NoReturn:
     raise InvalidRequest(message, code="h3_continuation", fields=["context"])
+
+
+def carries(height: int, width: int) -> bool:
+    """Whether a context can hold a canvas of this size."""
+    return min(height, width) >= 32 and not height % 32 and not width % 32 and height * width <= MAX_CONTEXT_PIXELS
 
 
 def video_tokens(frames: int) -> int:
@@ -200,10 +206,7 @@ class AVContext:
                 or shape[:2] != (1, 24)
                 or shape[2] not in {video_tokens(n) for n in CONTEXT_FRAMES}
                 or canvas is None
-                or min(canvas) < 32
-                or canvas[0] % 32
-                or canvas[1] % 32
-                or canvas[0] * canvas[1] > MAX_CONTEXT_PIXELS
+                or not carries(*canvas)
             ):
                 _refuse("context picture is outside the qualified H3 window or canvas")
         if self.audio is not None and tuple(self.audio.shape) != (2 * AUDIO_TICKS, 32):

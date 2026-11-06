@@ -32,11 +32,11 @@ cozy run ideogram-4/generate prompt='A bakery storefront at dawn' \
   'regions=[{"box":[0.15,0.05,0.85,0.25],"prompt":"hand-painted gold sign lettering","text":"MAISON LUNE"}]'
 ```
 
-Inputs are the shared image request: `prompt`, `aspect_ratio` (any `W:H`), `megapixels`, `steps`,
+Inputs: `prompt`, `aspect_ratio` (any `W:H`), `megapixels`, `steps`,
 `guidance`, `seed` (random when omitted, returned) and `prompt_upsampling` (default on). Text to image
 defaults to 1:1 at 1 MP (1024×1024, the reference CLI's); sizes are held to 256–2048 px sides, at most
-6:1 and 4 MP, on the 16 px grid, and anything outside is a `clamp` adjustment. Ideogram 4 takes no `pictures` (refused before upload), so a `<Name>` in its prompt stays as written, with a warning ([references](../docs/references.md)). `negative_prompt` is ignored
-with a warning (the unconditional DiT reads no text). Outputs: `image` (PNG), `width`, `height`, `seed`
+6:1 and 4 MP, on the 16 px grid, and anything outside is a `clamp` adjustment. Ideogram 4 is text to image only, so a `<Name>` in its prompt stays as written, with a warning ([references](../docs/references.md)). It has no
+`negative_prompt`: its unconditional DiT reads no text. Outputs: `image` (PNG), `width`, `height`, `seed`
 and `prompt`, the caption the image was made from.
 
 ## Captions and regions

@@ -10,15 +10,17 @@ from cozy_runtime.author import (
     Adjustments,
     App,
     Context,
+    Guidance,
     ImageFrame,
-    Picture,
     ImageRequest,
     ImageResult,
     Memoize,
+    NegativePrompt,
     Outputs,
     QuantizationPlan,
     Recipe,
     Sizes,
+    Steps,
     Telemetry,
     held,
 )
@@ -53,10 +55,9 @@ CARD_NEGATIVE = (
 
 
 class GenerateInput(ImageRequest):
-    #: Anima makes images from text only.
-    pictures: Annotated[list[Picture], msgspec.Meta(max_length=0)] = msgspec.field(
-        default_factory=list
-    )
+    steps: Steps = None
+    guidance: Guidance = None
+    negative_prompt: NegativePrompt = None
     #: CFG interval (cr-086 arm 1, Kynkäänniemi et al., NeurIPS 2024): guidance helps only
     #: in a middle band of the noise schedule, so the uncond forward is skipped outside
     #: [start, stop) of the step fraction. (0, 1) is full-range CFG. The banked default is
@@ -99,7 +100,6 @@ def generate(
     model.hold_vae(tel)
     # Both prompt branches are conditioned before the repeated transformer phase.
     ctx.plan("text_encoder", "text_conditioner", "transformer", "vae")
-    payload.ignored(adj, "prompt_upsampling", reason="Anima has no prompt upsampler")
     prompt = payload.rendered(adj)
     width, height = payload.size(adj, None, SIZES, megapixels=SIZES.megapixels[1])
     steps = held(adj, "steps", payload.steps or _STEPS[0], *_STEPS[1:])

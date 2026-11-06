@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from typing import Annotated, Any
+from typing import Any
 
 import msgspec
 import numpy as np
@@ -12,13 +12,14 @@ from cozy_runtime.author import (
     Adjustments,
     App,
     Context,
-    Picture,
+    Guidance,
     ImageRequest,
     ImageResult,
     Memoize,
     Outputs,
     Region,
     Sizes,
+    Steps,
     Telemetry,
     UnsupportedInput,
     corners,
@@ -38,8 +39,9 @@ SIZES = Sizes((256 * 256 / MEGAPIXEL, 4.0), (256, 2048), PATCH, "Ideogram 4 serv
 STEPS, GUIDANCE = 48, 7.0
 
 class GenerateInput(ImageRequest):
-    #: Ideogram 4 is text to image only.
-    pictures: Annotated[list[Picture], msgspec.Meta(max_length=0)] = msgspec.field(default_factory=list)
+    steps: Steps = None
+    guidance: Guidance = None
+    prompt_upsampling: bool | None = None
     #: Elements placed by box, in order: an object (`prompt`), or rendered text (`text`, styled as `prompt` says).
     regions: list[Region] = msgspec.field(default_factory=list)
 
@@ -122,7 +124,6 @@ def generate(ctx: Context, payload: GenerateInput, model: Ideogram4, text_encode
 
     Guidance is 3 on the last steps; the upsampler expands a prompt into the caption."""
     model.hold_vae(tel)
-    payload.ignored(adj, "negative_prompt", reason="Ideogram 4's unconditional DiT reads no text")
     prompt = payload.rendered(adj)
     steps = held(adj, "steps", payload.steps or STEPS, 1, 200)
     weight = held(adj, "guidance", GUIDANCE if payload.guidance is None else payload.guidance, 1.0, 20.0)
