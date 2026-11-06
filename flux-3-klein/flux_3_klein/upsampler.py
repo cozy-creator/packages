@@ -17,7 +17,7 @@ import io
 import json
 import math
 import re
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from importlib.resources import files
 from typing import Any
 
@@ -25,8 +25,13 @@ import torch
 from cozy_runtime import lm, vlm
 from cozy_runtime.author import Config, Loader, Model, UnsupportedInput, uses_components
 from PIL import Image, ImageOps
+from transformers import AutoConfig
+from transformers.initialization import no_init_weights
+from transformers.models.qwen3_5 import modeling_qwen3_5
 
 COMPONENT = "model"
+#: The drafter's component in Qwen3.5-9B's lane; only its MTP head (`mtp.*`) is built.
+DRAFT = "model"
 MAX_NEW_TOKENS = 3584
 MAX_REFERENCES = 10
 PRESENCE_PENALTY = {"t2i": 1.5, "i2i": 0.0}
@@ -181,6 +186,30 @@ def reconcile(text: str, locked: list[Row]) -> str:
         if added is not None and added["id"] not in {r["id"] for r in out}:
             out.append(added)
     return with_table(caption, out)
+
+
+class DrafterGraph:
+    def __init__(self, config: Config) -> None:
+        # The head-only lane keeps Qwen3.5-9B's config (`drafter_head`).
+        with no_init_weights():
+            head = lm.Draft(AutoConfig.for_model(**config.mapping()), modeling_qwen3_5)
+        self.components: dict[str, torch.nn.Module] = {DRAFT: head.to(torch.bfloat16).eval()}
+
+
+class Drafter(Model[DrafterGraph], encoded_leaves="accept"):
+    """Qwen3.5-9B's multi-token-prediction head (BFL's upsampler is that model fine-tuned, its
+    head left out). The upsampler drafts tokens with it and keeps the ones its own decode
+    agrees with: ~1.9 tokens a step."""
+
+    graph: DrafterGraph
+
+    def load(self, loader: Loader) -> None:
+        self.graph = loader.construct(DrafterGraph, factory=DrafterGraph)
+
+    @uses_components(DRAFT)
+    def drafting(self, body: Callable[[], str]) -> str:
+        with lm.drafting(self.graph.components[DRAFT]):
+            return body()
 
 
 class UpsamplerGraph:
