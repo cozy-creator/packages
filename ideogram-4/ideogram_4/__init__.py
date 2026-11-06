@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from typing import Any
+from typing import Annotated, Any
 
 import msgspec
 import numpy as np
@@ -11,13 +11,17 @@ from cozy_runtime.author import (
     MEGAPIXEL,
     Adjustments,
     App,
+    AspectRatio,
     Context,
     Guidance,
     ImageRequest,
     ImageResult,
     Memoize,
     Outputs,
+    Range,
+    Ratios,
     Region,
+    Seed,
     Sizes,
     Steps,
     Telemetry,
@@ -111,8 +115,7 @@ def refusal_card(image: Any) -> bool:
 
 # The upsampler is built and fetched only for a plain prompt with `prompt_upsampling` on. Model
 # parameters are in name order: Runtime refuses a binding set whose paths are not sorted.
-@app.tool(
-    label="Ideogram 4",
+@app.entrypoint(
     defaults={"model": "ideogram-ai/ideogram-4@0.1.0", "text_encoder": "qwen/qwen3-vl-8b-instruct@0.1.1",
               "upsampler": "qwen/qwen3-vl-8b-instruct@0.1.1"},
     components={"model": ("transformer", "unconditional_transformer", "vae"), "text_encoder": ("model",),
@@ -153,3 +156,29 @@ def generate(ctx: Context, payload: GenerateInput, model: Ideogram4, text_encode
     with tel.stage("saving image", overall_range=(0.99, 1.0)):
         asset = out.save_image(image, format="png")
     return ImageResult(asset, width, height, seed, written)
+
+
+class ImageBox(msgspec.Struct, kw_only=True):
+    #: `generate`'s prompt, as words, or a JSON caption.
+    instructions: str = ""
+    #: `generate`, through `ImageRequest.size`; held to 1:6 through 6:1.
+    aspect_ratio: Annotated[AspectRatio, Ratios(min=1 / 6, max=6)] | None = None
+    #: `generate`, through `SIZES.pixels`: 256² to 4 MP.
+    megapixels: Annotated[float, Range(0.0625, 4.0, unit="MP")] | None = None
+    #: `caption`: Auto or on has the upsampler write a plain prompt's caption.
+    prompt_upsampling: bool | None = None
+    seed: Seed | None = None
+
+
+@app.tool(label="Ideogram 4", named="image",
+          defaults={"model": "ideogram-ai/ideogram-4@0.1.0", "text_encoder": "qwen/qwen3-vl-8b-instruct@0.1.1",
+                    "upsampler": "qwen/qwen3-vl-8b-instruct@0.1.1"},
+          components={"model": ("transformer", "unconditional_transformer", "vae"), "text_encoder": ("model",),
+                      "upsampler": ("model",)},
+          on_demand=("upsampler",), memoize=Memoize(requires=["seed"]))  # fmt: skip
+def image(ctx: Context, payload: ImageBox, model: Ideogram4, text_encoder: QwenEncoder, upsampler: QwenUpsampler,
+          out: Outputs, tel: Telemetry, adj: Adjustments) -> ImageResult:
+    """Ideogram 4 on a canvas: `generate` from the box."""
+    request = GenerateInput(prompt=payload.instructions, aspect_ratio=payload.aspect_ratio, megapixels=payload.megapixels,
+                            seed=payload.seed, prompt_upsampling=payload.prompt_upsampling)  # fmt: skip
+    return generate(ctx, request, model, text_encoder, upsampler, out, tel, adj)

@@ -6,6 +6,8 @@ conditional one reads the caption beside the image tokens, a separate unconditio
 tokens alone, and both run every step ("asymmetric CFG"). The text encoder is a frozen
 Qwen3-VL-8B-Instruct (13 of its layers' hidden states, concatenated); the VAE is FLUX.2's.
 
+`image` is the canvas tool, its prompt `instructions`: `aspect_ratio`, `megapixels`, `prompt_upsampling` and `seed`.
+
 | function | checkpoints | default steps | guidance |
 | --- | --- | --- | --- |
 | `generate` | `ideogram-ai/ideogram-4@0.1.0`, text encoder `qwen/qwen3-vl-8b-instruct@0.1.1` (int8) | 48 | 7, then 3 on the last `ceil(steps/16)` |

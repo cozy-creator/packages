@@ -9,6 +9,7 @@ import torch
 from cozy_runtime.author import (
     Adjustments,
     App,
+    AspectRatio,
     Context,
     Guidance,
     ImageFrame,
@@ -18,7 +19,10 @@ from cozy_runtime.author import (
     NegativePrompt,
     Outputs,
     QuantizationPlan,
+    Range,
+    Ratios,
     Recipe,
+    Seed,
     Sizes,
     Steps,
     Telemetry,
@@ -88,7 +92,7 @@ def warmup() -> None:
     `import anima` already paid the cost and nothing is left to defer."""
 
 
-@app.tool(label="Anima", defaults={"model": "circlestone-labs/anima@1.0.0"}, memoize=Memoize(requires=["seed"]))
+@app.entrypoint(defaults={"model": "circlestone-labs/anima@1.0.0"}, memoize=Memoize(requires=["seed"]))
 def generate(
     ctx: Context,
     payload: GenerateInput,
@@ -177,3 +181,23 @@ INT8 = Recipe(
         output_precision="preserve",
     ),
 )
+
+
+class ImageBox(msgspec.Struct, kw_only=True):
+    #: `generate`'s prompt, as words.
+    instructions: str = ""
+    #: `generate`, through `ImageRequest.size`; held to 1:16 through 16:1.
+    aspect_ratio: Annotated[AspectRatio, Ratios(min=1 / 16, max=16)] | None = None
+    #: `generate`, through `SIZES.pixels`: Anima's 1 MP training size to its 1536 class.
+    megapixels: Annotated[float, Range(1.0, 2.25, unit="MP")] | None = None
+    #: `generate`: unset, the model card's.
+    negative_prompt: str | None = None
+    seed: Seed | None = None
+
+
+@app.tool(label="Anima", named="image", defaults={"model": "circlestone-labs/anima@1.0.0"}, memoize=Memoize(requires=["seed"]))
+def image(ctx: Context, payload: ImageBox, model: AnimaModel, out: Outputs, tel: Telemetry, adj: Adjustments) -> ImageResult:
+    """Anima on a canvas: `generate` from the box."""
+    request = GenerateInput(prompt=payload.instructions, aspect_ratio=payload.aspect_ratio, megapixels=payload.megapixels,
+                            seed=payload.seed, negative_prompt=payload.negative_prompt)  # fmt: skip
+    return generate(ctx, request, model, out, tel, adj)

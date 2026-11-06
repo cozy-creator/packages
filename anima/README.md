@@ -3,6 +3,8 @@
 `generate` makes one anime-style image from a text prompt with Anima Base 1.0. The model's
 licence is non-commercial.
 
+`image` is the canvas tool, its prompt `instructions`: `aspect_ratio`, `megapixels`, `negative_prompt` and `seed`.
+
 The model card's quality tags open the prompt; the package adds nothing to it:
 
 Write the request in a file, `request.yaml`:

@@ -4,6 +4,8 @@ OpenMOSS's MOSS-Image, a text-to-image model known for rendering text, reading l
 4,096 tokens) and placing objects and text in boxes. It is a 5B single-stream DiT over Qwen3.5-9B's last
 hidden state, decoded by FLUX.2's VAE with its small decoder.
 
+`image` is the canvas tool, its prompt `instructions`: `aspect_ratio`, `megapixels`, `negative_prompt` and `seed`.
+
 | function | checkpoint | default steps | guidance |
 | --- | --- | --- | --- |
 | `generate` | MOSS-Image-SFT | 50 | 3.0 (CFG; the negative branch skips block 22) |

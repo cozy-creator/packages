@@ -10,6 +10,7 @@ import msgspec
 from cozy_runtime.author import (
     Adjustments,
     App,
+    AspectRatio,
     Context,
     Guidance,
     ImageRequest,
@@ -17,7 +18,10 @@ from cozy_runtime.author import (
     Memoize,
     NegativePrompt,
     Outputs,
+    Range,
+    Ratios,
     Region,
+    Seed,
     Sizes,
     Steps,
     Telemetry,
@@ -73,9 +77,8 @@ def layout_prompt(prompt: str, regions: list[Region] | None, width: int, height:
 _MEMO = ("moss_image", "moss_image.model")
 
 
-@app.tool(label="MOSS-Image", defaults={"model": "openmoss-team/moss-image@0.1.0"},
-          components={"model": ("transformer", "text_encoder", "vae")}, memoize=Memoize(requires=["seed"]),
-          memo_dependencies=_MEMO)
+@app.entrypoint(defaults={"model": "openmoss-team/moss-image@0.1.0"}, components={"model": ("transformer", "text_encoder", "vae")},
+                memoize=Memoize(requires=["seed"]), memo_dependencies=_MEMO)
 def generate(ctx: Context, payload: GenerateInput, model: MossImage, out: Outputs, tel: Telemetry,
              adj: Adjustments) -> ImageResult:
     """MOSS-Image SFT, 50 Euler steps at CFG 3, with `regions` laid out as upstream's layout JSON.
@@ -104,3 +107,25 @@ def generate(ctx: Context, payload: GenerateInput, model: MossImage, out: Output
     with tel.stage("saving image", overall_range=(0.99, 1.0)):
         asset = out.save_image(image, format="png")
     return ImageResult(asset, width, height, seed, prompt)
+
+
+class ImageBox(msgspec.Struct, kw_only=True):
+    #: `generate`'s prompt, as words.
+    instructions: str = ""
+    #: `generate`, through `ImageRequest.size`; held to 1:16 through 16:1.
+    aspect_ratio: Annotated[AspectRatio, Ratios(min=1 / 16, max=16)] | None = None
+    #: `generate`, through `SIZES.pixels`: 0.25 to 4 MP.
+    megapixels: Annotated[float, Range(0.25, 4.0, unit="MP")] | None = None
+    #: `generate`'s negative branch, encoded only with guidance above 1.
+    negative_prompt: str | None = None
+    seed: Seed | None = None
+
+
+@app.tool(label="MOSS-Image", named="image", defaults={"model": "openmoss-team/moss-image@0.1.0"},
+          components={"model": ("transformer", "text_encoder", "vae")}, memoize=Memoize(requires=["seed"]),
+          memo_dependencies=_MEMO)  # fmt: skip
+def image(ctx: Context, payload: ImageBox, model: MossImage, out: Outputs, tel: Telemetry, adj: Adjustments) -> ImageResult:
+    """MOSS-Image on a canvas: `generate` from the box."""
+    request = GenerateInput(prompt=payload.instructions, aspect_ratio=payload.aspect_ratio, megapixels=payload.megapixels,
+                            seed=payload.seed, negative_prompt=payload.negative_prompt)  # fmt: skip
+    return generate(ctx, request, model, out, tel, adj)

@@ -33,7 +33,7 @@ import functools
 import json
 import math
 from pathlib import Path
-from typing import Any
+from typing import Annotated, Any
 
 import msgspec
 import torch
@@ -45,6 +45,7 @@ from cozy_runtime.author import (
     AdjustmentRows,
     Adjustments,
     App,
+    AspectRatio,
     Context,
     EncodingRule,
     Guidance,
@@ -59,7 +60,10 @@ from cozy_runtime.author import (
     Outputs,
     Preflight,
     QuantizationPlan,
+    Range,
+    Ratios,
     Recipe,
+    Seed,
     Sizes,
     Steps,
     Telemetry,
@@ -610,8 +614,7 @@ def resolve_generate(payload: GenerateInput) -> GenerateFacts:
     )
 
 
-@app.tool(
-    label="SDXL",
+@app.entrypoint(
     defaults={"model": "stabilityai/sdxl@1.0.0"},
     memoize=Memoize(requires=["seed"]),
     preflight=resolve_generate,
@@ -664,6 +667,37 @@ def generate(
     tel.log("sampled", sampler="ddim eta=1.0" if hidiffusion_applied else "euler", steps=steps,
             guidance=guidance, classifier_free=classifier_free, hidiffusion=hidiffusion_applied)
     return ImageResult(asset, decoded_w, decoded_h, seed, prompt)
+
+
+class ImageBox(msgspec.Struct, kw_only=True):
+    #: `generate`'s prompt, as words.
+    instructions: str = ""
+    #: `resolve_generate`, held to SDXL's 1:4 through 4:1 buckets.
+    aspect_ratio: Annotated[AspectRatio, Ratios(min=1 / 4, max=4)] | None = None
+    #: `resolve_generate`: 1 to 8 MP, 16 at 1:1.
+    megapixels: Annotated[float, Range(1.0, 16.0, unit="MP")] | None = None
+    #: `_negative_prompt`.
+    negative_prompt: str | None = None
+    #: `resolve_generate`: Auto runs HiDiffusion above 1 MP.
+    hidiffusion: bool | None = None
+    seed: Seed | None = None
+
+
+def _request(box: ImageBox) -> GenerateInput:
+    return GenerateInput(prompt=box.instructions, aspect_ratio=box.aspect_ratio, megapixels=box.megapixels,
+                         seed=box.seed, negative_prompt=box.negative_prompt, hidiffusion=box.hidiffusion)
+
+
+def resolve_image(payload: ImageBox) -> GenerateFacts:
+    return resolve_generate(_request(payload))
+
+
+@app.tool(label="SDXL", named="image", defaults={"model": "stabilityai/sdxl@1.0.0"}, memoize=Memoize(requires=["seed"]),
+          preflight=resolve_image)  # fmt: skip
+def image(ctx: Context, payload: ImageBox, facts: Preflight[GenerateFacts], model: SdxlModel, out: Outputs,
+          tel: Telemetry, adj: Adjustments) -> ImageResult:
+    """SDXL on a canvas: `generate` from the box."""
+    return generate(ctx, _request(payload), facts, model, out, tel, adj)
 
 
 # ------------------------------------------------------------------ quantized lanes
