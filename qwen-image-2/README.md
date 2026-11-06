@@ -26,7 +26,14 @@ Each runs as upstream's `pe_core.py`: its own `system_prompt.txt`, thinking firs
 1.0, top-p 0.95, presence penalty 0 for edits and 1.5 for words; each picture over white at most 1 MP. Runtime's
 sampler has no top-k, so upstream's top-k 20 is not applied. The rewrite is sampled from the render's `seed`: a new
 render rewrites anew, and a given seed repeats its rewrite. The rewrite is the result's `prompt`, and the run's log has it with its
-seed and canvas. With no `aspect_ratio`, the enhancer's canvas is used, as upstream passes it to the renderer: its
+seed, canvas and token counts.
+
+Upstream lets the enhancer think for up to 24,000 tokens, which on a 4090 added about 69 s to a 5 s edit. Here its
+thought stops at 128 tokens and it answers, closed as Qwen3 closes a thinking budget, and an edit's rewrite is asked
+to stay within 80 words. That adds about 9 s to an edit and keeps the rewriter's gains: a designed scene for a new
+shot, and no props the new picture has no use for. It holds the person's clothes as often as Turbo alone does (3 of 6),
+where upstream's full thought held them 6 of 6. With no thought at all, the enhancer reasons in its answer and never
+gives one. With no `aspect_ratio`, the enhancer's canvas is used, as upstream passes it to the renderer: its
 `wh_ratio`, or the shape of the picture its `ratio_follow` names.
 
 `creativity` steers how far the rewrite goes beyond the words: `balanced` (the default) is Qwen's own rewrite;

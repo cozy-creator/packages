@@ -26,11 +26,10 @@ from cozy_runtime.author import (
     ratio_of,
     render,
 )
-from cozy_runtime.vlm import VisionLM
 from PIL import Image
 
 from .model import QwenImage21Model
-from .rewriter import Creativity, rewrite
+from .rewriter import Creativity, Enhancer, rewrite
 from . import quantize as quantize  # its recipes
 
 app = App()
@@ -114,23 +113,24 @@ def _upsampled(
     prompt: str,
     images: list[Image.Image],
     seed: int,
-    enhancer: VisionLM,
+    enhancer: Enhancer,
     tel: Telemetry,
     adj: Adjustments,
 ) -> tuple[GenerateInput, str]:
     """The request as Qwen's enhancer rewrites it, sampled from the render's `seed`, and the canvas it chose
     when the request names none (upstream passes `wh_ratio` and `ratio_follow` to the renderer)."""
     with tel.stage("upsampling prompt", overall_range=(0.0, 0.3)):
-        found, answer = rewrite(enhancer, prompt, images, payload.creativity, seed,
-                                lambda done: tel.progress(done, stage="upsampling prompt"))
+        found, answer, thought, said = rewrite(enhancer, prompt, images, payload.creativity, seed,
+                                               lambda done: tel.progress(done, stage="upsampling prompt"))
     if found is None:
         adj.warn("prompt_upsampling", "Qwen's prompt enhancer gave no rewrite, so the prompt goes as written")
-        tel.log("upsampled prompt", parsed=False, answer=answer[:2000])
+        tel.log("upsampled prompt", parsed=False, answer=answer[:2000], thought_tokens=thought, answer_tokens=said)
         return payload, prompt
     ratio = found.ratio
     if found.follow is not None:
         ratio = "{}:{}".format(*images[found.follow - 1].size)
-    tel.log("upsampled prompt", prompt=found.prompt, seed=seed, creativity=payload.creativity,
+    tel.log("upsampled prompt", prompt=found.prompt, seed=seed, creativity=payload.creativity, thought_tokens=thought,
+            answer_tokens=said,
             wh_ratio=found.ratio or "", ratio_follow=f"<image{found.follow}>" if found.follow else "")
     if payload.aspect_ratio is None and ratio is not None:
         payload = msgspec.structs.replace(payload, aspect_ratio=":".join(map(str, ratio_of(ratio))))
@@ -141,8 +141,8 @@ def _generate(
     ctx: Context,
     payload: GenerateInput,
     model: QwenImage21Model,
-    rewriter: VisionLM,
-    expander: VisionLM,
+    rewriter: Enhancer,
+    expander: Enhancer,
     out: Outputs,
     tel: Telemetry,
     adj: Adjustments,
@@ -234,8 +234,8 @@ def generate(
     ctx: Context,
     payload: GenerateInput,
     model: QwenImage21Model,
-    rewriter: VisionLM,
-    expander: VisionLM,
+    rewriter: Enhancer,
+    expander: Enhancer,
     out: Outputs,
     tel: Telemetry,
     adj: Adjustments,
@@ -256,8 +256,8 @@ def generate_turbo(
     ctx: Context,
     payload: GenerateInput,
     model: QwenImage21Model,
-    rewriter: VisionLM,
-    expander: VisionLM,
+    rewriter: Enhancer,
+    expander: Enhancer,
     out: Outputs,
     tel: Telemetry,
     adj: Adjustments,
