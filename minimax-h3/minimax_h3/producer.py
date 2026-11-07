@@ -43,6 +43,7 @@ from cozy_runtime.author import (
     Cut,
     ProducerCall,
     ProducerSite,
+    producer_sites,
     register_attention,
     split,
 )
@@ -84,7 +85,10 @@ class RequestState:
     # The attention modules whose `Carry` slot a call of the current denoise loop has written.
     carried: set[int] = field(default_factory=set)
 
-    def close(self) -> None:
+    def end_loop(self) -> None:
+        """One loop's key means, rotary presentation and Kitchen's packed table of it go as the loop
+        returns: the Runtime calls this as `denoise_loop` returns, an eager step loop itself
+        (`end_loop`), so none stays through the decode after it."""
         self.statistics.clear()
         self.carried.clear()
         self.parallel_rotary.clear()
@@ -96,6 +100,8 @@ class RequestState:
                 if reference() is self.rope[2]:
                     cached.pop(key, None)
         self.rope = None
+
+    close = end_loop
 
 
 @dataclass(frozen=True, slots=True)
@@ -125,12 +131,24 @@ def carrying(carry: Carry) -> Iterator[None]:
         _CARRY.reset(token)
 
 
+def end_loop(root: Any) -> None:
+    """An eager step loop returned: the producer states its sites under `root` hold end their loop,
+    as the Runtime ends them when a `denoise_loop` returns."""
+    states = {
+        id(state): state
+        for site in producer_sites(root)
+        if isinstance(state := site.producer.request_state(), RequestState)
+    }
+    for state in states.values():
+        state.end_loop()
+
+
 def present(
     sites: Sequence[ProducerSite], rotary: tuple[torch.Tensor, torch.Tensor], tokens: int
 ) -> None:
     """Before a `denoise_loop`: the rotary presentation these sites' sparse calls read, and
     Kitchen's packed table of it, made eagerly so no recorded step allocates them from its pool.
-    `RequestState.close` forgets the table."""
+    `RequestState.end_loop` forgets the table."""
     states = {
         id(state): state
         for site in sites

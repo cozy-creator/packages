@@ -87,6 +87,7 @@ from .continuation import (
 )
 from .guide_rows import ANCHOR_LATENTS, ANCHORS, GUIDE, GUIDE_LATENTS, GuideClip, anchor_rows, guide_rows
 from .reference_rows import ClipRows, motion_size, public_video
+from . import producer
 from .steps import denoise_fl2va
 from .overlay import ATTENTION_KWARG, REGENERATE_BANK, TURBO_BANK, Overlay, TurboSchedule
 from .vae_tiles import TileBatchedVideoVAE, encode_condition
@@ -924,6 +925,15 @@ def _audio_weight_norm_scope(audio_vae: Any) -> Iterator[None]:
                     module.__dict__.pop(hook.name, None)
 
 
+@contextmanager
+def _producer_loop(transformer: Any) -> Iterator[None]:
+    """An eager step loop's producer state, ended as the loop returns, raised or not."""
+    try:
+        yield
+    finally:
+        producer.end_loop(transformer)
+
+
 class OfficialH3Pipeline:
     """Both official task workflows over one shared, dual-DiT construction."""
 
@@ -1557,7 +1567,7 @@ class OfficialH3Pipeline:
             )
         else:
             caching = stepcache.running(cache, len(block_state.timesteps)) if cache else nullcontext()
-            with step_invariants(), caching as run:
+            with step_invariants(), caching as run, _producer_loop(scoped.transformer):
                 for index, timestep in enumerate(block_state.timesteps):
                     cancel()
                     if run is not None:
