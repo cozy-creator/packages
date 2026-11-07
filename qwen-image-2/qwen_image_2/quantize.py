@@ -77,7 +77,6 @@ def calibrate(ctx: Context, tel: Telemetry, model: QwenImage21Model, record: Any
             model.denoise(
                 embeds, mask, width=1024, height=1024, steps=steps, seed=seed,
                 on_step=tel.step_callback(steps, stage="calibrating", overall_range=span),
-                cancel=ctx.raise_if_cancelled,
             )  # fmt: skip
 
 
