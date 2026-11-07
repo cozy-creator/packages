@@ -2,26 +2,36 @@
 
 The architecture, caption handling and sampling are Diffusers' (main `48cdbaef`, #14991, verified by
 Bria against its reference code). Runtime constructs and fills the modules and owns their residency:
-the pipeline runs once per component, its text encoder's and VAE's results replayed into the
-transformer's run.
+the pipeline's own run encodes the prompts, and its denoising loop is one `denoise_loop`.
 """
 
 from __future__ import annotations
 
-import json
-from collections.abc import Callable, Iterable, Iterator
+from collections.abc import Callable
 from importlib.resources import files
 from typing import Any
 
+import numpy as np
 import torch
 from cozy_runtime import rng, vlm
-from cozy_runtime.author import OutputError, Config, Loader, MemoDistribution, Model, Telemetry, hold_dtype, uses_components
+from cozy_runtime.author import (
+    Config,
+    Loader,
+    MemoDistribution,
+    Model,
+    OutputError,
+    Telemetry,
+    denoise_loop,
+    hold_dtype,
+    uses_components,
+)
 from diffusers import (
     AutoencoderKLFlux2,
     BriaFibo2Pipeline,
     BriaFibo2Transformer2DModel,
     FlowMatchEulerDiscreteScheduler,
 )
+from diffusers.pipelines.bria_fibo2.pipeline_bria_fibo2 import calculate_shift, retrieve_timesteps
 from PIL import Image
 from transformers import (
     AutoModelForImageTextToText,
@@ -37,47 +47,20 @@ FONTS = tuple(str(files(__package__).joinpath("fonts", name)) for name in ("Aile
 VAE_DTYPE = torch.float16
 
 
-class _Progress[T]:
-    """Pipeline iteration without tqdm; Runtime reports progress through Telemetry."""
-
-    def __init__(self, iterable: Iterable[T] | None = None, total: int | None = None) -> None:
-        self.iterable = iterable
-
-    def __iter__(self) -> Iterator[T]:
-        if self.iterable is None:
-            raise TypeError("progress has no iterable")
-        return iter(self.iterable)
-
-    def update(self, n: int = 1) -> None:
-        pass
-
-    def __enter__(self) -> _Progress[T]:
-        return self
-
-    def __exit__(self, *exc: object) -> None:
-        return None
-
-
 class _Encoded(Exception):
     """The recording run's stop: every prompt is encoded, and the latents are the transformer's."""
 
 
-def _key(prompt: str | list[str], image: object, text_images: object) -> str:
-    texts = [len(own) for own in text_images or []] if isinstance(text_images, list) else []
-    return json.dumps([prompt, image is not None, texts], ensure_ascii=False)
+#: An encoding: the embeddings and their mask (None when nothing is padded).
+Encoding = tuple[torch.Tensor, torch.Tensor | None]
 
 
 class _Staged(BriaFibo2Pipeline):
-    """`BriaFibo2Pipeline` run per component. Recording, it encodes each prompt the call encodes and
-    stops before the latents; replaying, it takes those encodings and the encoded images to edit."""
+    """`BriaFibo2Pipeline` run per component. The text encoder's run records each prompt the call
+    encodes, in order, and stops before the latents."""
 
     stage_device: torch.device
-    recording: bool = False
-    encoded: dict[str, tuple[torch.Tensor, torch.Tensor | None]]
-    image_latents: list[torch.Tensor] | None = None
-
-    def progress_bar[T](self, iterable: Iterable[T] | None = None, total: int | None = None) -> _Progress[T]:
-        return _Progress(iterable, total)
+    encoded: list[Encoding]
 
     @property
     def _execution_device(self) -> torch.device:
@@ -92,26 +75,13 @@ class _Staged(BriaFibo2Pipeline):
         prompt_embeds: torch.Tensor | None = None,
         prompt_embeds_mask: torch.Tensor | None = None,
         text_images: Any = None,
-    ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        key = _key(prompt, image, text_images)
-        if self.recording:
-            embeds, mask = super().encode_prompt(prompt, image, device, 1, None, None, text_images)
-            self.encoded[key] = (embeds.cpu(), None if mask is None else mask.cpu())
-        embeds, mask = self.encoded[key]
-        device = device or self.stage_device
-        return embeds.to(device), None if mask is None else mask.to(device)
+    ) -> Encoding:
+        embeds, mask = super().encode_prompt(prompt, image, device, 1, None, None, text_images)
+        self.encoded.append((embeds.cpu(), None if mask is None else mask.cpu()))
+        return embeds, mask
 
     def prepare_latents(self, *args: Any, **kwargs: Any) -> torch.Tensor:  # type: ignore[override]
-        if self.recording:
-            raise _Encoded
-        return super().prepare_latents(*args, **kwargs)  # type: ignore[no-any-return]
-
-    def prepare_image_latents(  # type: ignore[override]
-        self, image: Any, batch_size: int, device: torch.device, dtype: torch.dtype
-    ) -> list[torch.Tensor]:
-        if self.image_latents is None:
-            return super().prepare_image_latents(image, batch_size, device, dtype)  # type: ignore[no-any-return]
-        return [latents.to(device=device, dtype=dtype) for latents in self.image_latents]
+        raise _Encoded
 
 
 class FiboGraph:
@@ -155,7 +125,7 @@ class Fibo2(Model[FiboGraph], encoded_leaves="accept"):
             scheduler=FlowMatchEulerDiscreteScheduler.from_config(self.graph.scheduler_config),
         )
         pipe.stage_device = torch.device(str(self.device))
-        pipe.encoded = {}
+        pipe.encoded = []
         return pipe
 
     def hold_vae(self, tel: Telemetry) -> None:
@@ -169,17 +139,23 @@ class Fibo2(Model[FiboGraph], encoded_leaves="accept"):
     @uses_components("text_encoder", memoize=True, memo_dependencies=_CODE)
     def encode(
         self, prompt: str, images: list[Image.Image], *, width: int, height: int, guidance: float, negative: str | None
-    ) -> dict[str, tuple[torch.Tensor, torch.Tensor | None]]:
-        """Every encoding the pipeline's call makes: the prompt (with the images to edit and the
-        caption's text images), the prompt without its text images, and the negative prompt."""
+    ) -> dict[str, Encoding]:
+        """Every encoding the pipeline's call makes, by its part in the sampler: `prompt` (with the
+        images to edit and the caption's text images), `base` (a generation's caption without its
+        text images) and `negative` (with CFG). `__call__` encodes them in that order."""
         pipe = self._pipeline("text_encoder")
-        pipe.recording = True
         try:
             with torch.inference_mode():
                 pipe(prompt=prompt, image=images or None, width=width, height=height, guidance_scale=guidance,
                      negative_prompt=negative, fonts=list(FONTS), output_type="latent")
         except _Encoded:
-            return pipe.encoded
+            first, *rest = pipe.encoded
+            roles = {"prompt": first}
+            if guidance > 1.0:
+                roles["negative"] = rest.pop()
+            if rest:
+                roles["base"] = rest.pop()
+            return roles
         raise RuntimeError("the pipeline never reached its latents")
 
     @uses_components("vae", memoize=True, memo_dependencies=_CODE)
@@ -197,39 +173,72 @@ class Fibo2(Model[FiboGraph], encoded_leaves="accept"):
     @uses_components("transformer")
     def denoise(
         self,
-        prompt: str,
-        images: list[Image.Image],
-        encoded: dict[str, tuple[torch.Tensor, torch.Tensor | None]],
+        encoded: dict[str, Encoding],
         image_latents: list[torch.Tensor],
         *,
         width: int,
         height: int,
         steps: int,
         guidance: float,
-        negative: str | None,
         seed: int,
         on_step: Callable[[int], None],
-        cancel: Callable[[], None],
     ) -> torch.Tensor:
-        """Diffusers' sampler: Euler from sigma 1 to 1/steps, shifted by the image size, the noise
-        drawn on the CPU from `seed` and kept in float32 across steps."""
+        """`BriaFibo2Pipeline.__call__`'s loop as one `denoise_loop`: Euler from sigma 1 to 1/steps,
+        shifted by the image size, the noise drawn on the CPU from `seed` and kept in float32 across
+        steps, CFG as a second pass. A generation with text images reads `base` while the noise level
+        is above `text_images_max_noise_level`: the step's label."""
         pipe = self._pipeline("transformer")
-        pipe.encoded = encoded
-        pipe.image_latents = image_latents
+        transformer, scheduler, device = pipe.transformer, pipe.scheduler, pipe.stage_device
+        roles = tuple(role for role in ("prompt", "base", "negative") if role in encoded)
+        masked = tuple(encoded[role][1] is not None for role in roles)
+        cfg = guidance > 1.0
+        batch = encoded["prompt"][0].shape[0]
+        with torch.inference_mode(False), torch.no_grad():
+            shape = (batch, transformer.config.in_channels, height // pipe.vae_scale_factor, width // pipe.vae_scale_factor)
+            latents = rng.noise(shape, seed, device=device)
+            patch = transformer.config.patch_size
+            config = scheduler.config
+            mu = calculate_shift(
+                (latents.shape[2] // patch) * (latents.shape[3] // patch),
+                config.base_image_seq_len, config.max_image_seq_len, config.base_shift, config.max_shift,
+            )
+            timesteps, _ = retrieve_timesteps(scheduler, steps, device, sigmas=np.linspace(1.0, 1 / steps, steps), mu=mu)
+            deltas = scheduler.sigmas[1:] - scheduler.sigmas[:-1]
+            conditions: list[torch.Tensor] = []
+            for role in roles:
+                embeds, mask = encoded[role]
+                conditions += [embeds.to(device)] + ([] if mask is None else [mask.to(device)])
+            context = [tensor.to(device=device, dtype=transformer.dtype) for tensor in image_latents]
+        base = "base" in encoded
+        labels = [not base or t / 1000 <= pipe.text_images_max_noise_level for t in timesteps.tolist()]
 
-        def observed(_pipe: Any, step: int, _timestep: Any, values: Any) -> Any:
-            cancel()
-            on_step(step)
-            return values
+        def step(i: torch.Tensor, latents: torch.Tensor, timesteps: torch.Tensor, deltas: torch.Tensor,
+                 *tensors: torch.Tensor, label: bool) -> None:
+            it = iter(tensors)
+            texts = {role: (next(it), next(it) if has else None) for role, has in zip(roles, masked, strict=True)}
+            images = list(it) or None
+            timestep = timesteps.index_select(0, i).expand(latents.shape[0]) / 1000
+            hidden = latents.to(transformer.dtype)
 
-        cancel()
-        with torch.inference_mode():
-            latents = pipe(
-                prompt=prompt, image=images or None, width=width, height=height, num_inference_steps=steps,
-                guidance_scale=guidance, negative_prompt=negative, fonts=list(FONTS),
-                generator=rng.generator(seed), output_type="latent", callback_on_step_end=observed,
-            ).images
-        return latents.cpu()  # type: ignore[no-any-return]
+            def predict(role: str) -> torch.Tensor:
+                text, mask = texts[role]
+                return transformer(
+                    hidden_states=hidden, timestep=timestep, encoder_hidden_states=text,
+                    encoder_attention_mask=mask, context_latents=images, return_dict=False,
+                )[0].float()
+
+            noise_pred = predict("prompt" if label else "base")
+            if cfg:
+                unconditional = predict("negative")
+                noise_pred = unconditional + guidance * (noise_pred - unconditional)
+            delta = deltas.index_select(0, i).reshape(())
+            latents.copy_((latents.float() + delta * noise_pred).to(noise_pred.dtype))
+
+        denoise_loop(
+            step, range(steps), state=(latents,), inputs=(timesteps, deltas, *conditions, *context),
+            labels=labels, key=("fibo-2.denoise/1", roles, masked, guidance if cfg else None), on_step=on_step,
+        )
+        return latents.cpu()
 
     @uses_components("vae")
     def decode(self, latents: torch.Tensor) -> Image.Image:
