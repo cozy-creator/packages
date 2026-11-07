@@ -1550,7 +1550,10 @@ class OfficialH3Pipeline:
             references, latents = state.normalized_references, state.condition_latents
             clips = ClipRows(block_state, references, latents, scoped.patch_size, start=guided)
             clips.thin(block_state)
-        if getattr(scoped.transformer, "_parallel_config", None) is None:
+        # Every path runs `denoise_official` (several ranks too: there each rank's loop runs its
+        # steps eagerly). A path held back from it returns to the official Python loop here.
+        held = False
+        if not held:
             loop_over = partial(
                 denoise_official,
                 scoped.transformer,
