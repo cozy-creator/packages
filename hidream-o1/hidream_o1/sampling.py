@@ -11,6 +11,8 @@ on the device. `Euler` is Diffusers' `FlowMatchEulerDiscreteScheduler.step` on t
 
 from __future__ import annotations
 
+from typing import Any
+
 import numpy as np
 import torch
 from cozy_runtime import rng
@@ -54,18 +56,28 @@ class Flash(Euler):
 
 
 class UniPC:
-    """UniPC-bh2 of order 2 predicting x0, its sigmas shifted twice as Wan's are."""
+    """UniPC-bh2 of order 2 predicting x0, its sigmas shifted twice as Wan's are. Its history (the
+    last two predictions and the sample) is read again a step later: with a Runtime store `held`
+    (`author.retained`) it is held there, not kept as plain tensors."""
 
-    def __init__(self, steps: int, shift: float) -> None:
+    def __init__(self, steps: int, shift: float, held: Any = None) -> None:
         base = torch.from_numpy(1.0 - np.linspace(1, 1 / 1000, 1000)[::-1].copy()).to(torch.float32)
         base = shift * base / (1 + (shift - 1) * base)
         sigmas = np.linspace(base[0].item(), base[-1].item(), steps + 1).copy()[:-1]
         sigmas = shift * sigmas / (1 + (shift - 1) * sigmas)
         self.timesteps = torch.from_numpy(sigmas * 1000).to(torch.int64).tolist()
         self.sigmas = torch.from_numpy(np.concatenate([sigmas, [0.0]]).astype(np.float32))
-        self.outputs: list[torch.Tensor] = []
-        self.last: torch.Tensor | None = None
+        self.outputs: list[Any] = []
+        self.last: Any = None
         self.order = 0
+        self.held = held
+
+    def _keep(self, value: torch.Tensor) -> Any:
+        return value if self.held is None else self.held.put(value)
+
+    @staticmethod
+    def _read(kept: Any) -> torch.Tensor:
+        return kept if isinstance(kept, torch.Tensor) else kept.get()[0]
 
     def _lambda(self, i: int) -> torch.Tensor:
         sigma = self.sigmas[i]
@@ -96,12 +108,12 @@ class UniPC:
         alpha_t = 1 - sigma_t
         lambda_s0 = self._lambda(s0)
         h = self._lambda(t) - lambda_s0
-        m0 = self.outputs[-1]
+        m0 = self._read(self.outputs[-1])
         rks, d1s = [], []
         for k in range(1, order):
             rk = (self._lambda(s0 - k) - lambda_s0) / h
             rks.append(rk)
-            d1s.append((self.outputs[-(k + 1)] - m0) / rk)
+            d1s.append((self._read(self.outputs[-(k + 1)]) - m0) / rk)
         h_phi_1, b_h, r, b = self._coefficients(h, rks, x.device)
         out = sigma_t / sigma_s0 * x - alpha_t * h_phi_1 * m0
         if corrected is None:
@@ -116,8 +128,8 @@ class UniPC:
         self.sigmas = self.sigmas.to(sample.device)
         x0 = sample - self.sigmas[i] * flow
         if i > 0 and self.last is not None:
-            sample = self._update(i, self.last, self.order, x0)
-        self.outputs = [*self.outputs[-1:], x0]
+            sample = self._update(i, self._read(self.last), self.order, x0)
+        self.outputs = [*self.outputs[-1:], self._keep(x0)]
         self.order = min(2, len(self.timesteps) - i, i + 1)
-        self.last = sample
+        self.last = self._keep(sample)
         return self._update(i, sample, self.order, None)

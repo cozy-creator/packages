@@ -496,6 +496,7 @@ class HiDreamO1(Model[O1Graph], encoded_leaves="accept"):
             config = body.language_model.config
             per_token = 2 * config.num_key_value_heads * config.head_dim * torch.bfloat16.itemsize
             nbytes = sum(seq.prefix for seq in seqs) * per_token * config.num_hidden_layers
+            nbytes += 3 * n * 3 * PATCH * PATCH * torch.float32.itemsize  # UniPC's history (`sampling`)
             held = None if retained is None else retained(nbytes)
             prefixes = []
             for seq in seqs:
@@ -517,7 +518,7 @@ class HiDreamO1(Model[O1Graph], encoded_leaves="accept"):
             z = to_rows(noise[0].to(device, torch.bfloat16))
             sampler: Euler | UniPC
             if recipe.sampler == "unipc":
-                sampler = UniPC(steps, recipe.shift)
+                sampler = UniPC(steps, recipe.shift, held)
             elif recipe.sampler == "flash":
                 sampler = Flash(generator, recipe.noise, recipe.clip)
             else:
@@ -536,6 +537,7 @@ class HiDreamO1(Model[O1Graph], encoded_leaves="accept"):
                 if len(velocities) == 2:
                     velocity = velocities[1] + guidance * (velocities[0] - velocities[1])
                 z = sampler.step(index, -velocity, z.float()).to(torch.bfloat16)
+                del velocities, velocity  # this step's alone: none outlives it
                 on_step(index)
             # The prefixes die with the loop. A store from a Runtime before `close` lets its regions
             # go with their last reference.
