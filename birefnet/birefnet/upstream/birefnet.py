@@ -2,6 +2,8 @@
 
 import os
 import math
+import torch
+from cozy_runtime.attention import Attention as RuntimeAttention
 from transformers import PretrainedConfig
 
 
@@ -224,8 +226,9 @@ class Attention(nn.Module):
 
         self.q = nn.Linear(dim, dim, bias=qkv_bias)
         self.kv = nn.Linear(dim, dim * 2, bias=qkv_bias)
-        self.attn_drop_prob = attn_drop
-        self.attn_drop = nn.Dropout(attn_drop)
+        # The Runtime's attention site (BiRefNet serves in float16): the scale is SDPA's, head_dim ** -0.5.
+        assert self.scale == head_dim ** -0.5, "the attention site scales by head_dim ** -0.5"
+        self.attention = RuntimeAttention(num_heads, head_dim, dtype=torch.float16)
         self.proj = nn.Linear(dim, dim)
         self.proj_drop = nn.Dropout(proj_drop)
 
@@ -253,28 +256,18 @@ class Attention(nn.Module):
 
     def forward(self, x, H, W):
         B, N, C = x.shape
-        q = self.q(x).reshape(B, N, self.num_heads, C // self.num_heads).permute(0, 2, 1, 3)
+        q = self.q(x).reshape(B, N, self.num_heads, C // self.num_heads)  # B, N, nH, hd
 
         if self.sr_ratio > 1:
             x_ = x.permute(0, 2, 1).reshape(B, C, H, W)
             x_ = self.sr(x_).reshape(B, C, -1).permute(0, 2, 1)
             x_ = self.norm(x_)
-            kv = self.kv(x_).reshape(B, -1, 2, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
+            kv = self.kv(x_).reshape(B, -1, 2, self.num_heads, C // self.num_heads)
         else:
-            kv = self.kv(x).reshape(B, -1, 2, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
-        k, v = kv[0], kv[1]
+            kv = self.kv(x).reshape(B, -1, 2, self.num_heads, C // self.num_heads)
+        k, v = kv.unbind(2)  # B, Nkv, nH, hd
 
-        if config.SDPA_enabled:
-            x = torch.nn.functional.scaled_dot_product_attention(
-                q, k, v,
-                attn_mask=None, dropout_p=self.attn_drop_prob, is_causal=False
-            ).transpose(1, 2).reshape(B, N, C)
-        else:
-            attn = (q @ k.transpose(-2, -1)) * self.scale
-            attn = attn.softmax(dim=-1)
-            attn = self.attn_drop(attn)
-
-            x = (attn @ v).transpose(1, 2).reshape(B, N, C)
+        x = self.attention(q, k, v).reshape(B, N, C)
         x = self.proj(x)
         x = self.proj_drop(x)
 
@@ -710,13 +703,13 @@ class WindowAttention(nn.Module):
         self.register_buffer("relative_position_index", relative_position_index)
 
         self.qkv = nn.Linear(dim, dim * 3, bias=qkv_bias)
-        self.attn_drop_prob = attn_drop
-        self.attn_drop = nn.Dropout(attn_drop)
+        # The Runtime's attention site (BiRefNet serves in float16): the scale is SDPA's, head_dim ** -0.5.
+        assert self.scale == head_dim ** -0.5, "the attention site scales by head_dim ** -0.5"
+        self.attention = RuntimeAttention(num_heads, head_dim, dtype=torch.float16)
         self.proj = nn.Linear(dim, dim)
         self.proj_drop = nn.Dropout(proj_drop)
 
         trunc_normal_(self.relative_position_bias_table, std=.02)
-        self.softmax = nn.Softmax(dim=-1)
 
     def forward(self, x, mask=None):
         """ Forward function.
@@ -726,36 +719,14 @@ class WindowAttention(nn.Module):
             mask: (0/-inf) mask with shape of (num_windows, Wh*Ww, Wh*Ww) or None
         """
         B_, N, C = x.shape
-        qkv = self.qkv(x).reshape(B_, N, 3, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
-        q, k, v = qkv[0], qkv[1], qkv[2]  # make torchscript happy (cannot use tensor as tuple)
+        q, k, v = self.qkv(x).reshape(B_, N, 3, self.num_heads, C // self.num_heads).unbind(2)  # B_, N, nH, hd
 
-        q = q * self.scale
-
-        if config.SDPA_enabled:
-            x = torch.nn.functional.scaled_dot_product_attention(
-                q, k, v,
-                attn_mask=None, dropout_p=self.attn_drop_prob, is_causal=False
-            ).transpose(1, 2).reshape(B_, N, C)
-        else:
-            attn = (q @ k.transpose(-2, -1))
-
-            relative_position_bias = self.relative_position_bias_table[self.relative_position_index.view(-1)].view(
-                self.window_size[0] * self.window_size[1], self.window_size[0] * self.window_size[1], -1
-            )   # Wh*Ww, Wh*Ww, nH
-            relative_position_bias = relative_position_bias.permute(2, 0, 1).contiguous()  # nH, Wh*Ww, Wh*Ww
-            attn = attn + relative_position_bias.unsqueeze(0)
-
-            if mask is not None:
-                nW = mask.shape[0]
-                attn = attn.view(B_ // nW, nW, self.num_heads, N, N) + mask.unsqueeze(1).unsqueeze(0)
-                attn = attn.view(-1, self.num_heads, N, N)
-                attn = self.softmax(attn)
-            else:
-                attn = self.softmax(attn)
-
-            attn = self.attn_drop(attn)
-
-            x = (attn @ v).transpose(1, 2).reshape(B_, N, C)
+        relative_position_bias = self.relative_position_bias_table[self.relative_position_index.view(-1)].view(
+            self.window_size[0] * self.window_size[1], self.window_size[0] * self.window_size[1], -1
+        ).permute(2, 0, 1)  # nH, Wh*Ww, Wh*Ww
+        # The shift mask is one (0/-100) table a window position, repeated over the batch.
+        shift = None if mask is None else mask.repeat(B_ // mask.shape[0], 1, 1)[:, None]
+        x = self.attention(q, k, v, mask=shift, bias=relative_position_bias[None]).reshape(B_, N, C)
         x = self.proj(x)
         x = self.proj_drop(x)
         return x

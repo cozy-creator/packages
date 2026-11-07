@@ -6,7 +6,8 @@ Reference code
 Modified for Cozy (packages se-079): a plain nn.Module without diffusers' ModelMixin/ConfigMixin;
 no tiling, slicing, distributed decoding or weight loading (Runtime fills the weights). Each op runs in
 the dtype Tencent's float16 autocast gave it, with no autocast: a conv in its operands' stored dtype
-(float16), the group norms and the posterior's exp in float32 (xs-134).
+(float16), the group norms and the posterior's exp in float32 (xs-134). The posterior's noise is
+`cozy_runtime.rng`'s.
 """
 from dataclasses import dataclass
 from types import SimpleNamespace
@@ -15,32 +16,10 @@ import math
 import numpy as np
 from einops import rearrange
 import torch
+from cozy_runtime import rng
+from cozy_runtime.attention import Attention
 from torch import Tensor, nn
 import torch.nn.functional as F
-
-
-def randn_tensor(shape, generator=None, device=None, dtype=None):
-    """diffusers' `randn_tensor` (0.35): one draw per sample for a list of generators, on the
-    generators' device, then moved to `device`."""
-    rand_device = device
-    batch_size = shape[0]
-    device = device or torch.device("cpu")
-    if generator is not None:
-        gen_device_type = generator.device.type if not isinstance(generator, list) else generator[0].device.type
-        if gen_device_type != device.type and gen_device_type == "cpu":
-            rand_device = "cpu"
-        elif gen_device_type != device.type and gen_device_type == "cuda":
-            raise ValueError(f"Cannot generate a {device} tensor from a generator of type {gen_device_type}.")
-    if isinstance(generator, list) and len(generator) == 1:
-        generator = generator[0]
-    if isinstance(generator, list):
-        shape = (1,) + tuple(shape[1:])
-        latents = [
-            torch.randn(shape, generator=generator[i], device=rand_device, dtype=dtype)
-            for i in range(batch_size)
-        ]
-        return torch.cat(latents, dim=0).to(device)
-    return torch.randn(shape, generator=generator, device=rand_device, dtype=dtype).to(device)
 
 
 @dataclass
@@ -69,16 +48,10 @@ class DiagonalGaussianDistribution(object):
                 self.mean, device=self.parameters.device, dtype=self.parameters.dtype
             )
 
-    def sample(self, generator: Optional[torch.Generator] = None) -> torch.FloatTensor:
-        # make sure sample is on the same device as the parameters and has same dtype
-        sample = randn_tensor(
-            self.mean.shape,
-            generator=generator,
-            device=self.parameters.device,
-            dtype=self.parameters.dtype,
-        )
-        x = self.mean + self.std * sample
-        return x
+    def sample(self, generator: torch.Generator) -> torch.FloatTensor:
+        """A posterior sample, its noise drawn on the CPU from the call's stream (`rng.noise`)."""
+        noise = rng.noise(self.mean.shape, generator, device=self.parameters.device).to(self.parameters.dtype)
+        return self.mean + self.std * noise
 
     def kl(self, other: "DiagonalGaussianDistribution" = None) -> torch.Tensor:
         if self.deterministic:
@@ -190,6 +163,8 @@ class AttnBlock(nn.Module):
         self.k = Conv3d(in_channels, in_channels, kernel_size=1)
         self.v = Conv3d(in_channels, in_channels, kernel_size=1)
         self.proj_out = Conv3d(in_channels, in_channels, kernel_size=1)
+        # One head over the channels, in the convs' stored float16: the Runtime's attention site.
+        self.site = Attention(1, in_channels, dtype=torch.float16)
 
     def attention(self, h_: Tensor) -> Tensor:
         h_ = self.norm(h_)
@@ -198,12 +173,12 @@ class AttnBlock(nn.Module):
         v = self.v(h_)
 
         b, c, f, h, w = q.shape
-        q = rearrange(q, "b c f h w -> b 1 (f h w) c").contiguous()
-        k = rearrange(k, "b c f h w -> b 1 (f h w) c").contiguous()
-        v = rearrange(v, "b c f h w -> b 1 (f h w) c").contiguous()
-        h_ = nn.functional.scaled_dot_product_attention(q, k, v)
+        q = rearrange(q, "b c f h w -> b (f h w) 1 c").contiguous()
+        k = rearrange(k, "b c f h w -> b (f h w) 1 c").contiguous()
+        v = rearrange(v, "b c f h w -> b (f h w) 1 c").contiguous()
+        h_ = self.site(q, k, v)
 
-        return rearrange(h_, "b 1 (f h w) c -> b c f h w", f=f, h=h, w=w, c=c, b=b)
+        return rearrange(h_, "b (f h w) 1 c -> b c f h w", f=f, h=h, w=w, c=c, b=b)
 
     def forward(self, x: Tensor) -> Tensor:
         return x + self.proj_out(self.attention(x))

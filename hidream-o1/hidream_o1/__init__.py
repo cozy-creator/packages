@@ -107,7 +107,7 @@ def _generate(
     with tel.stage("generating image", overall_range=(0.0, 0.98)):
         image = model.generate(
             prompt, negative, references, width=width, height=height, recipe=recipe, steps=steps,
-            guidance=guidance, seed=seed, cancel=ctx.raise_if_cancelled, interval=interval,
+            guidance=guidance, seed=seed, interval=interval,
             on_step=tel.step_callback(steps, stage="generating image", overall_range=(0.0, 0.98)),
         )
     with tel.stage("saving image", overall_range=(0.98, 1.0)):

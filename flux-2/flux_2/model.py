@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 from functools import partial
+from itertools import pairwise
 import math
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any
@@ -25,6 +26,7 @@ from cozy_runtime.author import (
     Model,
     ModelAssets,
     Telemetry,
+    denoise_loop,
     hold_dtype,
     uses_components,
 )
@@ -259,42 +261,52 @@ class Flux2(Model[Flux2Graph], encoded_leaves="accept"):
         guidance: float | None,
         seed: int,
         on_step: Callable[[int], None],
-        cancel: Callable[[], None],
     ) -> torch.Tensor:
-        """BFL's Euler sampler in bf16 (`denoise`, `denoise_cfg`): [dev] embeds `guidance`, [klein]
-        Base takes CFG against `negative`, [klein] distilled takes neither."""
+        """BFL's Euler sampler in bf16 (`denoise`, `denoise_cfg`) as one `denoise_loop`: [dev] embeds
+        `guidance`, [klein] Base takes CFG against `negative`, [klein] distilled takes neither."""
         tf = self.graph.components["transformer"]
         device = torch.device(str(self.device))
         rows, columns = height // PATCH, width // PATCH
         noise = rng.noise((1, tf.config.in_channels, rows, columns), seed)
-        x = noise.to(torch.bfloat16).flatten(2).transpose(1, 2).to(device)
-        size = x.shape[1]
-        ids = grid_ids(rows, columns)
-        text = embeds if negative is None else torch.cat([negative, embeds])
-        text = text.to(device=device, dtype=torch.bfloat16)
-        refs = None
-        if references is not None:
-            refs = references[0].to(device).expand(text.shape[0], -1, -1)
-            ids = torch.cat([ids, references[1]])
-        ids, txt_ids = ids.to(device), text_ids(text.shape[1]).to(device)
-        batch = text.shape[0]
-        embedded = None if guidance is None or negative is not None else torch.full((batch,), guidance, device=device)
-        with torch.inference_mode():
-            for step, (t, nxt) in enumerate(zip(timesteps[:-1], timesteps[1:], strict=True)):
-                cancel()
-                tokens = x.expand(batch, -1, -1)
-                if refs is not None:
-                    tokens = torch.cat([tokens, refs], dim=1)
-                pred = tf(
-                    hidden_states=tokens, encoder_hidden_states=text,
-                    timestep=torch.full((batch,), t, device=device, dtype=torch.bfloat16),
-                    img_ids=ids, txt_ids=txt_ids, guidance=embedded, return_dict=False,
-                )[0][:, :size]
-                if negative is not None:
-                    unconditional, conditional = pred.chunk(2)
-                    pred = unconditional + guidance * (conditional - unconditional)
-                x = x + (nxt - t) * pred
-                on_step(step)
+        cfg = negative is not None
+        with torch.inference_mode(False), torch.no_grad():
+            x = noise.to(torch.bfloat16).flatten(2).transpose(1, 2).to(device)
+            ids = grid_ids(rows, columns)
+            text = embeds if negative is None else torch.cat([negative, embeds])
+            text = text.to(device=device, dtype=torch.bfloat16)
+            batch = text.shape[0]
+            extra = []
+            if references is not None:
+                extra.append(references[0].to(device).expand(batch, -1, -1))
+                ids = torch.cat([ids, references[1]])
+            if guidance is not None and not cfg:
+                extra.append(torch.full((batch,), guidance, device=device))
+            # BFL's timestep is the bf16 of each time; its Euler adds the bf16 product of the
+            # velocity and the f32 of the time delta to the bf16 state.
+            times = torch.tensor(timesteps[:-1], dtype=torch.float32).to(device=device, dtype=torch.bfloat16)
+            deltas = torch.tensor([b - a for a, b in pairwise(timesteps)], dtype=torch.float32).to(device)
+            inputs = (times, deltas, text, ids.to(device), text_ids(text.shape[1]).to(device), *extra)
+        referenced, embedded, size = references is not None, guidance is not None and not cfg, x.shape[1]
+
+        def step(i: torch.Tensor, x: torch.Tensor, times: torch.Tensor, deltas: torch.Tensor,
+                 text: torch.Tensor, ids: torch.Tensor, txt_ids: torch.Tensor, *extra: torch.Tensor) -> None:
+            tokens = x.expand(batch, -1, -1)
+            if referenced:
+                tokens = torch.cat([tokens, extra[0]], dim=1)
+            pred = tf(
+                hidden_states=tokens, encoder_hidden_states=text,
+                timestep=times.index_select(0, i).expand(batch), img_ids=ids, txt_ids=txt_ids,
+                guidance=extra[-1] if embedded else None, return_dict=False,
+            )[0][:, :size]
+            if cfg:
+                unconditional, conditional = pred.chunk(2)
+                pred = unconditional + guidance * (conditional - unconditional)
+            x.copy_(x + (pred.float() * deltas.index_select(0, i).reshape(())).to(pred.dtype))
+
+        denoise_loop(
+            step, range(len(timesteps) - 1), state=(x,), inputs=inputs,
+            key=("flux-2.denoise/1", referenced, embedded, guidance if cfg else None), on_step=on_step,
+        )
         return x.cpu()
 
     @uses_components("vae")

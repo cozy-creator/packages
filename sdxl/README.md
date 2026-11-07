@@ -36,11 +36,11 @@ one.
 Its recipes write the model's `fp8`, `int8` and `w4a8` lanes, for model authors
 (`cozy model quantize <model> --lane int8 --package sdxl`).
 
-Deterministic Euler runs as one `denoise_loop`: the Runtime runs the steps eagerly or as a native
-program (resident or streamed UNet blocks), by card and free memory, and records which in the run
-record's `loops`. Text encoding, VAE decode and HiDiffusion's DDIM run eagerly. Up to 4 MP the VAE decodes whole where
-it fits; larger canvases (HiDiffusion's, up to 16 MP), and those that do not fit, in 1024 px tiles
-(512 or 256 px where those do not fit). Every request holds
+Encoding, every step and the decode run as one `denoise_loop`: Euler (epsilon or v), or with
+HiDiffusion its DDIM at eta 1, each step labelled with its index. The Runtime runs the steps eagerly or
+as a native program (resident or streamed UNet blocks), by card and free memory, and records which in
+the run record's `loops`. The VAE decodes whole where it fits, else in the fewest windows that do (a
+`split` site, neighbours cross-faded over 256 px). Every request holds
 the VAE in its decode dtype for good (a cast of the stored bytes on its next fill; no request
 converts VAE weights). CLIP conditioning calls the encoders' layers directly, avoiding
 Transformers' lazy output-collection hooks; its original 5.16.1 forward is the numerical oracle.

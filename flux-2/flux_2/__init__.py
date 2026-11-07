@@ -101,7 +101,7 @@ def _generate(ctx: Context, payload: TurboInput, model: Flux2, turbo: Flux2Turbo
     timesteps = schedule(steps, tokens, TURBO_SIGMAS if turbo else None)
     denoise = partial(
         model.denoise, embeds, negative, references, width=width, height=height, timesteps=timesteps,
-        guidance=guidance, seed=seed, cancel=ctx.raise_if_cancelled,
+        guidance=guidance, seed=seed,
         on_step=tel.step_callback(steps, stage="generating image", overall_range=(0.25, 0.95)),
     )
     with tel.stage("generating image", overall_range=(0.25, 0.95)):

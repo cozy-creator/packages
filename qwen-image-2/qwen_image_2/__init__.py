@@ -196,7 +196,6 @@ def _generate(
             steps=steps,
             seed=seed,
             on_step=tel.step_callback(steps, stage="generating image", overall_range=(begin + 0.1, 0.9)),
-            cancel=ctx.raise_if_cancelled,
             sigmas=sigmas,
             reference_images=reference_images,
             reference_latents=reference_latents,

@@ -170,9 +170,6 @@ async def regenerate_lora(
             },
         }
     }
-    if ctx.device.type == "cuda":
-        torch.backends.cuda.matmul.allow_tf32 = False
-    torch.set_float32_matmul_precision("highest")
     computed = reused = 0
     with ctx.output("bf16", Derivation(base=None, sources=(full, source), order=order)) as out:
         write_config(out, canonical_json.encode(document))

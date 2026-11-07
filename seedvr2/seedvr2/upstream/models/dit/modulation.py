@@ -52,10 +52,10 @@ class AdaSingle(nn.Module):
         self.dim = dim
         self.emb_dim = emb_dim
         self.layers = layers
+        # [Override] Unset: the bound checkpoint fills them (upstream drew a training init).
         for l in layers:
-            self.register_parameter(f"{l}_shift", nn.Parameter(torch.randn(dim) / dim**0.5))
-            self.register_parameter(f"{l}_scale", nn.Parameter(torch.randn(dim) / dim**0.5 + 1))
-            self.register_parameter(f"{l}_gate", nn.Parameter(torch.randn(dim) / dim**0.5))
+            for name in ("shift", "scale", "gate"):
+                self.register_parameter(f"{l}_{name}", nn.Parameter(torch.empty(dim)))
 
     def forward(
         self,
