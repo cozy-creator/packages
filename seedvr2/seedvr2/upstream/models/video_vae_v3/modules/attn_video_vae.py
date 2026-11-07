@@ -10,7 +10,8 @@
 # This modified file is released under the same license.
 
 
-from contextlib import nullcontext
+import math
+from collections.abc import Iterable, Iterator
 from typing import Literal, Optional, Tuple, Union
 import diffusers
 import torch
@@ -27,9 +28,9 @@ from diffusers.models.upsampling import Upsample2D
 from diffusers.utils import is_torch_version
 from diffusers.utils.accelerate_utils import apply_forward_hook
 from einops import rearrange
+from cozy_runtime import rng
 from cozy_runtime.author import Cut, split
 
-from seedvr2.upstream.common.distributed.advanced import get_sequence_parallel_world_size
 from seedvr2.upstream.common.logger import get_logger
 from seedvr2.upstream.common.utils import safe_pad_operation, safe_interpolate_operation
 from seedvr2.upstream.models.video_vae_v3.modules.causal_inflation_lib import (
@@ -43,7 +44,6 @@ from seedvr2.upstream.models.video_vae_v3.modules.context_parallel_lib import (
     causal_conv_slice_inputs,
 )
 from seedvr2.upstream.models.video_vae_v3.modules.types import (
-    CausalAutoencoderOutput,
     CausalDecoderOutput,
     CausalEncoderOutput,
     MemoryState,
@@ -60,9 +60,26 @@ logger = get_logger(__name__)  # pylint: disable=invalid-name
 OVERLAP = 8
 #: Latent pixels a spatial tile holds at most. Tiles blend, and each one's GroupNorms and
 #: mid-block attention see only that tile, so the layout is part of the result: it comes from
-#: the shape alone (`split`'s `most`), never from free memory. A tile's causal caches and
-#: activations fit an 8 GB card; a conv's bands absorb pressure inside it.
+#: the shape alone (`split`'s `most`), never from free memory. A 512² decoder tile's peak is
+#: 5.2 GB (`_peak`: 2.3 GB of causal caches beside the widest conv's working set).
 TILE = 4096
+
+
+def _convs(module: nn.Module, area: int, frames: int) -> Iterator[tuple[InflatedCausalConv3d, int, int]]:
+    return ((m, area, frames) for m in module.modules() if isinstance(m, InflatedCausalConv3d))
+
+
+def _peak(convs: Iterable[tuple[InflatedCausalConv3d, int, int]], sliced: bool) -> int:
+    """Device elements a latent pixel's pass holds at its peak, from each causal conv with the
+    area (per latent pixel) and frames of its input: every conv's cached input frames (`kernel -
+    stride`, kept from one temporal slice to the next while `sliced`) beside the widest conv's
+    working set, its block's input and activation, the padded input it convolves and its output."""
+    cached = work = 0
+    for conv, area, frames in convs:
+        kernel, stride = conv.kernel_size[0], conv.stride[0]
+        cached += conv.in_channels * (kernel - stride) * area
+        work = max(work, ((3 * frames + kernel - 1) * conv.in_channels + frames * conv.out_channels) * area)
+    return work + (cached if sliced else 0)
 
 class Upsample3D(Upsample2D):
     """A 3D upsampling layer with an optional convolution."""
@@ -845,6 +862,18 @@ class Encoder3D(nn.Module):
 
         return sample
 
+    def convs(self, frames: int) -> Iterator[tuple[InflatedCausalConv3d, int, int]]:
+        """Each causal conv, its input's area per latent pixel and frames, over `frames` frames."""
+        area = math.prod(d.spatial_ratio**2 for b in self.down_blocks for d in b.downsamplers or ())
+        yield from _convs(self.conv_in, area, frames)
+        for block in self.down_blocks:
+            yield from _convs(block.resnets, area, frames)
+            for down in block.downsamplers or ():
+                yield from _convs(down, area, frames)
+                area, frames = area // down.spatial_ratio**2, 1 + (frames - 1) // down.temporal_ratio
+        yield from _convs(self.mid_block, area, frames)
+        yield from _convs(self.conv_out, area, frames)
+
 
 class Decoder3D(nn.Module):
     r"""
@@ -926,7 +955,6 @@ class Decoder3D(nn.Module):
         # up
         reversed_block_out_channels = list(reversed(block_out_channels))
         output_channel = reversed_block_out_channels[0]
-        print(f"slicing_up_num: {slicing_up_num}")
         for i, up_block_type in enumerate(up_block_types):
             prev_output_channel = output_channel
             output_channel = reversed_block_out_channels[i]
@@ -1027,6 +1055,19 @@ class Decoder3D(nn.Module):
         sample = self.conv_out(sample, memory_state=memory_state)
 
         return sample
+
+    def convs(self, frames: int) -> Iterator[tuple[InflatedCausalConv3d, int, int]]:
+        """Each causal conv, its input's area per latent pixel and frames, over `frames` latent
+        frames (a temporal upsampler's first pass drops its repeated head frame)."""
+        area = 1
+        yield from _convs(self.conv_in, area, frames)
+        yield from _convs(self.mid_block, area, frames)
+        for block in self.up_blocks:
+            yield from _convs(block.resnets, area, frames)
+            for up in block.upsamplers or ():
+                area, frames = area * up.spatial_ratio**2, 1 + (frames - 1) * up.temporal_ratio
+                yield from _convs(up, area, frames)
+        yield from _convs(self.conv_out, area, frames)
 
 
 class AutoencoderKL(diffusers.AutoencoderKL):
@@ -1213,43 +1254,29 @@ class VideoAutoencoderKL(diffusers.AutoencoderKL):
         output = causal_conv_gather_outputs(output)
         return output.to(z.device)
 
-    def slicing_encode(self, x: torch.Tensor) -> torch.Tensor:
-        sp_size = get_sequence_parallel_world_size()
-        if self.use_slicing and (x.shape[2] - 1) > self.slicing_sample_min_size * sp_size:
-            x_slices = x[:, :, 1:].split(split_size=self.slicing_sample_min_size * sp_size, dim=2)
-            encoded_slices = [
-                self._encode(
-                    torch.cat((x[:, :, :1], x_slices[0]), dim=2),
-                    memory_state=MemoryState.INITIALIZING,
-                )
-            ]
-            for x_idx in range(1, len(x_slices)):
-                encoded_slices.append(
-                    self._encode(x_slices[x_idx], memory_state=MemoryState.ACTIVE)
-                )
+    def _sliced(self, frames: int, size: int) -> bool:
+        """Whether a pass over `frames` frames runs in temporal slices of `size`, each conv
+        caching its last input frames for the next."""
+        return self.use_slicing and frames - 1 > size
+
+    def _slices(self, run, x: torch.Tensor, size: int) -> torch.Tensor:
+        """`run` over `x`'s frames, in temporal slices of `size` (the first one more) when
+        `_sliced`; the causal caches go when the pass ends, whatever ends it."""
+        if not self._sliced(x.shape[2], size):
+            return run(x)
+        x_slices = x[:, :, 1:].split(size, dim=2)
+        try:
+            done = [run(torch.cat((x[:, :, :1], x_slices[0]), dim=2), memory_state=MemoryState.INITIALIZING)]
+            done += [run(s, memory_state=MemoryState.ACTIVE) for s in x_slices[1:]]
+        finally:
             self._forget()
-            return torch.cat(encoded_slices, dim=2)
-        else:
-            return self._encode(x)
+        return torch.cat(done, dim=2)
+
+    def slicing_encode(self, x: torch.Tensor) -> torch.Tensor:
+        return self._slices(self._encode, x, self.slicing_sample_min_size)
 
     def slicing_decode(self, z: torch.Tensor) -> torch.Tensor:
-        sp_size = get_sequence_parallel_world_size()
-        if self.use_slicing and (z.shape[2] - 1) > self.slicing_latent_min_size * sp_size:
-            z_slices = z[:, :, 1:].split(split_size=self.slicing_latent_min_size * sp_size, dim=2)
-            decoded_slices = [
-                self._decode(
-                    torch.cat((z[:, :, :1], z_slices[0]), dim=2),
-                    memory_state=MemoryState.INITIALIZING,
-                )
-            ]
-            for z_idx in range(1, len(z_slices)):
-                decoded_slices.append(
-                    self._decode(z_slices[z_idx], memory_state=MemoryState.ACTIVE)
-                )
-            self._forget()
-            return torch.cat(decoded_slices, dim=2)
-        else:
-            return self._decode(z)
+        return self._slices(self._decode, z, self.slicing_latent_min_size)
 
     def _forget(self) -> None:
         """Drop the causal convolutions' cached frames once a pass completes."""
@@ -1257,15 +1284,26 @@ class VideoAutoencoderKL(diffusers.AutoencoderKL):
             if isinstance(module, InflatedCausalConv3d):
                 module.memory = None
 
+    def _holds(self, x: torch.Tensor, most: int, scale: float, coder, size: int) -> int:
+        """`split`'s `holds` for a tile of `x`: `_peak` of its largest slice (`TILE` latent
+        pixels in the VAE's dtype) in windows of its output as `split` counts one (`most`
+        elements, `scale` output elements each, in `x`'s dtype)."""
+        frames = x.shape[2]
+        sliced = self._sliced(frames, size)
+        peak = _peak(coder.convs(size + 1 if sliced else frames), sliced)
+        return math.ceil(TILE * peak * self.dtype.itemsize / (most * scale * x.element_size()))
+
     def tiled_encode(self, x: torch.Tensor) -> torch.Tensor:
         f = self.spatial_downsample_factor
         most = TILE * f * f * x.numel() // (x.shape[-2] * x.shape[-1])
-        return split(self.slicing_encode, x, *(Cut(d, 1 / f, OVERLAP * f, f) for d in (-2, -1)), most=most)
+        holds = self._holds(x, most, f**-2, self.encoder, self.slicing_sample_min_size)
+        return split(self.slicing_encode, x, *(Cut(d, 1 / f, OVERLAP * f, f) for d in (-2, -1)), most=most, holds=holds)
 
     def tiled_decode(self, z: torch.Tensor) -> torch.Tensor:
         f = self.spatial_downsample_factor
         most = TILE * z.numel() // (z.shape[-2] * z.shape[-1])
-        return split(self.slicing_decode, z, *(Cut(d, f, OVERLAP) for d in (-2, -1)), most=most)
+        holds = self._holds(z, most, f**2, self.decoder, self.slicing_latent_min_size)
+        return split(self.slicing_decode, z, *(Cut(d, f, OVERLAP) for d in (-2, -1)), most=most, holds=holds)
 
     def forward(
         self, x: torch.FloatTensor, mode: Literal["encode", "decode", "all"] = "all", **kwargs
@@ -1298,18 +1336,13 @@ class VideoAutoencoderKLWrapper(VideoAutoencoderKL):
         self.freeze_encoder = freeze_encoder
         super().__init__(*args, **kwargs)
 
-    def forward(self, x: torch.FloatTensor) -> CausalAutoencoderOutput:
-        with torch.no_grad() if self.freeze_encoder else nullcontext():
-            z, p = self.encode(x)
-        x = self.decode(z).sample
-        return CausalAutoencoderOutput(x, z, p)
-
-    def encode(self, x: torch.FloatTensor) -> CausalEncoderOutput:
+    def encode(self, x: torch.FloatTensor, generator: torch.Generator) -> CausalEncoderOutput:
+        """[Override] The posterior's sample, its noise `generator`'s, drawn on the CPU."""
         if x.ndim == 4:
             x = x.unsqueeze(2)
         p = super().encode(x).latent_dist
-        z = p.sample().squeeze(2)
-        return CausalEncoderOutput(z, p)
+        noise = rng.noise(p.mean.shape, generator, dtype=p.mean.dtype, device=p.mean.device)
+        return CausalEncoderOutput((p.mean + p.std * noise).squeeze(2), p)
 
     def decode(self, z: torch.FloatTensor) -> CausalDecoderOutput:
         if z.ndim == 4:

@@ -104,11 +104,10 @@ def _generate(ctx: Context, payload: HunyuanRequest, steps: int, model: HunyuanI
         with tel.stage("picking size", overall_range=(0.0, 0.05)):
             size = model.pick_size(prompt, references, seed=seed)
     with tel.stage("generating image", overall_range=(0.3, 0.97)):
-        image, routing = model.paint(
+        image = model.paint(
             prompt, references, cot, size=size, steps=steps, guidance=guidance, seed=seed,
             cancel=ctx.raise_if_cancelled,
             on_step=tel.step_callback(steps, stage="generating image", overall_range=(0.3, 0.95)))
-    tel.log("denoising routing", **routing)
     with tel.stage("saving image", overall_range=(0.97, 1.0)):
         asset = out.save_image(image, format="png")
     return ImageResult(asset, image.width, image.height, seed, caption(cot, prompt))

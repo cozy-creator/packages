@@ -75,7 +75,7 @@ Turbo runs 4 steps at guidance 1. The caption's text is also drawn and shown to 
 training used (`fibo_2/fonts`). On an L40S, its 16-bit images are 37–54 dB PSNR from Diffusers'
 own bf16 pipeline (same caption, seed and size, five cases: runs 14911–14923 against 14925/14926); the
 int8 lane's are 22.6–27.6 dB from them, the same pictures by eye (14929–14951). The VAE's BatchNorm
-statistics need Runtime ≥ 0.30.16 (cozy-runtime #1700).
+statistics need Runtime ≥ 0.30.16 (cozy-runtime #1700). The steps are one `author.denoise_loop`.
 
 ## Prepare the models
 

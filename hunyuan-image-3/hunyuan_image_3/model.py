@@ -17,13 +17,15 @@ from types import SimpleNamespace
 from typing import Any
 
 import torch
+from cozy_runtime import moe
 from cozy_runtime.author import Config, Loader, Model, uses_components
+from cozy_runtime.author.kernels import Plan
+from cozy_runtime.moe import Routing
 from PIL import Image
 from tokenizers import Tokenizer
 
-from .routing import Routing
 from .tencent.configuration_hunyuan_image_3 import HunyuanImage3Config
-from .tencent.modeling_hunyuan_image_3 import HunyuanImage3ForCausalMM
+from .tencent.modeling_hunyuan_image_3 import HunyuanImage3ForCausalMM, HunyuanMoE
 from .tencent.system_prompt import get_system_prompt
 from .tencent.tokenization_hunyuan_image_3 import HunyuanImage3TokenizerFast
 
@@ -90,8 +92,8 @@ def caption(cot: str | None, prompt: str) -> str:
 
 
 class HunyuanImage3(Model[Graph], encoded_leaves="accept"):
-    """Text to image, or an edit of up to three ordered references, with the thinking stage optional.
-    Every forward takes the KV cache object, so Runtime runs it as written and records no CUDA graph."""
+    """Text to image, or an edit of up to three ordered references, with the thinking stage optional. The image
+    steps after the first are a `denoise_loop` the Runtime may record; the think decodes eagerly."""
 
     graph: Graph
 
@@ -100,6 +102,10 @@ class HunyuanImage3(Model[Graph], encoded_leaves="accept"):
         model = self.graph.components[COMPONENT]
         model._tokenizer = _tokenizer(loader.assets.read)
         model.generation_config = SimpleNamespace(**GENERATION)
+
+    def execution_plan(self, plan: Plan) -> str:
+        """The Runtime's grouped expert kernels (`moe.install`): every layer's routing stays on the device."""
+        return moe.install(plan, self.graph.components[COMPONENT])
 
     def _cond(self, references: list[Image.Image]) -> Any:
         model = self.graph.components[COMPONENT]
@@ -114,14 +120,15 @@ class HunyuanImage3(Model[Graph], encoded_leaves="accept"):
     @contextmanager
     def _routing(self) -> Iterator[Routing]:
         routing = Routing()
-        layers = [layer.mlp for layer in self.graph.components[COMPONENT].model.layers]
-        for moe in layers:
-            moe.trace = routing
+        experts = [layer.mlp.experts for layer in self.graph.components[COMPONENT].model.layers
+                   if isinstance(layer.mlp, HunyuanMoE)]
+        for layer in experts:
+            layer.trace = routing
         try:
             yield routing
         finally:
-            for moe in layers:
-                moe.trace = None
+            for layer in experts:
+                layer.trace = None
 
     @uses_components(COMPONENT)
     def think(self, prompt: str, references: list[Image.Image], *, seed: int, pick_size: bool,
@@ -131,10 +138,8 @@ class HunyuanImage3(Model[Graph], encoded_leaves="accept"):
         with `pick_size` the size (width, height) the model then picks (`image_size="auto"`), and its routing."""
         model = self.graph.components[COMPONENT]
         with torch.inference_mode(), self._routing() as routing:
-            generator = torch.Generator(model.device).manual_seed(seed)
             cot, ratio = model.generate_cot(prompt, self._cond(references), _system(UPSAMPLED), UPSAMPLED, seed=seed,
-                                            generator=generator, need_ratio=pick_size, on_token=on_token,
-                                            cancel=cancel)
+                                            need_ratio=pick_size, on_token=on_token, cancel=cancel)
         return cot, None if ratio is None else self._size(ratio), routing.summary()
 
     @uses_components(COMPONENT)
@@ -147,14 +152,13 @@ class HunyuanImage3(Model[Graph], encoded_leaves="accept"):
     @uses_components(COMPONENT)
     def paint(self, prompt: str, references: list[Image.Image], cot: str | None, *, size: tuple[int, int],
               steps: int, guidance: float, seed: int, on_step: Callable[[int], None],
-              cancel: Callable[[], None]) -> tuple[Image.Image, dict[str, float]]:
-        """Tencent's image stage at an explicit `size` (width, height), after `think` or without it, and its
-        routing."""
+              cancel: Callable[[], None]) -> Image.Image:
+        """Tencent's image stage at an explicit `size` (width, height), after `think` or without it. Its steps
+        after the first are a `denoise_loop`, so no routing trace reads the experts' counts on the host."""
         model = self.graph.components[COMPONENT]
         width, height = size
-        with torch.inference_mode(), self._routing() as routing:
+        with torch.inference_mode():
             latents = model.denoise(prompt, self._cond(references), _system(UPSAMPLED if cot else DIRECT), cot,
                                     image_size=f"{height}x{width}", steps=steps, guidance_scale=guidance, seed=seed,
                                     on_step=on_step, cancel=cancel)
-            image: Image.Image = model.decode_latents(latents)
-        return image, routing.summary()
+            return model.decode_latents(latents)

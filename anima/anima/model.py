@@ -1,9 +1,8 @@
-"""Anima's model: Diffusers' maintained modular pipeline, its fused plan and its progress."""
+"""Anima's model: Diffusers' modular pipeline, its fused plan, its denoise loop and its progress."""
 
 from __future__ import annotations
 
 import json
-import sys
 from collections.abc import Callable
 from contextlib import AbstractContextManager
 from pathlib import Path
@@ -11,8 +10,8 @@ from types import TracebackType
 from typing import Any, NamedTuple
 
 import torch
-from cozy_runtime import fusion, rng
-from cozy_runtime.author import Loader, Model, Telemetry, hold_dtype, uses_components
+from cozy_runtime import fusion, rng, stepcache
+from cozy_runtime.author import Loader, Model, Telemetry, denoise_loop, hold_dtype, uses_components
 from cozy_runtime.author.kernels import Plan
 from diffusers import (
     AnimaAutoBlocks,
@@ -22,17 +21,8 @@ from diffusers import (
     CosmosTransformer3DModel,
     FlowMatchEulerDiscreteScheduler,
 )
-from diffusers.hooks._helpers import TransformerBlockMetadata, TransformerBlockRegistry
-from diffusers.hooks.first_block_cache import (
-    _FBC_BLOCK_HOOK,
-    _FBC_LEADER_BLOCK_HOOK,
-    FirstBlockCacheConfig,
-    apply_first_block_cache,
-)
-from diffusers.hooks.hooks import HookRegistry
-from diffusers.models.transformers.transformer_cosmos import CosmosTransformerBlock
 from diffusers.modular_pipelines import ModularPipelineBlocks
-from diffusers.modular_pipelines.anima.denoise import AnimaLoopDenoiser
+from diffusers.modular_pipelines.anima.denoise import AnimaDenoiseStep
 from transformers import AutoModel, PreTrainedTokenizerFast, Qwen3Config
 from transformers import initialization as transformer_init
 from transformers.modeling_utils import local_torch_dtype
@@ -40,6 +30,8 @@ from transformers.modeling_utils import local_torch_dtype
 from . import optimization
 
 _ROOT = Path(__file__).resolve().parent
+#: The DiT's block stack for `stepcache` (FBCache): each Cosmos block returns its hidden states.
+STACK = stepcache.Stack(CosmosTransformer3DModel, blocks="transformer_blocks", carried=(0,))
 
 
 class _Phase(NamedTuple):
@@ -124,10 +116,10 @@ class AnimaModel(Model[AnimaPipeline], encoded_leaves="accept"):
             if refusal:
                 outcome["reason"] = refusal
             plan.report(name, outcome)
-            print(f"[anima] {name}: {refusal or 'applied'}", file=sys.stderr)
         vae = self.pipe.components["vae"]
         installed = (
             *(name for name, refusal in parts.items() if not refusal),
+            stepcache.install(plan, STACK, self.pipe.components["transformer"]),
             fusion.install_norms(plan, optimization.VAE_NORM, vae),
             fusion.install_lone_frame(plan, optimization.VAE_FRAME, vae.decoder, vae.post_quant_conv),
         )
@@ -161,7 +153,8 @@ class AnimaModel(Model[AnimaPipeline], encoded_leaves="accept"):
         device = torch.device(str(self.device))
         generator = rng.generator(seed)
         fused = optimization.installed(self.pipe.components["transformer"])
-        pipeline: Any = _text2image_pipeline(device, phases, batched, fused)
+        cache = stepcache.FirstBlockCache(first_block_cache) if first_block_cache > 0.0 else None
+        pipeline: Any = _text2image_pipeline(device, phases, batched, fused, cache)
         pipeline.register_components(
             **self.pipe.components,
             scheduler=FlowMatchEulerDiscreteScheduler.from_config(self.pipe.scheduler_config),
@@ -172,28 +165,24 @@ class AnimaModel(Model[AnimaPipeline], encoded_leaves="accept"):
         # Diffusers 0.40 stores the interval on private attrs set by BaseGuidance.__init__;
         # outside [start, stop) num_conditions == 1 and the uncond forward never runs.
         pipeline.guider._start, pipeline.guider._stop = cfg_interval
-        transformer = self.pipe.components["transformer"]
-        restore_cache = _apply_first_block_cache(transformer, pipeline.guider, first_block_cache)
         phases.enter(_ENCODE_PROMPT)
-        try:
-            result = pipeline(
-                prompt=prompt,
-                negative_prompt=negative_prompt,
-                width=width,
-                height=height,
-                num_inference_steps=steps,
-                generator=generator,
-                output="images",
-                output_type="pt",
-            )
-        finally:
-            restore_cache()
-        return result
+        return pipeline(
+            prompt=prompt,
+            negative_prompt=negative_prompt,
+            width=width,
+            height=height,
+            num_inference_steps=steps,
+            generator=generator,
+            output="images",
+            output_type="pt",
+        )
 
 
-def _text2image_pipeline(device: Any, phases: _Phases, batched: bool, fused: bool) -> Any:
-    """The text2image pipeline, instrumented on the blocks it will actually run, its CFG
-    conditions in one forward when `batched`, its padding mask at latent size when `fused`.
+def _text2image_pipeline(
+    device: Any, phases: _Phases, batched: bool, fused: bool, cache: stepcache.Policy | None
+) -> Any:
+    """The text2image pipeline, instrumented on the blocks it will actually run, its denoise loop
+    one `denoise_loop` (`_Denoise`), its padding mask at latent size when `fused`.
 
     `ModularPipeline.blocks` is a property returning a DEEPCOPY, so a hook installed through
     it is thrown away and the meter never moves — the whole of the frozen `conditioning 0%`
@@ -224,53 +213,81 @@ def _text2image_pipeline(device: Any, phases: _Phases, batched: bool, fused: boo
         order
     ):
         raise RuntimeError(f"Diffusers Anima text2image blocks changed: {order}")
-    loop = blocks.sub_blocks["denoise.denoise"]
-    loop.progress_bar = _progress_bar(phases)
-    if batched:
-        loop.sub_blocks["denoiser"] = _BatchedDenoiser()
+    blocks.sub_blocks["denoise.denoise"] = _Denoise(phases, batched, cache)
     if fused:
         blocks.sub_blocks["denoise.prepare_latents"] = optimization.FusedLatents()
     blocks.sub_blocks.insert("conditioning", Announce(), order.index("denoise.text_conditioning"))
     return RuntimeAnimaPipeline(blocks=blocks)
 
 
-class _BatchedDenoiser(AnimaLoopDenoiser):
-    """Diffusers' Anima denoiser with the guider's conditions as one batch: one transformer
-    forward per step instead of one per condition. In a small pool every forward streams the
-    whole transformer through the card, so this halves a CFG step's copies (C4 of the
-    small-pool analysis). Inside the CFG interval cond and uncond run together; outside it
-    the guider asks for cond alone, and Diffusers' own step runs."""
+class _Denoise(AnimaDenoiseStep):
+    """Diffusers' Anima denoise loop as one `denoise_loop`: each step is `AnimaLoopBeforeDenoiser`,
+    `AnimaLoopDenoiser` under the CFG guider as `render` sets it (its scale and interval), and
+    `AnimaLoopAfterDenoiser`'s Euler step. The guider's choice of one condition or two is read
+    before the loop as each step's label. With `batched`, a guided step's two conditions run as one
+    forward: in a small pool every forward streams the whole transformer through the card, so this
+    halves a CFG step's copies (C4 of the small-pool analysis). `cache` is FBCache as a `stepcache`
+    policy: each forward of a step (the condition, then the unconditional one) keeps its own state,
+    as Diffusers' per-condition cache contexts did."""
 
-    def __init__(self) -> None:
-        super().__init__({"encoder_hidden_states": ("prompt_embeds", "negative_prompt_embeds")})
+    def __init__(self, phases: _Phases, batched: bool, cache: stepcache.Policy | None) -> None:
+        super().__init__()
+        self.phases, self.batched, self.cache = phases, batched, cache
 
     @torch.no_grad()
-    def __call__(self, components: Any, block_state: Any, i: int, t: torch.Tensor) -> Any:
+    def __call__(self, components: Any, state: Any) -> Any:
+        block_state = self.get_block_state(state)
         guider, transformer = components.guider, components.transformer
-        guider.set_state(step=i, num_inference_steps=block_state.num_inference_steps, timestep=t)
-        if guider.num_conditions == 1:
-            return super().__call__(components, block_state, i, t)
-        batches = guider.prepare_inputs_from_block_state(block_state, self._guider_input_fields)
-        for _ in batches:
-            guider.prepare_models(transformer)
-        conditions = {
-            key: torch.cat([getattr(batch, key) for batch in batches]).to(block_state.dtype)
-            for key in self._guider_input_fields
-        }
-        count = len(batches)
-        # One timestep for every condition: the modulation is computed once and broadcast.
-        predictions = transformer(
-            hidden_states=torch.cat([block_state.latent_model_input] * count),
-            timestep=block_state.timestep,
-            padding_mask=block_state.padding_mask,
-            return_dict=False,
-            **conditions,
-        )[0]
-        for batch, prediction in zip(batches, predictions.chunk(count), strict=True):
-            batch.noise_pred = prediction
-            guider.cleanup_models(transformer)
-        block_state.noise_pred = guider(batches)[0]
-        return components, block_state
+        scheduler, dtype = components.scheduler, block_state.dtype
+        timesteps, steps = block_state.timesteps, block_state.num_inference_steps
+        labels = []
+        for i in range(len(timesteps)):
+            guider.set_state(step=i, num_inference_steps=steps, timestep=timesteps[i])
+            labels.append(guider.num_conditions)
+        scale, batched = guider.guidance_scale, self.batched
+        with torch.inference_mode(False), torch.no_grad():
+            # The latents start f32 and leave each Euler step rounded to the prediction's dtype
+            # (`FlowMatchEulerDiscreteScheduler.step`): their f32 state holds those values.
+            latents = block_state.latents
+            times = timesteps.to(dtype) / scheduler.config.num_train_timesteps
+            deltas = scheduler.sigmas[1:] - scheduler.sigmas[:-1]
+            texts = [block_state.prompt_embeds.to(dtype)]
+            if max(labels) > 1:
+                negative = block_state.negative_prompt_embeds.to(dtype)
+                texts.append(torch.cat([texts[0], negative]) if batched else negative)
+            inputs = (times, deltas, block_state.padding_mask, *texts)
+
+        def step(i: torch.Tensor, latents: torch.Tensor, times: torch.Tensor, deltas: torch.Tensor,
+                 mask: torch.Tensor, *texts: torch.Tensor, label: int) -> None:
+            hidden, timestep = latents.to(dtype), times.index_select(0, i)
+
+            def predict(hidden: torch.Tensor, text: torch.Tensor) -> torch.Tensor:
+                return transformer(
+                    hidden_states=hidden, timestep=timestep, padding_mask=mask, return_dict=False,
+                    encoder_hidden_states=text,
+                )[0]
+
+            if label == 1:
+                prediction = predict(hidden, texts[0])
+            else:
+                if batched:
+                    conditional, unconditional = predict(torch.cat([hidden] * 2), texts[1]).chunk(2)
+                else:
+                    conditional, unconditional = predict(hidden, texts[0]), predict(hidden, texts[1])
+                prediction = unconditional + scale * (conditional - unconditional)
+            delta = deltas.index_select(0, i).reshape(())
+            latents.copy_((latents + delta * prediction).to(prediction.dtype))
+
+        self.phases.enter(_DENOISE)
+        denoise_loop(
+            step, range(len(timesteps)), state=(latents,), inputs=inputs, labels=labels,
+            key=("anima.denoise/1", scale, batched), on_step=self.phases.steps(len(timesteps)),
+            cache=self.cache,
+        )
+        self.phases.enter(_DECODE)
+        block_state.latents = latents
+        self.set_block_state(state, block_state)
+        return components, state
 
 
 class _Phases:
@@ -314,85 +331,3 @@ class _Phases:
         bracket, self.open = self.open, None
         if bracket is not None:
             bracket.__exit__(kind, exc, traceback)
-
-
-class _DenoiseProgress:
-    """Diffusers' denoise-loop progress bar projected onto Runtime telemetry."""
-
-    def __init__(self, total: int, phases: _Phases) -> None:
-        self.total = total
-        self.phases = phases
-        self.position = 0
-        self.step: Callable[[int], None] | None = None
-
-    def __enter__(self) -> _DenoiseProgress:
-        self.phases.enter(_DENOISE)
-        self.step = self.phases.steps(self.total)
-        return self
-
-    def update(self, count: int = 1) -> None:
-        if self.step is None:
-            raise RuntimeError("Anima denoise progress updated outside its loop")
-        for _ in range(count):
-            self.step(self.position)
-            self.position += 1
-
-    def __exit__(self, exc_type: object, exc: object, traceback: object) -> None:
-        if exc_type is None:
-            self.phases.enter(_DECODE)
-
-
-def _progress_bar(phases: _Phases) -> Callable[..., _DenoiseProgress]:
-    def progress_bar(iterable: object = None, total: int | None = None) -> _DenoiseProgress:
-        if iterable is not None or total is None or total < 1:
-            raise RuntimeError("Anima denoise progress requires one positive total")
-        return _DenoiseProgress(total, phases)
-
-    return progress_bar
-
-
-def _apply_first_block_cache(transformer: Any, guider: Any, threshold: float) -> Callable[[], None]:
-    """Attach FBCache hooks for one request; returns the restore. 0.0 attaches nothing.
-
-    Diffusers ships `apply_first_block_cache` but its registry does not know
-    `CosmosTransformerBlock` — the one-line registration below is the whole shim. With it on,
-    CFG runs as two batch-1 forwards, and the cond and uncond forwards would otherwise
-    share one residual cache and compare cond against uncond; wrapping the transformer
-    forward in a per-condition `cache_context` keeps the two streams separate. Hooks are
-    request-scoped (the HiDiffusion precedent in sdxl): removed in the restore so the
-    resident module leaves exactly as it entered.
-    """
-    if threshold <= 0.0:
-        return lambda: None
-
-    try:
-        TransformerBlockRegistry.get(CosmosTransformerBlock)
-    except ValueError:
-        TransformerBlockRegistry.register(
-            CosmosTransformerBlock,
-            TransformerBlockMetadata(return_hidden_states_index=0),
-        )
-    apply_first_block_cache(transformer, FirstBlockCacheConfig(threshold=threshold))
-    original_forward = transformer.forward
-    registry = HookRegistry.check_if_exists_or_initialize(transformer)
-
-    def forward(*args: Any, **kwargs: Any) -> Any:
-        # CosmosTransformer3DModel predates diffusers' CacheMixin, so the context is set
-        # on the hook registry directly — the same two calls `cache_context` makes.
-        registry._set_context("cond" if guider.is_conditional else "uncond")
-        try:
-            return original_forward(*args, **kwargs)
-        finally:
-            registry._set_context(None)
-
-    transformer.forward = forward
-
-    def restore() -> None:
-        transformer.forward = original_forward
-        for block in transformer.transformer_blocks:
-            registry = HookRegistry.check_if_exists_or_initialize(block)
-            for name in (_FBC_LEADER_BLOCK_HOOK, _FBC_BLOCK_HOOK):
-                if name in registry.hooks:
-                    registry.remove_hook(name, recurse=False)
-
-    return restore

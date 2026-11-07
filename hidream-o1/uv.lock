@@ -240,7 +240,7 @@ wheels = [
 
 [[package]]
 name = "hidream-o1"
-version = "0.5.0"
+version = "0.5.2"
 source = { editable = "." }
 dependencies = [
     { name = "cozy-runtime", extra = ["media"] },
@@ -255,7 +255,7 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
-    { name = "cozy-runtime", extras = ["media"], specifier = ">=0.41.0" },
+    { name = "cozy-runtime", extras = ["media"], specifier = ">=0.42.3" },
     { name = "diffusers", specifier = ">=0.40" },
     { name = "msgspec", specifier = ">=0.19" },
     { name = "numpy", specifier = ">=1.26" },

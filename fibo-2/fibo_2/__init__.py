@@ -168,8 +168,7 @@ def _generate(
     ctx.raise_if_cancelled()
     with tel.stage("generating image", overall_range=(0.25, 0.95)):
         tokens = model.denoise(
-            caption, images, encoded, latents, width=width, height=height, steps=steps, guidance=guidance,
-            negative=negative, seed=seed, cancel=ctx.raise_if_cancelled,
+            encoded, latents, width=width, height=height, steps=steps, guidance=guidance, seed=seed,
             on_step=tel.step_callback(steps, stage="generating image", overall_range=(0.25, 0.95)),
         )
     with tel.stage("decoding image", overall_range=(0.95, 0.99)):

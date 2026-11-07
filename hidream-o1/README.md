@@ -86,13 +86,15 @@ All recipes are upstream's latest (HiDream-ai/HiDream-O1-Image `main` at 2c2d29f
   (`guidance_interval`, limited-interval guidance; `false` keeps upstream's CFG to the end).
 - **`generate_turbo`:** the 28 fixed Dev timesteps. Text-to-image and two or more references use the
   flash sampler: predict the clean image, then noise it again to the next sigma, at noise scale 7.5
-  clipped at 2.5 standard deviations. A one-reference edit uses flow-match Euler, upstream's editing
-  scheduler for Dev since 2026-05-12.
+  clipped at 2.5 standard deviations, each step's noise computed from the seed and the step
+  (`rng.counter_noise`) where upstream draws it after the initial noise. A one-reference edit uses
+  flow-match Euler, upstream's editing scheduler for Dev since 2026-05-12.
 
 As in upstream, the noise comes from `seed + 1`, and the state between steps is bf16. The vision tower
 encodes each reference at 384² (288² for 5–8 references, 192² for more). Its tokens go into the prompt,
 and its deepstack features are added after the first three layers, as upstream added on 2026-05-13.
 ComfyUI's port drops them. The text and condition tokens' keys and values are computed once per request.
+The steps are one `author.denoise_loop`, run eagerly.
 
 `scripts/hidream-o1-model-proof.py` checks the cached forward against Transformers' own Qwen3-VL text
 model over the whole sequence under the hybrid mask. It also checks the UniPC timesteps against

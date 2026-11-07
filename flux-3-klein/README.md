@@ -32,7 +32,7 @@ cozy run flux-3-klein/generate_turbo prompt='A lighthouse on a basalt cliff in a
 cozy run flux-3-klein/generate prompt='Make <lighthouse> night, the lamp lit'   # in a project: <lighthouse> is that box
 ```
 
-Inputs: `prompt` (its text and the pictures it mentions), `boxes` (below), `aspect_ratio` (any W:H), `megapixels` (any size, 1024² pixels each), `seed`, `steps`, `prompt_upsampling` and `regions` (below); `generate` also takes `guidance` and `negative_prompt`, since the distilled Klein samples without CFG. Left out, each
+Inputs: `prompt` (its text and the pictures it mentions), `boxes` (below), `aspect_ratio` (any W:H), `megapixels` (any size, 1024² pixels each), `seed`, `steps`, `prompt_upsampling`, `regions` (below) and `prompt_drafting`; `generate` also takes `guidance` and `negative_prompt`, since the distilled Klein samples without CFG. Left out, each
 is the default in the table, no negative prompt (Base's CFG), upsampling on and a random seed; steps run
 1–200 (Base) or 1–100, guidance 1–20. Without references the default is 1:1 at 1 MP (1024×1024, BFL's `default_size`); the size is
 that area at that ratio, rounded to 32 px. With references, what is not given is the first reference's: given neither,
@@ -81,6 +81,11 @@ Text-to-image also tells it the canvas (`TARGET CANVAS: 16:9`). Set `prompt_upsa
 the prompt as typed, which then should be a full scene caption. Its token loop declares
 `min_bits=4, phase="decode"`, so it serves the release's `nvfp4` lane where there is one.
 
+The default upsampler is [AtomicChat's abliterated one](https://huggingface.co/AtomicChat/FLUX-3-Image-Klein-pup-Uncensored-GGUF)
+(`atomicchat/flux-3-klein-upsampler-abliterated`): BFL's weights with the refusal direction projected out of its
+32 attention outputs and 32 MLP down projections (`W' = W - 0.75 r rᵀW`), every other tensor BFL's. BFL's own is one
+setting away: `model.upsampler=black-forest-labs/flux-3-klein-upsampler@0.2.0`.
+
 ## Sampling
 
 The sampling follows BFL's reference code (`black-forest-labs/flux-3-image-klein` at `bfc8889`): Euler
@@ -88,7 +93,8 @@ steps with a constant shift (alpha) of 16, CFG 4 for the base model, and noise f
 with an fp32 state across steps. BFL raised alpha from the release's 6.93 and CFG from 3.5 on
 2026-10-17; Diffusers and ComfyUI still default to 6.93.
 The distilled model also embeds the timestep each step jumps to. The base model runs CFG with an empty
-negative prompt. A lone reference is padded to the 16-pixel grid at up to 4 MP, with no upscaling.
+negative prompt; its text and reference tokens are computed once and held by the Runtime (`retained`),
+or recomputed each step when there is no room for them. The steps run as one `denoise_loop`. A lone reference is padded to the 16-pixel grid at up to 4 MP, with no upscaling.
 With several references, each is cropped to the grid at up to 1 MP. The modules are Diffusers'
 (main `7ecb1e1b`; Flux3 is in no release yet).
 
@@ -105,6 +111,19 @@ cozy model upload hf://black-forest-labs/flux-3-image-klein-base@1469d27cfb9bb1b
   flux-3-klein-base --lane bf16 --on <machine>
 cozy model upload hf://black-forest-labs/flux-3-image-klein-pup@8b069751eb5dcab23829d9c5eccb470eb8b8a4ed \
   flux-3-klein-upsampler --lane bf16 --on <machine>
+```
+
+AtomicChat publishes its upsampler as a BF16 GGUF only (`FLUX-3-Image-Klein-pup-Uncensored-GGUF@8671d093`), and
+TensorFS's GGUF import has no `qwen35` name map. Its commit is BFL's checkpoint with the 64 edited matrices taken
+from the imported GGUF ([`scripts/abliterated_ingest.py`](../scripts/abliterated_ingest.py)); llama.cpp stores the
+linear-attention `out_proj` with its value heads reordered, so those 24 go back to BFL's head order:
+
+```sh
+cozy model upload hf://AtomicChat/FLUX-3-Image-Klein-pup-Uncensored-GGUF@8671d09367bc71d99a1c5e359575eb35b151156f/FLUX-3-Image-Klein-pup-Uncensored-BF16.gguf \
+  atomicchat/flux-3-klein-upsampler-abliterated --lane gguf --mirror https://huggingface.co/AtomicChat/FLUX-3-Image-Klein-pup-Uncensored-GGUF --on <machine>
+cozy run ./scripts/abliterated_ingest.py/assemble kind=pup model.stock=black-forest-labs/flux-3-klein-upsampler@0.2.0 \
+  model.gguf=atomicchat/flux-3-klein-upsampler-abliterated@sha256:<gguf commit> --lane bf16 --on <machine>
+cozy model upload run:<run> atomicchat/flux-3-klein-upsampler-abliterated --lane bf16
 ```
 
 Klein never builds Qwen3-VL's vision tower, its last four layers or its head, so it never loads those
@@ -137,5 +156,6 @@ with CFG), and the weights the lane holds:
 
 FLUX.3 Image Klein is under the FLUX Kommunity License v1.0 (`flux_3_klein/LICENSE.model.md`,
 `NOTICE.model.md`): non-commercial use, plus commercial outputs for Qualifying Users under the terms
-there. Its Qwen3-VL text encoder and the prompt upsampler are Apache-2.0. This wrapper grants no model
+there. Its Qwen3-VL text encoder and the prompt upsampler (BFL's, and AtomicChat's edit of it) are Apache-2.0
+(`flux_3_klein/LICENSE.upsampler.txt`, AtomicChat's copy). This wrapper grants no model
 rights.

@@ -34,6 +34,7 @@ from cozy_runtime.author import (
     Model,
     ModelAssets,
     Telemetry,
+    denoise_loop,
     hold_dtype,
     uses_components,
 )
@@ -234,61 +235,75 @@ def sample(
     guidance: float,
     seed: int,
     on_step: Callable[[int], None],
-    cancel: Callable[[], None],
 ) -> torch.Tensor:
-    """Upstream's sampling loop: seeded noise drawn on the CPU in the DiT's dtype, Euler steps on
-    `linspace(1, 1/steps)` shifted by `scheduler_config`, the references' tokens beside the target,
-    and true CFG with the conditional norm restored when `negative` is given."""
+    """Upstream's sampling loop as one `denoise_loop`: seeded noise drawn on the CPU in the DiT's
+    dtype, Euler steps on `linspace(1, 1/steps)` shifted by `scheduler_config`, the references'
+    tokens beside the target, and true CFG with the conditional norm restored when `negative` is
+    given. Each step is the DiT's forward per prompt and `FlowMatchEulerDiscreteScheduler.step`."""
     # Upstream's latents take the prompt's dtype, the DiT's (bf16).
     dtype = transformer.dtype
     rows, columns = height // PATCH, width // PATCH
     scheduler = FlowMatchEulerDiscreteScheduler.from_config(dict(scheduler_config))
     channels = transformer.config.in_channels // 4
-    noise = rng.noise((1, 1, channels, rows * 2, columns * 2), seed, dtype=dtype)
-    latents = QwenImagePipeline._pack_latents(noise.to(device), 1, channels, rows * 2, columns * 2)
     grids = [(1, rows, columns), *(references[1] if references else [])]
-    conditioning = None if references is None else references[0].to(device=device, dtype=dtype)
-    sigmas = np.linspace(1.0, 1 / steps, steps)
-    config = scheduler.config
-    mu = calculate_shift(
-        latents.shape[1],
-        config.get("base_image_seq_len", 256),
-        config.get("max_image_seq_len", 4096),
-        config.get("base_shift", 0.5),
-        config.get("max_shift", 1.15),
-    )
-    timesteps, _ = retrieve_timesteps(scheduler, steps, device, sigmas=sigmas, mu=mu)
     texts = [(embeds, mask), *([negative] if negative is not None else [])]
-    texts = [
-        (e.to(device=device, dtype=dtype), None if m is None else m.to(device)) for e, m in texts
-    ]
-    scheduler.set_begin_index(0)
-    with torch.inference_mode():
-        for index, t in enumerate(timesteps):
-            cancel()
-            model_input = latents if conditioning is None else torch.cat([latents, conditioning], dim=1)
-            timestep = t.expand(1).to(dtype)
-            predictions = [
-                transformer(
-                    hidden_states=model_input,
-                    timestep=timestep / 1000,
-                    encoder_hidden_states_mask=text_mask,
-                    encoder_hidden_states=text,
-                    img_shapes=[grids],
-                    attention_kwargs={},
-                    return_dict=False,
-                )[0][:, : latents.size(1)]
-                for text, text_mask in texts
-            ]
-            prediction = predictions[0]
-            if negative is not None:
-                combined = predictions[1] + guidance * (prediction - predictions[1])
-                prediction = combined * (
-                    torch.norm(prediction, dim=-1, keepdim=True)
-                    / torch.norm(combined, dim=-1, keepdim=True)
-                )
-            latents = scheduler.step(prediction, t, latents, return_dict=False)[0]
-            on_step(index)
+    masked = tuple(text_mask is not None for _, text_mask in texts)
+    config = scheduler.config
+    with torch.inference_mode(False), torch.no_grad():
+        noise = rng.noise((1, 1, channels, rows * 2, columns * 2), seed, dtype=dtype)
+        latents = QwenImagePipeline._pack_latents(noise.to(device), 1, channels, rows * 2, columns * 2)
+        mu = calculate_shift(
+            latents.shape[1],
+            config.get("base_image_seq_len", 256),
+            config.get("max_image_seq_len", 4096),
+            config.get("base_shift", 0.5),
+            config.get("max_shift", 1.15),
+        )
+        retrieve_timesteps(scheduler, steps, device, sigmas=np.linspace(1.0, 1 / steps, steps), mu=mu)
+        # The pipeline casts the f32 timestep to the DiT's dtype, then divides by 1000; Euler adds
+        # the f32 sigma delta times the bf16 prediction to the latents in f32, then rounds to bf16.
+        times = scheduler.timesteps.to(dtype)
+        deltas = scheduler.sigmas[1:] - scheduler.sigmas[:-1]
+        conditions = [] if references is None else [references[0].to(device=device, dtype=dtype)]
+        for text, text_mask in texts:
+            conditions.append(text.to(device=device, dtype=dtype))
+            if text_mask is not None:
+                conditions.append(text_mask.to(device))
+    referenced, size = references is not None, latents.shape[1]
+
+    def step(i: torch.Tensor, latents: torch.Tensor, times: torch.Tensor, deltas: torch.Tensor,
+             *conditions: torch.Tensor) -> None:
+        tensors = iter(conditions)
+        model_input = torch.cat([latents, next(tensors)], dim=1) if referenced else latents
+        timestep = times.index_select(0, i)
+        predictions = []
+        for has_mask in masked:
+            text = next(tensors)
+            predictions.append(transformer(
+                hidden_states=model_input,
+                timestep=timestep / 1000,
+                encoder_hidden_states_mask=next(tensors) if has_mask else None,
+                encoder_hidden_states=text,
+                img_shapes=[grids],
+                attention_kwargs={},
+                return_dict=False,
+            )[0][:, :size])
+        prediction = predictions[0]
+        if len(predictions) > 1:
+            combined = predictions[1] + guidance * (prediction - predictions[1])
+            prediction = combined * (
+                torch.norm(prediction, dim=-1, keepdim=True)
+                / torch.norm(combined, dim=-1, keepdim=True)
+            )
+        delta = deltas.index_select(0, i).reshape(())
+        latents.copy_((latents.float() + delta * prediction).to(prediction.dtype))
+
+    denoise_loop(
+        step, range(steps), state=(latents,), inputs=(times, deltas, *conditions),
+        key=("qwen-image.sample/1", tuple(grids), masked, referenced,
+             guidance if negative is not None else None),
+        on_step=on_step,
+    )
     return latents.cpu()
 
 

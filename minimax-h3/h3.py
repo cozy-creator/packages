@@ -1441,17 +1441,18 @@ async def regenerate_shot(
     cancel()
     with tel.stage("condition_text", overall_range=(0.10, 0.14)):
         text = base_model.encode_prompt(encoder_prompt("fl2va", payload.prompt), frames_for(MIN_DURATION_S))
-    spans = refine_math.plan_windows(tuple(int(value) for value in latents.shape))
+    layout = refine_math.plan_windows(tuple(int(value) for value in latents.shape))
+    (first, stop), *_ = layout.spans
     schedule = regenerate_lora.pipe.plan.refined(payload.strength)
     steps = schedule.transformer_evaluations
     seed = payload.seed
     tel.log("h3 regenerate", resolution=resolution, strength=payload.strength, quality=payload.quality, start_sigma=schedule.start,
             transformer_evaluations=steps, latent="x".join(str(int(value)) for value in latents.shape[2:]),
-            windows=len(spans), window_latent_frames=spans[0][1])  # fmt: skip
+            windows=len(layout), window_latent_frames=stop - first)  # fmt: skip
     with tel.stage("refine", overall_range=(0.14, 0.85)):
         refined = base_model.refine(
-            latents, overlay=regenerate_lora, prompt_embeds=text[0], text_tags=text[1], spans=spans,
-            audio=base_model.silence(refine_math.frames_of(spans[0][1])), schedule=schedule, seed=seed,
+            latents, overlay=regenerate_lora, prompt_embeds=text[0], text_tags=text[1], layout=layout,
+            audio=base_model.silence(refine_math.frames_of(stop - first)), schedule=schedule, seed=seed,
             quality=payload.quality,
             on_step=tel.step_callback(steps, stage="refine", overall_range=(0.14, 0.85)),
         )  # fmt: skip

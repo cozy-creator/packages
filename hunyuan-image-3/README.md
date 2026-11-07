@@ -53,7 +53,7 @@ which resizes the output to the reference's exact ratio, is not applied: the out
 `prompt_upsampling` is the Instruct models' own think-then-recaption stage (`bot_task="think_recaption"`, Tencent's
 default): the model thinks about the request and its references, rewrites the prompt, and draws from both. It
 samples as Tencent's `generation_config.json` says (temperature 0.6, top-k 1024, top-p 0.95, at most 2048
-tokens), from a generator seeded with `seed`, so a seed repeats the same thought. Off (`bot_task="image"`), the
+tokens), from `cozy_runtime.rng`'s stream for `seed`, so a seed repeats the same thought. Off (`bot_task="image"`), the
 prompt goes straight to the image stage.
 
 ## Memory
@@ -61,8 +61,10 @@ prompt goes straight to the image stage.
 Each of the 2,048 routed experts (37.7M parameters, 37.8 MB at int8, 93% of the model) is its own block for
 Runtime's weight paging, resident or paged on its own; attention, the shared expert, routers, embeddings and the
 image layers stay resident (about 8 GB at int8). Denoising sends 4,096 image tokens through every layer, so
-nearly every expert is used every step; the thinking stage uses 8 of 64 per layer per token. Every run logs both
-stages' routing: experts hit per layer, tokens per expert, and how often an expert cache would have held them.
+nearly every expert is used every step; the thinking stage uses 8 of 64 per layer per token. The routed experts
+run on the Runtime's grouped kernels (`moe.install`), routed on the device, and the image steps after the first
+are one `denoise_loop` the Runtime may record. A run with thinking logs its routing: experts hit per layer,
+tokens per expert, and how often an expert cache would have held them.
 
 ## Implementation
 
@@ -70,12 +72,12 @@ stages' routing: experts hit per layer, tokens per expert, and how often an expe
 checkpoints' remote code), vendored because it is not importable as a package (its `__init__` imports a
 top-level `utils`, and its requirements pin Gradio). The changes are in its git history: no Transformers
 model/generation/cache classes, the token and denoising loops written out over Tencent's own input preparation
-and logits processors, the next token's logits only, routed experts as their own class (the paging blocks),
-and routing that gathers each expert's rows with one sort instead of a mask per expert. As Tencent's
+and logits processors, the next token's logits only, and the routed experts as Runtime's `moe.Experts` (each
+its own paging block). Noise and token draws are `cozy_runtime.rng`'s (CPU), so a seed's image is not Tencent's
+CUDA draw. As Tencent's
 `from_pretrained(torch_dtype="auto")` builds it, every module runs in bfloat16 except the expert routers
 (float32) and the VAE. The VAE computes as Tencent's float16 autocast runs it, without the autocast: its convs
-in float16, the operands the `bf16` lane stores, and its group norms in float32. `scripts/hunyuan-image-3-model-proof.py` checks the port against Tencent's code on CPU
-with a small random-weight model: images bit-identical, the same thought and the same picked size.
+in float16, the operands the `bf16` lane stores, and its group norms in float32.
 
 ## Prepare the models
 
