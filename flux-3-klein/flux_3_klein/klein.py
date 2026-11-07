@@ -5,7 +5,7 @@ encoding of its Flux3 modular pipeline); reference preparation and sampling foll
 code (`black-forest-labs/flux-3-image-klein`, `flux3/pipeline.py`, `flux3/sampling.py`). The
 transformer's forward is the package's: every block is one parallel block over one token sequence,
 as in BFL's code, which Runtime fuses (`BLOCK`). Runtime constructs and fills the modules and owns
-their residency.
+their residency. A caller's LoRAs adapt the DiT through Runtime's PEFT layers (`__adapter_compatibility__`).
 """
 
 from __future__ import annotations
@@ -19,6 +19,7 @@ import torch
 import torch.nn.functional as F
 from cozy_runtime import fusion, rng, vlm
 from cozy_runtime.author import (
+    AdapterCompatibility,
     OutputError,
     Config,
     Loader,
@@ -271,6 +272,9 @@ class Klein(
     },
 ):
     """One Klein checkpoint: the distilled flow map (no guidance) or the base model (CFG)."""
+
+    #: Caller LoRAs on the DiT, at any strength: the Runtime bakes them into the weights.
+    __adapter_compatibility__ = (AdapterCompatibility("lora", "", ("transformer",), -math.inf, math.inf),)
 
     graph: KleinGraph
     processor: Qwen3VLProcessor
