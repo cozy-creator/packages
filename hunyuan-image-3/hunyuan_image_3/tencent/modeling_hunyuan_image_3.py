@@ -23,7 +23,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 import torch
 import torch.nn.functional as F
 from cozy_runtime import moe, rng
-from cozy_runtime.author import UnsupportedInput, retained
+from cozy_runtime.author import DoesNotFit, retained
 from einops import rearrange
 from PIL import Image
 from torch import nn
@@ -2512,11 +2512,10 @@ class HunyuanImage3ForCausalMM(nn.Module):
         nbytes = HunyuanStaticCache.nbytes(self.config, input_ids.shape[0], input_length, max_new_tokens, self.dtype)
         store = retained(nbytes)
         if store is None:  # without its K/V every token prefills the whole sequence again: refuse before the prefill
-            raise UnsupportedInput(
+            raise DoesNotFit(
                 f"HunyuanImage 3's thinking keeps {nbytes / (1 << 30):.1f} GiB of keys and values ({input_length} "
                 f"prompt and {max_new_tokens} new tokens), and neither this card nor host RAM has room for them: "
-                "set `prompt_upsampling` to false, or run on a larger card: `cozy run … --on new`",
-                code="does_not_fit",
+                "set `prompt_upsampling` to false, or run on a larger card: `cozy run … --on new`"
             )
         with store:
             cache = HunyuanStaticCache(store, self.config.num_hidden_layers, input_length, text=True)
