@@ -17,6 +17,7 @@ import numpy as np
 from einops import rearrange
 import torch
 from cozy_runtime import rng
+from cozy_runtime.attention import Attention
 from torch import Tensor, nn
 import torch.nn.functional as F
 
@@ -162,6 +163,8 @@ class AttnBlock(nn.Module):
         self.k = Conv3d(in_channels, in_channels, kernel_size=1)
         self.v = Conv3d(in_channels, in_channels, kernel_size=1)
         self.proj_out = Conv3d(in_channels, in_channels, kernel_size=1)
+        # One head over the channels, in the convs' stored float16: the Runtime's attention site.
+        self.site = Attention(1, in_channels, dtype=torch.float16)
 
     def attention(self, h_: Tensor) -> Tensor:
         h_ = self.norm(h_)
@@ -170,12 +173,12 @@ class AttnBlock(nn.Module):
         v = self.v(h_)
 
         b, c, f, h, w = q.shape
-        q = rearrange(q, "b c f h w -> b 1 (f h w) c").contiguous()
-        k = rearrange(k, "b c f h w -> b 1 (f h w) c").contiguous()
-        v = rearrange(v, "b c f h w -> b 1 (f h w) c").contiguous()
-        h_ = nn.functional.scaled_dot_product_attention(q, k, v)
+        q = rearrange(q, "b c f h w -> b (f h w) 1 c").contiguous()
+        k = rearrange(k, "b c f h w -> b (f h w) 1 c").contiguous()
+        v = rearrange(v, "b c f h w -> b (f h w) 1 c").contiguous()
+        h_ = self.site(q, k, v)
 
-        return rearrange(h_, "b 1 (f h w) c -> b c f h w", f=f, h=h, w=w, c=c, b=b)
+        return rearrange(h_, "b (f h w) 1 c -> b c f h w", f=f, h=h, w=w, c=c, b=b)
 
     def forward(self, x: Tensor) -> Tensor:
         return x + self.proj_out(self.attention(x))

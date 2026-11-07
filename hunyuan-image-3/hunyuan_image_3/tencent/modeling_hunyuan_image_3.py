@@ -22,6 +22,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 import torch
 import torch.nn.functional as F
 from cozy_runtime import moe, rng
+from cozy_runtime.attention import Attention
 from cozy_runtime.author import DoesNotFit, denoise_loop, retained
 from einops import rearrange
 from PIL import Image
@@ -1020,6 +1021,7 @@ class HunyuanImage3SDPAAttention(nn.Module):
             bias=config.attention_bias
         )
         self.o_proj = nn.Linear(self.hidden_size_q, self.hidden_size, bias=config.attention_bias)
+        self.site = Attention(self.num_heads, self.head_dim, dtype=torch.bfloat16)
 
         if self.use_qk_norm:
             self.query_layernorm = HunyuanRMSNorm(self.head_dim, eps=config.rms_norm_eps)
@@ -1085,19 +1087,11 @@ class HunyuanImage3SDPAAttention(nn.Module):
 
         key_states = repeat_kv(key_states, self.num_key_value_groups)
         value_states = repeat_kv(value_states, self.num_key_value_groups)
-
-        # SDPA with memory-efficient backend is currently (torch==2.1.2) bugged with non-contiguous inputs with
-        # custom attn_mask,
-        # Reference: https://github.com/pytorch/pytorch/issues/112577.
-        if query_states.device.type == "cuda" and attention_mask is not None:
-            query_states = query_states.contiguous()
-            key_states = key_states.contiguous()
-            value_states = value_states.contiguous()
-        attn_output = torch.nn.functional.scaled_dot_product_attention(
-            query_states, key_states, value_states, attn_mask=attention_mask, dropout_p=0.0
+        # The Runtime's attention site over (batch, tokens, heads, head dim); the mask's True attends.
+        attn_output = self.site(
+            query_states.transpose(1, 2), key_states.transpose(1, 2), value_states.transpose(1, 2),
+            mask=attention_mask,
         )
-        attn_output = attn_output.transpose(1, 2).contiguous()
-
         attn_output = attn_output.reshape(bsz, q_len, -1)
 
         attn_output = self.o_proj(attn_output)
