@@ -89,7 +89,7 @@ from .guide_rows import ANCHOR_LATENTS, ANCHORS, GUIDE, GUIDE_LATENTS, GuideClip
 from .reference_rows import ClipRows, motion_size, public_video
 from . import producer
 from .steps import denoise_official
-from .overlay import ATTENTION_KWARG, REGENERATE_BANK, TURBO_BANK, Overlay, TurboSchedule
+from .overlay import ATTENTION_KWARG, OVERLAY_KWARG, REGENERATE_BANK, TURBO_BANK, Overlay, TurboSchedule
 from .vae_tiles import TileBatchedVideoVAE, encode_condition
 
 #: A trunk is one DiT and its conditioning workflow; a task is one served function — the
@@ -1551,7 +1551,6 @@ class OfficialH3Pipeline:
             clips.thin(block_state)
         if (
             not (clips is not None and clips.releases())
-            and not block_state.attention_kwargs
             and getattr(scoped.transformer, "_parallel_config", None) is None
         ):
             denoise_official(
@@ -1562,6 +1561,7 @@ class OfficialH3Pipeline:
                 sol_dense_steps,
                 on_step,
                 trunk=_TRUNK[task],
+                overlay=(block_state.attention_kwargs or {}).get(OVERLAY_KWARG),
                 cache=cache,
             )
         else:

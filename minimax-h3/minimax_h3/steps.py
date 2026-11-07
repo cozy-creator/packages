@@ -22,7 +22,7 @@ from cozy_runtime.author import AttentionLayout, attention_scope, denoise_loop, 
 
 from . import producer
 from .adaln_pruned import step_invariants
-from .overlay import ATTENTION_KWARG, OVERLAY_KWARG
+from .overlay import ATTENTION_KWARG, OVERLAY_KWARG, Overlay
 
 
 @dataclass(frozen=True, slots=True)
@@ -31,6 +31,8 @@ class Label:
     rows: int
     rolling: bool
     seeding: bool
+    #: Turbo: the evaluation whose collapsed output heads serve the step.
+    head: int = 0
 
 
 def denoise_official(
@@ -42,21 +44,28 @@ def denoise_official(
     on_step: Callable[[int], None],
     *,
     trunk: str,
+    overlay: Overlay | None = None,
     cache: stepcache.Policy | None = None,
 ) -> None:
     """One rank's denoise of the loop's block `state` on `trunk`'s DiT (FL2VA's or Ref2VA's), its
-    latents advanced in place, its DiT's stack under `cache` when a preset names one."""
+    latents advanced in place: under the turbo `overlay` (its tables and LoRA, armed before the
+    loop, and each step's collapsed heads, its label's), its DiT's stack under `cache` when a
+    preset names one."""
     plan = state.row_timestep_plan
     fields = state.denoiser_input_fields
     position_ids, tags = fields["position_ids"], fields["token_tags"]
     device = state.latents.device
+    selector = None if overlay is None else {ATTENTION_KWARG: overlay.bank, OVERLAY_KWARG: overlay}
+    heads = [overlay.schedule.step(times) if overlay is not None and overlay.heads else 0 for times, _ in plan]
     with torch.no_grad(), step_invariants(checked=True):
         for times, rows in plan:  # an uncovered row refuses here, never inside the loop
-            transformer._arm(times, rows, tags, None)
+            transformer._arm(times, rows, tags, selector)
         transformer._release()
         sites = producer_sites(transformer)
         rotary = transformer.rope(position_ids)
         producer.present(sites, rotary, tags.numel())
+        if overlay is not None:  # armed before the loop, as `denoise_loop` requires
+            transformer._engage(overlay, heads[0])
         text = transformer.text_rows(state.prompt_embeds)
         timesteps = torch.zeros(len(plan), max(t.numel() for t, _ in plan), device=device)
         for index, (times, _) in enumerate(plan):
@@ -68,6 +77,7 @@ def denoise_official(
                 times.numel(),
                 bool(sites) and index >= max(sol_dense_steps, 1),
                 bool(sites) and index == sol_dense_steps - 1,
+                heads[index],
             )
             for index, (times, _) in enumerate(plan)
         )
@@ -86,6 +96,8 @@ def denoise_official(
             prompt, times, rows, tags, positions, at_video, at_audio, at_text, *more = given
             cos, sin, text, video_t, audio_t, video_sigmas, audio_sigmas = more
             carry = producer.Carry(dict(zip(keys, means, strict=True)), label.rolling, label.seeding)
+            if overlay is not None and overlay.heads:  # the same overlay, this step's heads
+                transformer._engage(overlay, label.head)
             with attention_scope(layouts[label.sparse]), producer.carrying(carry):
                 velocity, audio_velocity = transformer(
                     hidden_states=video[None],
@@ -106,17 +118,21 @@ def denoise_official(
             euler(video[video_rows:], velocity.float(), i, video_t, video_sigmas)
             euler(audio[audio_rows:], audio_velocity.float(), i, audio_t, audio_sigmas)
 
-        denoise_loop(
-            step,
-            range(len(plan)),
-            state=(state.latents, state.audio_latents),
-            carried=slots,
-            inputs=inputs,
-            labels=labels,
-            key=("minimax-h3.official/1", trunk, layouts[False], layouts[True], video_rows, audio_rows),
-            on_step=on_step,
-            cache=cache,
-        )
+        bank = None if overlay is None else overlay.bank
+        try:
+            denoise_loop(
+                step,
+                range(len(plan)),
+                state=(state.latents, state.audio_latents),
+                carried=slots,
+                inputs=inputs,
+                labels=labels,
+                key=("minimax-h3.official/1", trunk, bank, layouts[False], layouts[True], video_rows, audio_rows),
+                on_step=on_step,
+                cache=cache,
+            )
+        finally:
+            transformer._release()
     state.noise_pred = state.audio_noise_pred = None  # the official loop's outputs; none reads them
 
 
