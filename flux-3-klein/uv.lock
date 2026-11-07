@@ -198,7 +198,7 @@ wheels = [
 
 [[package]]
 name = "flux-3-klein"
-version = "0.5.1"
+version = "0.5.2"
 source = { editable = "." }
 dependencies = [
     { name = "cozy-runtime", extra = ["media"] },
@@ -213,7 +213,7 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
-    { name = "cozy-runtime", extras = ["media"], specifier = ">=0.41.0" },
+    { name = "cozy-runtime", extras = ["media"], specifier = ">=0.42.3" },
     { name = "diffusers", git = "https://github.com/huggingface/diffusers?rev=7ecb1e1b4fe500be7fb7381a7bb79a24d7fa3941" },
     { name = "msgspec", specifier = ">=0.19" },
     { name = "numpy", specifier = ">=1.26" },
