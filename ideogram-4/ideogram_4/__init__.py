@@ -169,7 +169,7 @@ class ImageBox(msgspec.Struct, kw_only=True):
 
 
 # A plain prompt is always upsampled into Ideogram's caption (`caption`); a JSON caption goes as given.
-@app.tool(label="Ideogram 4", named="image", defaults=_DEFAULTS, components=_COMPONENTS, on_demand=("upsampler",),
+@app.tool(label="Image", named="image", defaults=_DEFAULTS, components=_COMPONENTS, on_demand=("upsampler",),
           memoize=Memoize(requires=["seed"]))  # fmt: skip
 def image(ctx: Context, payload: ImageBox, model: Ideogram4, text_encoder: QwenEncoder, upsampler: QwenUpsampler,
           out: Outputs, tel: Telemetry, adj: Adjustments) -> ImageResult:

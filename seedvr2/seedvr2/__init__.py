@@ -107,7 +107,7 @@ def output_sizes(
 
 
 @app.tool(
-    label="SeedVR2",
+    label="Upscale",
     named="video",
     defaults={"model": "bytedance-seed/seedvr2-7b@0.1.0"},
     memoize=True,

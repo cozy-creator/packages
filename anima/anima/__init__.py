@@ -198,7 +198,7 @@ class ImageBox(msgspec.Struct, kw_only=True):
     seed: Seed | None = None
 
 
-@app.tool(label="Anima", named="image", defaults=_DEFAULTS, memoize=Memoize(requires=["seed"]))
+@app.tool(label="Image", named="image", defaults=_DEFAULTS, memoize=Memoize(requires=["seed"]))
 def image(ctx: Context, payload: ImageBox, model: AnimaModel, out: Outputs, tel: Telemetry, adj: Adjustments) -> ImageResult:
     """Anima on a canvas: `generate` from the box."""
     request = GenerateInput(prompt=payload.instructions, aspect_ratio=payload.aspect_ratio, megapixels=float(payload.megapixels),

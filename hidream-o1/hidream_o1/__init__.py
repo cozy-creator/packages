@@ -194,7 +194,7 @@ class ImageBox(msgspec.Struct, kw_only=True):
 
 
 # Each checkpoint is built, and its weights fetched, only when a box asks for it.
-@app.tool(label="HiDream-O1-Image", named="image", defaults={"full": _FULL, "model": _DEV},
+@app.tool(label="Image", named="image", defaults={"full": _FULL, "model": _DEV},
           components={"full": ("model",), "model": ("model",)}, on_demand=("full", "model"),
           memoize=Memoize(requires=["seed"]), memo_dependencies=_MEMO)  # fmt: skip
 def image(ctx: Context, payload: ImageBox, full: HiDreamO1, model: HiDreamO1, out: Outputs, tel: Telemetry,

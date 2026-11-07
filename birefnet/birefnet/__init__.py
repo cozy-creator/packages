@@ -40,7 +40,7 @@ def white_background(image: Image.Image, mask: Image.Image) -> Image.Image:
 
 
 @app.tool(
-    label="Remove Background",
+    label="Remove background",
     named="image",
     defaults={"model": "zhengpeng7/birefnet@0.1.0"},
     memoize=True,

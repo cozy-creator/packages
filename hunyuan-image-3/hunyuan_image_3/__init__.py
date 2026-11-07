@@ -151,7 +151,7 @@ class ImageBox(msgspec.Struct, kw_only=True):
 
 
 # Each checkpoint is built, and its weights fetched, only when a render asks for it.
-@app.tool(label="HunyuanImage 3.0", named="image", defaults={"model": _DISTIL, "full": _INSTRUCT},
+@app.tool(label="Image", named="image", defaults={"model": _DISTIL, "full": _INSTRUCT},
           components={"model": ("model",), "full": ("model",)}, on_demand=("full", "model"),
           memoize=Memoize(requires=["seed"]))
 def image(ctx: Context, payload: ImageBox, full: HunyuanImage3, model: HunyuanImage3, out: Outputs, tel: Telemetry,

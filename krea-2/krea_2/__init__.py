@@ -116,7 +116,7 @@ class ImageBox(msgspec.Struct, kw_only=True):
 
 
 # Each checkpoint is built, and its weights fetched, only when a box asks for it.
-@app.tool(label="Krea 2", named="image", defaults={"full": _RAW_MODEL, "model": _TURBO_MODEL},
+@app.tool(label="Image", named="image", defaults={"full": _RAW_MODEL, "model": _TURBO_MODEL},
           components={"full": _KREA, "model": _KREA}, on_demand=("full", "model"),
           memoize=Memoize(requires=["seed"]), memo_dependencies=_MEMO)  # fmt: skip
 def image(ctx: Context, payload: ImageBox, full: Krea2, model: Krea2, out: Outputs, tel: Telemetry,

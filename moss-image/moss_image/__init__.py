@@ -121,7 +121,7 @@ class ImageBox(msgspec.Struct, kw_only=True):
     seed: Seed | None = None
 
 
-@app.tool(label="MOSS-Image", named="image", defaults=_DEFAULTS, components=_COMPONENTS, memoize=Memoize(requires=["seed"]),
+@app.tool(label="Image", named="image", defaults=_DEFAULTS, components=_COMPONENTS, memoize=Memoize(requires=["seed"]),
           memo_dependencies=_MEMO)  # fmt: skip
 def image(ctx: Context, payload: ImageBox, model: MossImage, out: Outputs, tel: Telemetry, adj: Adjustments) -> ImageResult:
     """MOSS-Image on a canvas: `generate` from the box."""

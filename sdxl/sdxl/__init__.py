@@ -690,7 +690,7 @@ def resolve_image(payload: ImageBox) -> GenerateFacts:
     return resolve_generate(_request(payload))
 
 
-@app.tool(label="SDXL", named="image", defaults=_DEFAULTS, memoize=Memoize(requires=["seed"]), preflight=resolve_image)
+@app.tool(label="Image", named="image", defaults=_DEFAULTS, memoize=Memoize(requires=["seed"]), preflight=resolve_image)
 def image(ctx: Context, payload: ImageBox, facts: Preflight[GenerateFacts], model: SdxlModel, out: Outputs,
           tel: Telemetry, adj: Adjustments) -> ImageResult:
     """SDXL on a canvas: `generate` from the box."""

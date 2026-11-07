@@ -191,7 +191,7 @@ class ImageBox(msgspec.Struct, kw_only=True):
 
 # `model` holds the text encoder and VAE every render reads; each other DiT and LoRA is built, and its
 # weights fetched, only when a render asks for it.
-@app.tool(label="Qwen Image", named="image", defaults=_TURBO_DEFAULTS, components=_COMPONENTS,
+@app.tool(label="Image", named="image", defaults=_TURBO_DEFAULTS, components=_COMPONENTS,
           on_demand=("edit_model", "edit_turbo_lora", "turbo_lora"), memoize=Memoize(requires=["seed"]),
           memo_dependencies=_MEMO)  # fmt: skip
 def image(ctx: Context, payload: ImageBox, edit_model: QwenImageTransformer, edit_turbo_lora: QwenImageLoRA,

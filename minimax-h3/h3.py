@@ -1706,7 +1706,7 @@ async def _render(ctx: Context, shot: Shot, out: Outputs, tel: Telemetry, *, pla
                       kept_s=begun if take is not None else None)  # fmt: skip
 
 
-@app.tool(label="MiniMax H3", named="shot", emits_media=True, accelerator=False, reserved=_RESERVED)
+@app.tool(label="Video", named="shot", emits_media=True, accelerator=False, reserved=_RESERVED)
 async def generate(ctx: Context, payload: Shot, out: Outputs, tel: Telemetry) -> ShotResult:
     """One continuous shot of any length, with sound (README.md): a summary, then what happens, beat by beat, each text
     with the references it mentions; an optional first and last frame; and Pick up from here, which goes on from a take
@@ -1758,7 +1758,7 @@ class Edit(msgspec.Struct, kw_only=True):
     seed: Seed | None = None
 
 
-@app.tool(label="MiniMax H3 Edit", named="edit", emits_media=True, accelerator=False, reserved=_RESERVED)
+@app.tool(label="Edit", named="edit", emits_media=True, accelerator=False, reserved=_RESERVED)
 async def edit(ctx: Context, payload: Edit, out: Outputs, tel: Telemetry) -> ShotResult:
     """A plate edited by its beats, on Ref2VA under the chosen edit LoRA, its trigger opening each beat. With no picture
     in a beat, the plate's own first frame is the picture."""
@@ -1785,7 +1785,7 @@ class UpscaleOutput(msgspec.Struct):
     warnings: list[str] = msgspec.field(default_factory=list)
 
 
-@app.tool(label="MiniMax H3 Upscale", named="upscale", emits_media=True, accelerator=False)
+@app.tool(label="Upscale", named="upscale", emits_media=True, accelerator=False)
 async def upscale(ctx: Context, payload: Upscale, out: Outputs, tel: Telemetry) -> UpscaleOutput:
     """A take at 1080p, 1440p or 2160p, its sound kept (UPSCALE.md): its 768p latents upscaled and refined by H3 under
     the Regenerate LoRA, from the text they carry, else its frames from its description. A video already that big comes

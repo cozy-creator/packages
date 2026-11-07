@@ -217,7 +217,7 @@ class ImageBox(msgspec.Struct, kw_only=True):
 
 # The Turbo overlay is built, and its weights fetched, only when a box asks for it; a LoRA dropped on the
 # box adapts the base model either way.
-@app.tool(label="Qwen Image 2", named="image", defaults={"model": _FULL, "turbo_lora": _TURBO},
+@app.tool(label="Image", named="image", defaults={"model": _FULL, "turbo_lora": _TURBO},
           on_demand=("turbo_lora",), memoize=Memoize(requires=["seed"]), memo_dependencies=_MEMO)  # fmt: skip
 def image(
     ctx: Context,

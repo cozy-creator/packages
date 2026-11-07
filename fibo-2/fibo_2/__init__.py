@@ -219,7 +219,7 @@ class ImageBox(msgspec.Struct, kw_only=True):
 
 
 # Each checkpoint and VLM is built, and its weights fetched, only when a render asks for it.
-@app.tool(label="Fibo 2.0", named="image",
+@app.tool(label="Image", named="image",
           defaults={"model": _TURBO, "full": _DEV, "upsampler": _VLM, "edit_upsampler": _EDIT_VLM},
           components={"model": _MODEL, "full": _MODEL, "upsampler": ("model",), "edit_upsampler": ("model",)},
           on_demand=("edit_upsampler", "full", "model", "upsampler"), memoize=Memoize(requires=["seed"]))

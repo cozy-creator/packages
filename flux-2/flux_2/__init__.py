@@ -169,7 +169,7 @@ class ImageBox(msgspec.Struct, kw_only=True):
     prompt_upsampling: Annotated[bool, Advanced()] = True
 
 
-@app.tool(label="FLUX.2", named="image", defaults={"model": _DEV, "turbo_lora": _TURBO, "upsampler": _DEV},
+@app.tool(label="Image", named="image", defaults={"model": _DEV, "turbo_lora": _TURBO, "upsampler": _DEV},
           components=_TURBO_COMPONENTS, on_demand=("turbo_lora", "upsampler"), memoize=Memoize(requires=["seed"]))
 def image(ctx: Context, payload: ImageBox, model: Flux2, turbo_lora: Flux2TurboLoRA, upsampler: Flux2Upsampler,
           out: Outputs, tel: Telemetry, adj: Adjustments) -> ImageResult:

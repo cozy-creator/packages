@@ -288,7 +288,7 @@ class ImageBox(msgspec.Struct, kw_only=True):
 
 
 # Each checkpoint is built, and its weights fetched, only when a box asks for it.
-@app.tool(label="FLUX.3 Image Klein", named="image",
+@app.tool(label="Image", named="image",
           defaults={"full": _BASE, "model": _DISTILLED, "upsampler": _UPSAMPLER},
           components={"full": _KLEIN, "model": _KLEIN, "upsampler": ("model",)},
           on_demand=("full", "model", "upsampler"), memoize=Memoize(requires=["seed"]))  # fmt: skip
