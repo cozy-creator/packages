@@ -44,14 +44,16 @@ def denoise_official(
     on_step: Callable[[int], None],
     *,
     trunk: str,
+    steps: range | None = None,
     overlay: Overlay | None = None,
     cache: stepcache.Policy | None = None,
 ) -> None:
     """One rank's denoise of the loop's block `state` on `trunk`'s DiT (FL2VA's or Ref2VA's), its
-    latents advanced in place: under the turbo `overlay` (its tables and LoRA, armed before the
+    latents advanced in place over `steps` of its plan (all of them by default): under the turbo `overlay` (its tables and LoRA, armed before the
     loop, and each step's collapsed heads, its label's), its DiT's stack under `cache` when a
     preset names one."""
     plan = state.row_timestep_plan
+    steps = range(len(plan)) if steps is None else steps
     fields = state.denoiser_input_fields
     position_ids, tags = fields["position_ids"], fields["token_tags"]
     device = state.latents.device
@@ -65,21 +67,22 @@ def denoise_official(
         rotary = transformer.rope(position_ids)
         producer.present(sites, rotary, tags.numel())
         if overlay is not None:  # armed before the loop, as `denoise_loop` requires
-            transformer._engage(overlay, heads[0])
+            transformer._engage(overlay, heads[steps.start])
         text = transformer.text_rows(state.prompt_embeds)
         timesteps = torch.zeros(len(plan), max(t.numel() for t, _ in plan), device=device)
         for index, (times, _) in enumerate(plan):
             timesteps[index, : times.numel()] = times
         indices = torch.stack([rows for _, rows in plan])
+        # A loop's first step measures its own key means: none of its loop's steps left one.
         labels = tuple(
             Label(
                 index >= sol_dense_steps,
-                times.numel(),
-                bool(sites) and index >= max(sol_dense_steps, 1),
+                plan[index][0].numel(),
+                bool(sites) and index >= max(sol_dense_steps, 1) and index > steps.start,
                 bool(sites) and index == sol_dense_steps - 1,
                 heads[index],
             )
-            for index, (times, _) in enumerate(plan)
+            for index in steps
         )
         layouts = {sparse: layout_at(sol_dense_steps if sparse else 0) for sparse in (False, True)}
         keys = tuple(id(site.module) for site in sites)
@@ -122,7 +125,7 @@ def denoise_official(
         try:
             denoise_loop(
                 step,
-                range(len(plan)),
+                steps,
                 state=(state.latents, state.audio_latents),
                 carried=slots,
                 inputs=inputs,

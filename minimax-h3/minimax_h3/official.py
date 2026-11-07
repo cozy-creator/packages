@@ -21,6 +21,7 @@ from concurrent.futures import CancelledError, Future
 from contextlib import contextmanager, nullcontext, suppress
 from dataclasses import dataclass, replace
 from fractions import Fraction
+from functools import partial
 from itertools import pairwise
 from pathlib import Path
 from types import SimpleNamespace
@@ -1549,11 +1550,9 @@ class OfficialH3Pipeline:
             references, latents = state.normalized_references, state.condition_latents
             clips = ClipRows(block_state, references, latents, scoped.patch_size, start=guided)
             clips.thin(block_state)
-        if (
-            not (clips is not None and clips.releases())
-            and getattr(scoped.transformer, "_parallel_config", None) is None
-        ):
-            denoise_official(
+        if getattr(scoped.transformer, "_parallel_config", None) is None:
+            loop_over = partial(
+                denoise_official,
                 scoped.transformer,
                 scoped,
                 block_state,
@@ -1564,6 +1563,16 @@ class OfficialH3Pipeline:
                 overlay=(block_state.attention_kwargs or {}).get(OVERLAY_KWARG),
                 cache=cache,
             )
+            count = len(block_state.timesteps)
+            if clips is not None and clips.releases() and sol_dense_steps < count:
+                # The clips' rows guide the dense steps and leave before the first sparse one: the
+                # layout changes there, so the steps before it and after it are two loops.
+                if sol_dense_steps:
+                    loop_over(steps=range(sol_dense_steps))
+                clips.release(block_state)
+                loop_over(steps=range(sol_dense_steps, count))
+            else:
+                loop_over()
         else:
             caching = stepcache.running(cache, len(block_state.timesteps)) if cache else nullcontext()
             with step_invariants(), caching as run, _producer_loop(scoped.transformer):
