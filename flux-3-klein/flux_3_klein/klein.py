@@ -372,7 +372,7 @@ class Klein(
             # The base model's text and reference tokens are every step's: the Runtime holds them (on
             # the card while there is room, else refilled from pinned host memory), or each step
             # recomputes them.
-            fixed = None
+            fixed = held = None
             if not self.flow_map:
                 tokens, cond_rows = _conditions(tf, texts, text_ropes, refs, ref_rope, F.silu(at_zero), zero)
                 held = None if retained is None else retained(sum(t.nbytes for t in tokens) + cond_rows.nbytes)
@@ -411,6 +411,11 @@ class Klein(
                     velocity = unconditional + guidance * (conditional - unconditional)
                 x = x + (nxt - t) * velocity
                 on_step(step)
+            # The conditions die with the loop. A store from a Runtime before `close` lets its
+            # regions go with their last reference.
+            fixed = conditions = tokens = cond_rows = None
+            if held is not None and hasattr(held, "close"):
+                held.close()
         return x.cpu()
 
     @uses_components("vae")

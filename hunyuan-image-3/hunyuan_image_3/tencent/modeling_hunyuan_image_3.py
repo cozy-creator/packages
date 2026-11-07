@@ -773,6 +773,13 @@ class HunyuanStaticCache:
         self.tails: list[Optional[tuple[torch.Tensor, torch.Tensor, int]]] = [None] * layers
         self.starts: list[Optional[int]] = [None] * layers
 
+    def close(self) -> None:
+        """Its state dies with its loop: the Runtime's store goes now, not with its last reference
+        (a store from a Runtime before `close` lets its regions go with that)."""
+        if self.held is not None and hasattr(self.held, "close"):
+            self.held.close()
+        self.states, self.chunks, self.tails = [], [], []
+
     @staticmethod
     def _write(k_out, v_out, cache_position, key_states, value_states) -> None:
         if cache_position is None:
@@ -2712,6 +2719,7 @@ class HunyuanImage3ForCausalMM(nn.Module):
             on_token(n)
             if bool(torch.isin(next_tokens, stops).all()):
                 break
+        model_kwargs["past_key_values"].close()
 
         generated_tokens = input_ids[:, input_length:]
         if "recaption" in bot_task:
@@ -2748,6 +2756,7 @@ class HunyuanImage3ForCausalMM(nn.Module):
         model_inputs = self.prepare_inputs_for_generation(input_ids, **model_kwargs)
         with torch.autocast(device_type="cuda", dtype=self.dtype, enabled=self.dtype != torch.float32):
             outputs = self(**model_inputs)
+        model_kwargs["past_key_values"].close()
         scores = self.image_processor.img_ratio_slice_logits_processor(
             input_ids, outputs.logits[:, -1, :].to(copy=True, dtype=torch.float32))
         return int(torch.argmax(scores, dim=-1)[0].item())
@@ -2831,6 +2840,8 @@ class HunyuanImage3ForCausalMM(nn.Module):
                 model_kwargs = self._update_model_kwargs_for_generation(model_output, model_kwargs)
                 input_ids = None
             on_step(i)
+        # Its K/V dies with the loop: the decode after it has the room.
+        model_kwargs["past_key_values"].close()
         return latents
 
     @torch.no_grad()

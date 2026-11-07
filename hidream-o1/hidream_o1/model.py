@@ -537,6 +537,11 @@ class HiDreamO1(Model[O1Graph], encoded_leaves="accept"):
                     velocity = velocities[1] + guidance * (velocities[0] - velocities[1])
                 z = sampler.step(index, -velocity, z.float()).to(torch.bfloat16)
                 on_step(index)
+            # The prefixes die with the loop. A store from a Runtime before `close` lets its regions
+            # go with their last reference.
+            prefixes = guided = []
+            if held is not None and hasattr(held, "close"):
+                held.close()
             image = unpatch((z + 1) / 2, height, width).cpu().float()
         pixels = np.round(np.clip(image.numpy().transpose(1, 2, 0) * 255, 0, 255)).astype(np.uint8)
         return Image.fromarray(pixels)
