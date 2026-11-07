@@ -21,7 +21,7 @@ from cozy_runtime import stepcache
 from cozy_runtime.author import AttentionLayout, attention_scope, denoise_loop, producer_sites
 
 from . import producer
-from .adaln_pruned import step_invariants
+from .adaln_pruned import checked_loop
 from .overlay import ATTENTION_KWARG, OVERLAY_KWARG, Overlay
 
 
@@ -59,7 +59,7 @@ def denoise_official(
     device = state.latents.device
     selector = None if overlay is None else {ATTENTION_KWARG: overlay.bank, OVERLAY_KWARG: overlay}
     heads = [overlay.schedule.step(times) if overlay is not None and overlay.heads else 0 for times, _ in plan]
-    with torch.no_grad(), step_invariants(checked=True):
+    with torch.no_grad(), checked_loop():
         for times, rows in plan:  # an uncovered row refuses here, never inside the loop
             transformer._arm(times, rows, tags, selector)
         transformer._release()
@@ -167,7 +167,7 @@ def denoise_refine(
     position_ids, tags = fields["position_ids"], fields["token_tags"]
     device = video.device
     selector = {ATTENTION_KWARG: overlay.bank, OVERLAY_KWARG: overlay}
-    with torch.no_grad(), step_invariants(checked=True, overlay=overlay):
+    with torch.no_grad(), checked_loop():
         for times, rows in plan:  # an uncovered row refuses here, never inside the loop
             transformer._arm(times, rows, tags, selector)
         transformer._release()
