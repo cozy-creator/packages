@@ -1551,7 +1551,6 @@ class OfficialH3Pipeline:
             clips.thin(block_state)
         if (
             not (clips is not None and clips.releases())
-            and context is None
             and not block_state.attention_kwargs
             and getattr(scoped.transformer, "_parallel_config", None) is None
         ):
