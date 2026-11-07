@@ -66,7 +66,8 @@ the checkpoint's dynamic shift, and true CFG keeps the conditional prediction's 
 read upright, with any transparency composited over white. `generate_turbo` binds lightx2v's 8-step
 Lightning LoRA (V1.0, fp32) for each DiT at the file's `alpha / rank` (8/64) and samples at
 lightx2v's constant shift of 3. Runtime bakes the LoRA into the weights of whichever lane serves the
-DiT; the merged weights exist only on the GPU.
+DiT; the merged weights exist only on the GPU. The steps are one `author.denoise_loop`: the Runtime
+runs them eagerly or as one recorded program, and owns their progress and cancellation.
 
 ## Quality and speed (Qwen-Image-Edit-2511, A40, warm)
 
