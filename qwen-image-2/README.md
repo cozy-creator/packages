@@ -127,10 +127,12 @@ stores F32), else in its stored dtype. It decodes the whole canvas, each block i
 (exact, as ComfyUI does), so its working set stays a few GB at 4 MP and the DiT and text encoder
 stay resident beside it on a 24 GB card.
 
-Reference VAE encoding and multimodal prompt encoding each run once before
-denoising, in separate component residency leases. Denoising reuses their tensors
-and the upstream prefix KV cache across steps. Reference images add tokens and
-memory demand, so compare editing benchmarks separately from text-only runs.
+Reference VAE encoding (without Diffusers' per-convolution feature cache) and multimodal prompt
+encoding each run once before denoising, in separate component residency leases. Step 0 extracts the
+text and reference tokens' K/V into the Runtime's store (`retained`), and the later steps run as one
+`denoise_loop` over the target's tokens. With no room for that prefix, every step is the whole joint
+pass, again one `denoise_loop`. Reference images add tokens and memory demand, so compare editing
+benchmarks separately from text-only runs.
 
 The upstream model is under the Qwen Research License, for noncommercial research
 and evaluation. This wrapper is not an authorization for commercial model use.
