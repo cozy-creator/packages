@@ -23,7 +23,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 import torch
 import torch.nn.functional as F
 from cozy_runtime import moe, rng
-from cozy_runtime.author import retained
+from cozy_runtime.author import UnsupportedInput, retained
 from einops import rearrange
 from PIL import Image
 from torch import nn
@@ -2440,7 +2440,7 @@ class HunyuanImage3ForCausalMM(nn.Module):
     # temperature, top-k, top-p as Transformers orders them), the Euler flow-match schedule and CFG.
     # The differences: the sampler draws from `rng.generator(seed)` (upstream: the global RNG, unseeded),
     # the noise is `rng.noise`, every K/V a later forward reads is the Runtime's (`author.retained`, sized
-    # before the first forward; with no room for it, each forward recomputes it over the whole sequence),
+    # before the first forward; with no room for it, the think refuses and the image steps recompute it),
     # and `on_token(n)` / `on_step(i)` (0-based) and `cancel()` are called once per token and per step.
 
     @torch.no_grad()
@@ -2509,24 +2509,24 @@ class HunyuanImage3ForCausalMM(nn.Module):
         processors.append(TopPLogitsWarper(top_p=generation_config.top_p, min_tokens_to_keep=1))
         stops = torch.tensor(final_stop_tokens, device=input_ids.device)
         sampler = rng.generator(seed)
-        prefill = model_kwargs
-        rows = input_ids.shape[0]
-        store = retained(HunyuanStaticCache.nbytes(self.config, rows, input_length, max_new_tokens, self.dtype))
-        with store if store is not None else nullcontext():
-            if store is not None:
-                cache = HunyuanStaticCache(store, self.config.num_hidden_layers, input_length, text=True)
-                model_kwargs = {**prefill, "past_key_values": cache}
+        nbytes = HunyuanStaticCache.nbytes(self.config, input_ids.shape[0], input_length, max_new_tokens, self.dtype)
+        store = retained(nbytes)
+        if store is None:  # without its K/V every token prefills the whole sequence again: refuse before the prefill
+            raise UnsupportedInput(
+                f"HunyuanImage 3's thinking keeps {nbytes / (1 << 30):.1f} GiB of keys and values ({input_length} "
+                f"prompt and {max_new_tokens} new tokens), and neither this card nor host RAM has room for them: "
+                "set `prompt_upsampling` to false, or run on a larger card: `cozy run … --on new`",
+                code="does_not_fit",
+            )
+        with store:
+            cache = HunyuanStaticCache(store, self.config.num_hidden_layers, input_length, text=True)
+            model_kwargs = {**model_kwargs, "past_key_values": cache}
             for n in range(max_new_tokens):
                 cancel()
-                if store is None and n:
-                    positions = torch.arange(input_ids.shape[1], device=input_ids.device)[None].expand(rows, -1)
-                    mask = self._prepare_attention_mask_for_generation(input_ids, None, model_kwargs=prefill)
-                    model_kwargs = {**prefill, "position_ids": positions, "attention_mask": mask}
                 model_inputs = self.prepare_inputs_for_generation(input_ids, **model_kwargs)
                 with torch.autocast(device_type="cuda", dtype=self.dtype, enabled=self.dtype != torch.float32):
                     outputs = self(**model_inputs)
-                if store is not None:
-                    model_kwargs = self._update_model_kwargs_for_generation(outputs, model_kwargs)
+                model_kwargs = self._update_model_kwargs_for_generation(outputs, model_kwargs)
                 scores = processors(input_ids, outputs.logits[:, -1, :].to(copy=True, dtype=torch.float32))
                 probs = F.softmax(scores, dim=-1)
                 next_tokens = torch.multinomial(probs.cpu(), num_samples=1, generator=sampler).to(input_ids.device)
