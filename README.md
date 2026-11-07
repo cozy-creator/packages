@@ -61,8 +61,9 @@ asks for only that lane of the function's main model, and a release without it i
 LoRAs, other models and calls into other packages keep the machine's choice. The package declares
 only its tolerances, as `Model` class keywords:
 
-- `min_bits=` (16, 8 or 4; default 8): the fewest bits the machine may pick by itself. A slot at
-  4 takes `nvfp4` when it decodes; memory never lowers a lane.
+- `min_bits=` (16, 8 or 4; default 8): the fewest bits the machine may pick by itself; when no lane
+  has that many, it serves the widest that runs and warns. A slot at 4 takes 4 bits when it decodes,
+  on FP4 tensor cores, or when the 8-bit lane is larger than the GPU; free VRAM never lowers a lane.
 - `phase="decode"` for an LM's token loop (qwen3.5's and Klein's upsampler's).
 - `attention_bits=` (16, 8 or 4, or a mapping from a component-qualified module prefix to one;
   default 16): the fewest bits attention may run at. H3 declares 4 on its DiTs, Klein 8 on its
