@@ -9,15 +9,19 @@ only, so the vision tower is never built.
 from __future__ import annotations
 
 import json
+import math
+from collections.abc import Sequence
 from typing import Any
 
 import torch
+from cozy_runtime import lm
 from cozy_runtime.author import Config, Loader, Model, ModelAssets, UnsupportedInput, uses_components
 from diffusers.pipelines.ideogram4.pipeline_ideogram4 import Ideogram4Pipeline
 from diffusers.pipelines.ideogram4.prompt_enhancer import (
+    CAPTION_SYSTEM_MESSAGE,
+    CAPTION_USER_TEMPLATE,
     PROMPT_UPSAMPLE_TEMPERATURE,
     build_caption_logits_processor,
-    generate_captions,
 )
 from tokenizers import Tokenizer
 from torch import nn
@@ -100,32 +104,59 @@ class UpsamplerGraph:
         self.components: dict[str, nn.Module] = {COMPONENT: language_model(config)}
 
 
+class Schema:
+    """The caption's JSON schema as `lm.generate`'s constraint: the tokens its JSON may take after
+    `tokens`, from outlines-core's index of the schema over the tokenizer's vocabulary. It keeps the
+    state of the last prefix it was asked about, so a decode's next token costs one transition."""
+
+    def __init__(self, index: Any) -> None:
+        self.index = index
+        self.last: tuple[tuple[int, ...], Any] = ((), index.get_initial_state())
+
+    def allowed(self, tokens: Sequence[int]) -> Sequence[int]:
+        tokens = tuple(tokens)
+        done, state = self.last
+        if tokens[: len(done)] != done:
+            done, state = (), self.index.get_initial_state()
+        for token in tokens[len(done) :]:
+            state = self.index.get_next_state(state, token)
+        self.last = (tokens, state)
+        return self.index.get_allowed_tokens(state)  # type: ignore[no-any-return]
+
+
 class QwenUpsampler(Model[UpsamplerGraph], encoded_leaves="accept", min_bits=4, phase="decode"):
     """Qwen3-VL-8B-Instruct writing Ideogram 4's structured caption from a plain prompt."""
 
     graph: UpsamplerGraph
     tokenizer: PreTrainedTokenizerFast
-    constrained: Any = None
+    index: Any = None
 
     def load(self, loader: Loader) -> None:
         self.graph = loader.construct(UpsamplerGraph, factory=UpsamplerGraph)
         self.tokenizer = tokenizer(loader.assets)
-        # The caption schema's grammar, compiled once; `generate_captions` resets it for each caption.
-        self.constrained = build_caption_logits_processor(self.graph.components[COMPONENT], self.tokenizer)
+        # The caption schema's index over the vocabulary, compiled once (Diffusers' schema, outlines-core).
+        self.index = build_caption_logits_processor(self.graph.components[COMPONENT], self.tokenizer).index
 
-    @uses_components(COMPONENT, memoize=True, memo_dependencies=(tokenizer, language_model))
+    @uses_components(COMPONENT, memoize=True, memo_dependencies=(tokenizer, language_model, Schema))
     def caption(self, prompt: str, *, width: int, height: int, seed: int) -> str:
         """Diffusers' `upsample_prompt` for one prompt: Ideogram's caption system message and the
         target aspect ratio, sampled at temperature 1 from `seed`, constrained to the caption's JSON
         schema; returned as compact JSON."""
         model = self.graph.components[COMPONENT]
-        device = torch.device(str(self.device))
-        generator = torch.Generator(device=device).manual_seed(seed)
-        with torch.inference_mode():
-            (text,) = generate_captions(
-                model, self.tokenizer, self.constrained, prompt, height, width,
-                temperature=PROMPT_UPSAMPLE_TEMPERATURE, max_new_tokens=MAX_TOKENS, generator=generator, device=device,
-            )
+        divisor = math.gcd(width, height) or 1
+        messages = [
+            {"role": "system", "content": CAPTION_SYSTEM_MESSAGE},
+            {"role": "user", "content": CAPTION_USER_TEMPLATE.format(
+                aspect_ratio=f"{width // divisor}:{height // divisor}", original_prompt=prompt)},
+        ]
+        inputs = self.tokenizer.apply_chat_template(
+            messages, add_generation_prompt=True, tokenize=True, return_tensors="pt", return_dict=True
+        ).to(torch.device(str(self.device)))
+        stop = self.tokenizer.eos_token_id
+        # Transformers' default top-k (50), which Diffusers' `generate_captions` sampled under.
+        out = lm.generate(model, inputs, max_new_tokens=MAX_TOKENS, stop=[stop], pad=stop,
+                          temperature=PROMPT_UPSAMPLE_TEMPERATURE, top_k=50, seed=seed, allowed=Schema(self.index))
+        text = str(self.tokenizer.decode(out[0], skip_special_tokens=True)).strip()
         try:
             caption = json.loads(text)
         except json.JSONDecodeError as error:
