@@ -613,11 +613,10 @@ def resolve_generate(payload: GenerateInput) -> GenerateFacts:
     )
 
 
-@app.entrypoint(
-    defaults={"model": "stabilityai/sdxl@1.0.0"},
-    memoize=Memoize(requires=["seed"]),
-    preflight=resolve_generate,
-)
+_DEFAULTS = {"model": "stabilityai/sdxl@1.0.0"}
+
+
+@app.entrypoint(defaults=_DEFAULTS, memoize=Memoize(requires=["seed"]), preflight=resolve_generate)
 def generate(
     ctx: Context,
     payload: GenerateInput,
@@ -678,22 +677,20 @@ class ImageBox(msgspec.Struct, kw_only=True):
     megapixels: Literal[1, 4, 8, 16] = 1
     #: `_negative_prompt`.
     negative_prompt: str | None = None
-    #: `resolve_generate`: Auto runs HiDiffusion above 1 MP.
-    hidiffusion: bool | None = None
     seed: Seed | None = None
 
 
 def _request(box: ImageBox) -> GenerateInput:
+    """`generate`'s request, HiDiffusion as `resolve_generate` chooses it: above 1 MP."""
     return GenerateInput(prompt=box.instructions, aspect_ratio=box.aspect_ratio, megapixels=box.megapixels,
-                         seed=box.seed, negative_prompt=box.negative_prompt, hidiffusion=box.hidiffusion)
+                         seed=box.seed, negative_prompt=box.negative_prompt)
 
 
 def resolve_image(payload: ImageBox) -> GenerateFacts:
     return resolve_generate(_request(payload))
 
 
-@app.tool(label="SDXL", named="image", defaults={"model": "stabilityai/sdxl@1.0.0"}, memoize=Memoize(requires=["seed"]),
-          preflight=resolve_image)  # fmt: skip
+@app.tool(label="SDXL", named="image", defaults=_DEFAULTS, memoize=Memoize(requires=["seed"]), preflight=resolve_image)
 def image(ctx: Context, payload: ImageBox, facts: Preflight[GenerateFacts], model: SdxlModel, out: Outputs,
           tel: Telemetry, adj: Adjustments) -> ImageResult:
     """SDXL on a canvas: `generate` from the box."""

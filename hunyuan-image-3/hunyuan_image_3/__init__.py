@@ -9,6 +9,7 @@ from typing import Annotated
 import msgspec
 from cozy_runtime.author import (
     Adjustments,
+    Advanced,
     App,
     AspectRatio,
     Context,
@@ -146,7 +147,7 @@ class ImageBox(msgspec.Struct, kw_only=True):
     #: `_generate`'s seed, which also repeats the thought.
     seed: Seed | None = None
     #: The model's own think-and-rewrite stage (`_generate`).
-    prompt_upsampling: bool = True
+    prompt_upsampling: Annotated[bool, Advanced()] = True
 
 
 # Each checkpoint is built, and its weights fetched, only when a render asks for it.

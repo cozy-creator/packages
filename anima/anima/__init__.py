@@ -92,7 +92,10 @@ def warmup() -> None:
     `import anima` already paid the cost and nothing is left to defer."""
 
 
-@app.entrypoint(defaults={"model": "circlestone-labs/anima@1.0.0"}, memoize=Memoize(requires=["seed"]))
+_DEFAULTS = {"model": "circlestone-labs/anima@1.0.0"}
+
+
+@app.entrypoint(defaults=_DEFAULTS, memoize=Memoize(requires=["seed"]))
 def generate(
     ctx: Context,
     payload: GenerateInput,
@@ -195,7 +198,7 @@ class ImageBox(msgspec.Struct, kw_only=True):
     seed: Seed | None = None
 
 
-@app.tool(label="Anima", named="image", defaults={"model": "circlestone-labs/anima@1.0.0"}, memoize=Memoize(requires=["seed"]))
+@app.tool(label="Anima", named="image", defaults=_DEFAULTS, memoize=Memoize(requires=["seed"]))
 def image(ctx: Context, payload: ImageBox, model: AnimaModel, out: Outputs, tel: Telemetry, adj: Adjustments) -> ImageResult:
     """Anima on a canvas: `generate` from the box."""
     request = GenerateInput(prompt=payload.instructions, aspect_ratio=payload.aspect_ratio, megapixels=float(payload.megapixels),

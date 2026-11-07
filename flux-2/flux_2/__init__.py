@@ -9,6 +9,7 @@ from typing import Annotated, Literal
 import msgspec
 from cozy_runtime.author import (
     Adjustments,
+    Advanced,
     App,
     AspectRatio,
     Context,
@@ -165,7 +166,7 @@ class ImageBox(msgspec.Struct, kw_only=True):
     #: `ImageRequest.drawn_seed`.
     seed: Seed | None = None
     #: BFL's upsampler rewrites the prompt first (`_generate`).
-    prompt_upsampling: bool = False
+    prompt_upsampling: Annotated[bool, Advanced()] = True
 
 
 @app.tool(label="FLUX.2", named="image", defaults={"model": _DEV, "turbo_lora": _TURBO, "upsampler": _DEV},

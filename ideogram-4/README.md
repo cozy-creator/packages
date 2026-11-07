@@ -6,7 +6,7 @@ conditional one reads the caption beside the image tokens, a separate unconditio
 tokens alone, and both run every step ("asymmetric CFG"). The text encoder is a frozen
 Qwen3-VL-8B-Instruct (13 of its layers' hidden states, concatenated); the VAE is FLUX.2's.
 
-`image` is the canvas tool, its prompt `instructions`: `aspect_ratio`, `megapixels`, `prompt_upsampling` and `seed`.
+`image` is the canvas tool, its prompt `instructions`: `aspect_ratio`, `megapixels`, `turbo` (on by default: Ideogram's 12-step V4_TURBO_12, else 48 steps) and `seed`. A plain prompt is always upsampled into the caption.
 
 | function | checkpoints | default steps | guidance |
 | --- | --- | --- | --- |
