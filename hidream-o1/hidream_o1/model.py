@@ -18,7 +18,6 @@ from typing import Any
 
 import numpy as np
 import torch
-import torch.nn.functional as F
 from cozy_runtime import rng, vlm
 from cozy_runtime.attention import Attention
 from cozy_runtime.author import Config, Loader, Model, uses_components
@@ -118,7 +117,8 @@ class O1Graph:
             module.to(torch.bfloat16)
         text = root.model.language_model.config
         for layer in root.model.language_model.layers:
-            # The denoising steps' attention, a site whose kernel the Runtime picks.
+            # The prefix's causal attention and the denoising steps', sites whose kernels the Runtime picks.
+            layer.self_attn.prefix_site = Attention(text.num_attention_heads, text.head_dim, causal=True)
             layer.self_attn.site = Attention(text.num_attention_heads, text.head_dim)
         self.components: dict[str, torch.nn.Module] = {COMPONENT: root.eval()}
 
@@ -368,10 +368,8 @@ def _layer(
     keys, values = (k, v) if past is None else (torch.cat([past[0], k], 2), torch.cat([past[1], v], 2))
     groups = q.shape[1] // keys.shape[1]  # grouped-query heads, repeated so any SDPA backend serves them
     keys, values = keys.repeat_interleave(groups, dim=1), values.repeat_interleave(groups, dim=1)
-    if past is None:
-        out = F.scaled_dot_product_attention(q, keys, values, is_causal=True).transpose(1, 2)
-    else:
-        out = attention.site(q.transpose(1, 2), keys.transpose(1, 2), values.transpose(1, 2))
+    site = attention.prefix_site if past is None else attention.site
+    out = site(q.transpose(1, 2), keys.transpose(1, 2), values.transpose(1, 2))
     h = h + attention.o_proj(out.reshape(*x.shape[:-1], -1))
     return h + layer.mlp(layer.post_attention_layernorm(h)), k, v
 
