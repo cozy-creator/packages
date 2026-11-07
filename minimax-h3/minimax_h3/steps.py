@@ -12,6 +12,7 @@ call of the same key.
 from __future__ import annotations
 
 from collections.abc import Callable
+from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from typing import Any
 
@@ -129,6 +130,7 @@ def denoise_refine(
     plan: list[tuple[torch.Tensor, torch.Tensor]],
     sigmas: torch.Tensor,
     windows: list[tuple[int, int]],
+    piece: Callable[[], AbstractContextManager[None]],
     weights: list[torch.Tensor],
     dense_steps: int,
     layout_at: Callable[[int], AttentionLayout],
@@ -171,7 +173,7 @@ def denoise_refine(
             carry = producer.Carry(dict(zip(keys, means, strict=True)), label.rolling, label.seeding)
             velocity = torch.zeros_like(rows)
             for (start, count), weight in zip(windows, weights, strict=True):
-                with attention_scope(layouts[label.sparse]), producer.carrying(carry):
+                with piece(), attention_scope(layouts[label.sparse]), producer.carrying(carry):
                     predicted, _ = transformer(
                         hidden_states=rows[None, start : start + count],
                         audio_hidden_states=audio[None],

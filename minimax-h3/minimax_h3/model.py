@@ -23,6 +23,7 @@ from cozy_runtime.author import (
     concurrently,
     placeable,
     sequence_parallel,
+    Windows,
     uses_components,
 )
 from cozy_runtime.author.kernels import Plan
@@ -299,7 +300,7 @@ class H3TurboBase(H3Model, encoded_leaves="accept"):
         overlay: H3RegenerateLoRA,
         prompt_embeds: Any,
         text_tags: Any,
-        spans: list[tuple[int, int]],
+        layout: Windows,
         audio: Any,
         schedule: Schedule,
         seed: int,
@@ -308,7 +309,7 @@ class H3TurboBase(H3Model, encoded_leaves="accept"):
     ) -> Any:
         """The Regenerate refine of normalized latents at their canvas, on the FL2VA DiT."""
         return overlay.refine(
-            self, latents, prompt_embeds=prompt_embeds, text_tags=text_tags, spans=spans,
+            self, latents, prompt_embeds=prompt_embeds, text_tags=text_tags, layout=layout,
             audio=audio, schedule=schedule, seed=seed, preset=preset, on_step=on_step,
         )  # fmt: skip
 
@@ -435,7 +436,7 @@ class H3RegenerateLoRA(Model[OfficialH3RegenerateLoRA], encoded_leaves="accept")
         *,
         prompt_embeds: Any,
         text_tags: Any,
-        spans: list[tuple[int, int]],
+        layout: Windows,
         audio: Any,
         schedule: Schedule,
         seed: int,
@@ -445,6 +446,6 @@ class H3RegenerateLoRA(Model[OfficialH3RegenerateLoRA], encoded_leaves="accept")
         return regenerate.refine(
             base.pipe.components["transformer"],
             self.pipe.overlay(base.pipe),
-            latents=latents, prompt_embeds=prompt_embeds, text_tags=text_tags, spans=spans,
+            latents=latents, prompt_embeds=prompt_embeds, text_tags=text_tags, layout=layout,
             audio=audio, schedule=schedule, seed=seed, preset=preset, on_step=on_step,
         )  # fmt: skip
