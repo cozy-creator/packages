@@ -763,7 +763,7 @@ wheels = [
 
 [[package]]
 name = "sdxl"
-version = "0.6.0"
+version = "0.6.1"
 source = { editable = "." }
 dependencies = [
     { name = "cozy-runtime", extra = ["adapters", "media"] },
@@ -789,7 +789,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "cozy-runtime", extras = ["adapters", "media"], specifier = ">=0.41.0" },
+    { name = "cozy-runtime", extras = ["adapters", "media"], specifier = ">=0.42.0" },
     { name = "diffusers", specifier = ">=0.40.0,<0.41" },
     { name = "hf-xet", specifier = ">=1.6.0" },
     { name = "hidiffusion", specifier = ">=0.1.10" },

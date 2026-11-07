@@ -1,9 +1,10 @@
-"""Qwen-Image-2.1's cached denoise step: its Euler tables and the layout it reads.
+"""Qwen-Image-2.1's denoise steps: its Euler tables and the layouts they read.
 
 Step 0 runs in the transformer's ``extract`` mode, prefilling the per-layer text and
 condition-image K/V cache over the full joint sequence. Steps ``1..N-1`` are the ``cached`` pass
 over the target-image tokens only, identical from one step to the next but for the timestep and
-the running latent, so they run as one `denoise_loop` the Runtime may capture.
+the running latent, so they run as one `denoise_loop` the Runtime may capture. With no room to
+keep that prefix (`retained` None), every step is the whole joint pass (`_full_step`).
 
 The rotary tables and target-token modulation mask are derived once by `_Layout`, so the step
 carries no host sync, no Python scalar read and no data-dependent shape. The prefix K/V is
@@ -21,7 +22,10 @@ from dataclasses import dataclass
 from typing import Any
 
 import torch
-from diffusers.models.transformers.transformer_qwenimage21 import QwenImage21KVLayerCache
+from diffusers.models.transformers.transformer_qwenimage21 import (
+    QwenImage21KVLayerCache,
+    _qwenimage21_prefix_segments,
+)
 
 
 @dataclass(frozen=True)
@@ -129,3 +133,86 @@ class _Layout:
         # The target queries only: the cached prefix lives in the K/V cache, never recomputed.
         self.rotary_emb = rotary_emb[prefix_len:]
         self.modulation_mask = target_token_mask[prefix_len:]
+
+
+class _Joint:
+    """The whole joint sequence's layout, which `QwenImage21Transformer2DModel.forward` derives on
+    the host every call (`repeat_interleave`, boolean scatters, a `tolist`), derived once: where
+    the latent tokens and the text tokens land, the rotary table, the target mask and the
+    prefix's block-causal segments (the default processors' form)."""
+
+    def __init__(
+        self,
+        transformer: Any,
+        img_shapes: list[list[tuple[int, int, int]]],
+        img_mask: torch.Tensor,
+        text_mask: torch.Tensor | None,
+        device: Any,
+    ) -> None:
+        repeats = torch.where(img_mask, _Layout._IMG_TOKENS_PER_SLOT, 1)[0]
+        expanded = torch.repeat_interleave(img_mask[0], repeats)
+        self.length = int(expanded.shape[0])
+        # A padded prompt's keys: its text positions, in order, are the text encoder's non-image ones.
+        self.key_valid = None
+        if text_mask is not None:
+            self.key_valid = torch.ones(1, self.length, dtype=torch.bool, device=device)
+            self.key_valid[:, ~expanded] = text_mask.bool()[:, ~img_mask[0][: text_mask.shape[1]]]
+        self.image_index = expanded.nonzero(as_tuple=True)[0]
+        self.text_index = (~expanded).nonzero(as_tuple=True)[0]
+        self.text_source = (~img_mask[0]).nonzero(as_tuple=True)[0]
+        self.rotary_emb = transformer.pos_embed(img_shapes[0], expanded, device=device)
+        image_ids, self.target_mask = transformer.build_token_metadata(expanded, img_shapes[0])
+        self.segments = _qwenimage21_prefix_segments(image_ids, int((~self.target_mask).sum()))
+
+    def inputs(self) -> tuple[torch.Tensor, ...]:
+        masks = () if self.key_valid is None else (self.key_valid,)
+        return self.image_index, self.text_index, self.text_source, self.rotary_emb, self.target_mask, *masks
+
+
+def _full_step(
+    transformer: Any, segments: list[tuple[int, int, bool]], length: int, targets: int, masked: bool,
+) -> Callable[..., None]:
+    """A step over the whole joint sequence, `forward` with no cache past its layout (`_Joint`):
+    `masked`, its key mask follows the layout's inputs. `segments` and `length` are host values of
+    one layout, so its loop takes no key."""
+    blocks = transformer.transformer_blocks
+
+    def step(
+        index: torch.Tensor,
+        latents: torch.Tensor,
+        timesteps: torch.Tensor,
+        deltas: torch.Tensor,
+        image_index: torch.Tensor,
+        text_index: torch.Tensor,
+        text_source: torch.Tensor,
+        rotary: torch.Tensor,
+        target: torch.Tensor,
+        *rest: torch.Tensor,
+    ) -> None:
+        key_valid, (embeds, *references) = (rest[0], rest[1:]) if masked else (None, rest)
+        with torch.no_grad():
+            euler = _FlowEuler(timesteps, deltas)
+            images = transformer.img_in(torch.cat([*references, latents], dim=1))
+            text = transformer.txt_in(embeds)
+            hidden = images.new_empty(images.shape[0], length, images.shape[2])
+            hidden[:, text_index] = text[:, text_source]
+            hidden[:, image_index] = images
+            temb = transformer.time_text_embed(euler.timestep(index), images)
+            modulation = transformer.modulation(temb)
+            for block in blocks:
+                hidden = block(
+                    hidden_states=hidden,
+                    modulation=modulation,
+                    rotary_emb=rotary,
+                    attention_mask=None,
+                    target_token_mask=target,
+                    layer_cache=None,
+                    kv_cache_mode=None,
+                    cache_write_slice=None,
+                    segments=segments,
+                    key_valid=key_valid,
+                )
+            noise = transformer.proj_out(transformer.norm_out(hidden, temb, target))[:, -targets:]
+            latents.copy_((latents.float() + euler.delta(index) * noise).to(latents.dtype))
+
+    return step

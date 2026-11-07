@@ -139,7 +139,6 @@ def generate(ctx: Context, payload: GenerateInput, model: Ideogram4, text_encode
     with tel.stage("generating image", overall_range=(0.2, 0.96)):
         latents = model.denoise(
             features, width=width, height=height, guidance=guidance_schedule(steps, weight), seed=seed,
-            cancel=ctx.raise_if_cancelled,
             on_step=tel.step_callback(steps, stage="generating image", overall_range=(0.2, 0.96)),
         )
     with tel.stage("decoding image", overall_range=(0.96, 0.99)):

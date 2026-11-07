@@ -5,8 +5,8 @@ from __future__ import annotations
 from typing import Any
 
 import torch
-from cozy_runtime import tiles
-from cozy_runtime.author import Telemetry, hold_dtype
+from cozy_runtime import rng
+from cozy_runtime.author import Cut, Telemetry, hold_dtype, split
 from transformers.masking_utils import create_causal_mask
 
 
@@ -62,42 +62,26 @@ def encode_tokens(
     return prompt, second_encoder.text_projection(pooled)
 
 
-#: The largest canvas decoded whole where it fits, about 9.7 GB in bf16. HiDiffusion's larger canvases
-#: (up to 16 MP) decode in tiles: a whole 4096² decode asked for 8 GiB more with 14 GiB allocated on a
-#: 24 GB card. Tiles renormalize per tile (the VAE's GroupNorm), 34 dB against a whole 2048² decode.
-WHOLE_PIXELS = 2048 * 2048
-#: Tile sides (px), largest first: smaller where they do not fit.
-TILES = (1024, 512, 256)
+#: Latents a decode window shares with each neighbour, cross-faded (256 px): the blend of Diffusers'
+#: 1024 px tiles.
+OVERLAP = 32
+#: A decode's peak beside its output, in outputs (`split(holds=)`): a whole 2048² decode held about
+#: 9.7 GB in bf16.
+HOLDS = 290
 
 
 def decode_latents(vae: Any, latents: torch.Tensor, scale: float) -> torch.Tensor:
     """Decode with the VAE's already selected representation, never changing its weights: whole
-    up to `WHOLE_PIXELS` where it fits, else in the largest `TILES` that fit."""
-    z = latents / scale
+    where it fits, else in the fewest windows that do (`split`), neighbours cross-faded. Each
+    window's GroupNorms read its own statistics: 34 dB against a whole decode at 2048²."""
     factor = 2 ** (len(vae.config.block_out_channels) - 1)
-    if z.shape[-2] * z.shape[-1] * factor * factor <= WHOLE_PIXELS:
-        try:
-            return vae.decode(z).sample
-        except torch.OutOfMemoryError as error:
-            error.__traceback__ = None  # the whole decode's activations go with its frames
-    *larger, smallest = TILES
-    for side in larger:
-        try:
-            return _tiled(vae, z, factor, side)
-        except torch.OutOfMemoryError as error:
-            error.__traceback__ = None  # this attempt's tiles go with its frames
-    return _tiled(vae, z, factor, smallest)
+    quant = vae.post_quant_conv
 
+    def decoded(z: torch.Tensor) -> torch.Tensor:
+        return vae.decoder(quant(z) if quant is not None else z)  # type: ignore[no-any-return]
 
-def _tiled(vae: Any, z: torch.Tensor, factor: int, side: int) -> torch.Tensor:
-    """Diffusers' tiled decode (`AutoencoderKL.tiled_decode`'s quarter-side blend), its bits, in
-    `side` px tiles (`cozy_runtime.tiles`)."""
-
-    def decoded(tile: torch.Tensor) -> torch.Tensor:
-        quant = vae.post_quant_conv
-        return vae.decoder(quant(tile) if quant is not None else tile)  # type: ignore[no-any-return]
-
-    return tiles.tiled(decoded, z, scale=factor, side=side, stride=side * 3 // 4)
+    cuts = (Cut(-2, factor, OVERLAP), Cut(-1, factor, OVERLAP))
+    return split(decoded, latents / scale, *cuts, holds=HOLDS)  # type: ignore[no-any-return]
 
 
 def decode_dtype(vae: Any) -> torch.dtype:
@@ -121,60 +105,103 @@ def hold_decode_dtype(vae: Any, tel: Telemetry) -> None:
     tel.log("vae representation", dtype=str(dtype).removeprefix("torch."))
 
 
-class _Euler:
-    """Diffusers' epsilon Euler step in its operation order, over one device schedule `table`.
+def euler_schedule(scheduler: Any, device: Any) -> torch.Tensor:
+    """Diffusers' Euler (epsilon or v) as one float32 device table [7, steps], indexed by the
+    global step: timesteps, 1/sqrt(sigma^2+1), 1/sigma, sigma, sigma_next - sigma,
+    -sigma/sqrt(sigma^2+1), 1/(sigma^2+1)."""
+    if scheduler.config.prediction_type not in ("epsilon", "v_prediction"):
+        raise ValueError(f"SDXL's Euler step predicts epsilon or v, not {scheduler.config.prediction_type}")
+    # A CPU denominator takes reciprocal in double, then multiplies in float opmath.
+    # Moving the original scalar to the GPU changes half rounding, so prepare the
+    # same reciprocals before transfer.
+    sigmas = scheduler.sigmas[:-1]
+    squares = torch.stack([sigma**2 + 1 for sigma in sigmas])
+    scales = torch.stack([square**0.5 for square in squares])
+    sigma_hat = torch.stack([sigma * 1 for sigma in sigmas])
+    rows = (
+        scheduler.timesteps,
+        scales.double().reciprocal().float(),
+        sigma_hat.double().reciprocal().float(),
+        sigma_hat,
+        scheduler.sigmas[1:] - sigma_hat,
+        torch.stack([-sigma / scale for sigma, scale in zip(sigmas, scales, strict=True)]),
+        squares.double().reciprocal().float(),
+    )
+    if any(row.dtype != torch.float32 for row in rows):
+        raise ValueError("SDXL's Euler schedules are float32")
+    return torch.stack([row.to(device=device) for row in rows])
 
-    `table` is float32 [5, steps]: timesteps, 1/sqrt(sigma^2+1), 1/sigma, sigma and
-    sigma_next - sigma, indexed by the global step.
-    """
 
-    def __init__(self, scheduler: Any, device: Any) -> None:
-        if scheduler.config.prediction_type != "epsilon":
-            raise ValueError(
-                f"SDXL's Euler step predicts epsilon, not {scheduler.config.prediction_type}"
-            )
-        # A CPU denominator takes reciprocal in double, then multiplies in float opmath.
-        # Moving the original scalar to the GPU changes half rounding, so prepare the
-        # same reciprocals before transfer.
-        sigmas = scheduler.sigmas[:-1]
-        scales = torch.stack([(sigma**2 + 1) ** 0.5 for sigma in sigmas])
-        sigma_hat = torch.stack([sigma * 1 for sigma in sigmas])
-        rows = (
-            scheduler.timesteps,
-            scales.double().reciprocal().float(),
-            sigma_hat.double().reciprocal().float(),
-            sigma_hat,
-            scheduler.sigmas[1:] - sigma_hat,
-        )
-        if any(row.dtype != torch.float32 for row in rows):
-            raise ValueError("SDXL's Euler schedules are float32")
-        self.table = torch.stack([row.to(device=device) for row in rows])
-
-    @staticmethod
-    def step(
-        unet: Any,
-        index: torch.Tensor,
-        state: torch.Tensor,
-        prompt: torch.Tensor,
-        pooled: torch.Tensor,
-        time_ids: torch.Tensor,
-        table: torch.Tensor,
-        guidance: float,
-    ) -> None:
-        timestep, inverse_scale, inverse_sigma, sigma, delta = table.index_select(1, index)
-        inverse_scale, inverse_sigma = inverse_scale.reshape(()), inverse_sigma.reshape(())
-        sigma, delta = sigma.reshape(()), delta.reshape(())
-        batch = torch.cat([state] * 2) if guidance > 1.0 else state
-        noise = unet(
-            (batch.float() * inverse_scale).to(batch.dtype),
-            timestep,
-            encoder_hidden_states=prompt,
-            added_cond_kwargs={"text_embeds": pooled, "time_ids": time_ids},
-        ).sample
-        if guidance > 1.0:
-            uncond, cond = noise.chunk(2)
-            noise = uncond + guidance * (cond - uncond)
-        sample = state.to(torch.float32)
+def euler_step(
+    unet: Any, index: torch.Tensor, state: torch.Tensor, prompt: torch.Tensor, pooled: torch.Tensor,
+    time_ids: torch.Tensor, guidance: float, v: bool, table: torch.Tensor,
+) -> None:
+    """Diffusers' Euler step in its operation order, `v` its v prediction."""
+    rows = table.index_select(1, index)
+    timestep = rows[0]
+    inverse_scale, inverse_sigma, sigma, delta, v_scale, v_inverse = (row.reshape(()) for row in rows[1:])
+    noise = _guided(unet, (state.float() * inverse_scale).to(state.dtype), timestep, prompt, pooled,
+                    time_ids, guidance)
+    sample = state.to(torch.float32)
+    if v:
+        original = (v_scale * noise.float()).to(noise.dtype) + sample * v_inverse
+    else:
         original = sample - (sigma * noise.float()).to(noise.dtype)
-        derivative = (sample - original) * inverse_sigma
-        state.copy_((sample + derivative * delta).to(noise.dtype))
+    derivative = (sample - original) * inverse_sigma
+    state.copy_((sample + derivative * delta).to(noise.dtype))
+
+
+def ddim_schedule(
+    scheduler: Any, device: Any, generator: torch.Generator, shape: tuple[int, ...]
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Diffusers' epsilon DDIM at eta 1 (HiDiffusion's recipe) as one float32 device table
+    [6, steps], indexed by the global step: timesteps, sqrt(1 - a_t), 1/sqrt(a_t), sqrt(a_prev),
+    sqrt(1 - a_prev - s^2) and the step's noise scale s; and each step's noise [steps, *shape],
+    drawn on the CPU from `generator` in the order DDIM draws it."""
+    config = scheduler.config
+    if config.prediction_type != "epsilon" or config.thresholding or config.clip_sample:
+        raise ValueError("SDXL's DDIM step predicts epsilon, unclipped and unthresholded")
+    rows = []
+    for t in scheduler.timesteps.tolist():
+        prev = t - config.num_train_timesteps // scheduler.num_inference_steps
+        alpha = scheduler.alphas_cumprod[t]
+        alpha_prev = scheduler.alphas_cumprod[prev] if prev >= 0 else scheduler.final_alpha_cumprod
+        deviation = 1.0 * scheduler._get_variance(t, prev) ** 0.5
+        rows.append((
+            torch.tensor(float(t)), (1 - alpha) ** 0.5, (alpha**0.5).double().reciprocal().float(),
+            alpha_prev**0.5, (1 - alpha_prev - deviation**2) ** 0.5, deviation,
+        ))
+    table = torch.stack([torch.stack(row) for row in zip(*rows, strict=True)])
+    noise = torch.stack([rng.noise(shape, generator, dtype=torch.float16) for _ in rows])
+    return table.to(device=device), noise.to(device=device)
+
+
+def ddim_step(
+    unet: Any, index: torch.Tensor, state: torch.Tensor, prompt: torch.Tensor, pooled: torch.Tensor,
+    time_ids: torch.Tensor, guidance: float, table: torch.Tensor, noise: torch.Tensor,
+) -> None:
+    """Diffusers' DDIM step in its operation order."""
+    rows = table.index_select(1, index)
+    timestep = rows[0]
+    root_beta, inverse_root_alpha, root_alpha_prev, direction, deviation = (row.reshape(()) for row in rows[1:])
+    eps = _guided(unet, state, timestep, prompt, pooled, time_ids, guidance)
+    dtype = eps.dtype
+    original = ((state - (root_beta * eps.float()).to(dtype)).float() * inverse_root_alpha).to(dtype)
+    sample = (root_alpha_prev * original.float()).to(dtype) + (direction * eps.float()).to(dtype)
+    state.copy_(sample + (deviation * noise.index_select(0, index)[0].float()).to(dtype))
+
+
+def _guided(
+    unet: Any, latents: torch.Tensor, timestep: torch.Tensor, prompt: torch.Tensor, pooled: torch.Tensor,
+    time_ids: torch.Tensor, guidance: float,
+) -> torch.Tensor:
+    """The UNet's noise prediction, guided against the negative half of `prompt` above 1."""
+    batch = torch.cat([latents] * 2) if guidance > 1.0 else latents
+    noise = unet(
+        batch, timestep, encoder_hidden_states=prompt,
+        added_cond_kwargs={"text_embeds": pooled, "time_ids": time_ids},
+    ).sample
+    if guidance > 1.0:
+        uncond, cond = noise.chunk(2)
+        noise = uncond + guidance * (cond - uncond)
+    return noise  # type: ignore[no-any-return]
