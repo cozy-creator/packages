@@ -10,7 +10,9 @@ anew, and a given seed repeats its rewrite. The decode is plain and graphed.
 
 Upstream lets each think for up to 24000 tokens: 25-143 s of a 4090 an edit (runs 37228-37379). Here the thought
 stops at `THINK_TOKENS` and the model answers, closed as Qwen3 closes a thinking budget, and an edit's rewrite is asked
-to be short (`_BRIEF`). On a 4090, against upsampling off, an edit (pose, a new scene, a new shot; runs 37863-38112):
+to be short (`_BRIEF`). Qwen3.5-9B's multi-token-prediction head (`Drafter`) drafts the decode: where the enhancer's
+weights stream (a card or cap below its 11 GiB), each pass over them serves every drafted token it keeps. On a 4090,
+against upsampling off, an edit (pose, a new scene, a new shot; runs 37863-38112):
 
     thought               added   rewrite        the gains (designed scene, no stray props) / clothes held
     none                  +37 s   never parses   none: it reasons in the answer until it is cut off
@@ -28,13 +30,18 @@ import re
 from collections.abc import Callable
 from dataclasses import dataclass
 from importlib.resources import files
-from typing import Literal
+from typing import Literal, TypeVar
 
 import torch
 from cozy_runtime import lm
-from cozy_runtime.author import uses_components
+from cozy_runtime.author import Config, Loader, Model, uses_components
 from cozy_runtime.vlm import COMPONENT, Question, VisionLM
 from PIL import Image
+from transformers import AutoConfig
+from transformers.initialization import no_init_weights
+from transformers.models.qwen3_5 import modeling_qwen3_5
+
+T = TypeVar("T")
 
 #: How far the rewrite goes beyond the words: `balanced` is Qwen's own rewrite; the others say so after the
 #: request, where the enhancer reads intent.
@@ -147,6 +154,29 @@ def parse(answer: str, pictures: int) -> Rewrite | None:
     return None
 
 
+class DrafterGraph:
+    def __init__(self, config: Config) -> None:
+        # The head-only lane keeps Qwen3.5-9B's config (`drafter_head`).
+        with no_init_weights():
+            head = lm.Draft(AutoConfig.for_model(**config.mapping()), modeling_qwen3_5)
+        self.components: dict[str, torch.nn.Module] = {"model": head.to(torch.bfloat16).eval()}
+
+
+class Drafter(Model[DrafterGraph], encoded_leaves="accept"):
+    """Qwen3.5-9B's multi-token-prediction head: the enhancers are that model fine-tuned without it. Their decode
+    drafts tokens with it and keeps the ones it agrees with."""
+
+    graph: DrafterGraph
+
+    def load(self, loader: Loader) -> None:
+        self.graph = loader.construct(DrafterGraph, factory=DrafterGraph)
+
+    @uses_components("model")
+    def drafting(self, body: Callable[[], T]) -> T:
+        with lm.drafting(self.graph.components["model"]):
+            return body()
+
+
 class Enhancer(VisionLM):
     """Runtime's Qwen-VL model, answering after a thought of at most `think` tokens."""
 
@@ -190,18 +220,19 @@ class Enhancer(VisionLM):
 
 
 def rewrite(
-    enhancer: Enhancer, prompt: str, images: list[Image.Image], creativity: Creativity, seed: int,
+    enhancer: Enhancer, drafter: Drafter, prompt: str, images: list[Image.Image], creativity: Creativity, seed: int,
     progress: Callable[[float], None],
 ) -> tuple[Rewrite | None, str, int, int]:
-    """The enhancer's rewrite of `prompt` (`<imageN>` for two or more pictures, as its system prompt asks), its raw
-    answer and the tokens its thought and its answer took; `progress` is told the share of its budget decoded."""
+    """The enhancer's rewrite of `prompt` (`<imageN>` for two or more pictures, as its system prompt asks), drafted
+    by `drafter`, its raw answer and the tokens its thought and its answer took; `progress` is told the share of its
+    budget decoded."""
     task = "edit" if images else "t2i"
     profile = PROFILES[task]
     steer = _STEER[task].get(creativity, "")
     question = Question("\n\n".join(filter(None, (prompt.strip(), steer, _BRIEF[task]))),
                         [reference(image) for image in images])
-    answer, thought_tokens, answer_tokens = enhancer.answer(
+    answer, thought_tokens, answer_tokens = drafter.drafting(lambda: enhancer.answer(
         question, system=profile.system, think=THINK_TOKENS, presence_penalty=profile.presence_penalty, seed=seed,
         progress=lambda done: progress(min(done, 1.0)),
-    )
+    ))
     return parse(answer, len(images)), answer, thought_tokens, answer_tokens

@@ -29,7 +29,7 @@ from cozy_runtime.author import (
 from PIL import Image
 
 from .model import QwenImage21Model
-from .rewriter import Creativity, Enhancer, rewrite
+from .rewriter import Creativity, Drafter, Enhancer, rewrite
 from . import quantize as quantize  # its recipes
 
 app = App()
@@ -114,13 +114,14 @@ def _upsampled(
     images: list[Image.Image],
     seed: int,
     enhancer: Enhancer,
+    drafter: Drafter,
     tel: Telemetry,
     adj: Adjustments,
 ) -> tuple[GenerateInput, str]:
     """The request as Qwen's enhancer rewrites it, sampled from the render's `seed`, and the canvas it chose
     when the request names none (upstream passes `wh_ratio` and `ratio_follow` to the renderer)."""
     with tel.stage("upsampling prompt", overall_range=(0.0, 0.3)):
-        found, answer, thought, said = rewrite(enhancer, prompt, images, payload.creativity, seed,
+        found, answer, thought, said = rewrite(enhancer, drafter, prompt, images, payload.creativity, seed,
                                                lambda done: tel.progress(done, stage="upsampling prompt"))
     if found is None:
         adj.warn("prompt_upsampling", "Qwen's prompt enhancer gave no rewrite, so the prompt goes as written")
@@ -140,6 +141,7 @@ def _upsampled(
 def _generate(
     ctx: Context,
     payload: GenerateInput,
+    drafter: Drafter,
     expander: Enhancer,
     model: QwenImage21Model,
     rewriter: Enhancer,
@@ -162,7 +164,7 @@ def _generate(
     reference_images = [asset.read(mode="RGBA") for asset in payload.images()] or None
     if payload.prompt_upsampling:
         enhancer = rewriter if reference_images else expander
-        payload, prompt = _upsampled(payload, prompt, reference_images or [], seed, enhancer, tel, adj)
+        payload, prompt = _upsampled(payload, prompt, reference_images or [], seed, enhancer, drafter, tel, adj)
     model.hold_vae(tel)
     ctx.raise_if_cancelled()
     begin = 0.3 if payload.prompt_upsampling else 0.0
@@ -216,17 +218,20 @@ _MEMO = ("qwen_image_2", "qwen_image_2.model", "qwen_image_2.rewriter")
 #: Qwen's prompt enhancers (QwenLM/Qwen-Image-2.1 `prompt_rewrite/`), a picture from words' and an edit's, and the
 #: text encoder, the `text_encoder` of a Qwen-Image-2.1 checkpoint and one for both functions, are abliterated by
 #: default (Paul, 11-06). Qwen's own are `qwen/qwen-image-2.1-pe-t2i@0.1.0`, `qwen/qwen-image-2.1-pe-i2i@0.1.0` and
-#: any Qwen-Image-2.1 checkpoint (`model.text_encoder=qwen/qwen-image-2.1@0.1.0`).
-_FULL = {"expander": "pottokao/qwen-image-2.1-pe-t2i-abliterated@0.1.0", "model": "qwen/qwen-image-2.1@0.1.0",
-         "rewriter": "darrellbest/qwen-image-2.1-pe-i2i-abliterated@0.1.0",
+#: any Qwen-Image-2.1 checkpoint (`model.text_encoder=qwen/qwen-image-2.1@0.1.0`). Qwen3.5-9B's MTP head alone
+#: (`drafter_head` makes it) drafts the enhancers' decode: neither enhancer checkpoint has one.
+_DRAFTER = "qwen/qwen3.5-9b-mtp@0.2.0"
+_FULL = {"drafter": _DRAFTER, "expander": "pottokao/qwen-image-2.1-pe-t2i-abliterated@0.1.0",
+         "model": "qwen/qwen-image-2.1@0.1.0", "rewriter": "darrellbest/qwen-image-2.1-pe-i2i-abliterated@0.1.0",
          "text_encoder": "atomicchat/qwen-image-2.1-text-encoder-abliterated@0.1.0"}
-_TURBO = {"expander": "pottokao/qwen-image-2.1-pe-t2i-abliterated@0.1.0", "model": "qwen/qwen-image-2.1-turbo@0.1.1",
-          "rewriter": "darrellbest/qwen-image-2.1-pe-i2i-abliterated@0.1.0",
+_TURBO = {"drafter": _DRAFTER, "expander": "pottokao/qwen-image-2.1-pe-t2i-abliterated@0.1.0",
+          "model": "qwen/qwen-image-2.1-turbo@0.1.1", "rewriter": "darrellbest/qwen-image-2.1-pe-i2i-abliterated@0.1.0",
           "text_encoder": "atomicchat/qwen-image-2.1-text-encoder-abliterated@0.1.0"}
-_COMPONENTS = {"expander": ("model",), "model": ("transformer", "vae"), "rewriter": ("model",),
-               "text_encoder": ("text_encoder",)}
-#: Built and fetched on first use: an edit never pulls the expander, `prompt_upsampling=False` neither enhancer.
-_ON_DEMAND = ("rewriter", "expander")
+_COMPONENTS = {"drafter": ("model",), "expander": ("model",), "model": ("transformer", "vae"),
+               "rewriter": ("model",), "text_encoder": ("text_encoder",)}
+#: Built and fetched on first use: an edit never pulls the expander, `prompt_upsampling=False` neither enhancer nor
+#: the drafter.
+_ON_DEMAND = ("rewriter", "expander", "drafter")
 
 
 @app.entrypoint(
@@ -240,6 +245,7 @@ _ON_DEMAND = ("rewriter", "expander")
 def generate(
     ctx: Context,
     payload: GenerateInput,
+    drafter: Drafter,
     expander: Enhancer,
     model: QwenImage21Model,
     rewriter: Enhancer,
@@ -249,7 +255,7 @@ def generate(
     adj: Adjustments,
 ) -> ImageResult:
     """Qwen-Image-2.1, the 40-step base model."""
-    return _generate(ctx, payload, expander, model, rewriter, text_encoder, out, tel, adj, _STEPS, None)
+    return _generate(ctx, payload, drafter, expander, model, rewriter, text_encoder, out, tel, adj, _STEPS, None)
 
 
 @app.entrypoint(
@@ -263,6 +269,7 @@ def generate(
 def generate_turbo(
     ctx: Context,
     payload: GenerateInput,
+    drafter: Drafter,
     expander: Enhancer,
     model: QwenImage21Model,
     rewriter: Enhancer,
@@ -272,4 +279,5 @@ def generate_turbo(
     adj: Adjustments,
 ) -> ImageResult:
     """Qwen-Image-2.1-Turbo: the same inputs, on its 8-step distilled schedule."""
-    return _generate(ctx, payload, expander, model, rewriter, text_encoder, out, tel, adj, len(TURBO_SIGMAS), TURBO_SIGMAS)
+    return _generate(ctx, payload, drafter, expander, model, rewriter, text_encoder, out, tel, adj, len(TURBO_SIGMAS),
+                     TURBO_SIGMAS)
