@@ -135,6 +135,8 @@ memory demand, so compare editing benchmarks separately from text-only runs.
 The upstream model is under the Qwen Research License, for noncommercial research
 and evaluation. This wrapper is not an authorization for commercial model use.
 The licence and Notice ship in this package (`qwen_image_2/LICENSE.model.txt`, `qwen_image_2/Notice`).
+The abliterated enhancers keep that licence (pottokao's and darrellbest's `LICENSE` are the same file). The text
+encoder, Qwen3-VL-8B-Instruct, is Apache-2.0, as is AtomicChat's edit (`qwen_image_2/LICENSE.text-encoder.txt`).
 The architecture is Diffusers' (Apache-2.0), at the release `pyproject.toml` pins.
 
 
