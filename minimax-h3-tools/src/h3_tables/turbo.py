@@ -204,9 +204,6 @@ async def turbo_lora(
         }
         for task in TASKS
     }
-    if ctx.device.type == "cuda":
-        torch.backends.cuda.matmul.allow_tf32 = False
-    torch.set_float32_matmul_precision("highest")
     reused = computed = 0
     with ctx.output("pdd8", Derivation(base=None, sources=(full, pair), order=order)) as out:
         write_config(out, canonical_json.encode(config))
