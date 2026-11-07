@@ -10,25 +10,28 @@ import numpy as np
 import torch
 from omegaconf import OmegaConf
 from PIL import Image, ImageOps
+from cozy_runtime import rng
 from cozy_runtime.author import Config, Cut, Loader, Model, Telemetry, split, uses_components
 
 from .color import Correction, correct
 from .frames import extend
 from .upstream.infer import VideoDiffusionInfer
+from .upstream.models.dit.nablocks.mmsr_block import GROUP
 from .upstream.models.dit.nadit import NaDiT
 from .upstream.models.video_vae_v3.modules.attn_video_vae import VideoAutoencoderKLWrapper
 
 # SeedVR's configs_7b/main.yaml: separate text/video weights throughout.
+DIM, EXPAND = 3072, 4
 DIT = dict(
     vid_in_channels=33,
     vid_out_channels=16,
-    vid_dim=3072,
+    vid_dim=DIM,
     txt_in_dim=5120,
-    txt_dim=3072,
+    txt_dim=DIM,
     emb_dim=18432,
     heads=24,
     head_dim=128,
-    expand_ratio=4,
+    expand_ratio=EXPAND,
     norm="rms",
     norm_eps=1e-5,
     ada="single",
@@ -70,6 +73,11 @@ ARCHITECTURE = "SeedVR2-7B"
 #: come from the clip's shape alone (`split`'s `most`), never from free memory. Inside a piece,
 #: attention runs by window groups and the MLP by tokens (both exact), so a piece fits 8 GB.
 PIECE = 131072
+#: A piece's activation peak, in 2-byte elements: during its MLP, the block's input, the
+#: attention's residual sum and the MLP's input and output (4 DIM a token) beside one `GROUP`'s
+#: projection and GELU (2 EXPAND DIM a token). `split`'s `holds` counts it in windows of the
+#: piece's fp16 latent, `most` elements each.
+PEAK = (4 * PIECE + 2 * EXPAND * GROUP) * DIM
 #: SeedVR's configs_7b: the VAE's latent scaling factor (no shift).
 SCALE = 0.9152
 
@@ -114,24 +122,31 @@ class RestorationModel(
         self.graph = loader.construct(Graph, factory=build)
 
     @uses_components("vae")
-    def encode(self, pixels: torch.Tensor) -> torch.Tensor:
+    def encode(self, pixels: torch.Tensor, generator: torch.Generator) -> torch.Tensor:
         """A window's pixels, (c, t, h, w) bytes or [-1, 1] in host memory, to its scaled latent,
-        (t, h, w, c) on the device. The VAE moves one slice of frames at a time."""
-        latent = _vae(self.graph).encode(pixels[None]).latent[0]
+        (t, h, w, c) on the device, sampled from `generator`. The VAE moves one slice of frames
+        at a time."""
+        latent = _vae(self.graph).encode(pixels[None], generator).latent[0]
         return latent.movedim(0, -1).to(str(self.device)) * SCALE
 
     @uses_components("dit", "conditioning")
-    def denoise(self, latent: torch.Tensor, latent_noise: float) -> torch.Tensor:
-        """The one-step restoration of a window's latent, conditioned on itself, in the fewest
-        pieces along time that fit the device."""
+    def denoise(
+        self, latent: torch.Tensor, latent_noise: float, generator: torch.Generator
+    ) -> torch.Tensor:
+        """The one-step restoration of a window's latent, conditioned on itself, from
+        `generator`'s noise, in pieces along time from its shape alone."""
         runner = _runner(self.graph, torch.device(str(self.device)))
         conditioning = cast(Conditioning, self.graph.components["conditioning"])
-        noise = torch.randn_like(latent)
+
+        def draw() -> torch.Tensor:
+            return rng.noise(latent.shape, generator, dtype=latent.dtype, device=latent.device)
+
+        noise = draw()
         if latent_noise:
             # Upstream's `_add_noise`, including its (h, w, c) shape for the shift.
             latent = runner.schedule.forward(
                 latent,
-                noise * 0.1 + torch.randn_like(noise) * 0.05,
+                noise * 0.1 + draw() * 0.05,
                 runner.timestep_transform(
                     torch.tensor([1000.0 * latent_noise], device=latent.device),
                     torch.tensor(latent.shape[1:], device=latent.device)[None],
@@ -142,12 +157,11 @@ class RestorationModel(
         def dit(frames: torch.Tensor) -> torch.Tensor:
             x, c = frames.split([noise.shape[-1], condition.shape[-1]], dim=-1)
             with torch.autocast(frames.device.type, dtype=torch.bfloat16):
-                return runner.inference(
-                    [x], [c], [conditioning.positive], [conditioning.negative], decode=False
-                )[0]
+                return runner.inference([x], [c], [conditioning.positive], [conditioning.negative])[0]
 
         x = torch.cat([noise, condition], dim=-1)
-        return split(dit, x, Cut(0), most=PIECE * 4 * x.shape[-1])
+        most = PIECE * 4 * x.shape[-1]
+        return split(dit, x, Cut(0), most=most, holds=-(-PEAK // most))
 
     @uses_components("vae")
     def decode(self, latent: torch.Tensor) -> torch.Tensor:
@@ -162,12 +176,7 @@ def _runner(graph: Graph, device: torch.device) -> Any:
     """Upstream's inference driver over the constructed components (configuration only)."""
     cfg = OmegaConf.create(
         {
-            "vae": {
-                "dtype": "float16",
-                "scaling_factor": SCALE,
-                "grouping": False,
-                "model": {"temporal_downsample_factor": 4, "spatial_downsample_factor": 8},
-            },
+            "vae": {"model": {"temporal_downsample_factor": 4, "spatial_downsample_factor": 8}},
             "diffusion": {
                 "schedule": {"type": "lerp", "T": 1000.0},
                 "sampler": {"type": "euler", "prediction_type": "v_lerp"},
@@ -222,18 +231,18 @@ def restore(
     )
     crop = (slice(top, top + height), slice(left, left + width))
     device = torch.device(str(model.device))
-    gpus = [device.index or 0] if device.type == "cuda" else []
-    with torch.inference_mode(), torch.random.fork_rng(devices=gpus):
-        torch.manual_seed(seed)
+    # Every draw is the CPU stream's: a seed restores the same window on any device.
+    generator = rng.generator(seed)
+    with torch.inference_mode():
         pixels = source.permute(3, 0, 1, 2).contiguous()
         if input_noise:
             pixels = _signed(pixels, torch.float32)
-            pixels = pixels.add_(torch.randn_like(pixels) * (0.025 * input_noise)).half()
+            pixels = pixels.add_(rng.noise(pixels.shape, generator).mul_(0.025 * input_noise)).half()
         with tel.stage("SeedVR2 VAE encode"):
-            latent = model.encode(pixels)
+            latent = model.encode(pixels, generator)
         del pixels
         with tel.stage("SeedVR2 denoise"):
-            latent = model.denoise(latent, latent_noise)
+            latent = model.denoise(latent, latent_noise, generator)
         with tel.stage("SeedVR2 VAE decode"):
             sample = model.decode(latent)
         if sample.ndim == 3:

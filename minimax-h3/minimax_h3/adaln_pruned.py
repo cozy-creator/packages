@@ -54,41 +54,33 @@ _CHUNK = 1 << 15
 
 class StepInvariants:
     """What one denoise computes once rather than every step: the rotary tables of its packed
-    positions and its refined text rows. Each is kept while the same input tensors come back
-    unmodified (the same objects at the same in-place version) under the same turbo overlay, so
-    a layout change (a clip's rows leaving before the first sparse step) recomputes it.
-    `checked`: the denoise checked every step's rows before its loop, so its forwards read no
-    device value on the host (a `denoise_loop` step). `overlay`: the one overlay that loop's every
-    forward is served under, engaged for each (it has no per-step heads). A value computed while a
-    CUDA graph records is that graph's alone: another graph of the loop (a `denoise_loop` records
-    one per label) computes its own, since it may run first."""
+    positions and its refined text rows. `checked`: the denoise checked every step's rows before
+    its loop, so its forwards read no device value on the host (a `denoise_loop` step); such a
+    loop computes both before it and passes them in (`rotary`, `text`), so nothing is held here.
+    An eager step loop keeps each while the same input tensors come back unmodified (the same
+    objects at the same in-place version) under the same turbo overlay, so a layout change (a
+    clip's rows leaving before the first sparse step) recomputes it. `overlay`: the one overlay
+    that loop's every forward is served under, engaged for each (it has no per-step heads)."""
 
     __slots__ = ("checked", "held", "overlay")
 
     def __init__(self, checked: bool = False, overlay: Overlay | None = None) -> None:
-        self.held: dict[object, tuple[tuple[tuple[object, int], ...], Any]] = {}
+        self.held: dict[str, tuple[tuple[tuple[object, int], ...], Any]] = {}
         self.checked = checked
         self.overlay = overlay
 
     def get(self, name: str, inputs: tuple[object, ...], compute: Callable[[], Any]) -> Any:
+        if self.checked:
+            return compute()
         key = tuple((value, getattr(value, "_version", 0)) for value in inputs)
-        recording = (
-            torch.cuda.CUDAGraph.get_currently_capturing_graph()
-            if torch.cuda.is_available() and torch.cuda.is_current_stream_capturing()
-            else None
-        )
-        for held in (self.held.get(name), self.held.get((name, id(recording)))):
-            if (
-                held is not None
-                and len(held[0]) == len(key)
-                and all(
-                    old is new and old_version == new_version
-                    for (old, old_version), (new, new_version) in zip(held[0], key, strict=True)
-                )
-            ):
-                return held[1]
+        held = self.held.get(name)
+        if held is not None and len(held[0]) == len(key) and all(
+            old is new and old_version == new_version
+            for (old, old_version), (new, new_version) in zip(held[0], key, strict=True)
+        ):
+            return held[1]
         value = compute()
-        self.held[name if recording is None else (name, id(recording))] = (key, value)
+        self.held[name] = (key, value)
         return value
 
 
@@ -308,13 +300,16 @@ class AdaLNPrunedMiniMaxH3Transformer(MiniMaxH3Transformer3DModel):  # type: ign
         text_indices: torch.Tensor,
         attention_kwargs: dict[str, Any] | None = None,
         return_dict: bool = True,
+        rotary: tuple[torch.Tensor, torch.Tensor] | None = None,
+        text: torch.Tensor | None = None,
     ) -> MiniMaxH3TransformerOutput | tuple[torch.Tensor, torch.Tensor]:
         """Diffusers 0.41's forward, the projected rows scoped to the packing: Diffusers keeps
         them to its end, the video's float32 rows (2.25 GB a GPU at H3 15 s, degree 2) through
         every block. It checks the rows and arms a turbo bank `attention_kwargs` names (`_arm`)
         and ends disarmed, in the forward, as a package forward hook would keep it out of native
         loops; unless its denoise checked every step's rows ahead (`StepInvariants.checked`): a
-        `denoise_loop` step, which keeps the overlay its denoise armed before the loop."""
+        `denoise_loop` step, which keeps the overlay its denoise armed before the loop and passes
+        the `rotary` tables (`rope`) and `text` rows (`text_rows`) it computed before it."""
         memo = _STEP_INVARIANTS.get()
         looped = memo is not None and memo.checked
         if not looped:
@@ -331,20 +326,20 @@ class AdaLNPrunedMiniMaxH3Transformer(MiniMaxH3Transformer3DModel):  # type: ign
                     f"for seq_len={sequence_length}."
                 )
 
-            def refined() -> torch.Tensor:
-                dtype = get_parameter_dtype(self.context_embedder)
-                return cast(
-                    torch.Tensor,
-                    self.token_refiner(self.context_embedder(encoder_hidden_states.to(dtype))),
-                )
-
             memo = _STEP_INVARIANTS.get()
             if memo is None:
-                rotary_emb, text = self.rope(position_ids), refined()
-            else:  # inside a denoise loop: once per layout, not once per step
-                rotary_emb = memo.get("rope", (position_ids,), lambda: self.rope(position_ids))
-                overlay = self._arming.overlay if self._arming is not None else None
-                text = memo.get("text", (encoder_hidden_states, overlay), refined)
+                rotary_emb = self.rope(position_ids) if rotary is None else rotary
+                text = self.text_rows(encoder_hidden_states) if text is None else text
+            else:  # inside a step loop: once per layout, not once per step
+                if rotary is None:
+                    rotary = memo.get("rope", (position_ids,), lambda: self.rope(position_ids))
+                if text is None:
+                    overlay = self._arming.overlay if self._arming is not None else None
+                    text = memo.get(
+                        "text", (encoder_hidden_states, overlay),
+                        lambda: self.text_rows(encoder_hidden_states),
+                    )  # fmt: skip
+                rotary_emb = rotary
             # The packed rows are this forward's one full-length tensor outside the blocks: the
             # video goes in, and the heads come out, `_CHUNK` rows at a time.
             rows = text.new_zeros((text.shape[0], sequence_length, text.shape[-1]))
@@ -394,6 +389,13 @@ class AdaLNPrunedMiniMaxH3Transformer(MiniMaxH3Transformer3DModel):  # type: ign
         finally:
             if not looped:
                 self._release()
+
+    def text_rows(self, encoder_hidden_states: torch.Tensor) -> torch.Tensor:
+        """The refined text rows a forward packs, under the overlay armed now."""
+        dtype = get_parameter_dtype(self.context_embedder)
+        return cast(
+            torch.Tensor, self.token_refiner(self.context_embedder(encoder_hidden_states.to(dtype)))
+        )
 
     def install_lora_consumers(self) -> None:
         """Install once during turbo-capable construction, before Runtime fill/fusion."""

@@ -55,6 +55,5 @@ class H3LatentUpscaler(Model[UpscalerGraph]):
         scale = (height / in_height + width / in_width) / 2.0
         with torch.inference_mode():
             normalized = ((latents.to(device, torch.float32) - mean) / std).to(torch.bfloat16)
-            result = model(normalized, scale=scale, target_size=(latents.shape[2], height, width),
-                           enable_chunking=False)  # fmt: skip
+            result = model(normalized, scale=scale, target_size=(latents.shape[2], height, width))
             return cast(torch.Tensor, result.float() * std + mean)

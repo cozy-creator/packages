@@ -19,7 +19,6 @@ including VAE and ViT image encoding, resolution handling, and logits processing
 
 from dataclasses import dataclass, field, asdict
 from typing import Tuple, Optional, Callable, Union, Any
-import random
 import math
 
 import torch
@@ -93,7 +92,7 @@ def resize_and_crop(
         image: Input PIL Image to process
         target_size: Target size as (width, height) tuple
         resample: Resampling filter to use (default: LANCZOS)
-        crop_type: Crop strategy - 'resize', 'center', 'random', or 'fixed'
+        crop_type: Crop strategy - 'resize', 'center', or 'fixed'
         crop_coords: Coordinates for fixed crop type as (left, top) tuple
         
     Returns:
@@ -123,14 +122,11 @@ def resize_and_crop(
         if crop_type == 'center':
             crop_top = int(round((resize_height - th) / 2.0))
             crop_left = int(round((resize_width - tw) / 2.0))
-        elif crop_type == 'random':
-            crop_top = random.randint(0, resize_height - th)
-            crop_left = random.randint(0, resize_width - tw)
         elif crop_type == 'fixed':
             assert crop_coords is not None, 'crop_coords should be provided when crop_type is fixed.'
             crop_left, crop_top = crop_coords
         else:
-            raise ValueError(f'crop_type must be center, random or fixed, but got {crop_type}')
+            raise ValueError(f'crop_type must be resize, center or fixed, but got {crop_type}')
 
         image = image.resize((resize_width, resize_height), resample=resample)
         image = image.crop((crop_left, crop_top, crop_left + tw, crop_top + th))

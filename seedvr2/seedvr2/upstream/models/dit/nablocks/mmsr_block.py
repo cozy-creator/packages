@@ -14,6 +14,7 @@
 
 from typing import Tuple, Union
 import torch
+from cozy_runtime.attention import Attention
 from cozy_runtime.author import Cut, split
 from einops import rearrange
 
@@ -21,7 +22,6 @@ from einops import rearrange
 from seedvr2.upstream.common.cache import Cache
 from rotary_embedding_torch import apply_rotary_emb
 from .. import na
-from ..attention import WindowAttention
 from ..blocks.mmdit_window_block import MMWindowAttention, MMWindowTransformerBlock
 from ..mm import MMArg
 from ..modulation import ada_layer_type
@@ -60,7 +60,7 @@ class NaSwinAttention(MMWindowAttention):
             shared_qkv=shared_qkv,
         )
         self.rope = NaRotaryEmbedding3d(dim=head_dim // 2) if qk_rope else None
-        self.attn = WindowAttention(heads, head_dim)
+        self.attn = Attention(heads, head_dim)
         self.window_op = get_window_op(window_method)
 
     def forward(
@@ -103,7 +103,6 @@ class NaSwinAttention(MMWindowAttention):
 
         rows, window_shape, lengths, windows = cache_win("win_rows_by_length", layout)
         freqs = cache_win("rope_freqs_3d_by_length", lambda: self.rope.get_freqs(window_shape)) if self.rope else None
-        txt_rows = txt_q.shape[0]
         out = None
         txt_sum = None
         first = 0
@@ -122,8 +121,7 @@ class NaSwinAttention(MMWindowAttention):
                     torch.cat([x[rows_].view(count, length, *x.shape[1:]), t.expand(count, *t.shape)], dim=1)
                     for x, t in ((q, txt_q), (k, txt_k), (v, txt_v))
                 ]
-                o = self.attn(*(x.flatten(0, 1) for x in batch), [(0, count, length + txt_rows)])
-                o = o.unflatten(0, (count, length + txt_rows)).type_as(q)
+                o = self.attn(*batch).type_as(q)
                 o_vid.append(o[:, :length].flatten(0, 1))
                 o_txt = o[:, length:].float().sum(0)
                 txt_sum = o_txt if txt_sum is None else txt_sum + o_txt
@@ -209,6 +207,8 @@ class NaMMSRTransformerBlock(MMWindowTransformerBlock):
             mlp_type=mlp_type,
             **kwargs,
         )
+        #: The MLP's peak, in windows of its output: its projection and GELU, `expand_ratio` each.
+        self.mlp_holds = 2 * expand_ratio
 
         self.attn = NaSwinAttention(
             vid_dim=vid_dim,
@@ -257,7 +257,7 @@ class NaMMSRTransformerBlock(MMWindowTransformerBlock):
         vid_mlp, txt_mlp = self.mlp_norm(vid_attn, txt_attn)
         vid_mlp, txt_mlp = self.ada(vid_mlp, txt_mlp, layer="mlp", mode="in", **ada_kwargs)
         # [Override] The video MLP in pieces of `GROUP` tokens: exact, token-local.
-        vid_mlp = split(self.mlp.vid, vid_mlp, Cut(0), most=GROUP * vid_mlp.shape[-1])
+        vid_mlp = split(self.mlp.vid, vid_mlp, Cut(0), most=GROUP * vid_mlp.shape[-1], holds=self.mlp_holds)
         txt_mlp = self.mlp.txt(txt_mlp)
         vid_mlp, txt_mlp = self.ada(vid_mlp, txt_mlp, layer="mlp", mode="out", **ada_kwargs)
         vid_mlp, txt_mlp = (vid_mlp + vid_attn), (txt_mlp + txt_attn)

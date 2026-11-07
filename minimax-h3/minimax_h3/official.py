@@ -21,6 +21,7 @@ from concurrent.futures import CancelledError, Future
 from contextlib import contextmanager, nullcontext, suppress
 from dataclasses import dataclass, replace
 from fractions import Fraction
+from functools import partial
 from itertools import pairwise
 from pathlib import Path
 from types import SimpleNamespace
@@ -52,7 +53,7 @@ from diffusers.modular_pipelines.modular_pipeline import PipelineState
 from diffusers.utils.torch_utils import randn_tensor
 from torch.nn.utils.weight_norm import WeightNorm
 
-from cozy_runtime import stepcache, vlm
+from cozy_runtime import rng, stepcache, vlm
 from cozy_runtime.author import (
     AttentionLayout,
     Config,
@@ -87,8 +88,9 @@ from .continuation import (
 )
 from .guide_rows import ANCHOR_LATENTS, ANCHORS, GUIDE, GUIDE_LATENTS, GuideClip, anchor_rows, guide_rows
 from .reference_rows import ClipRows, motion_size, public_video
-from .steps import denoise_fl2va
-from .overlay import ATTENTION_KWARG, REGENERATE_BANK, TURBO_BANK, Overlay, TurboSchedule
+from . import producer
+from .steps import denoise_official
+from .overlay import ATTENTION_KWARG, OVERLAY_KWARG, REGENERATE_BANK, TURBO_BANK, Overlay, TurboSchedule
 from .vae_tiles import TileBatchedVideoVAE, encode_condition
 
 #: A trunk is one DiT and its conditioning workflow; a task is one served function — the
@@ -924,6 +926,15 @@ def _audio_weight_norm_scope(audio_vae: Any) -> Iterator[None]:
                     module.__dict__.pop(hook.name, None)
 
 
+@contextmanager
+def _producer_loop(transformer: Any) -> Iterator[None]:
+    """An eager step loop's producer state, ended as the loop returns, raised or not."""
+    try:
+        yield
+    finally:
+        producer.end_loop(transformer)
+
+
 class OfficialH3Pipeline:
     """Both official task workflows over one shared, dual-DiT construction."""
 
@@ -997,7 +1008,7 @@ class OfficialH3Pipeline:
                 f"request generator has unsupported type {type(source).__name__}",
                 code="artifact_config",
             )
-        return torch.Generator().manual_seed(source.getrandbits(63))
+        return rng.generator(source.getrandbits(63))
 
     def image_reference(self, image: Image) -> Any:
         return MiniMaxH3ImageReference(image=image if image.mode == "RGB" else image.convert("RGB"))
@@ -1539,25 +1550,35 @@ class OfficialH3Pipeline:
             references, latents = state.normalized_references, state.condition_latents
             clips = ClipRows(block_state, references, latents, scoped.patch_size, start=guided)
             clips.thin(block_state)
-        if (
-            task == "fl2va"
-            and clips is None
-            and context is None
-            and not block_state.attention_kwargs
-            and getattr(scoped.transformer, "_parallel_config", None) is None
-        ):
-            denoise_fl2va(
+        # Every path runs `denoise_official` (several ranks too: there each rank's loop runs its
+        # steps eagerly). A path held back from it returns to the official Python loop here.
+        held = False
+        if not held:
+            loop_over = partial(
+                denoise_official,
                 scoped.transformer,
                 scoped,
                 block_state,
                 lambda step: _attention_layout(block_state, step, sol_dense_steps=sol_dense_steps, tau=tau),
                 sol_dense_steps,
                 on_step,
+                trunk=_TRUNK[task],
+                overlay=(block_state.attention_kwargs or {}).get(OVERLAY_KWARG),
                 cache=cache,
             )
+            count = len(block_state.timesteps)
+            if clips is not None and clips.releases() and sol_dense_steps < count:
+                # The clips' rows guide the dense steps and leave before the first sparse one: the
+                # layout changes there, so the steps before it and after it are two loops.
+                if sol_dense_steps:
+                    loop_over(steps=range(sol_dense_steps))
+                clips.release(block_state)
+                loop_over(steps=range(sol_dense_steps, count))
+            else:
+                loop_over()
         else:
             caching = stepcache.running(cache, len(block_state.timesteps)) if cache else nullcontext()
-            with step_invariants(), caching as run:
+            with step_invariants(), caching as run, _producer_loop(scoped.transformer):
                 for index, timestep in enumerate(block_state.timesteps):
                     cancel()
                     if run is not None:
@@ -1569,6 +1590,8 @@ class OfficialH3Pipeline:
                     ):
                         _, block_state = loop.loop_step(scoped, block_state, i=index, t=timestep)
                     on_step(index)
+            # The last step's velocities: none reads them, so they leave before the decode.
+            block_state.noise_pred = block_state.audio_noise_pred = None
         loop.set_block_state(state, block_state)
         self._run_with(task, scoped, "denoise.after_denoise", state)
         return facts
@@ -1606,15 +1629,8 @@ class OfficialH3Pipeline:
         return count
 
     def decode_audio(self, task: Task, state: Any) -> Any:
-        # Repeated BigVGAN decodes can differ on the same input even
-        # with benchmarking disabled. Scope only algorithm determinism to this
-        # serial component call; preserve TF32, dtype and every other backend setting.
-        deterministic = torch.backends.cudnn.deterministic
-        torch.backends.cudnn.deterministic = True
-        try:
-            self._run(task, "decode.audio", state, component="audio_vae")
-        finally:
-            torch.backends.cudnn.deterministic = deterministic
+        """The soundtrack, under its caller's deterministic scope (`H3Model.decode_audio`)."""
+        self._run(task, "decode.audio", state, component="audio_vae")
         delivery = state.get("continuation_delivery")
         if delivery is None:
             return state.audio

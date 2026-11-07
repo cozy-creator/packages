@@ -3,8 +3,8 @@ https://github.com/ByteDance-Seed/SeedVR
 numz/ComfyUI-SeedVR2_VideoUpscaler 4490bd1f482e026674543386bb2a4d176da245b9 (Apache-2.0).
 https://github.com/numz/ComfyUI-SeedVR2_VideoUpscaler
 Changes: namespace relocation; Apex norms replaced with standard LayerNorm/RMSNorm;
-window attention is one Runtime attention site (windows ordered by length, each run of
-equal-length windows one batched call of the kernel the Runtime selects, after ComfyUI's
+window attention runs through the Runtime's `Attention` (windows ordered by length, each run
+of equal-length windows one batched call of the kernel the Runtime selects, after ComfyUI's
 native SeedVR2); the dense window attention path is removed; checkpoint loading and model movement removed from inference runner;
 single Runtime-selected GPU. Fixed upstream conditioning tensors are admitted by the
 normalize job from an explicit input Tree into a managed native conditioning component.
@@ -20,11 +20,14 @@ ComfyUI-SeedVR2_VideoUpscaler 4490bd1f algorithms (`src/utils/color_fix.py`,
 `src/core/generation_phases.py`, `src/core/generation_utils.py`). Histogram matching
 (`lab`, `hsv`) runs per frame rather than over the whole batch, so memory follows one frame;
 quantile ranks are exact integers.
-Inference can return its denoised latents so the adapter records VAE encoding,
-denoising and VAE decoding with Runtime's standard telemetry stages.
+Inference returns its denoised latents so the adapter records VAE encoding,
+denoising and VAE decoding with Runtime's standard telemetry stages. Every random draw (input,
+posterior and latent noise) comes from the request's CPU generator; the sampler's progress bar,
+the rotary frequencies' cross-call cache and the unused VAE inference helpers are removed.
 Without a sequence-parallel group, rank lookup uses the adapter's single-GPU
 rank instead of requiring a default PyTorch distributed process group.
-VAE encoding and decoding run over spatial tiles the Runtime sizes (`split`), take frames
-from and return them to host memory one slice at a time (encoding takes bytes and scales
-them on the device), and clear causal-convolution caches after each pass, so device memory
+VAE encoding and decoding run over spatial tiles from the shape (`split`), declaring each
+tile's peak (its causal-convolution caches beside the widest convolution), take frames from
+and return them to host memory one slice at a time (encoding takes bytes and scales them on
+the device), and clear causal-convolution caches when each pass ends, so device memory
 follows the tile and slice instead of the clip.

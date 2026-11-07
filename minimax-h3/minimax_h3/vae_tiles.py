@@ -30,6 +30,7 @@ from diffusers import AutoencoderKLMiniMaxH3
 from diffusers.models.autoencoders.vae import DiagonalGaussianDistribution
 from diffusers.models.modeling_utils import get_parameter_dtype
 
+from cozy_runtime import rng
 from cozy_runtime.author import Cut, split, spread
 from cozy_runtime.author import device as placed_device
 
@@ -256,7 +257,7 @@ def encode_condition(
         else:
             pixels = pixels.permute(3, 0, 1, 2)[None]
         posterior = vae.encode(_normalized(pixels, pixel_mean, pixel_std), return_dict=False)[0]
-    latents = posterior.sample(generator=torch.Generator().manual_seed(seed))
+    latents = posterior.sample(generator=rng.generator(seed))
     return latents.to(torch.float16).float()
 
 

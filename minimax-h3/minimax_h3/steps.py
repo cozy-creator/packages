@@ -12,6 +12,7 @@ call of the same key.
 from __future__ import annotations
 
 from collections.abc import Callable
+from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from typing import Any
 
@@ -21,7 +22,7 @@ from cozy_runtime.author import AttentionLayout, attention_scope, denoise_loop, 
 
 from . import producer
 from .adaln_pruned import step_invariants
-from .overlay import ATTENTION_KWARG, OVERLAY_KWARG
+from .overlay import ATTENTION_KWARG, OVERLAY_KWARG, Overlay
 
 
 @dataclass(frozen=True, slots=True)
@@ -30,9 +31,11 @@ class Label:
     rows: int
     rolling: bool
     seeding: bool
+    #: Turbo: the evaluation whose collapsed output heads serve the step.
+    head: int = 0
 
 
-def denoise_fl2va(
+def denoise_official(
     transformer: Any,
     schedulers: Any,
     state: Any,
@@ -40,33 +43,46 @@ def denoise_fl2va(
     sol_dense_steps: int,
     on_step: Callable[[int], None],
     *,
+    trunk: str,
+    steps: range | None = None,
+    overlay: Overlay | None = None,
     cache: stepcache.Policy | None = None,
 ) -> None:
-    """One rank's FL2VA denoise of the loop's block `state`, its latents advanced in place,
-    its DiT's stack under `cache` when a preset names one."""
+    """One rank's denoise of the loop's block `state` on `trunk`'s DiT (FL2VA's or Ref2VA's), its
+    latents advanced in place over `steps` of its plan (all of them by default): under the turbo `overlay` (its tables and LoRA, armed before the
+    loop, and each step's collapsed heads, its label's), its DiT's stack under `cache` when a
+    preset names one."""
     plan = state.row_timestep_plan
+    steps = range(len(plan)) if steps is None else steps
     fields = state.denoiser_input_fields
     position_ids, tags = fields["position_ids"], fields["token_tags"]
     device = state.latents.device
-    with torch.no_grad(), step_invariants(checked=True) as memo:
+    selector = None if overlay is None else {ATTENTION_KWARG: overlay.bank, OVERLAY_KWARG: overlay}
+    heads = [overlay.schedule.step(times) if overlay is not None and overlay.heads else 0 for times, _ in plan]
+    with torch.no_grad(), step_invariants(checked=True):
         for times, rows in plan:  # an uncovered row refuses here, never inside the loop
-            transformer._arm(times, rows, tags, None)
+            transformer._arm(times, rows, tags, selector)
         transformer._release()
         sites = producer_sites(transformer)
-        rotary = memo.get("rope", (position_ids,), lambda: transformer.rope(position_ids))
+        rotary = transformer.rope(position_ids)
         producer.present(sites, rotary, tags.numel())
+        if overlay is not None:  # armed before the loop, as `denoise_loop` requires
+            transformer._engage(overlay, heads[steps.start])
+        text = transformer.text_rows(state.prompt_embeds)
         timesteps = torch.zeros(len(plan), max(t.numel() for t, _ in plan), device=device)
         for index, (times, _) in enumerate(plan):
             timesteps[index, : times.numel()] = times
         indices = torch.stack([rows for _, rows in plan])
+        # A loop's first step measures its own key means: none of its loop's steps left one.
         labels = tuple(
             Label(
                 index >= sol_dense_steps,
-                times.numel(),
-                bool(sites) and index >= max(sol_dense_steps, 1),
+                plan[index][0].numel(),
+                bool(sites) and index >= max(sol_dense_steps, 1) and index > steps.start,
                 bool(sites) and index == sol_dense_steps - 1,
+                heads[index],
             )
-            for index, (times, _) in enumerate(plan)
+            for index in steps
         )
         layouts = {sparse: layout_at(sol_dense_steps if sparse else 0) for sparse in (False, True)}
         keys = tuple(id(site.module) for site in sites)
@@ -74,15 +90,17 @@ def denoise_fl2va(
         video_rows, audio_rows = state.num_condition_video_rows, state.num_condition_audio_rows
         inputs = (
             state.prompt_embeds, timesteps, indices, tags, position_ids, fields["video_indices"],
-            fields["audio_indices"], fields["text_indices"], state.timesteps,
+            fields["audio_indices"], fields["text_indices"], *rotary, text, state.timesteps,
             state.audio_timesteps, schedulers.scheduler.sigmas, schedulers.audio_scheduler.sigmas,
         )  # fmt: skip
 
         def step(i: torch.Tensor, video: Any, audio: Any, *rest: Any, label: Label) -> None:
             means, given = rest[: len(keys)], rest[len(keys) :]
-            prompt, times, rows, tags, positions, at_video, at_audio, at_text, *schedule = given
-            video_t, audio_t, video_sigmas, audio_sigmas = schedule
+            prompt, times, rows, tags, positions, at_video, at_audio, at_text, *more = given
+            cos, sin, text, video_t, audio_t, video_sigmas, audio_sigmas = more
             carry = producer.Carry(dict(zip(keys, means, strict=True)), label.rolling, label.seeding)
+            if overlay is not None and overlay.heads:  # the same overlay, this step's heads
+                transformer._engage(overlay, label.head)
             with attention_scope(layouts[label.sparse]), producer.carrying(carry):
                 velocity, audio_velocity = transformer(
                     hidden_states=video[None],
@@ -96,22 +114,28 @@ def denoise_fl2va(
                     audio_indices=at_audio,
                     text_indices=at_text,
                     return_dict=False,
+                    rotary=(cos, sin),
+                    text=text,
                 )
             velocity, audio_velocity = velocity[0, video_rows:], audio_velocity[0, audio_rows:]
             euler(video[video_rows:], velocity.float(), i, video_t, video_sigmas)
             euler(audio[audio_rows:], audio_velocity.float(), i, audio_t, audio_sigmas)
 
-        denoise_loop(
-            step,
-            range(len(plan)),
-            state=(state.latents, state.audio_latents),
-            carried=slots,
-            inputs=inputs,
-            labels=labels,
-            key=("minimax-h3.fl2va/1", layouts[False], layouts[True], video_rows, audio_rows),
-            on_step=on_step,
-            cache=cache,
-        )
+        bank = None if overlay is None else overlay.bank
+        try:
+            denoise_loop(
+                step,
+                steps,
+                state=(state.latents, state.audio_latents),
+                carried=slots,
+                inputs=inputs,
+                labels=labels,
+                key=("minimax-h3.official/1", trunk, bank, layouts[False], layouts[True], video_rows, audio_rows),
+                on_step=on_step,
+                cache=cache,
+            )
+        finally:
+            transformer._release()
     state.noise_pred = state.audio_noise_pred = None  # the official loop's outputs; none reads them
 
 
@@ -126,6 +150,7 @@ def denoise_refine(
     plan: list[tuple[torch.Tensor, torch.Tensor]],
     sigmas: torch.Tensor,
     windows: list[tuple[int, int]],
+    piece: Callable[[], AbstractContextManager[None]],
     weights: list[torch.Tensor],
     dense_steps: int,
     layout_at: Callable[[int], AttentionLayout],
@@ -142,12 +167,12 @@ def denoise_refine(
     position_ids, tags = fields["position_ids"], fields["token_tags"]
     device = video.device
     selector = {ATTENTION_KWARG: overlay.bank, OVERLAY_KWARG: overlay}
-    with torch.no_grad(), step_invariants(checked=True, overlay=overlay) as memo:
+    with torch.no_grad(), step_invariants(checked=True, overlay=overlay):
         for times, rows in plan:  # an uncovered row refuses here, never inside the loop
             transformer._arm(times, rows, tags, selector)
         transformer._release()
         sites = producer_sites(transformer)
-        rotary = memo.get("rope", (position_ids,), lambda: transformer.rope(position_ids))
+        rotary = transformer.rope(position_ids)
         producer.present(sites, rotary, tags.numel())
         timesteps = torch.stack([times for times, _ in plan]).to(device)
         indices = torch.stack([rows for _, rows in plan]).to(device)
@@ -168,7 +193,7 @@ def denoise_refine(
             carry = producer.Carry(dict(zip(keys, means, strict=True)), label.rolling, label.seeding)
             velocity = torch.zeros_like(rows)
             for (start, count), weight in zip(windows, weights, strict=True):
-                with attention_scope(layouts[label.sparse]), producer.carrying(carry):
+                with piece(), attention_scope(layouts[label.sparse]), producer.carrying(carry):
                     predicted, _ = transformer(
                         hidden_states=rows[None, start : start + count],
                         audio_hidden_states=audio[None],
@@ -181,6 +206,8 @@ def denoise_refine(
                         audio_indices=fields["audio_indices"],
                         text_indices=fields["text_indices"],
                         return_dict=False,
+                        rotary=rotary,
+                        text=text,
                     )
                 velocity[start : start + count].addcmul_(predicted[0].float(), weight[:, None])
             delta = sigmas.index_select(0, i) - sigmas.index_select(0, i + 1)
@@ -188,6 +215,7 @@ def denoise_refine(
 
         transformer._engage(overlay, 0)  # armed before the loop, as `denoise_loop` requires
         try:
+            text = transformer.text_rows(prompt_embeds)  # under the overlay, as every step reads it
             denoise_loop(
                 step, range(len(plan)), state=(video,), carried=slots, labels=labels, on_step=on_step
             )

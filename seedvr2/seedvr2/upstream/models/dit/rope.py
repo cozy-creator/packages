@@ -12,7 +12,6 @@
 # // See the License for the specific language governing permissions and
 # // limitations under the License.
 
-from functools import lru_cache
 from math import pi
 from typing import Tuple
 import torch
@@ -24,17 +23,14 @@ from seedvr2.upstream.common.cache import Cache
 
 
 class F32Rotary(RotaryEmbedding):
-    """[Override] F32 rotary frequencies, made where they are first used and held off the
-    module's tensors (a cast never rounds them; the parameters they derive from are meta at
-    construction). They are rotary_embedding_torch's `pixel` ones, `linspace(1, max_freq / 2) * pi`."""
+    """[Override] F32 rotary frequencies, made where they are used, never kept (a cast never
+    rounds them; the parameters they derive from are meta at construction). They are
+    rotary_embedding_torch's `pixel` ones, `linspace(1, max_freq / 2) * pi`."""
 
     @property
     def freqs(self):
-        device = self.dummy.device
-        if self.f32 is None or self.f32.device != device:
-            count, top = self.f32_spec
-            self.f32 = torch.linspace(1.0, top / 2, count, device=device, dtype=torch.float32) * pi
-        return self.f32
+        count, top = self.f32_spec
+        return torch.linspace(1.0, top / 2, count, device=self.dummy.device, dtype=torch.float32) * pi
 
 
 class RotaryEmbeddingBase(nn.Module):
@@ -58,11 +54,7 @@ class RotaryEmbeddingBase(nn.Module):
         # rotary_embedding_torch computes them in the frequencies' dtype (the lane's fp16 rounded
         # the high bands by up to 0.125 rad; upstream's checkpoint is F32).
         self.rope.__class__ = F32Rotary
-        self.rope.f32, self.rope.f32_spec = None, (freqs.shape[0], 256)
-
-    @lru_cache(maxsize=128)
-    def get_axial_freqs(self, *dims):
-        return self.rope.get_axial_freqs(*dims)
+        self.rope.f32_spec = (freqs.shape[0], 256)
 
 
 class RotaryEmbedding3d(RotaryEmbeddingBase):
@@ -79,7 +71,7 @@ class RotaryEmbedding3d(RotaryEmbeddingBase):
         torch.FloatTensor,
     ]:
         T, H, W = size
-        freqs = self.get_axial_freqs(T, H, W)
+        freqs = self.rope.get_axial_freqs(T, H, W)
         q = rearrange(q, "b h (T H W) d -> b h T H W d", T=T, H=H, W=W)
         k = rearrange(k, "b h (T H W) d -> b h T H W d", T=T, H=H, W=W)
         q = apply_rotary_emb(freqs, q)
@@ -113,8 +105,8 @@ class NaRotaryEmbedding3d(RotaryEmbedding3d):
         self,
         shape: torch.LongTensor,
     ) -> torch.Tensor:
-        freq_list = []
-        for f, h, w in shape.tolist():
-            freqs = self.get_axial_freqs(f, h, w)
-            freq_list.append(freqs.view(-1, freqs.size(-1)))
-        return torch.cat(freq_list, dim=0)
+        """[Override] Each window's frequencies, built once per window shape of this call: the
+        forward's `Cache` keeps the result, nothing outlives it."""
+        sizes = [tuple(size) for size in shape.tolist()]
+        axial = {size: self.rope.get_axial_freqs(*size).flatten(0, -2) for size in dict.fromkeys(sizes)}
+        return torch.cat([axial[size] for size in sizes], dim=0)
