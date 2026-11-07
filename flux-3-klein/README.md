@@ -154,5 +154,6 @@ with CFG), and the weights the lane holds:
 
 FLUX.3 Image Klein is under the FLUX Kommunity License v1.0 (`flux_3_klein/LICENSE.model.md`,
 `NOTICE.model.md`): non-commercial use, plus commercial outputs for Qualifying Users under the terms
-there. Its Qwen3-VL text encoder and the prompt upsampler are Apache-2.0. This wrapper grants no model
+there. Its Qwen3-VL text encoder and the prompt upsampler (BFL's, and AtomicChat's edit of it) are Apache-2.0
+(`flux_3_klein/LICENSE.upsampler.txt`, AtomicChat's copy). This wrapper grants no model
 rights.
