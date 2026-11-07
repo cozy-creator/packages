@@ -565,6 +565,10 @@ class QwenImage21Model(
                 ).images
         finally:
             _RETAINED.reset(token)
+            # Its K/V dies with the loop, so the decode after it gets the room. A store from a Runtime
+            # before `close` (dev builds of 0.42.1) lets its regions go with their last reference.
+            if held is not None and hasattr(held, "close"):
+                held.close()
 
     @uses_components("vae")
     def decode(self, latents: Any, *, width: int, height: int) -> Any:
