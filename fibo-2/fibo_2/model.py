@@ -3,19 +3,30 @@
 The architecture, caption handling and sampling are Diffusers' (main `48cdbaef`, #14991, verified by
 Bria against its reference code). Runtime constructs and fills the modules and owns their residency:
 the pipeline runs once per component, its text encoder's and VAE's results replayed into the
-transformer's run.
+transformer's run. A caller's LoRAs adapt the DiT through Runtime's PEFT layers (`__adapter_compatibility__`).
 """
 
 from __future__ import annotations
 
 import json
+import math
 from collections.abc import Callable, Iterable, Iterator
 from importlib.resources import files
 from typing import Any
 
 import torch
 from cozy_runtime import rng, vlm
-from cozy_runtime.author import OutputError, Config, Loader, MemoDistribution, Model, Telemetry, hold_dtype, uses_components
+from cozy_runtime.author import (
+    AdapterCompatibility,
+    Config,
+    Loader,
+    MemoDistribution,
+    Model,
+    OutputError,
+    Telemetry,
+    hold_dtype,
+    uses_components,
+)
 from diffusers import (
     AutoencoderKLFlux2,
     BriaFibo2Pipeline,
@@ -140,6 +151,9 @@ _CODE = (_Staged, vlm.processor, MemoDistribution("diffusers"), MemoDistribution
 
 class Fibo2(Model[FiboGraph], encoded_leaves="accept"):
     """One Fibo 2.0 checkpoint: Dev (CFG) or Edit Turbo (4 steps, no guidance)."""
+
+    #: Caller LoRAs on the DiT, at any strength: the Runtime bakes them into the weights.
+    __adapter_compatibility__ = (AdapterCompatibility("lora", "", ("transformer",), -math.inf, math.inf),)
 
     graph: FiboGraph
     processor: Qwen3VLProcessor
