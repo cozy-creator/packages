@@ -140,9 +140,10 @@ def _upsampled(
 def _generate(
     ctx: Context,
     payload: GenerateInput,
+    expander: Enhancer,
     model: QwenImage21Model,
     rewriter: Enhancer,
-    expander: Enhancer,
+    text_encoder: QwenImage21Model,
     out: Outputs,
     tel: Telemetry,
     adj: Adjustments,
@@ -182,9 +183,9 @@ def _generate(
     width, height = payload.size(adj, first, SIZES, megapixels=SIZES.megapixels[1])
     with tel.stage("encoding prompt", overall_range=(begin + 0.05, begin + 0.1)):
         if reference_images is None:
-            embeds, mask = model.encode(prompt)
+            embeds, mask = text_encoder.encode(prompt)
         else:
-            embeds, mask, image_pad_mask = model.encode_image_prompt(prompt, conditioning_images)
+            embeds, mask, image_pad_mask = text_encoder.encode_image_prompt(prompt, conditioning_images)
     with tel.stage("generating image", overall_range=(begin + 0.1, 0.9)):
         latents = model.denoise(
             embeds,
@@ -212,12 +213,18 @@ def _generate(
 
 
 _MEMO = ("qwen_image_2", "qwen_image_2.model", "qwen_image_2.rewriter")
-#: Each model, then Qwen's prompt enhancers (QwenLM/Qwen-Image-2.1 `prompt_rewrite/`): an edit's, a picture from words'.
-_FULL = {"model": "qwen/qwen-image-2.1@0.1.0", "rewriter": "qwen/qwen-image-2.1-pe-i2i@0.1.0",
-         "expander": "qwen/qwen-image-2.1-pe-t2i@0.1.0"}
-_TURBO = {"model": "qwen/qwen-image-2.1-turbo@0.1.1", "rewriter": "qwen/qwen-image-2.1-pe-i2i@0.1.0",
-          "expander": "qwen/qwen-image-2.1-pe-t2i@0.1.0"}
-_COMPONENTS = {"model": ("text_encoder", "transformer", "vae"), "rewriter": ("model",), "expander": ("model",)}
+#: Qwen's prompt enhancers (QwenLM/Qwen-Image-2.1 `prompt_rewrite/`), a picture from words' and an edit's, and the
+#: text encoder, the `text_encoder` of a Qwen-Image-2.1 checkpoint and one for both functions, are abliterated by
+#: default (Paul, 11-06). Qwen's own are `qwen/qwen-image-2.1-pe-t2i@0.1.0`, `qwen/qwen-image-2.1-pe-i2i@0.1.0` and
+#: any Qwen-Image-2.1 checkpoint (`model.text_encoder=qwen/qwen-image-2.1@0.1.0`).
+_FULL = {"expander": "pottokao/qwen-image-2.1-pe-t2i-abliterated@0.1.0", "model": "qwen/qwen-image-2.1@0.1.0",
+         "rewriter": "darrellbest/qwen-image-2.1-pe-i2i-abliterated@0.1.0",
+         "text_encoder": "atomicchat/qwen-image-2.1-text-encoder-abliterated@0.1.0"}
+_TURBO = {"expander": "pottokao/qwen-image-2.1-pe-t2i-abliterated@0.1.0", "model": "qwen/qwen-image-2.1-turbo@0.1.1",
+          "rewriter": "darrellbest/qwen-image-2.1-pe-i2i-abliterated@0.1.0",
+          "text_encoder": "atomicchat/qwen-image-2.1-text-encoder-abliterated@0.1.0"}
+_COMPONENTS = {"expander": ("model",), "model": ("transformer", "vae"), "rewriter": ("model",),
+               "text_encoder": ("text_encoder",)}
 #: Built and fetched on first use: an edit never pulls the expander, `prompt_upsampling=False` neither enhancer.
 _ON_DEMAND = ("rewriter", "expander")
 
@@ -233,15 +240,16 @@ _ON_DEMAND = ("rewriter", "expander")
 def generate(
     ctx: Context,
     payload: GenerateInput,
+    expander: Enhancer,
     model: QwenImage21Model,
     rewriter: Enhancer,
-    expander: Enhancer,
+    text_encoder: QwenImage21Model,
     out: Outputs,
     tel: Telemetry,
     adj: Adjustments,
 ) -> ImageResult:
     """Qwen-Image-2.1, the 40-step base model."""
-    return _generate(ctx, payload, model, rewriter, expander, out, tel, adj, _STEPS, None)
+    return _generate(ctx, payload, expander, model, rewriter, text_encoder, out, tel, adj, _STEPS, None)
 
 
 @app.entrypoint(
@@ -255,12 +263,13 @@ def generate(
 def generate_turbo(
     ctx: Context,
     payload: GenerateInput,
+    expander: Enhancer,
     model: QwenImage21Model,
     rewriter: Enhancer,
-    expander: Enhancer,
+    text_encoder: QwenImage21Model,
     out: Outputs,
     tel: Telemetry,
     adj: Adjustments,
 ) -> ImageResult:
     """Qwen-Image-2.1-Turbo: the same inputs, on its 8-step distilled schedule."""
-    return _generate(ctx, payload, model, rewriter, expander, out, tel, adj, len(TURBO_SIGMAS), TURBO_SIGMAS)
+    return _generate(ctx, payload, expander, model, rewriter, text_encoder, out, tel, adj, len(TURBO_SIGMAS), TURBO_SIGMAS)
