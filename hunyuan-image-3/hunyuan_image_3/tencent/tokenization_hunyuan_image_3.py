@@ -12,7 +12,6 @@
 # ==============================================================================
 # Modified for Cozy (packages se-079): diffusers' BaseOutput is replaced by an equivalent class.
 
-import random
 from collections import defaultdict
 from copy import deepcopy
 from dataclasses import dataclass
@@ -744,8 +743,6 @@ class HunyuanImage3TokenizerFast(PreTrainedTokenizerFast):
             uncond_enabled = [True] * len(texts)
         elif isinstance(uncond_enabled, bool):
             uncond_enabled = [uncond_enabled] * len(texts)
-        if len(uncond_enabled) != len(texts):
-            print(uncond_enabled, texts)
         assert len(uncond_enabled) == len(texts), (
             f"Length of uncond_flags should be equal to the number of texts, "
             f"but got {len(uncond_enabled)} and {len(texts)}."
@@ -754,7 +751,8 @@ class HunyuanImage3TokenizerFast(PreTrainedTokenizerFast):
         # Prepare text/uncond tokens
         # TODO: If len(texts) > 1, such as instruction + prompt in inpainting, we need to determine how to do uncond.
         # Now all texts will be cond or uncond at the same time.
-        do_uncond_drop = (uncond_p is not None) and (random.random() < uncond_p)
+        # Inference asks for 0 or 1 (`make_batch`): a draw would always agree, so none is made.
+        do_uncond_drop = uncond_p == 1.0
         text_tokens, lengths = [], []
         cum_length = 0
         for text, uncond_flag in zip(texts, uncond_enabled):

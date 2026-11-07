@@ -27,7 +27,6 @@
 # ==============================================================================
 
 from typing import Optional, Tuple, Union
-import warnings
 
 import torch
 import torch.nn as nn
@@ -227,77 +226,6 @@ class Siglip2Attention(nn.Module):
 
         return attn_output, attn_weights
 
-class Siglip2SdpaAttention(Siglip2Attention):
-    """
-    Siglip2 attention module using torch.nn.functional.scaled_dot_product_attention. This module inherits from
-    `Siglip2Attention` as the weights of the module stays untouched. The only changes are on the forward pass to adapt
-    to SDPA API.
-    """
-
-    is_causal = False
-
-    # Adapted from Siglip2Attention.forward and transformers.models.llama.modeling_llama.LlamaSdpaAttention.forward
-    def forward(
-        self,
-        hidden_states: torch.Tensor,
-        attention_mask: Optional[torch.Tensor] = None,
-        output_attentions: Optional[bool] = False,
-    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
-        if output_attentions:
-            # TODO: Improve this warning with e.g. `model.config.attn_implementation = "manual"`
-            #  once this is implemented.
-            warnings.warn(
-                "Siglip2Model is using Siglip2SdpaAttention, but `torch.nn.functional.scaled_dot_product_attention` "
-                "does not support `output_attentions=True`. Falling back to the manual attention implementation, "
-                'but specifying the manual implementation will be required from Transformers version v5.0.0 onwards. '
-                'This warning can be removed using the argument `attn_implementation="eager"` when loading the model.'
-            )
-            return super().forward(
-                hidden_states=hidden_states,
-                attention_mask=attention_mask,
-                output_attentions=output_attentions,
-            )
-
-        batch_size, q_len, _ = hidden_states.size()
-
-        query_states = self.q_proj(hidden_states)
-        key_states = self.k_proj(hidden_states)
-        value_states = self.v_proj(hidden_states)
-
-        query_states = query_states.view(batch_size, q_len, self.num_heads, self.head_dim).transpose(1, 2)
-        key_states = key_states.view(batch_size, q_len, self.num_heads, self.head_dim).transpose(1, 2)
-        value_states = value_states.view(batch_size, q_len, self.num_heads, self.head_dim).transpose(1, 2)
-
-        # SDPA with memory-efficient backend is currently (torch==2.1.2) bugged with non-contiguous inputs with
-        # custom attn_mask,
-        # Reference: https://github.com/pytorch/pytorch/issues/112577.
-        if query_states.device.type == "cuda" and attention_mask is not None:
-            query_states = query_states.contiguous()
-            key_states = key_states.contiguous()
-            value_states = value_states.contiguous()
-
-        # We dispatch to SDPA's Flash Attention or Efficient kernels via this `is_causal` if statement instead of an
-        # inline conditional assignment in SDPA to support both torch.compile's dynamic shapes and full graph options.
-        # An inline conditional prevents dynamic shapes from compiling.
-        is_causal = True if self.is_causal and q_len > 1 else False
-
-        attn_output = torch.nn.functional.scaled_dot_product_attention(
-            query_states,
-            key_states,
-            value_states,
-            attn_mask=attention_mask,
-            dropout_p=self.dropout if self.training else 0.0,
-            is_causal=is_causal,
-        )
-
-        attn_output = attn_output.transpose(1, 2).contiguous()
-        attn_output = attn_output.view(batch_size, q_len, self.embed_dim)
-
-        attn_output = self.out_proj(attn_output)
-
-        return attn_output, None
-
-
 class Siglip2MLP(nn.Module):
     def __init__(self, config):
         super().__init__()
@@ -450,7 +378,7 @@ class Siglip2MultiheadAttentionPoolingHead(nn.Module):
     def __init__(self, config):
         super().__init__()
 
-        self.probe = nn.Parameter(torch.randn(1, 1, config.hidden_size))
+        self.probe = nn.Parameter(torch.empty(1, 1, config.hidden_size))
         self.attention = torch.nn.MultiheadAttention(config.hidden_size, config.num_attention_heads, batch_first=True)
         self.layernorm = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
         self.mlp = Siglip2MLP(config)
@@ -530,7 +458,8 @@ class Siglip2VisionTransformer(nn.Module):
         last_hidden_state = encoder_outputs[0]
         last_hidden_state = self.post_layernorm(last_hidden_state)
 
-        pooler_output = self.head(last_hidden_state, attention_mask) if self.use_head else None
+        # HunyuanImage 3.0 reads the patch states: the pooling head's weights are the checkpoint's, never run.
+        pooler_output = None
         if not return_dict:
             return (last_hidden_state, pooler_output) + encoder_outputs[1:]
 

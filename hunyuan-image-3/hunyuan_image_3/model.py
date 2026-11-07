@@ -18,12 +18,12 @@ from typing import Any
 
 import torch
 from cozy_runtime.author import Config, Loader, Model, uses_components
+from cozy_runtime.moe import Routing
 from PIL import Image
 from tokenizers import Tokenizer
 
-from .routing import Routing
 from .tencent.configuration_hunyuan_image_3 import HunyuanImage3Config
-from .tencent.modeling_hunyuan_image_3 import HunyuanImage3ForCausalMM
+from .tencent.modeling_hunyuan_image_3 import HunyuanImage3ForCausalMM, HunyuanMoE
 from .tencent.system_prompt import get_system_prompt
 from .tencent.tokenization_hunyuan_image_3 import HunyuanImage3TokenizerFast
 
@@ -114,14 +114,15 @@ class HunyuanImage3(Model[Graph], encoded_leaves="accept"):
     @contextmanager
     def _routing(self) -> Iterator[Routing]:
         routing = Routing()
-        layers = [layer.mlp for layer in self.graph.components[COMPONENT].model.layers]
-        for moe in layers:
-            moe.trace = routing
+        experts = [layer.mlp.experts for layer in self.graph.components[COMPONENT].model.layers
+                   if isinstance(layer.mlp, HunyuanMoE)]
+        for layer in experts:
+            layer.trace = routing
         try:
             yield routing
         finally:
-            for moe in layers:
-                moe.trace = None
+            for layer in experts:
+                layer.trace = None
 
     @uses_components(COMPONENT)
     def think(self, prompt: str, references: list[Image.Image], *, seed: int, pick_size: bool,
@@ -131,10 +132,8 @@ class HunyuanImage3(Model[Graph], encoded_leaves="accept"):
         with `pick_size` the size (width, height) the model then picks (`image_size="auto"`), and its routing."""
         model = self.graph.components[COMPONENT]
         with torch.inference_mode(), self._routing() as routing:
-            generator = torch.Generator(model.device).manual_seed(seed)
             cot, ratio = model.generate_cot(prompt, self._cond(references), _system(UPSAMPLED), UPSAMPLED, seed=seed,
-                                            generator=generator, need_ratio=pick_size, on_token=on_token,
-                                            cancel=cancel)
+                                            need_ratio=pick_size, on_token=on_token, cancel=cancel)
         return cot, None if ratio is None else self._size(ratio), routing.summary()
 
     @uses_components(COMPONENT)
