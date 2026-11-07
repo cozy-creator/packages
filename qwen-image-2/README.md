@@ -40,6 +40,22 @@ gives one. With no `aspect_ratio`, the enhancer's canvas is used, as upstream pa
 `faithful` and `creative` add one sentence after the request, where the enhancer reads intent: change only what was
 asked, or make a striking new picture, bold with expression, pose, styling, setting, light and camera.
 
+## Abliterated by default
+
+The text encoder and both enhancers are abliterated by default: each is the stock model with its refusal direction
+projected out of the weights that write the residual stream, so it no longer leans a request it would refuse as a
+chat model towards a refusal. Each is one setting away from Qwen's own:
+
+| slot | default | Qwen's own |
+|---|---|---|
+| `text_encoder` | `atomicchat/qwen-image-2.1-text-encoder-abliterated` ([AtomicChat](https://huggingface.co/AtomicChat/Qwen-Image-2.1-Turbo-Uncensored-GGUF)) | `model.text_encoder=qwen/qwen-image-2.1@0.1.0` |
+| `expander` | `pottokao/qwen-image-2.1-pe-t2i-abliterated` ([pottokao](https://huggingface.co/pottokao/Qwen-Image-2.1-PE-T2I-Heretic)) | `model.expander=qwen/qwen-image-2.1-pe-t2i@0.1.0` |
+| `rewriter` | `darrellbest/qwen-image-2.1-pe-i2i-abliterated` ([darrellbest](https://huggingface.co/darrellbest/Qwen-Image-2.1-PE-I2I-Heretic)) | `model.rewriter=qwen/qwen-image-2.1-pe-i2i@0.1.0` |
+
+`text_encoder` is its own slot, one for both functions: it reads the `text_encoder` of a Qwen-Image-2.1 checkpoint,
+so any of them serves it (`qwen-image-2.1` and `-turbo` carry the same encoder, Qwen3-VL-8B-Instruct unmodified).
+`model` reads only the DiT and the VAE.
+
 Outputs use lossless WebP to preserve the same decoded pixels and alpha while reducing the
 bytes returned to the client. A canvas with either side at least 16384 pixels uses PNG,
 because that exceeds WebP's dimension limit. The requested canvas is preserved. The image
@@ -119,6 +135,8 @@ memory demand, so compare editing benchmarks separately from text-only runs.
 The upstream model is under the Qwen Research License, for noncommercial research
 and evaluation. This wrapper is not an authorization for commercial model use.
 The licence and Notice ship in this package (`qwen_image_2/LICENSE.model.txt`, `qwen_image_2/Notice`).
+The abliterated enhancers keep that licence (pottokao's and darrellbest's `LICENSE` are the same file). The text
+encoder, Qwen3-VL-8B-Instruct, is Apache-2.0, as is AtomicChat's edit (`qwen_image_2/LICENSE.text-encoder.txt`).
 The architecture is Diffusers' (Apache-2.0), at the release `pyproject.toml` pins.
 
 
@@ -146,6 +164,22 @@ cozy model upload hf://Qwen/Qwen-Image-2.1-PE-I2I@72927bc08afc99b7888ceb7d7d51a1
 cozy model upload hf://Qwen/Qwen-Image-2.1-PE-T2I@f3ed7985c788ad75b3ab7223e0c4c51e2a43545b \
   qwen/qwen-image-2.1-pe-t2i --lane bf16 --mirror --on YOUR_MACHINE
 cozy model quantize qwen/qwen-image-2.1-pe-i2i@sha256:BF16_COMMIT --lane int8 --package qwen3.5 --on YOUR_MACHINE
+```
+
+The abliterated enhancers upload the same way (`hf://pottokao/Qwen-Image-2.1-PE-T2I-Heretic@96e92081`,
+`hf://darrellbest/Qwen-Image-2.1-PE-I2I-Heretic@0402e068`). AtomicChat publishes its encoder as a BF16 GGUF only,
+and TensorFS's GGUF import has no `qwen3vl` name map, so its commit is Qwen's checkpoint with the 73 edited tensors
+(36 attention outputs, 36 MLP down projections and the token embedding) taken from the imported GGUF by reference
+([`scripts/abliterated_ingest.py`](../scripts/abliterated_ingest.py)). Its DiT and VAE are Qwen's; the package reads
+only its `text_encoder`, and its int8 lane is this package's recipe:
+
+```sh
+cozy model upload hf://AtomicChat/Qwen-Image-2.1-Turbo-Uncensored-GGUF@881a778e306c44920e42536def3e52c3a3ecc7cd/Qwen-Image-2.1-Turbo-Uncensored-BF16.gguf \
+  atomicchat/qwen-image-2.1-text-encoder-abliterated --lane gguf --mirror https://huggingface.co/AtomicChat/Qwen-Image-2.1-Turbo-Uncensored-GGUF --on YOUR_MACHINE
+cozy run ./scripts/abliterated_ingest.py/assemble kind=te model.stock=qwen/qwen-image-2.1@0.1.0 \
+  model.gguf=atomicchat/qwen-image-2.1-text-encoder-abliterated@sha256:GGUF_COMMIT --lane bf16 --on YOUR_MACHINE
+cozy model upload run:RUN atomicchat/qwen-image-2.1-text-encoder-abliterated --lane bf16
+cozy model quantize atomicchat/qwen-image-2.1-text-encoder-abliterated@sha256:BF16_COMMIT --lane int8 --package qwen-image-2 --on YOUR_MACHINE
 ```
 
 Replace `YOUR_MACHINE` and `COMMIT` with the selected machine name and
@@ -199,7 +233,8 @@ image = await generate(
 
 The Hub package is the first-party `qwen-image-2` (no owner); its callables are `generate` and
 `generate_turbo`. Their default models are `qwen/qwen-image-2.1@0.1.0` and
-`qwen/qwen-image-2.1-turbo@0.1.1`, in Qwen's org; both read `qwen/qwen-image-2.1-pe-i2i@0.1.0` (`rewriter`)
-and `qwen/qwen-image-2.1-pe-t2i@0.1.0` (`expander`).
+`qwen/qwen-image-2.1-turbo@0.1.1`, in Qwen's org; both read `atomicchat/qwen-image-2.1-text-encoder-abliterated@0.1.0`
+(`text_encoder`), `darrellbest/qwen-image-2.1-pe-i2i-abliterated@0.1.0` (`rewriter`) and
+`pottokao/qwen-image-2.1-pe-t2i-abliterated@0.1.0` (`expander`).
 Installing the wheel alone does not turn GPU execution into an in-process call;
 Cozy supplies the managed caller when composing package functions.
