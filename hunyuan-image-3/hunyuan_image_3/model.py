@@ -17,7 +17,9 @@ from types import SimpleNamespace
 from typing import Any
 
 import torch
+from cozy_runtime import moe
 from cozy_runtime.author import Config, Loader, Model, uses_components
+from cozy_runtime.author.kernels import Plan
 from cozy_runtime.moe import Routing
 from PIL import Image
 from tokenizers import Tokenizer
@@ -100,6 +102,10 @@ class HunyuanImage3(Model[Graph], encoded_leaves="accept"):
         model = self.graph.components[COMPONENT]
         model._tokenizer = _tokenizer(loader.assets.read)
         model.generation_config = SimpleNamespace(**GENERATION)
+
+    def execution_plan(self, plan: Plan) -> str:
+        """The Runtime's grouped expert kernels (`moe.install`): every layer's routing stays on the device."""
+        return moe.install(plan, self.graph.components[COMPONENT])
 
     def _cond(self, references: list[Image.Image]) -> Any:
         model = self.graph.components[COMPONENT]
