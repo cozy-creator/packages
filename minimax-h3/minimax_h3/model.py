@@ -186,7 +186,8 @@ class H3Model(
     def condition_text(self, task: Task, state: Any) -> None:
         self.pipe.condition_text(task, state, self.device)
 
-    @uses_components("audio_vae")
+    # Repeated BigVGAN decodes of one input differ under cuDNN's nondeterministic algorithms.
+    @uses_components("audio_vae", deterministic=True)
     def decode_audio(self, task: Task, state: Any) -> tuple[Any, int]:
         return self.pipe.decode_audio(task, state), int(state.sampling_rate)
 

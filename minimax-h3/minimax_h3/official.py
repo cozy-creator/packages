@@ -1608,15 +1608,8 @@ class OfficialH3Pipeline:
         return count
 
     def decode_audio(self, task: Task, state: Any) -> Any:
-        # Repeated BigVGAN decodes can differ on the same input even
-        # with benchmarking disabled. Scope only algorithm determinism to this
-        # serial component call; preserve TF32, dtype and every other backend setting.
-        deterministic = torch.backends.cudnn.deterministic
-        torch.backends.cudnn.deterministic = True
-        try:
-            self._run(task, "decode.audio", state, component="audio_vae")
-        finally:
-            torch.backends.cudnn.deterministic = deterministic
+        """The soundtrack, under its caller's deterministic scope (`H3Model.decode_audio`)."""
+        self._run(task, "decode.audio", state, component="audio_vae")
         delivery = state.get("continuation_delivery")
         if delivery is None:
             return state.audio
