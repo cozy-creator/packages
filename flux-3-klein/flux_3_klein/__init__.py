@@ -217,10 +217,13 @@ def _generate(ctx: Context, function: str, payload: TurboInput, drafter: Drafter
                    seed=payload.drawn_seed())
 
 
-# Qwen3.5-9B's MTP head alone (`drafter_head` makes it): BFL's upsampler checkpoint has none.
+#: The upsampler is AtomicChat's abliterated one by default (Paul, 11-06): BFL's with its refusal direction projected
+#: out. BFL's own is `model.upsampler=black-forest-labs/flux-3-klein-upsampler@0.2.0`.
+_UPSAMPLER = "atomicchat/flux-3-klein-upsampler-abliterated@0.1.0"
+# Qwen3.5-9B's MTP head alone (`drafter_head` makes it): neither upsampler checkpoint has one.
 _DRAFTER = "qwen/qwen3.5-9b-mtp@0.2.0"
-_DISTILLED = {"model": "black-forest-labs/flux-3-klein@0.1.0", "upsampler": "black-forest-labs/flux-3-klein-upsampler@0.2.0", "drafter": _DRAFTER}
-_BASE = {"model": "black-forest-labs/flux-3-klein-base@0.1.0", "upsampler": "black-forest-labs/flux-3-klein-upsampler@0.2.0", "drafter": _DRAFTER}
+_DISTILLED = {"model": "black-forest-labs/flux-3-klein@0.1.0", "upsampler": _UPSAMPLER, "drafter": _DRAFTER}
+_BASE = {"model": "black-forest-labs/flux-3-klein-base@0.1.0", "upsampler": _UPSAMPLER, "drafter": _DRAFTER}
 _COMPONENTS = {
     "model": ("transformer", "text_encoder", "vae"),
     "upsampler": ("model",),
