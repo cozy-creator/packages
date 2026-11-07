@@ -33,7 +33,7 @@ class Label:
     seeding: bool
 
 
-def denoise_fl2va(
+def denoise_official(
     transformer: Any,
     schedulers: Any,
     state: Any,
@@ -41,10 +41,11 @@ def denoise_fl2va(
     sol_dense_steps: int,
     on_step: Callable[[int], None],
     *,
+    trunk: str,
     cache: stepcache.Policy | None = None,
 ) -> None:
-    """One rank's FL2VA denoise of the loop's block `state`, its latents advanced in place,
-    its DiT's stack under `cache` when a preset names one."""
+    """One rank's denoise of the loop's block `state` on `trunk`'s DiT (FL2VA's or Ref2VA's), its
+    latents advanced in place, its DiT's stack under `cache` when a preset names one."""
     plan = state.row_timestep_plan
     fields = state.denoiser_input_fields
     position_ids, tags = fields["position_ids"], fields["token_tags"]
@@ -112,7 +113,7 @@ def denoise_fl2va(
             carried=slots,
             inputs=inputs,
             labels=labels,
-            key=("minimax-h3.fl2va/2", layouts[False], layouts[True], video_rows, audio_rows),
+            key=("minimax-h3.official/1", trunk, layouts[False], layouts[True], video_rows, audio_rows),
             on_step=on_step,
             cache=cache,
         )

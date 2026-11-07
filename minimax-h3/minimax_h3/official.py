@@ -88,7 +88,7 @@ from .continuation import (
 from .guide_rows import ANCHOR_LATENTS, ANCHORS, GUIDE, GUIDE_LATENTS, GuideClip, anchor_rows, guide_rows
 from .reference_rows import ClipRows, motion_size, public_video
 from . import producer
-from .steps import denoise_fl2va
+from .steps import denoise_official
 from .overlay import ATTENTION_KWARG, REGENERATE_BANK, TURBO_BANK, Overlay, TurboSchedule
 from .vae_tiles import TileBatchedVideoVAE, encode_condition
 
@@ -1550,19 +1550,19 @@ class OfficialH3Pipeline:
             clips = ClipRows(block_state, references, latents, scoped.patch_size, start=guided)
             clips.thin(block_state)
         if (
-            task == "fl2va"
-            and clips is None
+            not (clips is not None and clips.releases())
             and context is None
             and not block_state.attention_kwargs
             and getattr(scoped.transformer, "_parallel_config", None) is None
         ):
-            denoise_fl2va(
+            denoise_official(
                 scoped.transformer,
                 scoped,
                 block_state,
                 lambda step: _attention_layout(block_state, step, sol_dense_steps=sol_dense_steps, tau=tau),
                 sol_dense_steps,
                 on_step,
+                trunk=_TRUNK[task],
                 cache=cache,
             )
         else:
