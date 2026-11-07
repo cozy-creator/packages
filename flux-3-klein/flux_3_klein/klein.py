@@ -42,6 +42,11 @@ from transformers import (
 )
 from transformers import initialization as transformer_init
 
+try:
+    from cozy_runtime.author import retained
+except ImportError:  # a Runtime without `retained`: each step recomputes the conditions
+    retained = None
+
 #: BFL's constant timestep shift, the image RoPE scale and Qwen3-VL's conditioning layers.
 ALPHA = 16.0
 IMAGE_ROPE_SCALE = 0.5
@@ -364,15 +369,25 @@ class Klein(
             ref_rope = None if references is None else tf.pos_embed(references[1].to(device))
             joints = [_joint(image_rope, rope, ref_rope) for rope in text_ropes]
             at_zero = _embed(tf, tf.timestep_embedder, 0.0, device)
+            # The base model's text and reference tokens are every step's: the Runtime holds them (on
+            # the card while there is room, else refilled from pinned host memory), or each step
+            # recomputes them.
             fixed = None
             if not self.flow_map:
-                fixed = _conditions(tf, texts, text_ropes, refs, ref_rope, F.silu(at_zero), zero)
+                tokens, cond_rows = _conditions(tf, texts, text_ropes, refs, ref_rope, F.silu(at_zero), zero)
+                held = None if retained is None else retained(sum(t.nbytes for t in tokens) + cond_rows.nbytes)
+                fixed = None if held is None else held.put(*tokens, cond_rows)
+                del tokens, cond_rows
             for step in range(steps):
                 cancel()
                 t, nxt = timesteps[step], timesteps[step + 1]
                 temb = _embed(tf, tf.timestep_embedder, t, device)
-                conditions = fixed
-                if conditions is None:
+                if fixed is not None:
+                    *kept, kept_rows = fixed.get()
+                    conditions = (kept, kept_rows)
+                elif not self.flow_map:
+                    conditions = _conditions(tf, texts, text_ropes, refs, ref_rope, F.silu(at_zero), zero)
+                else:
                     target = _embed(tf, tf.target_timestep_embedder, nxt, device)
                     temb = temb + target
                     act = F.silu(at_zero + target)
