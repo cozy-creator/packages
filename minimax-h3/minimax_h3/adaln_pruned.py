@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import inspect
 from functools import partial
-from collections.abc import Callable, Iterator, Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from contextvars import ContextVar
 from typing import Any, ClassVar, cast
@@ -52,60 +52,18 @@ from .overlay import (
 _CHUNK = 1 << 15
 
 
-class StepInvariants:
-    """What one denoise computes once rather than every step: the rotary tables of its packed
-    positions and its refined text rows. `checked`: the denoise checked every step's rows before
-    its loop, so its forwards read no device value on the host (a `denoise_loop` step); such a
-    loop computes both before it and passes them in (`rotary`, `text`), so nothing is held here.
-    An eager step loop keeps each while the same input tensors come back unmodified (the same
-    objects at the same in-place version) under the same turbo overlay, so a layout change (a
-    clip's rows leaving before the first sparse step) recomputes it. `overlay`: the one overlay
-    that loop's every forward is served under, engaged for each (it has no per-step heads)."""
-
-    __slots__ = ("checked", "held", "overlay")
-
-    def __init__(self, checked: bool = False, overlay: Overlay | None = None) -> None:
-        self.held: dict[str, tuple[tuple[tuple[object, int], ...], Any]] = {}
-        self.checked = checked
-        self.overlay = overlay
-
-    def get(self, name: str, inputs: tuple[object, ...], compute: Callable[[], Any]) -> Any:
-        if self.checked:
-            return compute()
-        key = tuple((value, getattr(value, "_version", 0)) for value in inputs)
-        held = self.held.get(name)
-        if held is not None and len(held[0]) == len(key) and all(
-            old is new and old_version == new_version
-            for (old, old_version), (new, new_version) in zip(held[0], key, strict=True)
-        ):
-            return held[1]
-        value = compute()
-        self.held[name] = (key, value)
-        return value
-
-
-_STEP_INVARIANTS: ContextVar[StepInvariants | None] = ContextVar(
-    "minimax_h3_step_invariants", default=None
-)
+_CHECKED: ContextVar[bool] = ContextVar("minimax_h3_checked_loop", default=False)
 
 
 @contextmanager
-def step_invariants(
-    *, checked: bool = False, overlay: Overlay | None = None
-) -> Iterator[StepInvariants]:
-    """One denoise loop's step invariants, dropped when it ends."""
-    if overlay is not None and (overlay.heads or not checked):
-        raise ConformanceError(
-            "a denoise loop engages only a checked overlay without per-step heads",
-            code="artifact_config",
-        )
-    memo = StepInvariants(checked, overlay)
-    token = _STEP_INVARIANTS.set(memo)
+def checked_loop() -> Iterator[None]:
+    """A denoise that checked every step's rows before its `denoise_loop`: its forwards read no
+    device value on the host and keep the overlay it armed before the loop."""
+    token = _CHECKED.set(True)
     try:
-        yield memo
+        yield
     finally:
-        _STEP_INVARIANTS.reset(token)
-        memo.held.clear()
+        _CHECKED.reset(token)
 
 
 class _Armed:
@@ -307,11 +265,10 @@ class AdaLNPrunedMiniMaxH3Transformer(MiniMaxH3Transformer3DModel):  # type: ign
         them to its end, the video's float32 rows (2.25 GB a GPU at H3 15 s, degree 2) through
         every block. It checks the rows and arms a turbo bank `attention_kwargs` names (`_arm`)
         and ends disarmed, in the forward, as a package forward hook would keep it out of native
-        loops; unless its denoise checked every step's rows ahead (`StepInvariants.checked`): a
+        loops; unless its denoise checked every step's rows ahead (`checked_loop`): a
         `denoise_loop` step, which keeps the overlay its denoise armed before the loop and passes
         the `rotary` tables (`rope`) and `text` rows (`text_rows`) it computed before it."""
-        memo = _STEP_INVARIANTS.get()
-        looped = memo is not None and memo.checked
+        looped = _CHECKED.get()
         if not looped:
             self._arm(timestep, timestep_indices, token_tags, attention_kwargs)
         del attention_kwargs  # `apply_lora_scale` consumed its scale
@@ -326,20 +283,8 @@ class AdaLNPrunedMiniMaxH3Transformer(MiniMaxH3Transformer3DModel):  # type: ign
                     f"for seq_len={sequence_length}."
                 )
 
-            memo = _STEP_INVARIANTS.get()
-            if memo is None:
-                rotary_emb = self.rope(position_ids) if rotary is None else rotary
-                text = self.text_rows(encoder_hidden_states) if text is None else text
-            else:  # inside a step loop: once per layout, not once per step
-                if rotary is None:
-                    rotary = memo.get("rope", (position_ids,), lambda: self.rope(position_ids))
-                if text is None:
-                    overlay = self._arming.overlay if self._arming is not None else None
-                    text = memo.get(
-                        "text", (encoder_hidden_states, overlay),
-                        lambda: self.text_rows(encoder_hidden_states),
-                    )  # fmt: skip
-                rotary_emb = rotary
+            rotary_emb = self.rope(position_ids) if rotary is None else rotary
+            text = self.text_rows(encoder_hidden_states) if text is None else text
             # The packed rows are this forward's one full-length tensor outside the blocks: the
             # video goes in, and the heads come out, `_CHUNK` rows at a time.
             rows = text.new_zeros((text.shape[0], sequence_length, text.shape[-1]))

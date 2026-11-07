@@ -43,7 +43,6 @@ from cozy_runtime.author import (
     Cut,
     ProducerCall,
     ProducerSite,
-    producer_sites,
     register_attention,
     split,
 )
@@ -87,8 +86,8 @@ class RequestState:
 
     def end_loop(self) -> None:
         """One loop's key means, rotary presentation and Kitchen's packed table of it go as the loop
-        returns: the Runtime calls this as `denoise_loop` returns, an eager step loop itself
-        (`end_loop`), so none stays through the decode after it."""
+        returns (the Runtime calls this as `denoise_loop` returns), so none stays through the decode
+        after it."""
         self.statistics.clear()
         self.carried.clear()
         self.parallel_rotary.clear()
@@ -129,18 +128,6 @@ def carrying(carry: Carry) -> Iterator[None]:
         yield
     finally:
         _CARRY.reset(token)
-
-
-def end_loop(root: Any) -> None:
-    """An eager step loop returned: the producer states its sites under `root` hold end their loop,
-    as the Runtime ends them when a `denoise_loop` returns."""
-    states = {
-        id(state): state
-        for site in producer_sites(root)
-        if isinstance(state := site.producer.request_state(), RequestState)
-    }
-    for state in states.values():
-        state.end_loop()
 
 
 def present(
@@ -284,7 +271,7 @@ def rope_presentation(
     rotary: tuple[torch.Tensor, torch.Tensor], tokens: int, state: RequestState
 ) -> torch.Tensor:
     # Kept while the step's rotary tables are the same tensors, which the transformer computes
-    # once per layout (`adaln_pruned.StepInvariants`), so every step of a phase reuses one
+    # once before each loop (`steps.denoise_official`), so every step of a phase reuses one
     # presentation, and Kitchen's table cache keyed on it. The held tensors cannot be reused
     # under another identity. A value key would read the device every call; a shape key would
     # serve one document's angles to another of the same length (a continuation's shifted
