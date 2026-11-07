@@ -5,21 +5,27 @@ condition-image K/V cache over the full joint sequence. Steps ``1..N-1`` are the
 over the target-image tokens only, identical from one step to the next but for the timestep and
 the running latent, so they run as one `denoise_loop` the Runtime may capture.
 
-Everything except the latent is a function of the request *layout* (prompt length, canvas), not
-of the step: the rotary tables, the target-token modulation mask and the key-valid mask are
-derived once, eagerly, by `_Layout`, so the step carries no host sync, no Python scalar read and
-no data-dependent shape. The step calls the transformer's own ``img_in``/``time_text_embed``/
+The rotary tables and target-token modulation mask are derived once by `_Layout`, so the step
+carries no host sync, no Python scalar read and no data-dependent shape. The prefix K/V is
+prompt-specific. It joins the layout and schedules as explicitly declared per-call inputs;
+no retained step closure owns a previous prompt's tensors. The step calls the transformer's
+own ``img_in``/``time_text_embed``/
 ``modulation``/``norm_out``/``proj_out`` and the installed blocks, so the numerics are the
 Diffusers/Runtime ones.
 """
 
 from __future__ import annotations
 
+from collections.abc import Callable
+from dataclasses import dataclass
 from typing import Any
 
 import torch
+import torch.nn.functional as F
+from diffusers.models.transformers.transformer_qwenimage21 import QwenImage21KVLayerCache
 
 
+@dataclass(frozen=True)
 class _FlowEuler:
     """FlowMatch Euler device schedules, indexed by the global step.
 
@@ -29,10 +35,16 @@ class _FlowEuler:
     per-step sigma delta in f32 — the exact `FlowMatchEulerDiscreteScheduler.step` arithmetic.
     """
 
-    def __init__(self, scheduler: Any, device: Any) -> None:
+    ts: torch.Tensor
+    dt: torch.Tensor
+
+    @classmethod
+    def from_scheduler(cls, scheduler: Any, device: Any) -> _FlowEuler:
         sigmas = scheduler.sigmas
-        self.ts = (scheduler.timesteps.to(torch.bfloat16) / 1000).to(device=device)
-        self.dt = (sigmas[1:] - sigmas[:-1]).to(device=device)
+        return cls(
+            (scheduler.timesteps.to(torch.bfloat16) / 1000).to(device=device),
+            (sigmas[1:] - sigmas[:-1]).to(device=device),
+        )
 
     def timestep(self, index: torch.Tensor) -> torch.Tensor:
         # causal_condition: the sampled row for the target tokens plus the trailing t=0 row the
@@ -42,6 +54,57 @@ class _FlowEuler:
 
     def delta(self, index: torch.Tensor) -> torch.Tensor:
         return self.dt.index_select(0, index).reshape(())
+
+
+def _cached_step(transformer: Any, *, heads: bool = False) -> Callable[..., None]:
+    """A step whose only closed-over owner is the placed transformer.
+
+    Schedules, target layout and every prefix K/V arrive as declared tensors.
+    Rebuilding the small cache wrappers from those arguments also works when
+    Runtime records on its own copies and later copies a new prompt into them.
+    With `heads`, the first input after the layout is a parallel decoder's output projection per
+    step (PDD): its prediction is F32, and so is the state, which the DiT reads in its own dtype.
+    """
+    blocks = transformer.transformer_blocks
+
+    def step(
+        index: torch.Tensor,
+        latents: torch.Tensor,
+        timesteps: torch.Tensor,
+        deltas: torch.Tensor,
+        rotary: torch.Tensor,
+        target: torch.Tensor,
+        *rest: torch.Tensor,
+    ) -> None:
+        projections, prefix = (rest[0], rest[1:]) if heads else (None, rest)
+        with torch.no_grad():
+            euler = _FlowEuler(timesteps, deltas)
+            hidden = transformer.img_in(latents.to(transformer.dtype))
+            temb = transformer.time_text_embed(euler.timestep(index), hidden)
+            modulation = transformer.modulation(temb)
+            for layer, block in enumerate(blocks):
+                cache = QwenImage21KVLayerCache()
+                cache.store(prefix[2 * layer], prefix[2 * layer + 1])
+                hidden = block(
+                    hidden_states=hidden,
+                    modulation=modulation,
+                    rotary_emb=rotary,
+                    attention_mask=None,
+                    target_token_mask=target,
+                    layer_cache=cache,
+                    kv_cache_mode="cached",
+                    cache_write_slice=None,
+                    segments=None,
+                    key_valid=None,
+                )
+            hidden = transformer.norm_out(hidden, temb, target)
+            if projections is None:
+                noise = transformer.proj_out(hidden)
+            else:
+                noise = F.linear(hidden, projections.index_select(0, index)[0]).float()
+            latents.copy_((latents.float() + euler.delta(index) * noise).to(latents.dtype))
+
+    return step
 
 
 class _Layout:
@@ -61,7 +124,6 @@ class _Layout:
         transformer: Any,
         img_shapes: list[list[tuple[int, int, int]]],
         img_mask: torch.Tensor,
-        encoder_hidden_states_mask: torch.Tensor | None,
         device: Any,
     ) -> None:
         repeats = torch.where(img_mask, self._IMG_TOKENS_PER_SLOT, 1)[0]
@@ -69,18 +131,8 @@ class _Layout:
         rotary_emb = transformer.pos_embed(img_shapes[0], expanded, device=device)
         _, target_token_mask = transformer.build_token_metadata(expanded, img_shapes[0])
 
-        joint_key_valid = None
-        if encoder_hidden_states_mask is not None:
-            joint_key_valid = torch.ones(1, expanded.shape[0], dtype=torch.bool, device=device)
-            text_positions = (~expanded).nonzero(as_tuple=True)[0]
-            vlm_text_positions = ~img_mask[0][: encoder_hidden_states_mask.shape[1]]
-            joint_key_valid[:, text_positions] = encoder_hidden_states_mask.bool()[
-                :, vlm_text_positions
-            ]
-
         prefix_len = int((~target_token_mask).sum())
         self.prefix_len = prefix_len
         # The target queries only: the cached prefix lives in the K/V cache, never recomputed.
         self.rotary_emb = rotary_emb[prefix_len:]
         self.modulation_mask = target_token_mask[prefix_len:]
-        self.attention_mask = None if joint_key_valid is None else joint_key_valid[:, None, None, :]

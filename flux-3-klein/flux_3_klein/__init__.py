@@ -43,7 +43,7 @@ from .klein import (
     reference_canvas,
 )
 from . import quantize as quantize  # its recipes
-from .upsampler import MAX_REFERENCES, Drafter, Row, Upsampler, canvas_box, is_finished, with_table
+from .upsampler import MAX_REFERENCES, Row, Upsampler, canvas_box, is_finished, with_table
 
 app = App()
 
@@ -71,9 +71,6 @@ class TurboInput(ImageRequest):
     prompt_upsampling: bool | None = None
     #: Elements and rendered text placed by box, described in words.
     regions: list[Region] | None = None
-    #: Upsample with Qwen3.5-9B's MTP head drafting tokens (1.1-1.2× faster a caption on a 4090);
-    #: its first use downloads the 0.5 GB head.
-    prompt_drafting: bool = True
 
 
 class GenerateInput(TurboInput):
@@ -85,14 +82,12 @@ def _render(
     ctx: Context,
     model: Klein,
     upsampler: Upsampler,
-    drafter: Drafter,
     out: Outputs,
     tel: Telemetry,
     adj: Adjustments,
     *,
     prompt: str,
     upsample: bool,
-    draft: bool,
     images: list[PILImage.Image],
     prepared: list[PILImage.Image],
     size: tuple[int, int],
@@ -110,9 +105,7 @@ def _render(
     if upsample and (rows or not is_finished(prompt)):
         table = json.dumps(rows, ensure_ascii=False) if rows else ""
         with tel.stage("upsampling prompt", overall_range=(0.0, 0.15)):
-            def run() -> str:
-                return upsampler.upsample(prompt, images, canvas, table)
-            written = drafter.drafting(run) if draft else run()
+            written = upsampler.upsample(prompt, images, canvas, table)
         if written:
             caption = written
         else:
@@ -229,7 +222,7 @@ def layout_rows(payload: TurboInput, placed: dict[str, Corners | None]) -> list[
     return rows
 
 
-def _generate(ctx: Context, function: str, payload: TurboInput, drafter: Drafter, model: Klein,
+def _generate(ctx: Context, function: str, payload: TurboInput, model: Klein,
               upsampler: Upsampler, out: Outputs, tel: Telemetry, adj: Adjustments) -> ImageResult:
     default, most = _STEPS[function]
     steps = held(adj, "steps", payload.steps or default, 1, most)
@@ -247,38 +240,35 @@ def _generate(ctx: Context, function: str, payload: TurboInput, drafter: Drafter
     # The upsampler is told the references' order in words, or as the layout record's ids; Klein
     # reading the prompt itself was trained on `<ref_image_N>`.
     prompt = worded(payload.prompt, placed, (ref_id if rows else ordinal) if upsample else tagged)
-    return _render(ctx, model, upsampler, drafter, out, tel, adj, prompt=prompt, upsample=upsample,
-                   draft=payload.prompt_drafting, images=images, prepared=prepared, size=size, crop=crop,
+    return _render(ctx, model, upsampler, out, tel, adj, prompt=prompt, upsample=upsample,
+                   images=images, prepared=prepared, size=size, crop=crop,
                    canvas=canvas, rows=rows, steps=steps, guidance=guidance, negative=negative,
                    seed=payload.drawn_seed())
 
 
-# Qwen3.5-9B's MTP head alone (`drafter_head` makes it): BFL's upsampler checkpoint has none.
-_DRAFTER = "qwen/qwen3.5-9b-mtp@0.2.0"
 _UPSAMPLER = "black-forest-labs/flux-3-klein-upsampler@0.2.0"
 _DISTILLED = "black-forest-labs/flux-3-klein@0.1.0"
 _BASE = "black-forest-labs/flux-3-klein-base@0.1.0"
 _KLEIN = ("transformer", "text_encoder", "vae")
-_COMPONENTS = {"drafter": ("model",), "model": _KLEIN, "upsampler": ("model",)}
-#: Built and fetched on first use: `prompt_upsampling=False` never pulls the upsampler, and
-#: `prompt_drafting=False` never pulls the drafter.
-_ON_DEMAND = ("drafter", "upsampler")
+_COMPONENTS = {"model": _KLEIN, "upsampler": ("model",)}
+#: Built and fetched on first use: `prompt_upsampling=False` never pulls the upsampler.
+_ON_DEMAND = ("upsampler",)
 
 
-@app.entrypoint(defaults={"drafter": _DRAFTER, "model": _BASE, "upsampler": _UPSAMPLER}, components=_COMPONENTS,
+@app.entrypoint(defaults={"model": _BASE, "upsampler": _UPSAMPLER}, components=_COMPONENTS,
                 on_demand=_ON_DEMAND, memoize=Memoize(requires=["seed"]))
-def generate(ctx: Context, payload: GenerateInput, drafter: Drafter, model: Klein, upsampler: Upsampler,
+def generate(ctx: Context, payload: GenerateInput, model: Klein, upsampler: Upsampler,
              out: Outputs, tel: Telemetry, adj: Adjustments) -> ImageResult:
     """Klein Base, 50 steps with CFG 4: text to image, or an edit of up to ten ordered pictures."""
-    return _generate(ctx, "generate", payload, drafter, model, upsampler, out, tel, adj)
+    return _generate(ctx, "generate", payload, model, upsampler, out, tel, adj)
 
 
-@app.entrypoint(defaults={"drafter": _DRAFTER, "model": _DISTILLED, "upsampler": _UPSAMPLER}, components=_COMPONENTS,
+@app.entrypoint(defaults={"model": _DISTILLED, "upsampler": _UPSAMPLER}, components=_COMPONENTS,
                 on_demand=_ON_DEMAND, memoize=Memoize(requires=["seed"]))
-def generate_turbo(ctx: Context, payload: TurboInput, drafter: Drafter, model: Klein, upsampler: Upsampler,
+def generate_turbo(ctx: Context, payload: TurboInput, model: Klein, upsampler: Upsampler,
                    out: Outputs, tel: Telemetry, adj: Adjustments) -> ImageResult:
     """The distilled Klein, 16 steps, no guidance: text to image, or an edit of up to ten ordered pictures."""
-    return _generate(ctx, "generate_turbo", payload, drafter, model, upsampler, out, tel, adj)
+    return _generate(ctx, "generate_turbo", payload, model, upsampler, out, tel, adj)
 
 
 class ImageBox(msgspec.Struct, kw_only=True):
@@ -296,13 +286,13 @@ class ImageBox(msgspec.Struct, kw_only=True):
 
 # Each checkpoint is built, and its weights fetched, only when a box asks for it.
 @app.tool(label="FLUX.3 Image Klein", named="image",
-          defaults={"drafter": _DRAFTER, "full": _BASE, "model": _DISTILLED, "upsampler": _UPSAMPLER},
-          components={"drafter": ("model",), "full": _KLEIN, "model": _KLEIN, "upsampler": ("model",)},
-          on_demand=("drafter", "full", "model", "upsampler"), memoize=Memoize(requires=["seed"]))  # fmt: skip
-def image(ctx: Context, payload: ImageBox, drafter: Drafter, full: Klein, model: Klein, upsampler: Upsampler,
+          defaults={"full": _BASE, "model": _DISTILLED, "upsampler": _UPSAMPLER},
+          components={"full": _KLEIN, "model": _KLEIN, "upsampler": ("model",)},
+          on_demand=("full", "model", "upsampler"), memoize=Memoize(requires=["seed"]))  # fmt: skip
+def image(ctx: Context, payload: ImageBox, full: Klein, model: Klein, upsampler: Upsampler,
           out: Outputs, tel: Telemetry, adj: Adjustments) -> ImageResult:
     """FLUX.3 Image Klein on a canvas, upsampled: the distilled model, or Base, which loads only when asked for."""
     kind, function, klein = (TurboInput, "generate_turbo", model) if payload.turbo else (GenerateInput, "generate", full)
     request = kind(prompt=payload.instructions, aspect_ratio=payload.aspect_ratio, megapixels=payload.megapixels,
                    seed=payload.seed)  # fmt: skip
-    return _generate(ctx, function, request, drafter, klein, upsampler, out, tel, adj)
+    return _generate(ctx, function, request, klein, upsampler, out, tel, adj)

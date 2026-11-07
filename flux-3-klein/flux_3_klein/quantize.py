@@ -10,12 +10,11 @@ from cozy_runtime.author import (
     EncodingRule,
     QuantizationPlan,
     Recipe,
-    SelectionPlan,
     Telemetry,
 )
 
 from .klein import Klein, prepare_reference
-from .upsampler import Drafter, Upsampler
+from .upsampler import Upsampler
 
 #: Every linear of the 43 DiT blocks, the six modulation heads, the context embedder and the output
 #: norm, and the q/k/v/o and MLP projections of the 32 text-encoder layers the pipeline reads. On real
@@ -181,7 +180,3 @@ UPSAMPLER_NVFP4 = Recipe(
         output_precision="preserve",
     ),
 )
-
-#: The drafter's lane from any Qwen3.5-9B lane: its multi-token-prediction head alone (`mtp.*`,
-#: bf16 in each), 0.5 GB of the 18 GB model, the source's own objects, with the model's config.
-DRAFTER_HEAD = Recipe(lane="bf16", model=Drafter, plan=SelectionPlan(include=("model.mtp.*",)))

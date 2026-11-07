@@ -50,7 +50,15 @@ from cozy_runtime.author.kernels import ROWWISE_FP8, PreQuantized, quantize_once
 from cozy_runtime.rows import Rows
 from cozy_runtime.rows import rows as columns
 
-from .glue import KEY_MEAN, FusedMiniMaxH3AttnProcessor, H3AttnProcessor, KeyMean, Owned, take
+from .glue import (
+    HEAD_HOLDS,
+    KEY_MEAN,
+    FusedMiniMaxH3AttnProcessor,
+    H3AttnProcessor,
+    KeyMean,
+    Owned,
+    take,
+)
 
 FAST = "kitchen-sol-producer-fast-shared-qkv"
 FP4_LOWMEM = "kitchen-sol-producer-fp4-lowmem-shared-qkv"
@@ -97,7 +105,7 @@ class Carry:
     sparse call leaves its own there, and the last dense step's calls seed it (`seeding`; a step
     loop seeds `RequestState.statistics` the same way), so the first sparse step reads one too
     instead of measuring its keys in a second producer pass. Eager
-    reuse decides on `layout.step` in Python, which a recorded step would freeze; the step's phase
+    reuse decides on `layout.step` in Python, which a recorded step would freeze; the step's label
     decides instead (`rolling`, `seeding`)."""
 
     slots: Mapping[int, torch.Tensor]
@@ -336,7 +344,7 @@ def produce(
         state.replay_inputs.pop(key, None)
         carry, seed = _CARRY.get(), None
         if not parallel and producing(layout, call.path):
-            if carry is not None:  # `denoise_loop`: the phase says which step seeds
+            if carry is not None:  # `denoise_loop`: the label says which step seeds
                 seed = KeyMean(carry.slots[id(attn)]) if carry.seeding else None
             elif layout.step == layout.dense_until_step - 1:  # a step loop: the last dense step
                 held = hidden_states.value if isinstance(hidden_states, Owned) else hidden_states
@@ -363,7 +371,7 @@ def produce(
         f"comfy_kitchen.sol_attn_chunked(int8, stats={statistics}, vmargin=1.1, "
         f"prefix=int8, qkv=one-operand{',v=once' if reuse and not parallel else ''})"
     )
-    out = attn.to_out[1](split(attn.to_out[0], output.flatten(2, 3), Cut(1)))
+    out = attn.to_out[1](split(attn.to_out[0], output.flatten(2, 3), Cut(1), holds=2))
     del output
     return out
 
@@ -512,7 +520,7 @@ def _attend(
         else:
             # Kitchen's call holds the whole document's K/V codes and its whole output: an exact
             # split by query heads, which the Runtime sizes beside the DiT's weights.
-            output = split(heads, heads, Cut(2))
+            output = split(heads, heads, Cut(2), holds=HEAD_HOLDS)
         means.close()
         reuse = means.prior is not None
     return output, reuse

@@ -2,9 +2,11 @@
 
 The step is the official loop step (`MiniMaxH3LoopDenoiser`, then `MiniMaxH3LoopSchedulerStep`)
 over tensors alone. It reads its timesteps and sigmas from tables at the step index, and takes
-every host decision from its phase: dense or sparse attention, how many distinct timesteps its
+every host decision from its label: dense or sparse attention, how many distinct timesteps its
 rows hold, and whether the Kitchen producer's sites reuse the previous step's key means, which
-it carries in one slot per site (`producer.Carry`); the last dense step seeds them.
+it carries in one slot per site (`producer.Carry`); the last dense step seeds them. FL2VA's loop
+reaches every per-call tensor through its inputs, so the Runtime keeps its program for the next
+call of the same key.
 """
 
 from __future__ import annotations
@@ -23,7 +25,7 @@ from .overlay import ATTENTION_KWARG, OVERLAY_KWARG
 
 
 @dataclass(frozen=True, slots=True)
-class Phase:
+class Label:
     sparse: bool
     rows: int
     rolling: bool
@@ -57,8 +59,8 @@ def denoise_fl2va(
         for index, (times, _) in enumerate(plan):
             timesteps[index, : times.numel()] = times
         indices = torch.stack([rows for _, rows in plan])
-        phases = tuple(
-            Phase(
+        labels = tuple(
+            Label(
                 index >= sol_dense_steps,
                 times.numel(),
                 bool(sites) and index >= max(sol_dense_steps, 1),
@@ -70,38 +72,43 @@ def denoise_fl2va(
         keys = tuple(id(site.module) for site in sites)
         slots = tuple(torch.zeros(site.module.heads, 128, device=device) for site in sites)
         video_rows, audio_rows = state.num_condition_video_rows, state.num_condition_audio_rows
-        video_sigmas, audio_sigmas = schedulers.scheduler.sigmas, schedulers.audio_scheduler.sigmas
+        inputs = (
+            state.prompt_embeds, timesteps, indices, tags, position_ids, fields["video_indices"],
+            fields["audio_indices"], fields["text_indices"], state.timesteps,
+            state.audio_timesteps, schedulers.scheduler.sigmas, schedulers.audio_scheduler.sigmas,
+        )  # fmt: skip
 
-        def step(i: torch.Tensor, video: Any, audio: Any, *means: Any, phase: Phase) -> None:
-            carry = producer.Carry(
-                dict(zip(keys, means, strict=True)), phase.rolling, phase.seeding
-            )
-            with attention_scope(layouts[phase.sparse]), producer.carrying(carry):
+        def step(i: torch.Tensor, video: Any, audio: Any, *rest: Any, label: Label) -> None:
+            means, given = rest[: len(keys)], rest[len(keys) :]
+            prompt, times, rows, tags, positions, at_video, at_audio, at_text, *schedule = given
+            video_t, audio_t, video_sigmas, audio_sigmas = schedule
+            carry = producer.Carry(dict(zip(keys, means, strict=True)), label.rolling, label.seeding)
+            with attention_scope(layouts[label.sparse]), producer.carrying(carry):
                 velocity, audio_velocity = transformer(
                     hidden_states=video[None],
                     audio_hidden_states=audio[None],
-                    encoder_hidden_states=state.prompt_embeds,
-                    timestep=timesteps.index_select(0, i)[0, : phase.rows],
-                    timestep_indices=indices.index_select(0, i)[0],
+                    encoder_hidden_states=prompt,
+                    timestep=times.index_select(0, i)[0, : label.rows],
+                    timestep_indices=rows.index_select(0, i)[0],
                     token_tags=tags,
-                    position_ids=position_ids,
-                    video_indices=fields["video_indices"],
-                    audio_indices=fields["audio_indices"],
-                    text_indices=fields["text_indices"],
+                    position_ids=positions,
+                    video_indices=at_video,
+                    audio_indices=at_audio,
+                    text_indices=at_text,
                     return_dict=False,
                 )
             velocity, audio_velocity = velocity[0, video_rows:], audio_velocity[0, audio_rows:]
-            euler(video[video_rows:], velocity.float(), i, state.timesteps, video_sigmas)
-            euler(
-                audio[audio_rows:], audio_velocity.float(), i, state.audio_timesteps, audio_sigmas
-            )
+            euler(video[video_rows:], velocity.float(), i, video_t, video_sigmas)
+            euler(audio[audio_rows:], audio_velocity.float(), i, audio_t, audio_sigmas)
 
         denoise_loop(
             step,
             range(len(plan)),
             state=(state.latents, state.audio_latents),
             carried=slots,
-            phases=phases,
+            inputs=inputs,
+            labels=labels,
+            key=("minimax-h3.fl2va/1", layouts[False], layouts[True], video_rows, audio_rows),
             on_step=on_step,
             cache=cache,
         )
@@ -148,8 +155,8 @@ def denoise_refine(
         # producer's key means. A key mean carried from a step's last window is no other window's:
         # windows compute their own statistics.
         single = bool(sites) and len(windows) == 1
-        phases = tuple(
-            Phase(index >= dense_steps, int(times.numel()), single and index >= max(dense_steps, 1),
+        labels = tuple(
+            Label(index >= dense_steps, int(times.numel()), single and index >= max(dense_steps, 1),
                   single and index == dense_steps - 1)  # fmt: skip
             for index, (times, _) in enumerate(plan)
         )
@@ -157,16 +164,16 @@ def denoise_refine(
         keys = tuple(id(site.module) for site in sites)
         slots = tuple(torch.zeros(site.module.heads, 128, device=device) for site in sites)
 
-        def step(i: torch.Tensor, rows: Any, *means: Any, phase: Phase) -> None:
-            carry = producer.Carry(dict(zip(keys, means, strict=True)), phase.rolling, phase.seeding)
+        def step(i: torch.Tensor, rows: Any, *means: Any, label: Label) -> None:
+            carry = producer.Carry(dict(zip(keys, means, strict=True)), label.rolling, label.seeding)
             velocity = torch.zeros_like(rows)
             for (start, count), weight in zip(windows, weights, strict=True):
-                with attention_scope(layouts[phase.sparse]), producer.carrying(carry):
+                with attention_scope(layouts[label.sparse]), producer.carrying(carry):
                     predicted, _ = transformer(
                         hidden_states=rows[None, start : start + count],
                         audio_hidden_states=audio[None],
                         encoder_hidden_states=prompt_embeds,
-                        timestep=timesteps.index_select(0, i)[0, : phase.rows],
+                        timestep=timesteps.index_select(0, i)[0, : label.rows],
                         timestep_indices=indices.index_select(0, i)[0],
                         token_tags=tags,
                         position_ids=position_ids,
@@ -179,7 +186,13 @@ def denoise_refine(
             delta = sigmas.index_select(0, i) - sigmas.index_select(0, i + 1)
             rows.add_(velocity * delta.reshape(1, 1))
 
-        denoise_loop(step, range(len(plan)), state=(video,), carried=slots, phases=phases, on_step=on_step)
+        transformer._engage(overlay, 0)  # armed before the loop, as `denoise_loop` requires
+        try:
+            denoise_loop(
+                step, range(len(plan)), state=(video,), carried=slots, labels=labels, on_step=on_step
+            )
+        finally:
+            transformer._release()
 
 
 def euler(

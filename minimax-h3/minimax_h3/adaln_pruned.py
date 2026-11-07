@@ -59,29 +59,36 @@ class StepInvariants:
     a layout change (a clip's rows leaving before the first sparse step) recomputes it.
     `checked`: the denoise checked every step's rows before its loop, so its forwards read no
     device value on the host (a `denoise_loop` step). `overlay`: the one overlay that loop's every
-    forward is served under, engaged for each (it has no per-step heads)."""
+    forward is served under, engaged for each (it has no per-step heads). A value computed while a
+    CUDA graph records is that graph's alone: another graph of the loop (a `denoise_loop` records
+    one per label) computes its own, since it may run first."""
 
     __slots__ = ("checked", "held", "overlay")
 
     def __init__(self, checked: bool = False, overlay: Overlay | None = None) -> None:
-        self.held: dict[str, tuple[tuple[tuple[object, int], ...], Any]] = {}
+        self.held: dict[object, tuple[tuple[tuple[object, int], ...], Any]] = {}
         self.checked = checked
         self.overlay = overlay
 
     def get(self, name: str, inputs: tuple[object, ...], compute: Callable[[], Any]) -> Any:
         key = tuple((value, getattr(value, "_version", 0)) for value in inputs)
-        held = self.held.get(name)
-        if (
-            held is not None
-            and len(held[0]) == len(key)
-            and all(
-                old is new and old_version == new_version
-                for (old, old_version), (new, new_version) in zip(held[0], key, strict=True)
-            )
-        ):
-            return held[1]
+        recording = (
+            torch.cuda.CUDAGraph.get_currently_capturing_graph()
+            if torch.cuda.is_available() and torch.cuda.is_current_stream_capturing()
+            else None
+        )
+        for held in (self.held.get(name), self.held.get((name, id(recording)))):
+            if (
+                held is not None
+                and len(held[0]) == len(key)
+                and all(
+                    old is new and old_version == new_version
+                    for (old, old_version), (new, new_version) in zip(held[0], key, strict=True)
+                )
+            ):
+                return held[1]
         value = compute()
-        self.held[name] = (key, value)
+        self.held[name if recording is None else (name, id(recording))] = (key, value)
         return value
 
 
@@ -304,14 +311,14 @@ class AdaLNPrunedMiniMaxH3Transformer(MiniMaxH3Transformer3DModel):  # type: ign
     ) -> MiniMaxH3TransformerOutput | tuple[torch.Tensor, torch.Tensor]:
         """Diffusers 0.41's forward, the projected rows scoped to the packing: Diffusers keeps
         them to its end, the video's float32 rows (2.25 GB a GPU at H3 15 s, degree 2) through
-        every block. It checks the rows and arms a turbo bank `attention_kwargs` names (`_arm`),
-        unless its denoise checked every step's rows ahead (`StepInvariants.checked`), and ends
-        disarmed: in the forward, as a package forward hook would keep it out of native loops."""
+        every block. It checks the rows and arms a turbo bank `attention_kwargs` names (`_arm`)
+        and ends disarmed, in the forward, as a package forward hook would keep it out of native
+        loops; unless its denoise checked every step's rows ahead (`StepInvariants.checked`): a
+        `denoise_loop` step, which keeps the overlay its denoise armed before the loop."""
         memo = _STEP_INVARIANTS.get()
-        if memo is None or not memo.checked:
+        looped = memo is not None and memo.checked
+        if not looped:
             self._arm(timestep, timestep_indices, token_tags, attention_kwargs)
-        elif memo.overlay is not None:
-            self._engage(memo.overlay, 0)
         del attention_kwargs  # `apply_lora_scale` consumed its scale
         try:
             sequence_length = position_ids.shape[0]
@@ -385,7 +392,8 @@ class AdaLNPrunedMiniMaxH3Transformer(MiniMaxH3Transformer3DModel):  # type: ign
                 return (video_output, audio_output)
             return MiniMaxH3TransformerOutput(sample=video_output, audio_sample=audio_output)
         finally:
-            self._release()
+            if not looped:
+                self._release()
 
     def install_lora_consumers(self) -> None:
         """Install once during turbo-capable construction, before Runtime fill/fusion."""

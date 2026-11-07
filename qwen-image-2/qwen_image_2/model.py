@@ -66,7 +66,7 @@ from cozy_runtime.author import (
 )
 from cozy_runtime.author.kernels import Plan
 
-from ._prepared import _FlowEuler, _Layout
+from ._prepared import _FlowEuler, _Layout, _cached_step
 
 
 def _modulation(block: Any, arguments: Mapping[str, Any]) -> fusion.Modulation:
@@ -489,7 +489,7 @@ class QwenImage21Model(
                 [image_pad_mask, image_pad_mask.new_ones(1, latents.shape[1] // 4)], dim=1
             )
             img_shapes = [[(1, height // pipeline.vae_scale_factor, width // pipeline.vae_scale_factor)]]
-            layout = _Layout(transformer, img_shapes, image_pad_mask, None, device)
+            layout = _Layout(transformer, img_shapes, image_pad_mask, device)
 
             # Step 0 prefills the prefix K/V over the full joint sequence.
             kv_cache = QwenImage21KVCache(len(transformer.transformer_blocks))
@@ -521,37 +521,20 @@ class QwenImage21Model(
             on_step(0)
             if steps < 2:
                 return latents
-            euler = _FlowEuler(scheduler, device)
+            euler = _FlowEuler.from_scheduler(scheduler, device)
         blocks = transformer.transformer_blocks
-        caches = [kv_cache.get_layer(index) for index in range(len(blocks))]
-        rotary, target, attention = layout.rotary_emb, layout.modulation_mask, layout.attention_mask
-
-        def step(i: torch.Tensor, latents: torch.Tensor) -> None:
-            with torch.no_grad():
-                hidden = transformer.img_in(latents.to(transformer.dtype))
-                temb = transformer.time_text_embed(euler.timestep(i), hidden)
-                modulation = transformer.modulation(temb)
-                for index, block in enumerate(blocks):
-                    hidden = block(
-                        hidden_states=hidden,
-                        modulation=modulation,
-                        rotary_emb=rotary,
-                        attention_mask=attention,
-                        target_token_mask=target,
-                        layer_cache=caches[index],
-                        kv_cache_mode="cached",
-                        cache_write_slice=None,
-                        segments=None,
-                        key_valid=None,
-                    )
-                hidden = transformer.norm_out(hidden, temb, target)
-                if heads is None:
-                    noise = transformer.proj_out(hidden)
-                else:
-                    noise = F.linear(hidden, heads.index_select(0, i)[0]).float()
-                latents.copy_((latents.float() + euler.delta(i) * noise).to(latents.dtype))
-
-        denoise_loop(step, range(1, steps), state=(latents,), on_step=on_step)
+        prefix = tuple(
+            tensor
+            for layer in range(len(blocks))
+            for tensor in kv_cache.get_layer(layer).get()
+        )
+        projections = () if heads is None else (heads,)
+        denoise_loop(
+            _cached_step(transformer, heads=heads is not None), range(1, steps), state=(latents,),
+            inputs=(euler.ts, euler.dt, layout.rotary_emb, layout.modulation_mask, *projections, *prefix),
+            key=("qwen-image-2.1.cached/1" if heads is None else "qwen-image-2.1.cached-heads/1", len(blocks)),
+            on_step=on_step,
+        )
         return latents
 
     def _denoise_eager(

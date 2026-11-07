@@ -51,6 +51,8 @@ MAX_PICTURES = 10
 class GenerateInput(ImageRequest):
     #: Its text, and the pictures it mentions, in the order it first mentions them.
     prompt: Prompt[Image] = Prompt()
+    #: Qwen Image 2.1 renders at 1, 2 or 4 MP (its native 2K); 2 by default (Paul, 11-06).
+    megapixels: Literal[1, 2, 4] = DEFAULT_MEGAPIXELS
 
 
 def label(n: int, key: str, count: int) -> str:

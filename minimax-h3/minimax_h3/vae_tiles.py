@@ -9,8 +9,8 @@ ViT over `(B, S, C)` tokens whose norms reduce over the last dimension only, who
 register/cls tokens are per-batch replicas and whose RoPE comes from the tile geometry.
 (`MiniMaxH3VideoGroupNorm`, the one batch-mixing module, is encoder-side.) So the tiles
 of one chunk go through `post_quant_conv` and the decoder as one `(tiles, C, T, h, w)`
-batch, or as few as the device holds (the Runtime's `split`), and are stitched by the
-unchanged `_stitch_tiles` in the unchanged order.
+batch, its rows cut block by block as the device holds them (the Runtime's `split`), and are
+stitched by the unchanged `_stitch_tiles` in the unchanged order.
 
 The arithmetic per tile is the same; the BYTES are a property of the kernel a larger GEMM
 selects, so they are measured, never assumed. Measured 2026-09-07 at the release tile
@@ -171,7 +171,7 @@ class TileBatchedVideoVAE(AutoencoderKLMiniMaxH3):  # type: ignore[misc]
             for x, x_len in zip(x_indices, x_lengths, strict=True)
         ]
         batch = tiles[0] if len(tiles) == 1 else torch.cat(tiles, dim=0)
-        decoded = split(self._decode_tiles, batch, Cut(0)).split(z.shape[0], dim=0)
+        decoded = self._decode_tiles(batch).split(z.shape[0], dim=0)
         columns = len(x_indices)
         rows = [decoded[row * columns : (row + 1) * columns] for row in range(len(y_indices))]
         return self._stitch_tiles(rows, y_overlaps, x_overlaps)
