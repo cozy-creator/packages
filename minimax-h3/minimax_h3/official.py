@@ -52,7 +52,7 @@ from diffusers.modular_pipelines.modular_pipeline import PipelineState
 from diffusers.utils.torch_utils import randn_tensor
 from torch.nn.utils.weight_norm import WeightNorm
 
-from cozy_runtime import stepcache, vlm
+from cozy_runtime import rng, stepcache, vlm
 from cozy_runtime.author import (
     AttentionLayout,
     Config,
@@ -997,7 +997,7 @@ class OfficialH3Pipeline:
                 f"request generator has unsupported type {type(source).__name__}",
                 code="artifact_config",
             )
-        return torch.Generator().manual_seed(source.getrandbits(63))
+        return rng.generator(source.getrandbits(63))
 
     def image_reference(self, image: Image) -> Any:
         return MiniMaxH3ImageReference(image=image if image.mode == "RGB" else image.convert("RGB"))
@@ -1569,6 +1569,8 @@ class OfficialH3Pipeline:
                     ):
                         _, block_state = loop.loop_step(scoped, block_state, i=index, t=timestep)
                     on_step(index)
+            # The last step's velocities: none reads them, so they leave before the decode.
+            block_state.noise_pred = block_state.audio_noise_pred = None
         loop.set_block_state(state, block_state)
         self._run_with(task, scoped, "denoise.after_denoise", state)
         return facts

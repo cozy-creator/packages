@@ -12,7 +12,7 @@ from typing import Any, Literal
 import torch
 from diffusers.models.autoencoders.autoencoder_kl_minimax_h3 import MiniMaxH3VideoTransformerBlock
 
-from cozy_runtime import fusion, stepcache
+from cozy_runtime import fusion, rng, stepcache
 from diffusers import MiniMaxH3Transformer3DModel
 from cozy_runtime.author import (
     AdapterCompatibility,
@@ -219,7 +219,7 @@ class H3Model(
         plan = self.pipe.plans["fl2va"]
         state = self.pipe.start_fl2va(
             prompt=prompt, first_frame=None, last_frame=None,
-            generator=torch.Generator().manual_seed(0), steps=plan.steps[0], frames=frames,
+            generator=rng.generator(0), steps=plan.steps[0], frames=frames,
             task="fl2va", plan=plan,
         )  # fmt: skip
         self.pipe.condition_text("fl2va", state, self.device)

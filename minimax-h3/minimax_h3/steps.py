@@ -48,13 +48,14 @@ def denoise_fl2va(
     fields = state.denoiser_input_fields
     position_ids, tags = fields["position_ids"], fields["token_tags"]
     device = state.latents.device
-    with torch.no_grad(), step_invariants(checked=True) as memo:
+    with torch.no_grad(), step_invariants(checked=True):
         for times, rows in plan:  # an uncovered row refuses here, never inside the loop
             transformer._arm(times, rows, tags, None)
         transformer._release()
         sites = producer_sites(transformer)
-        rotary = memo.get("rope", (position_ids,), lambda: transformer.rope(position_ids))
+        rotary = transformer.rope(position_ids)
         producer.present(sites, rotary, tags.numel())
+        text = transformer.text_rows(state.prompt_embeds)
         timesteps = torch.zeros(len(plan), max(t.numel() for t, _ in plan), device=device)
         for index, (times, _) in enumerate(plan):
             timesteps[index, : times.numel()] = times
@@ -74,14 +75,14 @@ def denoise_fl2va(
         video_rows, audio_rows = state.num_condition_video_rows, state.num_condition_audio_rows
         inputs = (
             state.prompt_embeds, timesteps, indices, tags, position_ids, fields["video_indices"],
-            fields["audio_indices"], fields["text_indices"], state.timesteps,
+            fields["audio_indices"], fields["text_indices"], *rotary, text, state.timesteps,
             state.audio_timesteps, schedulers.scheduler.sigmas, schedulers.audio_scheduler.sigmas,
         )  # fmt: skip
 
         def step(i: torch.Tensor, video: Any, audio: Any, *rest: Any, label: Label) -> None:
             means, given = rest[: len(keys)], rest[len(keys) :]
-            prompt, times, rows, tags, positions, at_video, at_audio, at_text, *schedule = given
-            video_t, audio_t, video_sigmas, audio_sigmas = schedule
+            prompt, times, rows, tags, positions, at_video, at_audio, at_text, *more = given
+            cos, sin, text, video_t, audio_t, video_sigmas, audio_sigmas = more
             carry = producer.Carry(dict(zip(keys, means, strict=True)), label.rolling, label.seeding)
             with attention_scope(layouts[label.sparse]), producer.carrying(carry):
                 velocity, audio_velocity = transformer(
@@ -96,6 +97,8 @@ def denoise_fl2va(
                     audio_indices=at_audio,
                     text_indices=at_text,
                     return_dict=False,
+                    rotary=(cos, sin),
+                    text=text,
                 )
             velocity, audio_velocity = velocity[0, video_rows:], audio_velocity[0, audio_rows:]
             euler(video[video_rows:], velocity.float(), i, video_t, video_sigmas)
@@ -108,7 +111,7 @@ def denoise_fl2va(
             carried=slots,
             inputs=inputs,
             labels=labels,
-            key=("minimax-h3.fl2va/1", layouts[False], layouts[True], video_rows, audio_rows),
+            key=("minimax-h3.fl2va/2", layouts[False], layouts[True], video_rows, audio_rows),
             on_step=on_step,
             cache=cache,
         )
@@ -142,12 +145,12 @@ def denoise_refine(
     position_ids, tags = fields["position_ids"], fields["token_tags"]
     device = video.device
     selector = {ATTENTION_KWARG: overlay.bank, OVERLAY_KWARG: overlay}
-    with torch.no_grad(), step_invariants(checked=True, overlay=overlay) as memo:
+    with torch.no_grad(), step_invariants(checked=True, overlay=overlay):
         for times, rows in plan:  # an uncovered row refuses here, never inside the loop
             transformer._arm(times, rows, tags, selector)
         transformer._release()
         sites = producer_sites(transformer)
-        rotary = memo.get("rope", (position_ids,), lambda: transformer.rope(position_ids))
+        rotary = transformer.rope(position_ids)
         producer.present(sites, rotary, tags.numel())
         timesteps = torch.stack([times for times, _ in plan]).to(device)
         indices = torch.stack([rows for _, rows in plan]).to(device)
@@ -181,6 +184,8 @@ def denoise_refine(
                         audio_indices=fields["audio_indices"],
                         text_indices=fields["text_indices"],
                         return_dict=False,
+                        rotary=rotary,
+                        text=text,
                     )
                 velocity[start : start + count].addcmul_(predicted[0].float(), weight[:, None])
             delta = sigmas.index_select(0, i) - sigmas.index_select(0, i + 1)
@@ -188,6 +193,7 @@ def denoise_refine(
 
         transformer._engage(overlay, 0)  # armed before the loop, as `denoise_loop` requires
         try:
+            text = transformer.text_rows(prompt_embeds)  # under the overlay, as every step reads it
             denoise_loop(
                 step, range(len(plan)), state=(video,), carried=slots, labels=labels, on_step=on_step
             )
