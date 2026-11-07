@@ -41,6 +41,11 @@ from .image_processor import HunyuanImage3ImageProcessor
 from .siglip2 import LightProjector, Siglip2VisionTransformer
 from .tokenization_hunyuan_image_3 import CondImage, HunyuanImage3TokenizerFast, ImageInfo, ImageTensor
 
+try:
+    from cozy_runtime.author import retained
+except ImportError:  # a Runtime without `retained`: the cache stays plain tensors
+    retained = None
+
 # Type aliases
 BatchRaggedImages = Union[torch.Tensor, List[Union[torch.Tensor, List[torch.Tensor]]]]
 BatchRaggedTensor = Union[torch.Tensor, List[torch.Tensor]]
@@ -743,14 +748,113 @@ class CausalMMOutputWithPast:
 class HunyuanStaticCache:
     """Upstream's cache without Transformers' `StaticCache`: one zero-initialized
     [batch, kv heads, max_cache_len, head dim] buffer per layer, allocated at the first write and
-    written in place at `cache_position`; `dynamic` returns only the written prefix (text decoding)."""
+    written in place at `cache_position`; `dynamic` returns only the written prefix (text decoding).
 
-    def __init__(self, config, max_batch_size: int, max_cache_len: int, dtype=None, dynamic: bool = False):
+    With the Runtime's store `held` (`author.retained`) no layer's K/V outlives its layer as a plain
+    tensor: an image's whole cache is held after its first write and each step rewrites its image
+    positions into a copy for that layer alone; text holds its prefill, and its decoded tokens
+    `CHUNK` at a time."""
+
+    CHUNK = 256
+
+    def __init__(self, config, max_batch_size: int, max_cache_len: int, dtype=None, dynamic: bool = False,
+                 held: Any = None):
         # Like Transformers 4.57's StaticCache, the buffers take the dtype of the first keys written.
         self.max_cache_len = max_cache_len
         self.dynamic = dynamic
-        self.keys: list[Optional[torch.Tensor]] = [None] * config.num_hidden_layers
-        self.values: list[Optional[torch.Tensor]] = [None] * config.num_hidden_layers
+        self.held = held
+        layers = config.num_hidden_layers
+        self.keys: list[Optional[torch.Tensor]] = [None] * layers
+        self.values: list[Optional[torch.Tensor]] = [None] * layers
+        # Held: each layer's first write, the decoded tokens' held chunks, the chunk being written
+        # and where decoding began.
+        self.states: list[Any] = [None] * layers
+        self.chunks: list[list[Any]] = [[] for _ in range(layers)]
+        self.tails: list[Optional[tuple[torch.Tensor, torch.Tensor, int]]] = [None] * layers
+        self.starts: list[Optional[int]] = [None] * layers
+
+    def close(self) -> None:
+        """Its state dies with its loop: the Runtime's store goes now, not with its last reference
+        (a store from a Runtime before `close` lets its regions go with that)."""
+        if self.held is not None and hasattr(self.held, "close"):
+            self.held.close()
+        self.states, self.chunks, self.tails = [], [], []
+
+    @staticmethod
+    def _write(k_out, v_out, cache_position, key_states, value_states) -> None:
+        if cache_position is None:
+            k_out.copy_(key_states)
+            v_out.copy_(value_states)
+        elif cache_position.dim() == 1:
+            k_out.index_copy_(2, cache_position, key_states)
+            v_out.index_copy_(2, cache_position, value_states)
+        else:
+            assert cache_position.dim() == 2, f"multiple batch dims not yet {cache_position.shape=}"
+            batch_size, idx_size = cache_position.shape
+            assert batch_size == k_out.size(0)
+            assert batch_size == v_out.size(0)
+            assert batch_size == key_states.size(0)
+            assert batch_size == value_states.size(0)
+            for i in range(batch_size):
+                k_out[i].index_copy_(1, cache_position[i], key_states[i])
+                v_out[i].index_copy_(1, cache_position[i], value_states[i])
+
+    def _buffers(self, layer_idx: int, key_states: torch.Tensor, value_states: torch.Tensor):
+        batch, heads, _, head_dim = key_states.shape
+        shape = (batch, heads, self.max_cache_len, head_dim)
+        return (torch.zeros(shape, dtype=key_states.dtype, device=key_states.device),
+                torch.zeros(shape, dtype=value_states.dtype, device=value_states.device))
+
+    def _plain(self, layer_idx: int) -> None:
+        """A held text layer back as one plain buffer: decoding that does not append in order."""
+        k, v = self.states[layer_idx].get()
+        k_out = k.new_zeros((*k.shape[:2], self.max_cache_len, k.shape[3]))
+        v_out = v.new_zeros((*v.shape[:2], self.max_cache_len, v.shape[3]))
+        start = self.starts[layer_idx]
+        start = k.shape[2] if start is None else start
+        k_out[:, :, :start], v_out[:, :, :start] = k[:, :, :start], v[:, :, :start]
+        at = start
+        for chunk in self.chunks[layer_idx]:
+            ck, cv = chunk.get()
+            k_out[:, :, at:at + ck.shape[2]], v_out[:, :, at:at + cv.shape[2]] = ck, cv
+            at += ck.shape[2]
+        if self.tails[layer_idx] is not None:
+            tk, tv, n = self.tails[layer_idx]
+            k_out[:, :, at:at + n], v_out[:, :, at:at + n] = tk[:, :, :n], tv[:, :, :n]
+        self.keys[layer_idx], self.values[layer_idx] = k_out, v_out
+        self.states[layer_idx], self.chunks[layer_idx], self.tails[layer_idx] = None, [], None
+
+    def _decoded(self, layer_idx, cache_position, key_states, value_states):
+        """One decoded token (batch 1, its position next in order): the prefill before it, the held
+        chunks and the chunk being written, joined for this layer's attention alone."""
+        position = int(cache_position.reshape(-1)[0].item()) if cache_position is not None else None
+        start = self.starts[layer_idx]
+        if start is None and position is not None:
+            start = self.starts[layer_idx] = position
+        tail = self.tails[layer_idx]
+        written = len(self.chunks[layer_idx]) * self.CHUNK + (0 if tail is None else tail[2])
+        if (position is None or key_states.shape[0] != 1 or key_states.shape[2] != 1
+                or position != start + written):
+            self._plain(layer_idx)
+            return None
+        if tail is None:
+            shape = (*key_states.shape[:2], self.CHUNK, key_states.shape[3])
+            tail = (key_states.new_zeros(shape), value_states.new_zeros(shape), 0)
+        tk, tv, n = tail
+        tk[:, :, n:n + 1], tv[:, :, n:n + 1] = key_states, value_states
+        n += 1
+        if n == self.CHUNK:
+            self.chunks[layer_idx].append(self.held.put(tk, tv))
+            self.tails[layer_idx] = None
+            tk = tv = None
+            n = 0
+        else:
+            self.tails[layer_idx] = (tk, tv, n)
+        k, v = self.states[layer_idx].get()
+        parts = [(k[:, :, :start], v[:, :, :start]), *(chunk.get() for chunk in self.chunks[layer_idx])]
+        if n:
+            parts.append((tk[:, :, :n], tv[:, :, :n]))
+        return torch.cat([p[0] for p in parts], 2), torch.cat([p[1] for p in parts], 2)
 
     def update(
         self,
@@ -760,44 +864,39 @@ class HunyuanStaticCache:
         cache_kwargs: Optional[Dict[str, Any]] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         cache_position = cache_kwargs.get("cache_position")
+        if self.held is not None and self.keys[layer_idx] is None:
+            state = self.states[layer_idx]
+            if not self.dynamic:
+                if state is None:
+                    k_out, v_out = self._buffers(layer_idx, key_states, value_states)
+                    self._write(k_out, v_out, cache_position, key_states, value_states)
+                    self.states[layer_idx] = self.held.put(k_out, v_out)
+                    return k_out, v_out
+                k, v = state.get()
+                k_out, v_out = k.clone(), v.clone()
+                self._write(k_out, v_out, cache_position, key_states, value_states)
+                return k_out, v_out
+            if state is None:
+                prefill = cache_position is None or (
+                    cache_position.reshape(-1)[0].item() == 0 and key_states.shape[0] == 1)
+                if prefill:
+                    self.states[layer_idx] = self.held.put(key_states, value_states)
+                    return key_states, value_states
+            else:
+                joined = self._decoded(layer_idx, cache_position, key_states, value_states)
+                if joined is not None:
+                    return joined
         if self.keys[layer_idx] is None:
-            batch, heads, _, head_dim = key_states.shape
-            shape = (batch, heads, self.max_cache_len, head_dim)
-            self.keys[layer_idx] = torch.zeros(shape, dtype=key_states.dtype, device=key_states.device)
-            self.values[layer_idx] = torch.zeros(shape, dtype=value_states.dtype, device=value_states.device)
+            self.keys[layer_idx], self.values[layer_idx] = self._buffers(layer_idx, key_states, value_states)
         k_out = self.keys[layer_idx]
         v_out = self.values[layer_idx]
-
-        if cache_position is None:
-            k_out.copy_(key_states)
-            v_out.copy_(value_states)
-        else:
-            if cache_position.dim() == 1:
-                k_out.index_copy_(2, cache_position, key_states)
-                v_out.index_copy_(2, cache_position, value_states)
-
-                if self.dynamic:
-                    end = cache_position[-1].item() + 1
-                    k_out = k_out[:, :, :end]
-                    v_out = v_out[:, :, :end]
-            else:
-                assert cache_position.dim() == 2, f"multiple batch dims not yet {cache_position.shape=}"
-                batch_size, idx_size = cache_position.shape
-                assert batch_size == k_out.size(0)
-                assert batch_size == v_out.size(0)
-                assert batch_size == key_states.size(0)
-                assert batch_size == value_states.size(0)
-                for i in range(batch_size):
-                    unbatched_dim = 1
-                    k_out[i].index_copy_(unbatched_dim, cache_position[i], key_states[i])
-                    v_out[i].index_copy_(unbatched_dim, cache_position[i], value_states[i])
-
-                if self.dynamic:
-                    assert len(cache_position) == 1
-                    end = cache_position[0, -1].item() + 1
-                    k_out = k_out[:, :, :end]
-                    v_out = v_out[:, :, :end]
-
+        self._write(k_out, v_out, cache_position, key_states, value_states)
+        if self.dynamic and cache_position is not None:
+            if cache_position.dim() == 2:
+                assert len(cache_position) == 1
+            end = cache_position.reshape(-1)[-1].item() + 1
+            k_out = k_out[:, :, :end]
+            v_out = v_out[:, :, :end]
         return k_out, v_out
 
 
@@ -2238,12 +2337,18 @@ class HunyuanImage3ForCausalMM(nn.Module):
             max_cache_len = output.tokens.shape[1]
         else:
             max_cache_len = output.tokens.shape[1] + default(max_new_tokens, self.generation_config.max_length)
+        # Every step reads the cache again: the Runtime holds it (`author.retained`), on the card while
+        # there is room, else refilled from pinned host memory; with no room for it, plain buffers.
+        config = self.config
+        nbytes = (2 * batch_size * cfg_factor[mode] * config.num_key_value_heads * max_cache_len
+                  * config.attention_head_dim * 2 * config.num_hidden_layers)
         cache = HunyuanStaticCache(
             config=self.config,
             max_batch_size=batch_size * cfg_factor[mode],
             max_cache_len=max_cache_len,
             dtype=self.dtype,
             dynamic=mode == "gen_text",
+            held=None if retained is None else retained(nbytes),
         )
 
         # 7. Build position ids
@@ -2614,6 +2719,7 @@ class HunyuanImage3ForCausalMM(nn.Module):
             on_token(n)
             if bool(torch.isin(next_tokens, stops).all()):
                 break
+        model_kwargs["past_key_values"].close()
 
         generated_tokens = input_ids[:, input_length:]
         if "recaption" in bot_task:
@@ -2650,6 +2756,7 @@ class HunyuanImage3ForCausalMM(nn.Module):
         model_inputs = self.prepare_inputs_for_generation(input_ids, **model_kwargs)
         with torch.autocast(device_type="cuda", dtype=self.dtype, enabled=self.dtype != torch.float32):
             outputs = self(**model_inputs)
+        model_kwargs["past_key_values"].close()
         scores = self.image_processor.img_ratio_slice_logits_processor(
             input_ids, outputs.logits[:, -1, :].to(copy=True, dtype=torch.float32))
         return int(torch.argmax(scores, dim=-1)[0].item())
@@ -2733,6 +2840,8 @@ class HunyuanImage3ForCausalMM(nn.Module):
                 model_kwargs = self._update_model_kwargs_for_generation(model_output, model_kwargs)
                 input_ids = None
             on_step(i)
+        # Its K/V dies with the loop: the decode after it has the room.
+        model_kwargs["past_key_values"].close()
         return latents
 
     @torch.no_grad()

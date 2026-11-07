@@ -2,12 +2,15 @@
 
 The architecture and sampling are Diffusers' (`QwenImage21Pipeline`, Diffusers 0.41.0). Runtime
 constructs and fills the modules and owns their residency; no Diffusers weight loader, device
-placement, or offload hook takes part in serving.
+placement, or offload hook takes part in serving. A caller's LoRAs adapt the DiT through Runtime's PEFT
+layers (`__adapter_compatibility__`).
 """
 
 from __future__ import annotations
 
+import math
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+from contextvars import ContextVar
 from typing import Any
 
 import numpy as np
@@ -29,8 +32,10 @@ from diffusers.models.autoencoders.autoencoder_kl_qwenimage21 import (
 )
 from diffusers.models.transformers.transformer_qwenimage21 import (
     QwenImage21KVCache,
+    QwenImage21KVLayerCache,
     QwenImage21TransformerBlock,
 )
+from diffusers.pipelines.qwenimage21 import pipeline_qwenimage21
 from diffusers.pipelines.qwenimage21.pipeline_qwenimage21 import (
     calculate_dimensions,
     calculate_shift,
@@ -45,6 +50,7 @@ from transformers.modeling_utils import local_torch_dtype
 
 from cozy_runtime import fusion, rng, tiles, vlm
 from cozy_runtime.author import (
+    AdapterCompatibility,
     Config,
     ConformanceError,
     Loader,
@@ -56,6 +62,11 @@ from cozy_runtime.author import (
     uses_components,
 )
 from cozy_runtime.author.kernels import Plan
+
+try:
+    from cozy_runtime.author import retained
+except ImportError:  # a Runtime without `retained` (0.42.1): the prefix is recomputed each step
+    retained = None
 
 from ._prepared import _FlowEuler, _Layout, _cached_step
 
@@ -112,6 +123,44 @@ VAE_NORM = fusion.ChannelNorm(
 #: A lone frame's convolutions without the padded copy before each, and its nearest upsampling in
 #: bf16 (Diffusers upsamples in F32).
 VAE_FRAME = fusion.LoneFrame(QwenImage21CausalConv3d, upsample=QwenImage21Upsample)
+
+
+#: Where the pipeline's call keeps its prefix K/V (`_RetainedKV`), set around that call.
+_RETAINED: ContextVar[Any] = ContextVar("qwen_image_2_retained", default=None)
+
+
+class _RetainedLayer(QwenImage21KVLayerCache):
+    """A layer's prefix K/V held by the Runtime (`retained`): on the card while there is room,
+    else in pinned host RAM, filled ahead of the layer's next step."""
+
+    def __init__(self, held: Any) -> None:
+        super().__init__()
+        self.held, self.state = held, None
+
+    def store(self, k: torch.Tensor, v: torch.Tensor) -> None:
+        self.state = self.held.put(k, v)
+
+    def get(self) -> tuple[torch.Tensor, torch.Tensor]:
+        if self.state is None:
+            raise RuntimeError("KV cache has not been populated yet.")
+        return self.state.get()
+
+
+class _RetainedKV(QwenImage21KVCache):
+    """Diffusers' prefix cache, its layers held by the Runtime when the call sets a store. Two
+    references' 8k conditioning tokens keep 132 MiB a block, 7.9 GB over the stack: kept as
+    tensors they outgrew an 8 GB card in step 1 (runs 39611, 39615)."""
+
+    def __init__(self, num_layers: int) -> None:
+        held = _RETAINED.get()
+        if held is None:
+            super().__init__(num_layers)
+        else:
+            self.layer_caches = [_RetainedLayer(held) for _ in range(num_layers)]
+
+
+# The pipeline builds its cache by this name.
+pipeline_qwenimage21.QwenImage21KVCache = _RetainedKV
 
 
 class _Progress[T]:
@@ -246,6 +295,9 @@ class QwenImage21Model(
     # two thirds of a 4 MP step. A 16-bit request attends exactly.
     attention_bits={"transformer.transformer_blocks.": 8},
 ):
+    #: Caller LoRAs on the DiT, at any strength: the Runtime bakes them into the weights.
+    __adapter_compatibility__ = (AdapterCompatibility("lora", "", ("transformer",), -math.inf, math.inf),)
+
     graph: QwenImage21Graph
     processor: Any
 
@@ -495,18 +547,34 @@ class QwenImage21Model(
             on_step(step)
             return values
 
-        with torch.inference_mode():
-            return pipeline(
-                image=reference_images,
-                prompt_embeds=embeds.to(device=device, dtype=transformer.dtype),
-                prompt_embeds_mask=None if mask is None else mask.to(device=device),
-                width=width,
-                height=height,
-                num_inference_steps=steps,
-                generator=rng.generator(seed),
-                output_type="latent",
-                callback_on_step_end=observed,
-            ).images
+        # The prefix (text and reference tokens) keeps its K/V across steps: the Runtime holds
+        # it, or with no room for it each step recomputes it.
+        prefix = embeds.shape[1] + (0 if reference_latents is None else reference_latents.shape[1])
+        config = transformer.config
+        width_bytes = config.num_attention_heads * config.attention_head_dim * transformer.dtype.itemsize
+        nbytes = 2 * prefix * width_bytes * len(transformer.transformer_blocks)
+        held = None if retained is None else retained(nbytes)
+        token = _RETAINED.set(held)
+        try:
+            with torch.inference_mode():
+                return pipeline(
+                    image=reference_images,
+                    prompt_embeds=embeds.to(device=device, dtype=transformer.dtype),
+                    prompt_embeds_mask=None if mask is None else mask.to(device=device),
+                    width=width,
+                    height=height,
+                    num_inference_steps=steps,
+                    generator=rng.generator(seed),
+                    output_type="latent",
+                    callback_on_step_end=observed,
+                    use_kv_cache=held is not None,
+                ).images
+        finally:
+            _RETAINED.reset(token)
+            # Its K/V dies with the loop, so the decode after it gets the room. A store from a Runtime
+            # before `close` (dev builds of 0.42.1) lets its regions go with their last reference.
+            if held is not None and hasattr(held, "close"):
+                held.close()
 
     @uses_components("vae")
     def decode(self, latents: Any, *, width: int, height: int) -> Any:

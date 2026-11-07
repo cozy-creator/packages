@@ -100,7 +100,8 @@ class Ideogram4(Model[IdeogramGraph], encoded_leaves="accept"):
         position_ids, segment_ids, indicator = Ideogram4Pipeline._prepare_ids([texts], rows, columns, texts, device)
         dtype = torch.bfloat16
         llm = torch.cat([features, features.new_zeros(tokens, features.shape[1])])[None].to(device, dtype)
-        neg_llm = torch.zeros(1, tokens, features.shape[1], dtype=dtype, device=device)
+        # The unconditional pass reads no text: one zero row seen at every position, not a copy per token.
+        neg_llm = torch.zeros(1, 1, features.shape[1], dtype=dtype, device=device).expand(1, tokens, -1)
         mu, std = schedule_shape(steps)
         scheduler = FlowMatchEulerDiscreteScheduler.from_config(self.graph.scheduler_config)
         sigmas = _logit_normal_sigmas(steps, _resolution_aware_mu(height, width, mu), std=std, device=device)
