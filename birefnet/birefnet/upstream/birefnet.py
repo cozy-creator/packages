@@ -226,8 +226,9 @@ class Attention(nn.Module):
 
         self.q = nn.Linear(dim, dim, bias=qkv_bias)
         self.kv = nn.Linear(dim, dim * 2, bias=qkv_bias)
-        self.attn_drop_prob = attn_drop
-        self.attn_drop = nn.Dropout(attn_drop)
+        # The Runtime's attention site (BiRefNet serves in float16): the scale is SDPA's, head_dim ** -0.5.
+        assert self.scale == head_dim ** -0.5, "the attention site scales by head_dim ** -0.5"
+        self.attention = RuntimeAttention(num_heads, head_dim, dtype=torch.float16)
         self.proj = nn.Linear(dim, dim)
         self.proj_drop = nn.Dropout(proj_drop)
 
@@ -255,28 +256,18 @@ class Attention(nn.Module):
 
     def forward(self, x, H, W):
         B, N, C = x.shape
-        q = self.q(x).reshape(B, N, self.num_heads, C // self.num_heads).permute(0, 2, 1, 3)
+        q = self.q(x).reshape(B, N, self.num_heads, C // self.num_heads)  # B, N, nH, hd
 
         if self.sr_ratio > 1:
             x_ = x.permute(0, 2, 1).reshape(B, C, H, W)
             x_ = self.sr(x_).reshape(B, C, -1).permute(0, 2, 1)
             x_ = self.norm(x_)
-            kv = self.kv(x_).reshape(B, -1, 2, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
+            kv = self.kv(x_).reshape(B, -1, 2, self.num_heads, C // self.num_heads)
         else:
-            kv = self.kv(x).reshape(B, -1, 2, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
-        k, v = kv[0], kv[1]
+            kv = self.kv(x).reshape(B, -1, 2, self.num_heads, C // self.num_heads)
+        k, v = kv.unbind(2)  # B, Nkv, nH, hd
 
-        if config.SDPA_enabled:
-            x = torch.nn.functional.scaled_dot_product_attention(
-                q, k, v,
-                attn_mask=None, dropout_p=self.attn_drop_prob, is_causal=False
-            ).transpose(1, 2).reshape(B, N, C)
-        else:
-            attn = (q @ k.transpose(-2, -1)) * self.scale
-            attn = attn.softmax(dim=-1)
-            attn = self.attn_drop(attn)
-
-            x = (attn @ v).transpose(1, 2).reshape(B, N, C)
+        x = self.attention(q, k, v).reshape(B, N, C)
         x = self.proj(x)
         x = self.proj_drop(x)
 
