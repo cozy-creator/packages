@@ -92,8 +92,8 @@ def caption(cot: str | None, prompt: str) -> str:
 
 
 class HunyuanImage3(Model[Graph], encoded_leaves="accept"):
-    """Text to image, or an edit of up to three ordered references, with the thinking stage optional.
-    Every forward takes the KV cache object, so Runtime runs it as written and records no CUDA graph."""
+    """Text to image, or an edit of up to three ordered references, with the thinking stage optional. The image
+    steps after the first are a `denoise_loop` the Runtime may record; the think decodes eagerly."""
 
     graph: Graph
 
@@ -152,14 +152,13 @@ class HunyuanImage3(Model[Graph], encoded_leaves="accept"):
     @uses_components(COMPONENT)
     def paint(self, prompt: str, references: list[Image.Image], cot: str | None, *, size: tuple[int, int],
               steps: int, guidance: float, seed: int, on_step: Callable[[int], None],
-              cancel: Callable[[], None]) -> tuple[Image.Image, dict[str, float]]:
-        """Tencent's image stage at an explicit `size` (width, height), after `think` or without it, and its
-        routing."""
+              cancel: Callable[[], None]) -> Image.Image:
+        """Tencent's image stage at an explicit `size` (width, height), after `think` or without it. Its steps
+        after the first are a `denoise_loop`, so no routing trace reads the experts' counts on the host."""
         model = self.graph.components[COMPONENT]
         width, height = size
-        with torch.inference_mode(), self._routing() as routing:
+        with torch.inference_mode():
             latents = model.denoise(prompt, self._cond(references), _system(UPSAMPLED if cot else DIRECT), cot,
                                     image_size=f"{height}x{width}", steps=steps, guidance_scale=guidance, seed=seed,
                                     on_step=on_step, cancel=cancel)
-            image: Image.Image = model.decode_latents(latents)
-        return image, routing.summary()
+            return model.decode_latents(latents)

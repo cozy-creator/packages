@@ -16,14 +16,13 @@
 
 import math
 import warnings
-from contextlib import nullcontext
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 import torch
 import torch.nn.functional as F
 from cozy_runtime import moe, rng
-from cozy_runtime.author import DoesNotFit, retained
+from cozy_runtime.author import DoesNotFit, denoise_loop, retained
 from einops import rearrange
 from PIL import Image
 from torch import nn
@@ -742,6 +741,18 @@ class CausalMMOutputWithPast:
     diffusion_prediction: Optional[torch.Tensor] = None
 
 
+class _Given:
+    """K/V a loop step was given, read as a retained State reads."""
+
+    __slots__ = ("kv",)
+
+    def __init__(self, k: torch.Tensor, v: torch.Tensor) -> None:
+        self.kv = k, v
+
+    def get(self) -> tuple[torch.Tensor, torch.Tensor]:
+        return self.kv
+
+
 class HunyuanStaticCache:
     """K/V the Runtime holds (`author.retained` store `held`), so no layer's outlives its layer as a plain
     tensor. Image (`text=False`): a layer's whole cache, [rows, kv heads, `length`, head dim], is held at its
@@ -756,6 +767,14 @@ class HunyuanStaticCache:
         self.states: list[Any] = [None] * layers
         self.chunks: list[list[Any]] = [[] for _ in range(layers)]
         self.tails: list[Optional[tuple[torch.Tensor, torch.Tensor, int]]] = [None] * layers
+
+    @classmethod
+    def reading(cls, kv) -> "HunyuanStaticCache":
+        """An image step's cache over the K/V step 0 wrote (each layer's keys then values, as a `denoise_loop`
+        step receives the store's States): it writes this step's positions into a copy per layer."""
+        cache = cls(None, len(kv) // 2, 0, text=False)
+        cache.states = [_Given(k, v) for k, v in zip(kv[::2], kv[1::2], strict=True)]
+        return cache
 
     @classmethod
     def nbytes(cls, config, rows: int, length: int, decoded: int, dtype: torch.dtype) -> int:
@@ -2622,35 +2641,82 @@ class HunyuanImage3ForCausalMM(nn.Module):
         input_ids = model_kwargs.pop("input_ids")
         model_kwargs["attention_mask"] = self._prepare_attention_mask_for_generation(
             input_ids, None, model_kwargs=model_kwargs).to(latents.device)
-        first = rest = model_kwargs
-        # Its K/V dies with the loop (the store closes): the decode after it has the room.
         rows, length = input_ids.shape
-        store = retained(HunyuanStaticCache.nbytes(self.config, rows, length, 0, torch.bfloat16))
-        with store if store is not None else nullcontext():
-            if store is not None:
-                cache = HunyuanStaticCache(store, self.config.num_hidden_layers, length, text=False)
-                first = {**model_kwargs, "past_key_values": cache}
+        layers = self.config.num_hidden_layers
+        nbytes = HunyuanStaticCache.nbytes(self.config, rows, length, 0, torch.bfloat16)
+        store = retained(nbytes)
+        if store is None:
+            raise DoesNotFit(
+                f"HunyuanImage 3's image steps keep {nbytes / (1 << 30):.1f} GiB of keys and values ({length} tokens), "
+                "and neither this card nor host RAM has room for them: run on a larger card: `cozy run … --on new`"
+            )
+        meanflow = bool(self.config.use_meanflow)
+        dts = (scheduler.sigmas[1:] - scheduler.sigmas[:-1]).to(device)
+        # Its K/V dies with the loop (the store closes): the decode after it has the room.
+        with store:
+            # Step 0 runs the whole sequence and writes every position's K/V to the Runtime's store.
+            cancel()
+            cache = HunyuanStaticCache(store, layers, length, text=False)
+            first = {**model_kwargs, "past_key_values": cache}
+            images = torch.cat([latents] * cfg_factor)
+            count = images.shape[0]
+            timesteps_r = scheduler.timesteps_full[1:2].repeat(count) if meanflow else None
+            model_inputs = self.prepare_inputs_for_generation(
+                input_ids, images=images, timesteps=timesteps[0].repeat(count), timesteps_r=timesteps_r,
+                guidance=guidance, **first,
+            )
+            with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=True):
+                pred = self(**model_inputs, first_step=True).diffusion_prediction
+            latents = latents.float() + self._guided(pred, cfg_distilled, guidance_scale) * dts[0]
+            on_step(0)
+            if steps > 1:
                 rest = self._update_model_kwargs_for_generation(CausalMMOutputWithPast(past_key_values=cache), first)
-            for i, t in enumerate(timesteps):
-                cancel()
-                cached = store is not None and i > 0
-                latent_model_input = torch.cat([latents] * cfg_factor)
-                timesteps_r = None
-                if self.config.use_meanflow:
-                    timesteps_r = scheduler.get_timestep_r(t).repeat(latent_model_input.shape[0])
-                model_inputs = self.prepare_inputs_for_generation(
-                    None if cached else input_ids, images=latent_model_input, timesteps=t.repeat(latent_model_input.shape[0]),
-                    timesteps_r=timesteps_r, guidance=guidance, **(rest if cached else first),
+                cos, sin = rest["rope"]
+                tables = (timesteps,) + ((scheduler.timesteps_full[1:],) if meanflow else ())
+                given = (guidance,) if cfg_distilled else ()
+                denoise_loop(
+                    self._image_step(cfg_factor, cfg_distilled, meanflow, guidance_scale),
+                    range(1, steps),
+                    state=(latents,),
+                    inputs=(dts, *tables, *given, rest["position_ids"], rest["attention_mask"], cos, sin,
+                            *cache.states),
+                    key=("hunyuan-image-3.image/1", cfg_factor, cfg_distilled, meanflow, guidance_scale,
+                         self.num_special_tokens, layers),
+                    on_step=on_step,
                 )
-                with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=True):
-                    pred = self(**model_inputs, first_step=not cached).diffusion_prediction
-                pred = pred.to(dtype=torch.float32)
-                if not cfg_distilled:
-                    pred_cond, pred_uncond = pred.chunk(2)
-                    pred = pred_uncond + guidance_scale * (pred_cond - pred_uncond)
-                latents = scheduler.step(pred, t, latents, return_dict=False)[0]
-                on_step(i)
         return latents
+
+    @staticmethod
+    def _guided(pred: torch.Tensor, cfg_distilled: bool, guidance_scale: float) -> torch.Tensor:
+        """The step's velocity in float32: CFG's combination of its halves unless the model is distilled."""
+        pred = pred.to(dtype=torch.float32)
+        if cfg_distilled:
+            return pred
+        pred_cond, pred_uncond = pred.chunk(2)
+        return pred_uncond + guidance_scale * (pred_cond - pred_uncond)
+
+    def _image_step(self, cfg_factor: int, cfg_distilled: bool, meanflow: bool, guidance_scale: float):
+        """One cached image step as a `denoise_loop` step: the image tokens alone, at the step's timestep,
+        reading the prefix K/V step 0 wrote (the store's States, received as tensors), then Euler in place."""
+
+        def step(i: torch.Tensor, latents: torch.Tensor, dts: torch.Tensor, timesteps: torch.Tensor,
+                 *given: torch.Tensor) -> None:
+            rest = list(given)
+            timesteps_r = rest.pop(0) if meanflow else None
+            guidance = rest.pop(0) if cfg_distilled else None
+            position_ids, attention_mask, cos, sin, *kv = rest
+            images = torch.cat([latents] * cfg_factor)
+            count = images.shape[0]
+            with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=True):
+                pred = self(
+                    images=images, timesteps=timesteps.index_select(0, i).repeat(count),
+                    timesteps_r=None if timesteps_r is None else timesteps_r.index_select(0, i).repeat(count),
+                    guidance=guidance, position_ids=position_ids, attention_mask=attention_mask, rope=(cos, sin),
+                    past_key_values=HunyuanStaticCache.reading(kv), mode="gen_image", first_step=False,
+                ).diffusion_prediction
+            latents.add_(self._guided(pred, cfg_distilled, guidance_scale) * dts.index_select(0, i))
+
+        return step
 
     @torch.no_grad()
     def decode_latents(self, latents: torch.Tensor, generator=None) -> Image.Image:
