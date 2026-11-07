@@ -210,8 +210,11 @@ def _generate(ctx: Context, function: str, payload: TurboInput, model: Klein,
                    seed=payload.drawn_seed())
 
 
-_DISTILLED = {"model": "black-forest-labs/flux-3-klein@0.1.0", "upsampler": "black-forest-labs/flux-3-klein-upsampler@0.2.0"}
-_BASE = {"model": "black-forest-labs/flux-3-klein-base@0.1.0", "upsampler": "black-forest-labs/flux-3-klein-upsampler@0.2.0"}
+#: The upsampler is AtomicChat's abliterated one by default (Paul, 11-06): BFL's with its refusal direction projected
+#: out. BFL's own is `model.upsampler=black-forest-labs/flux-3-klein-upsampler@0.2.0`.
+_UPSAMPLER = "atomicchat/flux-3-klein-upsampler-abliterated@0.1.0"
+_DISTILLED = {"model": "black-forest-labs/flux-3-klein@0.1.0", "upsampler": _UPSAMPLER}
+_BASE = {"model": "black-forest-labs/flux-3-klein-base@0.1.0", "upsampler": _UPSAMPLER}
 _COMPONENTS = {
     "model": ("transformer", "text_encoder", "vae"),
     "upsampler": ("model",),
