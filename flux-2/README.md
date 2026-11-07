@@ -10,7 +10,7 @@ speed generates an image, or edits the pictures its prompt mentions (up to ten, 
 | `generate_turbo` | [dev] + fal's Turbo LoRA: 8 steps, guidance 2.5 | [klein]: `flux-2-klein-9b`, `flux-2-klein-4b` (4 steps, no guidance) |
 
 `image` is the canvas tool, its prompt `instructions`, one box for [dev]: `turbo` (on by default) adds the Turbo LoRA; `aspect_ratio`,
-`megapixels`, `seed` and `prompt_upsampling`. The LoRA and the upsampler load only when a render asks for them.
+`megapixels`, `seed`, and `prompt_upsampling` under Advanced, on by default. The LoRA and the upsampler load only when a render asks for them.
 
 The function sets the regime: `generate` runs a [klein] as Base, `generate_turbo` as distilled, so give each its
 own checkpoint. Klein 4B (Apache-2.0,

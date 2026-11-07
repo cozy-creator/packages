@@ -9,6 +9,7 @@ from typing import Annotated
 import msgspec
 from cozy_runtime.author import (
     Adjustments,
+    Advanced,
     App,
     AspectRatio,
     Context,
@@ -214,7 +215,7 @@ class ImageBox(msgspec.Struct, kw_only=True):
     #: `ImageRequest.drawn_seed`.
     seed: Seed | None = None
     #: Bria's VLMs write the JSON caption from the prompt (`_caption`).
-    prompt_upsampling: bool = True
+    prompt_upsampling: Annotated[bool, Advanced()] = True
 
 
 # Each checkpoint and VLM is built, and its weights fetched, only when a render asks for it.

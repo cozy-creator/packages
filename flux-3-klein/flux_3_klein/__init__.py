@@ -10,6 +10,7 @@ import msgspec
 from cozy_runtime.author import (
     MEGAPIXEL,
     Adjustments,
+    Advanced,
     App,
     AspectRatio,
     Box,
@@ -282,6 +283,8 @@ class ImageBox(msgspec.Struct, kw_only=True):
     megapixels: Literal[1, 2, 4] = 1
     #: `_generate`'s `drawn_seed`.
     seed: Seed | None = None
+    #: BFL's upsampler rewrites the prompt first (`_render`).
+    prompt_upsampling: Annotated[bool, Advanced()] = True
 
 
 # Each checkpoint is built, and its weights fetched, only when a box asks for it.
@@ -294,5 +297,5 @@ def image(ctx: Context, payload: ImageBox, full: Klein, model: Klein, upsampler:
     """FLUX.3 Image Klein on a canvas, upsampled: the distilled model, or Base, which loads only when asked for."""
     kind, function, klein = (TurboInput, "generate_turbo", model) if payload.turbo else (GenerateInput, "generate", full)
     request = kind(prompt=payload.instructions, aspect_ratio=payload.aspect_ratio, megapixels=payload.megapixels,
-                   seed=payload.seed)  # fmt: skip
+                   seed=payload.seed, prompt_upsampling=payload.prompt_upsampling)  # fmt: skip
     return _generate(ctx, function, request, klein, upsampler, out, tel, adj)

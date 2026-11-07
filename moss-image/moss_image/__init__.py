@@ -74,10 +74,11 @@ def layout_prompt(prompt: str, regions: list[Region] | None, width: int, height:
 
 
 _MEMO = ("moss_image", "moss_image.model")
+_DEFAULTS = {"model": "openmoss-team/moss-image@0.1.0"}
+_COMPONENTS = {"model": ("transformer", "text_encoder", "vae")}
 
 
-@app.entrypoint(defaults={"model": "openmoss-team/moss-image@0.1.0"}, components={"model": ("transformer", "text_encoder", "vae")},
-                memoize=Memoize(requires=["seed"]), memo_dependencies=_MEMO)
+@app.entrypoint(defaults=_DEFAULTS, components=_COMPONENTS, memoize=Memoize(requires=["seed"]), memo_dependencies=_MEMO)
 def generate(ctx: Context, payload: GenerateInput, model: MossImage, out: Outputs, tel: Telemetry,
              adj: Adjustments) -> ImageResult:
     """MOSS-Image SFT, 50 Euler steps at CFG 3, with `regions` laid out as upstream's layout JSON.
@@ -120,8 +121,7 @@ class ImageBox(msgspec.Struct, kw_only=True):
     seed: Seed | None = None
 
 
-@app.tool(label="MOSS-Image", named="image", defaults={"model": "openmoss-team/moss-image@0.1.0"},
-          components={"model": ("transformer", "text_encoder", "vae")}, memoize=Memoize(requires=["seed"]),
+@app.tool(label="MOSS-Image", named="image", defaults=_DEFAULTS, components=_COMPONENTS, memoize=Memoize(requires=["seed"]),
           memo_dependencies=_MEMO)  # fmt: skip
 def image(ctx: Context, payload: ImageBox, model: MossImage, out: Outputs, tel: Telemetry, adj: Adjustments) -> ImageResult:
     """MOSS-Image on a canvas: `generate` from the box."""

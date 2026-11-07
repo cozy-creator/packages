@@ -38,8 +38,8 @@ app = App()
 #: Ideogram 4 serves 256-2048 px sides on its 16 px grid, at most 6:1 (README, `docs/inference.md`); the
 #: reference CLI's 1024² by default, up to 2048² (4 MP, Ideogram's highest quality).
 SIZES = Sizes((256 * 256 / MEGAPIXEL, 4.0), (256, 2048), PATCH, "Ideogram 4 serves 0.06-4 MP", widest=6.0)
-#: Diffusers' default: V4_QUALITY_48, 48 steps at guidance 7 with a 3.0 polish tail.
-STEPS, GUIDANCE = 48, 7.0
+#: Diffusers' default: V4_QUALITY_48, 48 steps at guidance 7 with a 3.0 polish tail; V4_TURBO_12 is the box's Turbo.
+STEPS, TURBO_STEPS, GUIDANCE = 48, 12, 7.0
 
 class GenerateInput(ImageRequest):
     steps: Steps = None
@@ -112,16 +112,15 @@ def refusal_card(image: Any) -> bool:
             and float((np.abs(luma - field) <= 8).mean()) >= 0.85)
 
 
+_DEFAULTS = {"model": "ideogram-ai/ideogram-4@0.1.0", "text_encoder": "qwen/qwen3-vl-8b-instruct@0.1.1",
+             "upsampler": "qwen/qwen3-vl-8b-instruct@0.1.1"}
+_COMPONENTS = {"model": ("transformer", "unconditional_transformer", "vae"), "text_encoder": ("model",),
+               "upsampler": ("model",)}
+
+
 # The upsampler is built and fetched only for a plain prompt with `prompt_upsampling` on. Model
 # parameters are in name order: Runtime refuses a binding set whose paths are not sorted.
-@app.entrypoint(
-    defaults={"model": "ideogram-ai/ideogram-4@0.1.0", "text_encoder": "qwen/qwen3-vl-8b-instruct@0.1.1",
-              "upsampler": "qwen/qwen3-vl-8b-instruct@0.1.1"},
-    components={"model": ("transformer", "unconditional_transformer", "vae"), "text_encoder": ("model",),
-                "upsampler": ("model",)},
-    on_demand=("upsampler",),
-    memoize=Memoize(requires=["seed"]),
-)
+@app.entrypoint(defaults=_DEFAULTS, components=_COMPONENTS, on_demand=("upsampler",), memoize=Memoize(requires=["seed"]))
 def generate(ctx: Context, payload: GenerateInput, model: Ideogram4, text_encoder: QwenEncoder,
              upsampler: QwenUpsampler, out: Outputs, tel: Telemetry, adj: Adjustments) -> ImageResult:
     """Ideogram 4, 48 steps at guidance 7: a JSON caption or a prompt, with `regions` placed by box.
@@ -164,20 +163,17 @@ class ImageBox(msgspec.Struct, kw_only=True):
     aspect_ratio: Annotated[AspectRatio, Ratios(min=1 / 6, max=6)] | None = None
     #: `generate`, through `SIZES.pixels`: the reference CLI's 1 MP default up to its 4 MP, 2048 px sides (README).
     megapixels: Literal[1, 2, 4] = 1
-    #: `caption`: Auto or on has the upsampler write a plain prompt's caption.
-    prompt_upsampling: bool | None = None
+    #: Ideogram's V4_TURBO_12, 12 steps, else V4_QUALITY_48 (`generate`'s steps).
+    turbo: bool = True
     seed: Seed | None = None
 
 
-@app.tool(label="Ideogram 4", named="image",
-          defaults={"model": "ideogram-ai/ideogram-4@0.1.0", "text_encoder": "qwen/qwen3-vl-8b-instruct@0.1.1",
-                    "upsampler": "qwen/qwen3-vl-8b-instruct@0.1.1"},
-          components={"model": ("transformer", "unconditional_transformer", "vae"), "text_encoder": ("model",),
-                      "upsampler": ("model",)},
-          on_demand=("upsampler",), memoize=Memoize(requires=["seed"]))  # fmt: skip
+# A plain prompt is always upsampled into Ideogram's caption (`caption`); a JSON caption goes as given.
+@app.tool(label="Ideogram 4", named="image", defaults=_DEFAULTS, components=_COMPONENTS, on_demand=("upsampler",),
+          memoize=Memoize(requires=["seed"]))  # fmt: skip
 def image(ctx: Context, payload: ImageBox, model: Ideogram4, text_encoder: QwenEncoder, upsampler: QwenUpsampler,
           out: Outputs, tel: Telemetry, adj: Adjustments) -> ImageResult:
-    """Ideogram 4 on a canvas: `generate` from the box."""
+    """Ideogram 4 on a canvas: Turbo's 12 steps, or 48."""
     request = GenerateInput(prompt=payload.instructions, aspect_ratio=payload.aspect_ratio, megapixels=payload.megapixels,
-                            seed=payload.seed, prompt_upsampling=payload.prompt_upsampling)  # fmt: skip
+                            steps=TURBO_STEPS if payload.turbo else STEPS, seed=payload.seed)  # fmt: skip
     return generate(ctx, request, model, text_encoder, upsampler, out, tel, adj)

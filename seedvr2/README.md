@@ -3,7 +3,7 @@
 Managed SeedVR2 7B restoration with the upstream Apache-2.0 architecture, one-step sampler,
 fixed conditioning, standard PyTorch SDPA and Runtime-owned DiT/VAE weights. `upscale` takes a
 video, `resolution` (`1080p`, `1440p`, `2160p`), a deterministic `seed`, and `aspect_ratio`
-(unset keeps the source's shape; `16:9` gives an exact letterboxed canvas, and on a canvas it's the box's shape). Frame presentation timestamps
+(unset keeps the source's shape; `16:9` gives an exact letterboxed canvas, and on a canvas it's the box's shape). On a box, the Tuning controls sit under Advanced. Frame presentation timestamps
 and audio pass through Runtime's streaming media API.
 
 Resolution defines the maximum 16:9 canvas; source-aspect output fits inside it. Internally,

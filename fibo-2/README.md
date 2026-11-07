@@ -17,7 +17,7 @@ name ([references](../docs/references.md)).
 Bria ships Edit Turbo for editing; it also renders text-to-image.
 
 `image` is the canvas tool, its prompt `instructions`, one box for both: `turbo` (on by default) picks Edit Turbo, else Dev; `aspect_ratio`,
-`seed` and `prompt_upsampling`, at Fibo's 1 MP. Each checkpoint and VLM loads only when a render asks for it.
+`seed`, and `prompt_upsampling` under Advanced, on by default, at Fibo's 1 MP. Each checkpoint and VLM loads only when a render asks for it.
 
 Write the request in a file, `request.yaml`:
 

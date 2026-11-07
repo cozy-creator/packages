@@ -12,7 +12,7 @@ three ordered reference images. Use `generate_turbo`.
 | `generate` | Instruct | 50 | classifier-free (both halves run every step) |
 
 `image` is the canvas tool, its prompt `instructions`, one box for both: `turbo` (on by default) picks Instruct-Distil, else Instruct;
-`aspect_ratio`, `seed` and `prompt_upsampling`. Each checkpoint loads only when a render asks for it.
+`aspect_ratio`, `seed`, and `prompt_upsampling` under Advanced, on by default. Each checkpoint loads only when a render asks for it.
 
 Write the request in a file, `request.yaml`:
 

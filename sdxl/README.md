@@ -2,7 +2,7 @@
 
 `generate` makes one image from a text prompt with Stable Diffusion XL 1.0 (VAE fix).
 
-`image` is the canvas tool, its prompt `instructions`: `aspect_ratio`, `megapixels`, `negative_prompt`, `hidiffusion` and `seed`.
+`image` is the canvas tool, its prompt `instructions`: `aspect_ratio`, `megapixels`, `negative_prompt` and `seed`; HiDiffusion runs above 1 MP.
 
 Write the request in a file, `request.yaml`:
 

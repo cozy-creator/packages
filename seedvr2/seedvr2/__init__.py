@@ -14,6 +14,7 @@ import torch
 from PIL import Image, ImageOps
 from torchvision.transforms import functional as vision
 from cozy_runtime.author import (
+    Advanced,
     App,
     AspectRatio,
     FileBound,
@@ -51,22 +52,22 @@ _RESOLUTIONS: dict[Resolution, tuple[int, int]] = {
 
 
 class Tuning(msgspec.Struct, kw_only=True):
-    """The ComfyUI SeedVR2 Video Upscaler node's controls, under its names (README: Tuning)."""
+    """The ComfyUI SeedVR2 Video Upscaler node's controls, under its names (README: Tuning), in the box's Advanced."""
 
     #: `restore_window`'s `correction`.
-    color_correction: Correction = "lab"
+    color_correction: Annotated[Correction, Advanced()] = "lab"
     #: `restore_window`'s `input_noise`.
-    input_noise_scale: Annotated[float, msgspec.Meta(ge=0, le=1)] = 0.0
+    input_noise_scale: Annotated[float, msgspec.Meta(ge=0, le=1), Advanced()] = 0.0
     #: `restore_window`'s `latent_noise`.
-    latent_noise_scale: Annotated[float, msgspec.Meta(ge=0, le=1)] = 0.0
+    latent_noise_scale: Annotated[float, msgspec.Meta(ge=0, le=1), Advanced()] = 0.0
     #: `upscale`'s window size.
     batch_size: Annotated[int, msgspec.Meta(ge=1)] | None = None
     #: `restore`: the last window padded to `batch_size`.
-    uniform_batch_size: bool = False
+    uniform_batch_size: Annotated[bool, Advanced()] = False
     #: `upscale`'s `overlap`, crossfaded in `flush`.
-    temporal_overlap: Annotated[int, msgspec.Meta(ge=0, le=16)] = 0
+    temporal_overlap: Annotated[int, msgspec.Meta(ge=0, le=16), Advanced()] = 0
     #: `events`: mirrored, restored, then dropped.
-    prepend_frames: Annotated[int, msgspec.Meta(ge=0, le=32)] = 0
+    prepend_frames: Annotated[int, msgspec.Meta(ge=0, le=32), Advanced()] = 0
 
 
 class UpscaleInput(Tuning, kw_only=True):
@@ -107,6 +108,7 @@ def output_sizes(
 
 @app.tool(
     label="SeedVR2",
+    named="video",
     defaults={"model": "bytedance-seed/seedvr2-7b@0.1.0"},
     memoize=True,
 )
