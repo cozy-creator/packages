@@ -43,5 +43,5 @@ torch = { index = "pytorch-cu130", marker = "sys_platform == 'win32'" }
 torchvision = { index = "pytorch-cu130", marker = "sys_platform == 'win32'" }
 # 0.22.1's Runtime (0.43.1: 0.43's tools with the 0.21.3 batch) and the TensorFS it pins, by git rev until
 # both publish: the release relocks to PyPI.
-cozy-runtime = { git = "https://github.com/cozy-creator/cozy-runtime", rev = "5933aba0553898e0f60a54fd5cd768cc3b237332" }
-tensorfs = { git = "https://github.com/cozy-creator/cozy-creator", rev = "e5e389eec3331d19c973341f0f49ec82f7d26261", subdirectory = "crates/tensorfs-py" }
+cozy-runtime = { git = "https://github.com/cozy-creator/cozy-runtime", rev = "858643167e58fb16558f1cb51ffaaddf71229034" }
+tensorfs = { git = "https://github.com/cozy-creator/cozy-creator", rev = "06043efb9122fa4f8a11b51ce7335924c7777339", subdirectory = "crates/tensorfs-py" }
