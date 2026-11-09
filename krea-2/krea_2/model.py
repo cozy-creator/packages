@@ -151,12 +151,34 @@ def as_stored(config: Config, component: str, root: nn.Module) -> None:
                 module.register_parameter(name, nn.Parameter(param.to(dtype), requires_grad=False))
 
 
+class Transformer(Krea2Transformer2DModel):
+    """`Krea2Transformer2DModel` whose forward is one sampling step for every prompt of a request."""
+
+    def forward(  # type: ignore[override]
+        self, latents: torch.Tensor, timestep: torch.Tensor, texts: list[torch.Tensor],
+        rotary: list[tuple[torch.Tensor, torch.Tensor]],
+    ) -> list[torch.Tensor]:
+        """Each prompt's velocity at `timestep` [1] (0-1): `Krea2Transformer2DModel.forward` op for op past
+        what no step changes, each prompt's fused text (`fused_text`) and rotary tables. The prompts pass
+        through each block in turn, so a streamed block comes in once per step."""
+        # The embedders and the final layer run in their stored F32; the blocks in bf16.
+        temb = self.time_embed(timestep, dtype=_dtype(self.time_embed))
+        modulation = self.time_mod_proj(F.gelu(temb, approximate="tanh").to(_dtype(self.time_mod_proj)))
+        image = self.img_in(latents.to(_dtype(self.img_in))).to(latents.dtype)
+        hidden = [torch.cat([text, image], dim=1) for text in texts]
+        for block in self.transformer_blocks:
+            hidden = [block(h, modulation, rope) for h, rope in zip(hidden, rotary, strict=True)]
+        return [self.final_layer(h[:, text.shape[1]:], temb.to(_dtype(self.final_layer)))
+                for h, text in zip(hidden, texts, strict=True)]
+
+
 class Krea2Graph:
     def __init__(self, config: Config) -> None:
         with no_init_weights():
             transformer = Krea2Transformer2DModel.from_config(config.section("transformer").mapping())
             encoder = TextEncoder(Qwen3VLConfig(**config.section("text_encoder").mapping()), max(TAPS))
             vae = AutoencoderKLQwenImage.from_config(config.section("vae").mapping())
+        transformer.__class__ = Transformer
         for block in transformer.transformer_blocks:
             block.__class__ = Block
         as_stored(config, "transformer", transformer)
@@ -279,9 +301,8 @@ class Krea2(Model[Krea2Graph]):
         `cond + g(cond - uncond)` when `negative` is given. Returns the packed latents [1, (H/16)(W/16), 64]
         on the CPU.
 
-        Each step is `Krea2Transformer2DModel.forward` op for op, with what no step changes built once
-        before the loop: each prompt's text-fusion and projection, and its rotary tables. With CFG both
-        branches pass through each block in turn, so a streamed block comes in once per step."""
+        Each step is one call of the transformer (`Transformer.forward`), with what no step changes built
+        once before the loop: each prompt's text-fusion and projection, and its rotary tables."""
         transformer = self.graph.components["transformer"]
         device = torch.device(str(self.device))
         rows, columns = height // PATCH, width // PATCH
@@ -293,7 +314,6 @@ class Krea2(Model[Krea2Graph]):
             config.get("base_shift", 0.5), config.get("max_shift", 1.15),
         )
         retrieve_timesteps(scheduler, steps, device, sigmas=np.linspace(1.0, 1 / steps, steps), mu=mu)
-        blocks = transformer.transformer_blocks
         with torch.no_grad():
             noise = rng.noise((1, channels, rows * 2, columns * 2), seed, dtype=DTYPE)
             latents = noise.view(1, channels, rows, 2, columns, 2).permute(0, 2, 4, 1, 3, 5)
@@ -305,16 +325,7 @@ class Krea2(Model[Krea2Graph]):
                 texts.append(fused_text(transformer, text))
                 rotary.append(transformer.rotary_emb(ids))
             for i, t in enumerate(scheduler.timesteps):
-                # The embedders and the final layer run in their stored F32; the blocks in bf16.
-                timestep = (t / config.num_train_timesteps).expand(1).to(DTYPE)
-                temb = transformer.time_embed(timestep, dtype=_dtype(transformer.time_embed))
-                modulation = transformer.time_mod_proj(F.gelu(temb, approximate="tanh").to(_dtype(transformer.time_mod_proj)))
-                image = transformer.img_in(latents.to(_dtype(transformer.img_in))).to(latents.dtype)
-                hidden = [torch.cat([text, image], dim=1) for text in texts]
-                for block in blocks:
-                    hidden = [block(h, modulation, rope) for h, rope in zip(hidden, rotary, strict=True)]
-                velocity = [transformer.final_layer(h[:, text.shape[1]:], temb.to(_dtype(transformer.final_layer)))
-                            for h, text in zip(hidden, texts, strict=True)]
+                velocity = transformer(latents, (t / config.num_train_timesteps).expand(1).to(DTYPE), texts, rotary)
                 prediction = velocity[0]
                 if len(velocity) > 1:
                     prediction = prediction + guidance * (prediction - velocity[1])
