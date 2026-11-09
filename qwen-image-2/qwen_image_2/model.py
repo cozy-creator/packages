@@ -209,7 +209,7 @@ class QwenImage21Graph:
         # timestep `freqs` and the text encoder's RoPE. A cast of the built module would round them.
         with transformer_init.no_init_weights():
             with local_torch_dtype(torch.bfloat16):
-                transformer = QwenImage21Transformer2DModel.from_config(
+                transformer: Any = QwenImage21Transformer2DModel.from_config(
                     config.section("transformer").mapping()
                 )
             transformer.__class__ = Transformer

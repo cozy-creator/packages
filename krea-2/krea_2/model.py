@@ -175,7 +175,7 @@ class Transformer(Krea2Transformer2DModel):
 class Krea2Graph:
     def __init__(self, config: Config) -> None:
         with no_init_weights():
-            transformer = Krea2Transformer2DModel.from_config(config.section("transformer").mapping())
+            transformer: Any = Krea2Transformer2DModel.from_config(config.section("transformer").mapping())
             encoder = TextEncoder(Qwen3VLConfig(**config.section("text_encoder").mapping()), max(TAPS))
             vae = AutoencoderKLQwenImage.from_config(config.section("vae").mapping())
         transformer.__class__ = Transformer

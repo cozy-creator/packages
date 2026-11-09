@@ -45,9 +45,9 @@ class Transformer(QwenImage21Transformer2DModel):
         joint: tuple[Any, ...] | None = None, projection: torch.Tensor | None = None, **kwargs: Any,
     ) -> Any:
         if cached is not None:
-            return self._cached(hidden_states, *cached, projection)
+            return self._cached(hidden_states, *cached, projection=projection)
         if joint is not None:
-            return self._joint(hidden_states, *joint, projection)
+            return self._joint(hidden_states, *joint, projection=projection)
         return super().forward(hidden_states, *args, **kwargs)
 
     def _cached(self, latents: torch.Tensor, t: torch.Tensor, rotary: Any, target: torch.Tensor,

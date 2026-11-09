@@ -146,7 +146,7 @@ class Transformer(Flux3Transformer2DModel):
 class KleinGraph:
     def __init__(self, config: Config) -> None:
         with transformer_init.no_init_weights():
-            transformer = Flux3Transformer2DModel.from_config(config.section("transformer").mapping())
+            transformer: Any = Flux3Transformer2DModel.from_config(config.section("transformer").mapping())
             text_encoder = AutoModelForImageTextToText.from_config(
                 Qwen3VLConfig(**config.section("text_encoder").mapping()), dtype=torch.bfloat16
             )
