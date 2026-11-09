@@ -5,6 +5,7 @@ vars:
   LOCK_HUB: https://tensorhub.com # committed locks resolve against production
   HUBS: https://tensorhub.com http://127.0.0.1:8819
   IMAGE_TORCH: torch==2.15.0 torchvision==0.29.2 # what the Hub's current worker image carries (its tag): a lock carries none (cl-715)
+  YANKED: --yanked # `YANKED=` publishes live: a release proven before its publish (0.22.1's hard cut)
 
 tasks:
   # First-party packages publish at the root namespace (`--root`, Hub admins). Locks pin first-party callees exactly, so each release of X is followed by one of every package
@@ -84,11 +85,11 @@ tasks:
           for h in {{.HUBS}}; do
             rm -rf "${work:?}/$1"; git archive HEAD "$1" | tar -x -C "$work"
             [ ! -d "$work/.kernels/$1" ] || cp -r "$work/.kernels/$1/." "$work/$1/"
-            (cd "$work/$1" && COZY_HUB_URL="$h" cozy package publish --root --yanked)
+            (cd "$work/$1" && COZY_HUB_URL="$h" cozy package publish --root {{.YANKED}})
           done
           shipped="$shipped${shipped:+,}$1@$(ver "$1")"
         }
-        trap 'git checkout -q -- .; rm -rf "$work"; [ -z "$shipped" ] || echo "candidates (yanked): $shipped
+        trap 'git checkout -q -- .; rm -rf "$work"; [ -z "$shipped" ] || echo "{{if .YANKED}}candidates (yanked){{else}}published live{{end}}: $shipped
         gate: gh workflow run release-gate.yml -R cozy-creator/cozy-creator -f suites=packages -f pins=$shipped -f only=$(echo "$shipped" | sed "s/@[^,]*//g")
         then: task promote GATE=<passing release-gate run id>  (a hand gate: GATE=<its dirs> RECORD=<URL of its recorded result>)"' EXIT
         release() {
