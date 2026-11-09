@@ -68,7 +68,10 @@ def denoise_official(
         producer.present(sites, rotary, tags.numel())
         if overlay is not None:  # armed before the loop, as `denoise_loop` requires
             transformer._engage(overlay, heads[steps.start])
-        text = transformer.text_rows(state.prompt_embeds)
+        layouts = {sparse: layout_at(sol_dense_steps if sparse else 0) for sparse in (False, True)}
+        # The token refiner's attention is a site too: it runs under the dense layout, as a step's would.
+        with attention_scope(layouts[False]):
+            text = transformer.text_rows(state.prompt_embeds)
         timesteps = torch.zeros(len(plan), max(t.numel() for t, _ in plan), device=device)
         for index, (times, _) in enumerate(plan):
             timesteps[index, : times.numel()] = times
@@ -84,7 +87,6 @@ def denoise_official(
             )
             for index in steps
         )
-        layouts = {sparse: layout_at(sol_dense_steps if sparse else 0) for sparse in (False, True)}
         keys = tuple(id(site.module) for site in sites)
         slots = tuple(torch.zeros(site.module.heads, 128, device=device) for site in sites)
         video_rows, audio_rows = state.num_condition_video_rows, state.num_condition_audio_rows
@@ -215,7 +217,8 @@ def denoise_refine(
 
         transformer._engage(overlay, 0)  # armed before the loop, as `denoise_loop` requires
         try:
-            text = transformer.text_rows(prompt_embeds)  # under the overlay, as every step reads it
+            with attention_scope(layouts[False]):  # under the overlay, as every step reads it
+                text = transformer.text_rows(prompt_embeds)
             denoise_loop(
                 step, range(len(plan)), state=(video,), carried=slots, labels=labels, on_step=on_step
             )

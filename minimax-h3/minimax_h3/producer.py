@@ -146,6 +146,11 @@ def present(
     for state in states.values():
         state.carried.clear()  # this loop's slots start unwritten
     first, *others = states.values()
+    # Sharded, `rotary` holds this GPU's rows; the calls attend whole sequences, with the tables
+    # `retain_rotary` kept before the split.
+    rotary = first.parallel_rotary.get(
+        getattr(sites[0].module, "_cozy_producer_rotary_key", None), rotary
+    )
     presentation = rope_presentation(rotary, tokens, first)
     for state in others:
         state.rope = (rotary[0], rotary[1], presentation)
@@ -705,9 +710,12 @@ class _RetainRotary(ModelHook):  # type: ignore[misc]  # untyped Diffusers hook 
     def post_forward(self, module: object, output: object) -> object:
         if getattr(self.component, "_parallel_config", None) is None:
             return output  # one GPU: the producer reads the rotary its call receives
-        state = PRODUCERS[FIXED_MEANS].request_state()
-        if state is not None and isinstance(output, tuple) and len(output) == 2:
-            state.parallel_rotary[self.key] = output
+        if not (isinstance(output, tuple) and len(output) == 2):
+            return output
+        for producer in PRODUCERS.values():  # whichever recipe serves this request's calls
+            state = producer.request_state() if producer.context_parallel else None
+            if state is not None:
+                state.parallel_rotary[self.key] = output
         return output
 
 
