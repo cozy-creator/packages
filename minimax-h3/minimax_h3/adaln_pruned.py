@@ -16,9 +16,8 @@ from __future__ import annotations
 
 import inspect
 from functools import partial
-from collections.abc import Iterator, Mapping, Sequence
-from contextlib import contextmanager
-from contextvars import ContextVar
+from collections.abc import Mapping, Sequence
+import weakref
 from typing import Any, ClassVar, cast
 
 import torch
@@ -51,27 +50,28 @@ from .overlay import (
 _CHUNK = 1 << 15
 
 
-_CHECKED: ContextVar[bool] = ContextVar("minimax_h3_checked_loop", default=False)
+class KeyMeans:
+    """One block's attention key means for the DiT call in flight, F32 [heads, 128]: `prior` the
+    previous step's (None where the call measures its own), `mean` what this call leaves when
+    `keep`, and `freqs` the rotary presentation its sparse call reads. The forward places one on
+    each block's attention module from its own arguments and returns the means, so a step's
+    statistics are the call's tensors in and out and nothing outlives the call."""
 
+    __slots__ = ("freqs", "keep", "mean", "prior")
 
-@contextmanager
-def checked_loop() -> Iterator[None]:
-    """A denoise that checked every step's rows before its loop: its forwards skip the check and
-    keep the overlay it armed before the loop."""
-    token = _CHECKED.set(True)
-    try:
-        yield
-    finally:
-        _CHECKED.reset(token)
+    def __init__(self, prior: torch.Tensor | None, keep: bool, freqs: torch.Tensor | None) -> None:
+        self.prior, self.keep, self.freqs = prior, keep, freqs
+        self.mean: torch.Tensor | None = None
 
 
 class _Armed:
     """One module's turbo source for the forward in flight; a plain object, so placing it
-    on a module registers nothing and the DiT's state dict is what it was."""
+    on a module registers nothing and the DiT's state dict is what it was. `step` is the
+    evaluation whose collapsed head serves: an index, or a one-element index tensor."""
 
     __slots__ = ("source", "step")
 
-    def __init__(self, source: Any, step: int = 0) -> None:
+    def __init__(self, source: Any, step: int | torch.Tensor = 0) -> None:
         self.source = source
         self.step = step
 
@@ -239,6 +239,9 @@ class AdaLNPrunedMiniMaxH3Transformer(MiniMaxH3Transformer3DModel):  # type: ign
             head = cast(nn.Linear, getattr(self, name))
             setattr(self, name, _SelectableHead(head.in_features, head.out_features))
         self._arming: OverlayArming | None = None
+        #: The armed overlay's bank: its tables, LoRA and heads steer the forward.
+        self.overlay_bank: str | None = None
+        self._banks: dict[str, weakref.ref[Overlay]] = {}
         self._lora_hooks_installed = False
 
     @apply_lora_scale("attention_kwargs")  # type: ignore[untyped-decorator]
@@ -258,17 +261,36 @@ class AdaLNPrunedMiniMaxH3Transformer(MiniMaxH3Transformer3DModel):  # type: ign
         return_dict: bool = True,
         rotary: tuple[torch.Tensor, torch.Tensor] | None = None,
         text: torch.Tensor | None = None,
-    ) -> MiniMaxH3TransformerOutput | tuple[torch.Tensor, torch.Tensor]:
+        key_means: Sequence[torch.Tensor | None] | None = None,
+        keep_key_means: bool = False,
+        rope_presentation: torch.Tensor | None = None,
+        head: torch.Tensor | None = None,
+        checked: bool = False,
+        bank: str | None = None,
+    ) -> MiniMaxH3TransformerOutput | tuple[Any, ...]:
         """Diffusers 0.41's forward, the projected rows scoped to the packing: Diffusers keeps
         them to its end, the video's float32 rows (2.25 GB a GPU at H3 15 s, degree 2) through
         every block. It checks the rows and arms a turbo bank `attention_kwargs` names (`_arm`)
         and ends disarmed, in the forward; unless its denoise checked every step's rows ahead
-        (`checked_loop`): a loop's step, which keeps the overlay its denoise armed before the loop
-        and passes the `rotary` tables (`rope`) and `text` rows (`text_rows`) it computed before
-        it."""
-        looped = _CHECKED.get()
+        (`checked`): a loop's step, which reads no device value on the host, runs under the
+        overlay `bank` names (the one its denoise armed before the loop; armed here for the call
+        when it is not) and passes the `rotary` tables (`rope`) and `text` rows (`text_rows`) it
+        computed before it.
+
+        A loop's per-step state is this call's tensors, so a recording of it replays any step of
+        its kind: `key_means` are each block's attention key means from the previous step (None:
+        the block measures its own), `keep_key_means` returns this call's, one per block or None,
+        as a third output; `rope_presentation` is the sparse calls' rotary presentation
+        (`producer.present`); `head` the turbo evaluation whose collapsed heads serve, a
+        one-element index."""
+        looped, own = checked, False
         if not looped:
             self._arm(timestep, timestep_indices, token_tags, attention_kwargs)
+        elif bank != self.overlay_bank:  # a call outside its loop (a recording of it): its own arming
+            self._release()
+            if bank is not None:
+                self._engage(self._held(bank), 0)
+            own = True
         del attention_kwargs  # `apply_lora_scale` consumed its scale
         try:
             sequence_length = position_ids.shape[0]
@@ -300,11 +322,32 @@ class AdaLNPrunedMiniMaxH3Transformer(MiniMaxH3Transformer3DModel):  # type: ign
             temb = self.time_proj(timestep)
             temb = self.time_embedder(temb.to(get_parameter_dtype(self.time_embedder)))
             adaln_indices = timestep_indices * MINIMAX_H3_MODALITY_NUM + token_tags
-            for block in self.transformer_blocks:
-                if torch.is_grad_enabled() and self.gradient_checkpointing:
-                    rows = self._gradient_checkpointing_func(block, rows, temb, adaln_indices, rotary_emb)
-                else:
-                    rows = block(rows, temb, adaln_indices, rotary_emb)
+            if head is not None:  # this step's collapsed heads, of the overlay armed before the loop
+                for name in ("proj_out", "audio_proj_out"):
+                    armed = getattr(_projection_base(getattr(self, name)), "_armed", None)
+                    if armed is not None:
+                        armed.step = head
+            # A loop's every call states its means, so its attention never reads request statistics.
+            stated = looped or key_means is not None or keep_key_means or rope_presentation is not None
+            if stated:
+                priors = key_means if key_means is not None else (None,) * len(self.transformer_blocks)
+                for block, prior in zip(self.transformer_blocks, priors, strict=True):
+                    block.attn._key_means = KeyMeans(prior, keep_key_means, rope_presentation)
+            try:
+                for block in self.transformer_blocks:
+                    if torch.is_grad_enabled() and self.gradient_checkpointing:
+                        rows = self._gradient_checkpointing_func(block, rows, temb, adaln_indices, rotary_emb)
+                    else:
+                        rows = block(rows, temb, adaln_indices, rotary_emb)
+                means = (
+                    tuple(block.attn._key_means.mean for block in self.transformer_blocks)
+                    if keep_key_means
+                    else None
+                )
+            finally:
+                if stated:
+                    for block in self.transformer_blocks:
+                        block.attn._key_means = None
             dtype = get_parameter_dtype(self.proj_out)
             if rows.shape[1] != sequence_length:
                 # Across GPUs `rows` is this GPU's share: the `_cp_plan` split it at the first
@@ -314,23 +357,23 @@ class AdaLNPrunedMiniMaxH3Transformer(MiniMaxH3Transformer3DModel):  # type: ign
                 video_output = self.proj_out(normed).index_select(1, video_indices)
                 audio_output = self.audio_proj_out(normed).index_select(1, audio_indices)
                 if not return_dict:
-                    return (video_output, audio_output)
+                    return (video_output, audio_output) if means is None else (video_output, audio_output, means)
                 return MiniMaxH3TransformerOutput(sample=video_output, audio_sample=audio_output)
 
-            def head(proj: nn.Module, indices: torch.Tensor) -> torch.Tensor:
+            def project(proj: nn.Module, indices: torch.Tensor) -> torch.Tensor:
                 parts = []
                 for part in indices.split(_CHUNK):
                     normed = self.norm_out(rows.index_select(1, part), temb, timestep_indices[part])
                     parts.append(proj(normed.to(dtype)))
                 return parts[0] if len(parts) == 1 else torch.cat(parts, dim=1)
 
-            video_output = head(self.proj_out, video_indices)
-            audio_output = head(self.audio_proj_out, audio_indices)
+            video_output = project(self.proj_out, video_indices)
+            audio_output = project(self.audio_proj_out, audio_indices)
             if not return_dict:
-                return (video_output, audio_output)
+                return (video_output, audio_output) if means is None else (video_output, audio_output, means)
             return MiniMaxH3TransformerOutput(sample=video_output, audio_sample=audio_output)
         finally:
-            if not looped:
+            if not looped or own:
                 self._release()
 
     def text_rows(self, encoder_hidden_states: torch.Tensor) -> torch.Tensor:
@@ -408,6 +451,8 @@ class AdaLNPrunedMiniMaxH3Transformer(MiniMaxH3Transformer3DModel):  # type: ign
 
     def _engage(self, overlay: Overlay, step: int) -> None:
         self._arming = OverlayArming(overlay, step)
+        self.overlay_bank = overlay.bank
+        self._banks[overlay.bank] = weakref.ref(overlay)
         self.time_proj._armed = _Armed(overlay)
         for block, source in zip(self.transformer_blocks, overlay.transformer_blocks, strict=True):
             block.adaln_proj._armed = _Armed(source.adaln_proj)
@@ -420,9 +465,16 @@ class AdaLNPrunedMiniMaxH3Transformer(MiniMaxH3Transformer3DModel):  # type: ign
                 )
             head._armed = _Armed(getattr(overlay, name), step)
 
+    def _held(self, bank: str) -> Overlay:
+        overlay = (self._banks.get(bank) or (lambda: None))()
+        if overlay is None:
+            raise ValueError(f"no overlay of bank {bank!r} is loaded beside this model")
+        return overlay
+
     def _release(self) -> None:
         """Every forward starts disarmed, whatever the previous one left behind."""
         self._arming = None
+        self.overlay_bank = None
         self.time_proj._armed = None
         for block in self.transformer_blocks:
             block.adaln_proj._armed = None

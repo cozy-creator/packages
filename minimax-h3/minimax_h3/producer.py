@@ -23,9 +23,7 @@ call (`_Heads`), and each recipe's dense base is head-local.
 from __future__ import annotations
 
 import sys
-from collections.abc import Callable, Iterator, Mapping, Sequence
-from contextlib import contextmanager
-from contextvars import ContextVar
+from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass, field
 from functools import partial
 from typing import Any
@@ -53,6 +51,7 @@ from cozy_runtime.accel.kernels import PreQuantized, quantize_once, ROWWISE_FP8
 from cozy_runtime.accel.rows import Rows
 from cozy_runtime.accel.rows import rows as columns
 
+from .adaln_pruned import KeyMeans
 from .glue import (
     HEAD_HOLDS,
     KEY_MEAN,
@@ -84,14 +83,11 @@ class RequestState:
     rope: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None
     parallel_rotary: dict[object, tuple[torch.Tensor, torch.Tensor]] = field(default_factory=dict)
     replay_inputs: dict[tuple[object, ...], Statistics] = field(default_factory=dict)
-    # The attention modules whose `Carry` slot a call of the current denoise loop has written.
-    carried: set[int] = field(default_factory=set)
 
     def end_loop(self) -> None:
         """One loop's key means, rotary presentation and Kitchen's packed table of it go after the
         loop's last step (`end_loop`, from `steps`), so none stays through the decode after it."""
         self.statistics.clear()
-        self.carried.clear()
         self.parallel_rotary.clear()
         self.replay_inputs.clear()
         backend = sys.modules.get("comfy_kitchen.backends.cuda")
@@ -105,46 +101,19 @@ class RequestState:
     close = end_loop
 
 
-@dataclass(frozen=True, slots=True)
-class Carry:
-    """One denoise step's Kitchen key means: an F32 [H, 128] slot per site, by attention module.
-    A rolling step's calls read the previous step's mean from their slot; every sparse call leaves
-    its own there, and the last dense step's calls seed it (`seeding`), so the first sparse step
-    reads one too instead of measuring its keys in a second producer pass. The loop says which
-    step rolls and which seeds; a call outside one decides on `layout.step`
-    (`RequestState.statistics`)."""
-
-    slots: Mapping[int, torch.Tensor]
-    rolling: bool
-    seeding: bool = False
-
-
-_CARRY: ContextVar[Carry | None] = ContextVar("minimax_h3_kitchen_carry", default=None)
-
-
-@contextmanager
-def carrying(carry: Carry) -> Iterator[None]:
-    token = _CARRY.set(carry)
-    try:
-        yield
-    finally:
-        _CARRY.reset(token)
-
-
 def present(
     sites: Sequence[ProducerSite], rotary: tuple[torch.Tensor, torch.Tensor], tokens: int
-) -> None:
-    """Before a denoise loop: the rotary presentation these sites' sparse calls read, and
-    Kitchen's packed table of it, made once. `end_loop` forgets the table."""
+) -> torch.Tensor | None:
+    """Before a denoise loop: the rotary presentation these sites' sparse calls read (None where
+    no producer serves), and Kitchen's packed table of it, made once. The loop passes it to each
+    DiT call; `end_loop` forgets the table."""
     states = {
         id(state): state
         for site in sites
         if isinstance(state := site.producer.request_state(), RequestState)
     }
     if not states:
-        return
-    for state in states.values():
-        state.carried.clear()  # this loop's slots start unwritten
+        return None
     first, *others = states.values()
     # Sharded, `rotary` holds this GPU's rows; the calls attend whole sequences, with the tables
     # `retain_rotary` kept before the split.
@@ -157,6 +126,7 @@ def present(
     build = getattr(sys.modules.get("comfy_kitchen.backends.cuda"), "_packed_rope_fab", None)
     if callable(build):
         build(presentation, tokens, presentation.shape[-3] * 2)
+    return presentation
 
 
 def rows(value: torch.Tensor | PreQuantized, start: int, stop: int) -> torch.Tensor | PreQuantized:
@@ -332,6 +302,11 @@ def sparse_step(layout: AttentionLayout, path: str) -> bool:
     return layout.sparse and producing(layout, path)
 
 
+def _device(hidden_states: torch.Tensor | PreQuantized | Owned) -> torch.device:
+    held = hidden_states.value if isinstance(hidden_states, Owned) else hidden_states
+    return (held.payload if isinstance(held, PreQuantized) else held).device
+
+
 def produce(
     name: str,
     call: ProducerCall,
@@ -350,16 +325,18 @@ def produce(
     # A recipe that shards over Ulysses keys its statistics and replays per module instance.
     key = (call.component, call.path, id(attn)) if sharded else (call.component, call.path)
     if not sparse_step(layout, call.path):
-        state.statistics.pop(key, None)
-        state.replay_inputs.pop(key, None)
-        carry, seed = _CARRY.get(), None
+        if parallel or getattr(attn, "_key_means", None) is None:  # a loop's one-GPU call keeps none
+            state.statistics.pop(key, None)
+            state.replay_inputs.pop(key, None)
+        given: KeyMeans | None = getattr(attn, "_key_means", None)
+        seed = None
         if not parallel and producing(layout, call.path):
-            if carry is not None:  # a denoise loop says which step seeds
-                seed = KeyMean(carry.slots[id(attn)]) if carry.seeding else None
+            if given is not None:  # a denoise loop's DiT call says whether it keeps its means
+                if given.keep:
+                    slot = _device(hidden_states)
+                    seed = KeyMean(torch.zeros(attn.heads, 128, dtype=torch.float32, device=slot))
             elif layout.step == layout.dense_until_step - 1:  # a step loop: the last dense step
-                held = hidden_states.value if isinstance(hidden_states, Owned) else hidden_states
-                device = (held.payload if isinstance(held, PreQuantized) else held).device
-                del held
+                device = _device(hidden_states)
                 seed = KeyMean(torch.empty(attn.heads, 128, dtype=torch.float32, device=device))
         token = KEY_MEAN.set(seed)
         try:
@@ -367,8 +344,8 @@ def produce(
         finally:
             KEY_MEAN.reset(token)
         if seed is not None and seed.heads >= attn.heads:
-            if carry is not None:
-                state.carried.add(id(attn))
+            if given is not None:
+                given.mean = seed.slot
             else:  # what `previous_statistics` reads at the first sparse step; its values stay its own
                 geometry = (layout.live_tokens, attn.heads, layout.protected_prefix)
                 state.statistics[key] = (layout.step, geometry, seed.slot, None)
@@ -389,25 +366,25 @@ def produce(
 class _Means:
     """A one-GPU call's Kitchen key means, F32 [heads, 128]: the previous step's (`prior`, or None
     where the call measures its keys) and this call's, which each head window writes its rows of
-    (`keep`). `close` leaves them where the next step reads them, the module's `Carry` slot in a
-    denoise loop, else `RequestState.statistics` under the call's key, after the whole call:
-    a split the Runtime retries in smaller windows reads the same prior."""
+    (`keep`). `close` leaves them where the next step reads them, the DiT call's own `KeyMeans`
+    in a denoise loop (its forward returns them), else `RequestState.statistics` under the
+    call's key, after the whole call: a split the Runtime retries in smaller windows reads the
+    same prior. A loop's call reads and keeps no request state."""
 
-    __slots__ = ("call", "carry", "geometry", "key", "mean", "prior")
+    __slots__ = ("call", "geometry", "given", "key", "mean", "prior")
 
     def __init__(
         self, call: ProducerCall, key: tuple[object, ...], name: str, geometry: tuple[int, ...]
     ) -> None:
-        attn, state = call.module, call.state
-        self.call, self.key, self.geometry, self.carry = call, key, geometry, _CARRY.get()
+        self.call, self.key, self.geometry = call, key, geometry
+        self.given: KeyMeans | None = getattr(call.module, "_key_means", None)
         self.mean: torch.Tensor | None = None
-        if self.carry is None:
+        if self.given is None:
             self.prior, _ = previous_statistics(
-                state, key, call.layout.step, geometry, replay_safe=PRODUCERS[name].context_parallel
+                call.state, key, call.layout.step, geometry, replay_safe=PRODUCERS[name].context_parallel
             )
-        else:  # a rolling step reads the slot the previous step's call wrote
-            rolling = self.carry.rolling and id(attn) in state.carried
-            self.prior = self.carry.slots[id(attn)] if rolling else None
+        else:  # the previous step's, as the loop passed it to this DiT call
+            self.prior = self.given.prior
 
     def keep(self, window: slice, mean: torch.Tensor) -> None:
         if self.mean is None:
@@ -415,12 +392,10 @@ class _Means:
         self.mean[window].copy_(mean)
 
     def close(self) -> None:
-        attn, state = self.call.module, self.call.state
-        if self.carry is None:
-            state.statistics[self.key] = (self.call.layout.step, self.geometry, self.mean, None)
-        else:
-            self.carry.slots[id(attn)].copy_(self.mean)
-            state.carried.add(id(attn))
+        if self.given is None:
+            self.call.state.statistics[self.key] = (self.call.layout.step, self.geometry, self.mean, None)
+        elif self.given.keep:
+            self.given.mean = self.mean
 
 
 class _Heads:
@@ -513,8 +488,10 @@ def _attend(
     if parallel:
         output, reuse = _parallel_produce(call, hidden_states, name, key)
     else:
-        freqs = rope_presentation(rotary_emb, tokens, state)
         means = _Means(call, key, name, (tokens, attn.heads, layout.protected_prefix))
+        freqs = None if means.given is None else means.given.freqs
+        if freqs is None:
+            freqs = rope_presentation(rotary_emb, tokens, state)
         heads = _Heads.of(call, means, hidden_states, freqs)
         if heads is None:
             qkv, width = (whole(attn.to_q), whole(attn.to_k), whole(attn.to_v)), attn.heads * 128

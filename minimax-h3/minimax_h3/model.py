@@ -14,7 +14,7 @@ from diffusers.models.autoencoders.autoencoder_kl_minimax_h3 import MiniMaxH3Vid
 from cozy_runtime import rng
 from cozy_runtime.accel import fusion, stepcache
 from diffusers import MiniMaxH3Transformer3DModel
-from cozy_runtime.accel import concurrently, placeable, sequence_parallel
+from cozy_runtime.accel import concurrently, graph_keys, placeable, sequence_parallel
 from cozy_runtime.author import (
     Serving,
     DerivedCache,
@@ -121,6 +121,8 @@ class FullRecipe:
 FULL_BALANCED = FullRecipe()
 
 
+# Each DiT's forward runs under the overlay armed on it (turbo, Regenerate) or none.
+@graph_keys(transformer=("overlay_bank",), transformer_ref=("overlay_bank",))
 @placeable("text_encoder")
 @sequence_parallel(degrees=(2, 4, 7, 8))
 class H3Model(Model[OfficialH3Pipeline]):
