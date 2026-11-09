@@ -8,7 +8,7 @@ import torch
 from PIL import Image
 from torchvision import transforms
 
-from cozy_runtime.author import Config, Loader, Model, uses_components
+from cozy_runtime.author import Config, Loader, Model, Serving, uses_components
 
 from .upstream.BiRefNet_config import BiRefNetConfig
 from .upstream.birefnet import BiRefNet
@@ -28,10 +28,12 @@ def build_birefnet(config: Config) -> BiRefNetGraph:
 
 
 class BackgroundRemovalModel(Model[BiRefNetGraph]):
+    serving = Serving(encoded_leaves=False)
+
     graph: BiRefNetGraph
 
     def load(self, loader: Loader) -> None:
-        self.graph = loader.construct(BiRefNetGraph, factory=build_birefnet)
+        self.graph = loader.construct(build_birefnet)
 
     @uses_components("model")
     def mask(self, image: Image.Image) -> Image.Image:

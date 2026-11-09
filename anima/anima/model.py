@@ -10,9 +10,10 @@ from types import TracebackType
 from typing import Any, NamedTuple
 
 import torch
-from cozy_runtime import fusion, rng, stepcache
-from cozy_runtime.author import Loader, Model, Telemetry, hold_dtype, uses_components
-from cozy_runtime.author.kernels import Plan
+from cozy_runtime import rng
+from cozy_runtime.accel import fusion, hold_dtype, stepcache
+from cozy_runtime.author import Loader, Model, Telemetry, uses_components
+from cozy_runtime.accel.kernels import Plan
 from diffusers import (
     AnimaAutoBlocks,
     AnimaModularPipeline,
@@ -97,7 +98,7 @@ def build_pipeline(config: Any) -> AnimaPipeline:
     return AnimaPipeline(config)
 
 
-class AnimaModel(Model[AnimaPipeline], encoded_leaves="accept"):
+class AnimaModel(Model[AnimaPipeline]):
     """Touches its components through their forward passes only, so an encoded lane may
     replace DiT linears with native leaves (the fp8 lane's whole point on sm89). The filled
     transformer runs the fused CUDA plan wherever this process supports it."""
@@ -105,7 +106,7 @@ class AnimaModel(Model[AnimaPipeline], encoded_leaves="accept"):
     pipe: AnimaPipeline
 
     def load(self, loader: Loader) -> None:
-        self.pipe = loader.construct(AnimaPipeline, factory=build_pipeline)
+        self.pipe = loader.construct(build_pipeline)
 
     def execution_plan(self, plan: Plan) -> str:
         refusals = optimization.apply(self.pipe)

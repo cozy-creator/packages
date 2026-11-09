@@ -10,7 +10,7 @@ from typing import Any
 
 import torch
 from cozy_runtime import lm
-from cozy_runtime.author import Config, Loader, Model, uses_components
+from cozy_runtime.author import Config, Loader, Model, Serving, memoize, uses_components
 from diffusers.pipelines.flux2.image_processor import Flux2ImageProcessor
 from diffusers.pipelines.flux2.pipeline_flux2 import (
     UPSAMPLING_MAX_IMAGE_SIZE,
@@ -34,17 +34,20 @@ class UpsamplerGraph:
         self.components: dict[str, torch.nn.Module] = {COMPONENT: model.eval()}
 
 
-class Flux2Upsampler(Model[UpsamplerGraph], encoded_leaves="accept", min_bits=4, phase="decode"):
+class Flux2Upsampler(Model[UpsamplerGraph]):
     """Rewrites a short request, and its references when editing, into a detailed FLUX.2 prompt."""
+
+    serving = Serving(min_bits=4, phase="decode")
 
     graph: UpsamplerGraph
     processor: Any
 
     def load(self, loader: Loader) -> None:
-        self.graph = loader.construct(UpsamplerGraph, factory=UpsamplerGraph)
+        self.graph = loader.construct(UpsamplerGraph)
         self.processor = processor(loader.assets)
 
-    @uses_components(COMPONENT, memoize=True, memo_dependencies=(processor,))
+    @memoize
+    @uses_components(COMPONENT)
     def upsample(self, prompt: str, images: list[Image.Image]) -> str:
         model, processor = self.graph.components[COMPONENT], self.processor
         system = SYSTEM_MESSAGE_UPSAMPLING_I2I if images else SYSTEM_MESSAGE_UPSAMPLING_T2I

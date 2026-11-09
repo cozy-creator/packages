@@ -26,18 +26,20 @@ from typing import Any
 
 import numpy as np
 import torch
-from cozy_runtime import fusion, lora, rng, tiles
+from cozy_runtime import rng, tiles
+from cozy_runtime.accel import fusion, hold_dtype, lora
 from cozy_runtime.author import (
-    OutputError,
     Config,
     Loader,
     Model,
     ModelAssets,
+    OutputError,
+    Serving,
     Telemetry,
-    hold_dtype,
+    memoize,
     uses_components,
 )
-from cozy_runtime.author.kernels import Plan
+from cozy_runtime.accel.kernels import Plan
 from diffusers import (
     AutoencoderKLQwenImage,
     FlowMatchEulerDiscreteScheduler,
@@ -215,10 +217,6 @@ def reference_sizes(image: Image.Image) -> tuple[tuple[int, int], tuple[int, int
 References = tuple[torch.Tensor, list[tuple[int, int, int]]]
 
 
-#: Code the encoders read beyond their own bodies: their memo keys bind it.
-_ENCODER_CODE = (build_processor, reference_sizes, QwenImagePipeline, QwenImageEditPlusPipeline)
-
-
 def sample(
     transformer: nn.Module,
     device: torch.device,
@@ -287,13 +285,13 @@ def sample(
     return latents.cpu()
 
 
-class QwenImageTransformer(Model[TransformerGraph], encoded_leaves="accept"):
+class QwenImageTransformer(Model[TransformerGraph]):
     """A Qwen-Image DiT alone (Qwen-Image-Edit-2511's): it denoises what a `QwenImage` encodes."""
 
     graph: TransformerGraph
 
     def load(self, loader: Loader) -> None:
-        self.graph = loader.construct(TransformerGraph, factory=TransformerGraph)
+        self.graph = loader.construct(TransformerGraph)
 
     @uses_components("transformer")
     def denoise(self, *args: Any, scheduler_config: Mapping[str, Any] | None = None, **kwargs: Any) -> torch.Tensor:
@@ -307,7 +305,7 @@ class QwenImageTransformer(Model[TransformerGraph], encoded_leaves="accept"):
         )
 
 
-class QwenImage(Model[QwenImageGraph], encoded_leaves="accept"):
+class QwenImage(Model[QwenImageGraph]):
     """A whole Qwen-Image checkpoint (Qwen-Image-2512): it encodes text and references for either
     DiT, denoises on its own and decodes."""
 
@@ -315,7 +313,7 @@ class QwenImage(Model[QwenImageGraph], encoded_leaves="accept"):
     processor: Qwen2VLProcessor
 
     def load(self, loader: Loader) -> None:
-        self.graph = loader.construct(QwenImageGraph, factory=QwenImageGraph)
+        self.graph = loader.construct(QwenImageGraph)
         self.processor = build_processor(loader.assets, self.graph.text_encoder_config)
 
     def execution_plan(self, plan: Plan) -> str:
@@ -355,7 +353,8 @@ class QwenImage(Model[QwenImageGraph], encoded_leaves="accept"):
             return QwenImageEditPlusPipeline(processor=self.processor, **parts)
         return QwenImagePipeline(**parts)
 
-    @uses_components("text_encoder", memoize=True, memo_dependencies=_ENCODER_CODE)
+    @memoize
+    @uses_components("text_encoder")
     def encode(self, prompt: str, images: list[Image.Image]) -> tuple[torch.Tensor, torch.Tensor | None]:
         """The prompt as upstream reads it, its embeddings and mask (None when every token is
         valid): with references, the edit template with each at its 384² area; without, the
@@ -373,7 +372,8 @@ class QwenImage(Model[QwenImageGraph], encoded_leaves="accept"):
                 embeds, mask = pipeline.encode_prompt(prompt, device=device, max_sequence_length=TEXT_TOKENS)
         return embeds.cpu(), None if mask is None else mask.cpu()
 
-    @uses_components("vae", memoize=True, memo_dependencies=_ENCODER_CODE)
+    @memoize
+    @uses_components("vae")
     def encode_references(self, images: list[Image.Image]) -> References:
         """Each reference at its 1024² area through the VAE (argmax), normalized and packed: the
         pipeline's `_encode_vae_image` of one frame without Diffusers' feature cache (each
@@ -544,11 +544,13 @@ class QwenImageLoRA(Model[LoRAGraph]):
     """A Qwen-Image LoRA on all twelve linears of every DiT block (the Lightning distillation),
     with the sampling it was distilled for."""
 
+    serving = Serving(encoded_leaves=False)
+
     graph: LoRAGraph
     scheduler_config: Mapping[str, Any] = LIGHTNING_SCHEDULER
 
     def load(self, loader: Loader) -> None:
-        self.graph = loader.construct(LoRAGraph, factory=build_lora)
+        self.graph = loader.construct(build_lora)
 
     @uses_components(LORA_COMPONENT)
     def denoise(self, base: QwenImage | QwenImageTransformer, *args: Any, **kwargs: Any) -> torch.Tensor:

@@ -14,7 +14,8 @@ from typing import Any
 import torch
 import torch.nn.functional as F
 from cozy_runtime import rng
-from cozy_runtime.author import OutputError, Config, Loader, Model, Telemetry, hold_dtype, uses_components
+from cozy_runtime.accel import hold_dtype
+from cozy_runtime.author import Config, Loader, Model, OutputError, Telemetry, uses_components
 from diffusers import AutoencoderKLFlux2, FlowMatchEulerDiscreteScheduler, Ideogram4Transformer2DModel
 from diffusers.image_processor import VaeImageProcessor
 from diffusers.pipelines.ideogram4.pipeline_ideogram4 import (
@@ -90,13 +91,13 @@ def _velocity(tf: Any, image: torch.Tensor, prefix: torch.Tensor | None, t: torc
     return tf.final_layer(hidden[:, hidden.shape[1] - image.shape[1] :], conditioning=adaln)  # type: ignore[no-any-return]
 
 
-class Ideogram4(Model[IdeogramGraph], encoded_leaves="accept"):
+class Ideogram4(Model[IdeogramGraph]):
     """Ideogram 4's two DiTs and its VAE."""
 
     graph: IdeogramGraph
 
     def load(self, loader: Loader) -> None:
-        self.graph = loader.construct(IdeogramGraph, factory=IdeogramGraph)
+        self.graph = loader.construct(IdeogramGraph)
 
     def hold_vae(self, tel: Telemetry) -> None:
         """Serve the VAE at `VAE_DTYPE` on a GPU from now on, before any VAE scope opens: the Runtime

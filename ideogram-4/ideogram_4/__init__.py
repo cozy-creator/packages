@@ -7,24 +7,16 @@ from typing import Annotated, Any, Literal
 
 import msgspec
 import numpy as np
-from cozy_runtime.author import (
-    MEGAPIXEL,
-    Adjustments,
-    App,
-    AspectRatio,
-    Context,
+from cozy_runtime.author import Adjustments, App, Context, Memoize, Outputs, Seed, Telemetry, UnsupportedInput
+from cozy_runtime.fields import AspectRatio, Ratios
+from cozy_runtime.image import (
     Guidance,
     ImageRequest,
     ImageResult,
-    Memoize,
-    Outputs,
-    Ratios,
+    MEGAPIXEL,
     Region,
-    Seed,
     Sizes,
     Steps,
-    Telemetry,
-    UnsupportedInput,
     corners,
     held,
 )

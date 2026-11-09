@@ -11,8 +11,8 @@ from collections.abc import Callable, Mapping
 from typing import Any, TypeVar
 
 import torch
-from cozy_runtime import lora
-from cozy_runtime.author import Config, Loader, Model, uses_components
+from cozy_runtime.accel import lora
+from cozy_runtime.author import Config, Loader, Model, Serving, uses_components
 from diffusers import Flux2Transformer2DModel
 from torch import nn
 
@@ -61,13 +61,15 @@ class TurboGraph:
         self.components: dict[str, nn.Module] = {COMPONENT: root.to(torch.bfloat16)}
 
 
-class Flux2TurboLoRA(Model[TurboGraph], min_bits=16):
+class Flux2TurboLoRA(Model[TurboGraph]):
     """The Turbo LoRA's factors, kept at their stored 16 bits."""
+
+    serving = Serving(encoded_leaves=False, min_bits=16)
 
     graph: TurboGraph
 
     def load(self, loader: Loader) -> None:
-        self.graph = loader.construct(TurboGraph, factory=TurboGraph)
+        self.graph = loader.construct(TurboGraph)
 
     @uses_components(COMPONENT)
     def applied(self, transformer: nn.Module, body: Callable[[], T]) -> T:

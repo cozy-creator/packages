@@ -6,28 +6,18 @@ import math
 from typing import Annotated
 
 import msgspec
-from cozy_runtime.author import (
-    Adjustments,
-    App,
-    AspectRatio,
+from cozy_runtime.author import Adjustments, App, Context, Memoize, Outputs, Seed, Telemetry
+from cozy_runtime.fields import AspectRatio, Image, Prompt, Ratios, name_key
+from cozy_runtime.image import (
     Box,
-    Context,
     Guidance,
-    Image,
     ImageRequest,
     ImageResult,
-    Memoize,
     NegativePrompt,
-    Outputs,
-    Prompt,
-    Ratios,
-    Seed,
     Sizes,
     Steps,
-    Telemetry,
     corners,
     held,
-    name_key,
 )
 from PIL import Image as PILImage
 
@@ -161,11 +151,9 @@ def _generate(ctx: Context, payload: TurboInput, model: HiDreamO1, out: Outputs,
 _FULL = "hidream-ai/hidream-o1@0.1.0"
 _DEV = "hidream-ai/hidream-o1-dev@0.1.0"
 _COMPONENTS = {"model": ("model",)}
-_MEMO = ("hidream_o1", "hidream_o1.model", "hidream_o1.sampling")
 
 
-@app.entrypoint(defaults={"model": _FULL}, components=_COMPONENTS, memoize=Memoize(requires=["seed"]),
-                memo_dependencies=_MEMO)
+@app.entrypoint(defaults={"model": _FULL}, components=_COMPONENTS, memoize=Memoize(requires=["seed"]))
 def generate(ctx: Context, payload: GenerateInput, model: HiDreamO1, out: Outputs,
              tel: Telemetry, adj: Adjustments) -> ImageResult:
     """HiDream-O1-Image: 50 UniPC steps with CFG 5.0 over the first 40. The model HiDream recommends
@@ -173,8 +161,7 @@ def generate(ctx: Context, payload: GenerateInput, model: HiDreamO1, out: Output
     return _generate(ctx, payload, model, out, tel, adj)
 
 
-@app.entrypoint(defaults={"model": _DEV}, components=_COMPONENTS, memoize=Memoize(requires=["seed"]),
-                memo_dependencies=_MEMO)
+@app.entrypoint(defaults={"model": _DEV}, components=_COMPONENTS, memoize=Memoize(requires=["seed"]))
 def generate_turbo(ctx: Context, payload: TurboInput, model: HiDreamO1, out: Outputs,
                    tel: Telemetry, adj: Adjustments) -> ImageResult:
     """HiDream-O1-Image-Dev: 28 distilled steps, no CFG. A one-picture edit samples flow-match Euler."""
@@ -195,7 +182,7 @@ class ImageBox(msgspec.Struct, kw_only=True):
 # Each checkpoint is built, and its weights fetched, only when a box asks for it.
 @app.tool(label="Image", named="image", defaults={"full": _FULL, "model": _DEV},
           components={"full": ("model",), "model": ("model",)}, on_demand=("full", "model"),
-          memoize=Memoize(requires=["seed"]), memo_dependencies=_MEMO)  # fmt: skip
+          memoize=Memoize(requires=["seed"]))  # fmt: skip
 def image(ctx: Context, payload: ImageBox, full: HiDreamO1, model: HiDreamO1, out: Outputs, tel: Telemetry,
           adj: Adjustments) -> ImageResult:
     """HiDream-O1-Image on a canvas: Dev, or the full model, which loads only when asked for."""

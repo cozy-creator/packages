@@ -71,8 +71,8 @@ thinking open; Qwen3.5's vision tower is never built or read.
 ## Execution
 
 The denoise is a plain loop. Each prompt's text stream and RoPE are built once a request; with
-CFG both branches pass through each DiT block in turn (their text lengths differ, so they are two
-streams, as ComfyUI's two forwards). On a GPU a block runs as ComfyUI's MOSS-Image does: each modulated
+CFG each branch is one forward of the transformer (their text lengths differ, so they are two streams, as
+ComfyUI's two forwards), which the Runtime may replay as a CUDA graph. On a GPU a block runs as ComfyUI's MOSS-Image does: each modulated
 RMSNorm and SiTU comes out of the int8 leaves' quantization pass, the q/k norms and split-half RoPE are
 one kernel and each gated residual one `addcmul`, all prebuilt in the Runtime (no compile on a cold
 request; the run log's `dit block` line says which served). The 42 DiT blocks attend at 8 bits

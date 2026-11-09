@@ -7,23 +7,16 @@ import math
 from typing import Annotated, Literal
 
 import msgspec
-from cozy_runtime.author import (
-    Adjustments,
-    App,
-    AspectRatio,
-    Context,
+from cozy_runtime.author import Adjustments, App, Context, Memoize, Outputs, Seed, Telemetry
+from cozy_runtime.fields import AspectRatio, Ratios
+from cozy_runtime.image import (
     Guidance,
     ImageRequest,
     ImageResult,
-    Memoize,
     NegativePrompt,
-    Outputs,
-    Ratios,
     Region,
-    Seed,
     Sizes,
     Steps,
-    Telemetry,
     corners,
     held,
 )
@@ -73,12 +66,11 @@ def layout_prompt(prompt: str, regions: list[Region] | None, width: int, height:
     return json.dumps(layout, ensure_ascii=False, separators=(",", ":"))
 
 
-_MEMO = ("moss_image", "moss_image.model")
 _DEFAULTS = {"model": "openmoss-team/moss-image@0.1.0"}
 _COMPONENTS = {"model": ("transformer", "text_encoder", "vae")}
 
 
-@app.entrypoint(defaults=_DEFAULTS, components=_COMPONENTS, memoize=Memoize(requires=["seed"]), memo_dependencies=_MEMO)
+@app.entrypoint(defaults=_DEFAULTS, components=_COMPONENTS, memoize=Memoize(requires=["seed"]))
 def generate(ctx: Context, payload: GenerateInput, model: MossImage, out: Outputs, tel: Telemetry,
              adj: Adjustments) -> ImageResult:
     """MOSS-Image SFT, 50 Euler steps at CFG 3, with `regions` laid out as upstream's layout JSON.
@@ -120,8 +112,7 @@ class ImageBox(msgspec.Struct, kw_only=True):
     seed: Seed | None = None
 
 
-@app.tool(label="Image", named="image", defaults=_DEFAULTS, components=_COMPONENTS, memoize=Memoize(requires=["seed"]),
-          memo_dependencies=_MEMO)  # fmt: skip
+@app.tool(label="Image", named="image", defaults=_DEFAULTS, components=_COMPONENTS, memoize=Memoize(requires=["seed"]))  # fmt: skip
 def image(ctx: Context, payload: ImageBox, model: MossImage, out: Outputs, tel: Telemetry, adj: Adjustments) -> ImageResult:
     """MOSS-Image on a canvas: `generate` from the box."""
     request = GenerateInput(prompt=payload.instructions, aspect_ratio=payload.aspect_ratio, megapixels=payload.megapixels,

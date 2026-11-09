@@ -5,7 +5,8 @@ from __future__ import annotations
 from typing import Any
 
 import torch
-from cozy_runtime.author import Cut, Telemetry, hold_dtype, split
+from cozy_runtime.accel import hold_dtype
+from cozy_runtime.author import Cut, Telemetry, split
 from transformers.masking_utils import create_causal_mask
 
 

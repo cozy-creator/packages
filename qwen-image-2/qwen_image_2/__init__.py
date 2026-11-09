@@ -7,26 +7,9 @@ from typing import Annotated, Any, Literal
 
 import msgspec
 import torch
-from cozy_runtime.author import (
-    MENTION,
-    Adjustments,
-    Advanced,
-    App,
-    AspectRatio,
-    Context,
-    Image,
-    ImageRequest,
-    ImageResult,
-    Memoize,
-    OutputError,
-    Outputs,
-    Prompt,
-    Ratios,
-    Seed,
-    Sizes,
-    Telemetry,
-    ratio_of,
-)
+from cozy_runtime.author import Adjustments, App, Context, Memoize, OutputError, Outputs, Seed, Telemetry
+from cozy_runtime.fields import Advanced, AspectRatio, Image, MENTION, Prompt, Ratios
+from cozy_runtime.image import ImageRequest, ImageResult, Sizes, ratio_of
 from PIL import Image as PILImage
 
 from . import quantize as quantize  # its recipes
@@ -167,13 +150,6 @@ def _generate(
     model.hold_vae(tel)
     ctx.raise_if_cancelled()
     begin = 0.3 if payload.prompt_upsampling else 0.0
-    # Phase order for residency: references encode on the VAE first, then the transformer denoise, and
-    # the VAE decode. The text encoder is another slot's construction: a plan naming it
-    # resolves in neither, so it plans nothing and the DiT streams its weights at a third of its speed.
-    if pictures:
-        ctx.plan("vae", "transformer", "vae")
-    else:
-        ctx.plan("transformer", "vae")
     reference_latents, image_pad_mask = None, None
     if reference_images:
         with tel.stage("encoding reference images", overall_range=(begin, begin + 0.05)):
@@ -213,7 +189,6 @@ def _generate(
     return ImageResult(asset, width, height, seed, prompt)
 
 
-_MEMO = ("qwen_image_2", "qwen_image_2.model", "qwen_image_2.rewriter", "qwen_image_2.turbo")
 #: Qwen's prompt enhancers (QwenLM/Qwen-Image-2.1 `prompt_rewrite/`), a picture from words' and an edit's, and the
 #: text encoder, the `text_encoder` of a Qwen-Image-2.1 checkpoint and one for every function, are abliterated by
 #: default (Paul, 11-06). Qwen's own are `qwen/qwen-image-2.1-pe-t2i@0.1.0`, `qwen/qwen-image-2.1-pe-i2i@0.1.0` and
@@ -232,8 +207,7 @@ _COMPONENTS = {"expander": ("model",), "model": ("transformer", "vae"), "rewrite
 _ON_DEMAND = ("rewriter", "expander")
 
 
-@app.entrypoint(defaults=_FULL, components=_COMPONENTS, on_demand=_ON_DEMAND, memoize=Memoize(requires=["seed"]),
-                memo_dependencies=_MEMO)  # fmt: skip
+@app.entrypoint(defaults=_FULL, components=_COMPONENTS, on_demand=_ON_DEMAND, memoize=Memoize(requires=["seed"]))  # fmt: skip
 def generate(
     ctx: Context,
     payload: GenerateInput,
@@ -249,8 +223,7 @@ def generate(
     return _generate(ctx, payload, expander, model, rewriter, text_encoder, out, tel, adj, None)
 
 
-@app.entrypoint(defaults=_TURBO, components=_COMPONENTS, on_demand=_ON_DEMAND, memoize=Memoize(requires=["seed"]),
-                memo_dependencies=_MEMO)  # fmt: skip
+@app.entrypoint(defaults=_TURBO, components=_COMPONENTS, on_demand=_ON_DEMAND, memoize=Memoize(requires=["seed"]))  # fmt: skip
 def generate_turbo(
     ctx: Context,
     payload: GenerateInput,
@@ -286,8 +259,7 @@ class ImageBox(msgspec.Struct, kw_only=True):
 # The Turbo overlay is built, and its weights fetched, only when a box asks for it, and an enhancer only when the
 # box upsamples; a LoRA dropped on the box adapts the base model either way.
 @app.tool(label="Image", named="image", defaults=_TURBO, components=_COMPONENTS,
-          on_demand=("rewriter", "expander", "turbo_lora"), memoize=Memoize(requires=["seed"]),
-          memo_dependencies=_MEMO)  # fmt: skip
+          on_demand=("rewriter", "expander", "turbo_lora"), memoize=Memoize(requires=["seed"]))  # fmt: skip
 def image(
     ctx: Context,
     payload: ImageBox,

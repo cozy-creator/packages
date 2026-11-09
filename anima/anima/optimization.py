@@ -20,9 +20,10 @@ from typing import Any
 
 import torch
 import torch.nn.functional as F
-from cozy_runtime import fusion, tiles
+from cozy_runtime import tiles
+from cozy_runtime.accel import fusion
 from cozy_runtime.author import device
-from cozy_runtime.author.kernels import int8_rows, native, quantize_once, rms_rope_split_half
+from cozy_runtime.accel.kernels import int8_rows, native, quantize_once, rms_rope_split_half
 from diffusers.models.activations import GELU
 from diffusers.models.attention import FeedForward
 from diffusers.models.attention_dispatch import dispatch_attention_fn

@@ -3,12 +3,11 @@
 The architecture, caption handling and sampling are Diffusers' (main `48cdbaef`, #14991, verified by
 Bria against its reference code). Runtime constructs and fills the modules and owns their residency:
 the pipeline's own run encodes the prompts, and `Fibo2.denoise` is its denoising loop. A caller's LoRAs
-adapt the DiT through Runtime's PEFT layers (`__adapter_compatibility__`).
+adapt the DiT through Runtime's PEFT layers (`serving.loras`).
 """
 
 from __future__ import annotations
 
-import math
 from collections.abc import Callable
 from importlib.resources import files
 from typing import Any
@@ -16,15 +15,15 @@ from typing import Any
 import numpy as np
 import torch
 from cozy_runtime import rng, vlm
+from cozy_runtime.accel import hold_dtype
 from cozy_runtime.author import (
-    AdapterCompatibility,
     Config,
     Loader,
-    MemoDistribution,
     Model,
     OutputError,
+    Serving,
     Telemetry,
-    hold_dtype,
+    memoize,
     uses_components,
 )
 from diffusers import (
@@ -106,21 +105,17 @@ class FiboGraph:
         self.processor_config = config.section("processor").mapping() if "processor" in config.keys() else {}
 
 
-#: Code the stages read beyond their own bodies: their memo keys bind it.
-_CODE = (_Staged, vlm.processor, MemoDistribution("diffusers"), MemoDistribution("transformers"))
-
-
-class Fibo2(Model[FiboGraph], encoded_leaves="accept"):
+class Fibo2(Model[FiboGraph]):
     """One Fibo 2.0 checkpoint: Dev (CFG) or Edit Turbo (4 steps, no guidance)."""
 
     #: Caller LoRAs on the DiT, at any strength: the Runtime bakes them into the weights.
-    __adapter_compatibility__ = (AdapterCompatibility("lora", "", ("transformer",), -math.inf, math.inf),)
+    serving = Serving(loras=("transformer",))
 
     graph: FiboGraph
     processor: Qwen3VLProcessor
 
     def load(self, loader: Loader) -> None:
-        self.graph = loader.construct(FiboGraph, factory=FiboGraph)
+        self.graph = loader.construct(FiboGraph)
         self.processor = vlm.processor(loader.assets, "processor/", self.graph.processor_config)
 
     def _pipeline(self, component: str) -> _Staged:
@@ -141,7 +136,8 @@ class Fibo2(Model[FiboGraph], encoded_leaves="accept"):
             hold_dtype(vae, VAE_DTYPE)
             tel.log("vae representation", dtype=str(VAE_DTYPE).removeprefix("torch."))
 
-    @uses_components("text_encoder", memoize=True, memo_dependencies=_CODE)
+    @memoize
+    @uses_components("text_encoder")
     def encode(
         self, prompt: str, images: list[Image.Image], *, width: int, height: int, guidance: float, negative: str | None
     ) -> dict[str, Encoding]:
@@ -163,7 +159,8 @@ class Fibo2(Model[FiboGraph], encoded_leaves="accept"):
             return roles
         raise RuntimeError("the pipeline never reached its latents")
 
-    @uses_components("vae", memoize=True, memo_dependencies=_CODE)
+    @memoize
+    @uses_components("vae")
     def encode_images(self, images: list[Image.Image], *, width: int, height: int) -> list[torch.Tensor]:
         """The images to edit as the pipeline crops and normalizes them, as latents."""
         pipe = self._pipeline("vae")

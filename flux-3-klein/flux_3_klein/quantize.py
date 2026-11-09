@@ -5,14 +5,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from cozy_runtime.author import (
-    Context,
-    EncodingRule,
-    QuantizationPlan,
-    Recipe,
-    SelectionPlan,
-    Telemetry,
-)
+from cozy_runtime.author import Context, EncodingRule, QuantizationPlan, Recipe, SelectionPlan, Telemetry
 
 from .klein import Klein, prepare_reference
 from .upsampler import Drafter, Upsampler

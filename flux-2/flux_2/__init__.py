@@ -7,26 +7,9 @@ from functools import partial
 from typing import Annotated, Literal
 
 import msgspec
-from cozy_runtime.author import (
-    Adjustments,
-    Advanced,
-    App,
-    AspectRatio,
-    Context,
-    Guidance,
-    Image,
-    ImageRequest,
-    ImageResult,
-    Memoize,
-    Outputs,
-    Prompt,
-    Ratios,
-    Seed,
-    Sizes,
-    Steps,
-    Telemetry,
-    held,
-)
+from cozy_runtime.author import Adjustments, App, Context, Memoize, Outputs, Seed, Telemetry
+from cozy_runtime.fields import Advanced, AspectRatio, Image, Prompt, Ratios
+from cozy_runtime.image import Guidance, ImageRequest, ImageResult, Sizes, Steps, held
 
 from .model import MAX_SIDE, MIN_SIDE, PATCH, TURBO_SIGMAS, Flux2, prepare_references, schedule
 from . import quantize as quantize  # its recipes

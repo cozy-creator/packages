@@ -9,25 +9,24 @@ constructs and fills the modules and owns their residency.
 from __future__ import annotations
 
 import json
-import math
 from collections.abc import Callable, Mapping
 from typing import Any
 
 import numpy as np
 import torch
-from cozy_runtime import fusion, rng, tiles
+from cozy_runtime import rng, tiles
+from cozy_runtime.accel import fusion, hold_dtype
 from cozy_runtime.author import (
-    OutputError,
-    AdapterCompatibility,
     Config,
     Loader,
-    MemoDistribution,
     Model,
     ModelAssets,
-    hold_dtype,
+    OutputError,
+    Serving,
+    memoize,
     uses_components,
 )
-from cozy_runtime.author.kernels import Plan
+from cozy_runtime.accel.kernels import Plan
 from diffusers import AutoencoderKLQwenImage, FlowMatchEulerDiscreteScheduler, Krea2Transformer2DModel
 from diffusers.models.autoencoders.autoencoder_kl_qwenimage import (
     QwenImageCausalConv3d,
@@ -208,22 +207,18 @@ def fused_text(transformer: Any, text: torch.Tensor) -> torch.Tensor:
     return transformer.txt_in(hidden.to(_dtype(transformer.txt_in))).to(text.dtype)  # type: ignore[no-any-return]
 
 
-#: Code the memoized encode reads beyond its own body.
-_CODE = (build_tokenizer, TextEncoder, MemoDistribution("transformers"), MemoDistribution("tokenizers"))
-
-
-class Krea2(Model[Krea2Graph], encoded_leaves="accept"):
+class Krea2(Model[Krea2Graph]):
     """One Krea 2 checkpoint, Raw or Turbo. Their configs are identical and the pipeline's `is_distilled` is
     not in the model's config, so the caller names the regime (`denoise(distilled=)`)."""
 
     #: Caller LoRAs on the DiT, at any strength: the Runtime bakes them into the weights.
-    __adapter_compatibility__ = (AdapterCompatibility("lora", "", ("transformer",), -math.inf, math.inf),)
+    serving = Serving(loras=("transformer",))
 
     graph: Krea2Graph
     tokenizer: PreTrainedTokenizerFast
 
     def load(self, loader: Loader) -> None:
-        self.graph = loader.construct(Krea2Graph, factory=Krea2Graph)
+        self.graph = loader.construct(Krea2Graph)
         self.tokenizer = build_tokenizer(loader.assets)
 
     def execution_plan(self, plan: Plan) -> str:
@@ -241,7 +236,8 @@ class Krea2(Model[Krea2Graph], encoded_leaves="accept"):
         if torch.device(str(self.device)).type == "cuda":
             hold_dtype(self.graph.components["vae"], VAE_DTYPE)
 
-    @uses_components("text_encoder", memoize=True, memo_dependencies=_CODE)
+    @memoize
+    @uses_components("text_encoder")
     def encode(self, prompt: str) -> torch.Tensor:
         """The DiT's text conditioning [1, S, 12, 2560] (bf16, on the CPU): Diffusers' Qwen-Image chat
         template, at most 512 tokens after its 34-token system prefix, the 12 tapped hidden states.

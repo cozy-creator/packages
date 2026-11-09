@@ -41,35 +41,35 @@ import torch
 import torch.nn.functional as F
 from cozy_runtime import rng
 from cozy_runtime.author import (
-    MEGAPIXEL,
-    AdapterCompatibility,
     AdjustmentRow,
     AdjustmentRows,
     Adjustments,
     App,
-    AspectRatio,
     Context,
     EncodingRule,
-    Guidance,
     ImageFrame,
-    ImageRequest,
-    ImageResult,
     Loader,
     Memoize,
     Model,
-    NegativePrompt,
     OutputError,
     Outputs,
-    Preflight,
     QuantizationPlan,
-    Ratios,
     Recipe,
     Seed,
+    Serving,
+    Telemetry,
+    uses_components,
+)
+from cozy_runtime.fields import AspectRatio, Preflight, Ratios
+from cozy_runtime.image import (
+    Guidance,
+    ImageRequest,
+    ImageResult,
+    MEGAPIXEL,
+    NegativePrompt,
     Sizes,
     Steps,
-    Telemetry,
     held,
-    uses_components,
 )
 from diffusers import AutoencoderKL, DDIMScheduler, EulerDiscreteScheduler, UNet2DConditionModel
 from hidiffusion import (  # type: ignore[import-not-found,import-untyped]
@@ -287,7 +287,7 @@ def build_pipeline(config: Any) -> SdxlPipeline:
     return SdxlPipeline(config)
 
 
-class SdxlModel(Model[SdxlPipeline], encoded_leaves="accept"):
+class SdxlModel(Model[SdxlPipeline]):
     """Admits by pure topology satisfaction: no structural twins, so no stamp keyword.
 
     Runtime may replace supported linear leaves with encoded implementations. The
@@ -304,17 +304,13 @@ class SdxlModel(Model[SdxlPipeline], encoded_leaves="accept"):
     #: Caller LoRAs on the UNet and both text towers, at any strength. Ingest normalizes
     #: kohya and Diffusers SDXL LoRAs to PEFT keys; the Runtime bakes them into the weights,
     #: or computes them per step when a request says `lora_mode: per_step`.
-    __adapter_compatibility__ = (
-        AdapterCompatibility(
-            "lora", "", ("unet", "text_encoder", "text_encoder_2"), -math.inf, math.inf
-        ),
-    )
+    serving = Serving(loras=("unet", "text_encoder", "text_encoder_2"))
 
     pipe: SdxlPipeline
     tokenizers: tuple[Any, Any]
 
     def load(self, loader: Loader) -> None:
-        self.pipe = loader.construct(SdxlPipeline, factory=build_pipeline)
+        self.pipe = loader.construct(build_pipeline)
         # Checkpoint vocabularies override the standard SDXL CLIP vocabulary. Both
         # sources are read-only and the parsed tokenizers survive between requests.
         self.tokenizers = (
@@ -546,7 +542,6 @@ def generate(
     """SDXL 1.0 text to image, as a WebP.
 
     Tokenize, encode, denoise, decode, encode the WebP."""
-    ctx.plan({"text_encoder", "text_encoder_2"}, "unet", "vae")
     hold_decode_dtype(model.pipe.components["vae"], tel)
     prompt = payload.prompt
     adj.extend(facts.adjustments)

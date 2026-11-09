@@ -7,25 +7,16 @@ from functools import partial
 from typing import Annotated
 
 import msgspec
-from cozy_runtime.author import (
-    MEGAPIXEL,
-    Adjustments,
-    App,
-    AspectRatio,
-    Context,
+from cozy_runtime.author import Adjustments, App, Context, Memoize, Outputs, Seed, Telemetry
+from cozy_runtime.fields import AspectRatio, Image, Prompt, Ratios
+from cozy_runtime.image import (
     Guidance,
-    Image,
     ImageRequest,
     ImageResult,
-    Memoize,
+    MEGAPIXEL,
     NegativePrompt,
-    Outputs,
-    Prompt,
-    Ratios,
-    Seed,
     Sizes,
     Steps,
-    Telemetry,
     held,
 )
 
@@ -147,7 +138,6 @@ def _turbo(ctx: Context, payload: TurboInput, edit_model: QwenImageTransformer, 
     return _render(ctx, model, dit, lora, out, tel, adj, payload, steps=steps, guidance=1.0, negative="")
 
 
-_MEMO = ("qwen_image", "qwen_image.model")
 _BASE = "qwen/qwen-image-2512@0.1.1"
 _EDIT = "qwen/qwen-image-edit-2511@0.1.0"
 _TURBO_DEFAULTS = {"model": _BASE, "edit_model": _EDIT,
@@ -159,7 +149,7 @@ _COMPONENTS = {"edit_model": ("transformer",)}
 # The edit DiT is all `edit_model` binds: the text encoder, VAE and tokenizer are `model`'s. It, and
 # its LoRA, are fetched and built by the first request with references.
 @app.entrypoint(defaults={"model": _BASE, "edit_model": _EDIT}, components=_COMPONENTS, on_demand=("edit_model",),
-                memoize=Memoize(requires=["seed"]), memo_dependencies=_MEMO)
+                memoize=Memoize(requires=["seed"]))
 def generate(ctx: Context, payload: GenerateInput, edit_model: QwenImageTransformer, model: QwenImage, out: Outputs,
              tel: Telemetry, adj: Adjustments) -> ImageResult:
     """Qwen-Image-2512 from text (50 steps), or Qwen-Image-Edit-2511 with pictures (40 steps).
@@ -169,7 +159,7 @@ def generate(ctx: Context, payload: GenerateInput, edit_model: QwenImageTransfor
 
 
 @app.entrypoint(defaults=_TURBO_DEFAULTS, components=_COMPONENTS, on_demand=("edit_model", "edit_turbo_lora"),
-                memoize=Memoize(requires=["seed"]), memo_dependencies=_MEMO)
+                memoize=Memoize(requires=["seed"]))
 def generate_turbo(ctx: Context, payload: TurboInput, edit_model: QwenImageTransformer, edit_turbo_lora: QwenImageLoRA,
                    model: QwenImage, turbo_lora: QwenImageLoRA, out: Outputs, tel: Telemetry,
                    adj: Adjustments) -> ImageResult:
@@ -191,8 +181,7 @@ class ImageBox(msgspec.Struct, kw_only=True):
 # `model` holds the text encoder and VAE every render reads; each other DiT and LoRA is built, and its
 # weights fetched, only when a render asks for it.
 @app.tool(label="Image", named="image", defaults=_TURBO_DEFAULTS, components=_COMPONENTS,
-          on_demand=("edit_model", "edit_turbo_lora", "turbo_lora"), memoize=Memoize(requires=["seed"]),
-          memo_dependencies=_MEMO)  # fmt: skip
+          on_demand=("edit_model", "edit_turbo_lora", "turbo_lora"), memoize=Memoize(requires=["seed"]))  # fmt: skip
 def image(ctx: Context, payload: ImageBox, edit_model: QwenImageTransformer, edit_turbo_lora: QwenImageLoRA,
           model: QwenImage, turbo_lora: QwenImageLoRA, out: Outputs, tel: Telemetry, adj: Adjustments) -> ImageResult:
     """Qwen Image on a canvas: Lightning, or the full models."""

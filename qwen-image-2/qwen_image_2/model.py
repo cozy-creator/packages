@@ -4,14 +4,13 @@ The architecture and sampling are Diffusers' (`QwenImage21Pipeline`, Diffusers 0
 constructs and fills the modules and owns their residency; no Diffusers weight loader, device
 placement, or offload hook takes part in serving.
 
-A caller's LoRAs adapt the DiT through Runtime's PEFT layers (`__adapter_compatibility__`). The
+A caller's LoRAs adapt the DiT through Runtime's PEFT layers (`serving.loras`). The
 Turbo overlay (`turbo.FunAccLoRA`) reaches the DiT's linears through permanent hooks
 (`cozy_runtime.lora.Hook`), which Runtime bakes into the resident weights while it is armed.
 """
 
 from __future__ import annotations
 
-import math
 from collections.abc import Callable, Mapping, Sequence
 from functools import partial
 from typing import Any
@@ -53,20 +52,20 @@ from transformers import (
 from transformers import initialization as transformer_init
 from transformers.modeling_utils import local_torch_dtype
 
-from cozy_runtime import fusion, lora, rng, tiles, vlm
+from cozy_runtime import rng, tiles, vlm
+from cozy_runtime.accel import fusion, hold_dtype, lora
 from cozy_runtime.author import (
-    AdapterCompatibility,
     Config,
-    ConformanceError,
     Loader,
-    MemoDistribution,
     Model,
+    Serving,
     Telemetry,
-    hold_dtype,
+    UnsupportedInput,
+    memoize,
     retained,
     uses_components,
 )
-from cozy_runtime.author.kernels import Plan
+from cozy_runtime.accel.kernels import Plan
 
 from ._prepared import _Joint, _Layout, cached_pass, joint_pass
 
@@ -190,7 +189,7 @@ def _stored(config: Config, component: str, module: torch.nn.Module) -> torch.dt
     stored = {config.tensor_dtype(f"{component}.{name}", default="f32") for name, _ in module.named_parameters()}
     dtype = _DTYPES.get(next(iter(stored))) if len(stored) == 1 else None
     if dtype is None:
-        raise ConformanceError(
+        raise UnsupportedInput(
             f"{component} stores {sorted(stored)}; Qwen Image builds it in one of {sorted(_DTYPES)}",
             code="artifact_dtype",
             fields=[component],
@@ -254,30 +253,17 @@ class _StagedPipeline(QwenImage21Pipeline):
         return self.device_placed
 
 
-#: Code the encoders read beyond their own bodies: their memo key binds it.
-_ENCODER_CODE = (
-    _StagedPipeline,
-    vlm.processor,
-    MemoDistribution("diffusers"),
-    MemoDistribution("transformers"),
-)
-
-
-class QwenImage21Model(
-    Model[QwenImage21Graph],
-    encoded_leaves="accept",
-    # The 32 DiT blocks attend at 8 bits (comfy-kitchen INT8 on RTX 40-class cards): attention is
-    # two thirds of a 4 MP step. A 16-bit request attends exactly.
-    attention_bits={"transformer.transformer_blocks.": 8},
-):
-    #: Caller LoRAs on the DiT, at any strength: the Runtime bakes them into the weights.
-    __adapter_compatibility__ = (AdapterCompatibility("lora", "", ("transformer",), -math.inf, math.inf),)
+class QwenImage21Model(Model[QwenImage21Graph]):
+    #: The 32 DiT blocks attend at 8 bits (comfy-kitchen INT8 on RTX 40-class cards): attention is two thirds
+    #: of a 4 MP step; a 16-bit request attends exactly. Caller LoRAs on the DiT, at any strength: the Runtime
+    #: bakes them into the weights.
+    serving = Serving(attention_bits={"transformer.transformer_blocks.": 8}, loras=("transformer",))
 
     graph: QwenImage21Graph
     processor: Any
 
     def load(self, loader: Loader) -> None:
-        self.graph = loader.construct(QwenImage21Graph, factory=build_qwen_image21)
+        self.graph = loader.construct(build_qwen_image21)
         self.processor = vlm.processor(loader.assets, "processor/", self.graph.processor_config)
 
     def execution_plan(self, plan: Plan) -> str:
@@ -317,7 +303,8 @@ class QwenImage21Model(
         pipeline.device_placed = torch.device(str(self.device))
         return pipeline
 
-    @uses_components("text_encoder", memoize=True, memo_dependencies=_ENCODER_CODE)
+    @memoize
+    @uses_components("text_encoder")
     def encode(self, prompt: str) -> tuple[Any, Any]:
         encoder = self.graph.components["text_encoder"]
         with torch.inference_mode():
@@ -326,7 +313,8 @@ class QwenImage21Model(
             )
         return embeds, mask
 
-    @uses_components("vae", memoize=True, memo_dependencies=_ENCODER_CODE)
+    @memoize
+    @uses_components("vae")
     def encode_reference_images(self, images: list[Any]) -> tuple[list[Any], torch.Tensor]:
         """Encode each reference once, using Diffusers' 1 MP conditioning size."""
         vae = self.graph.components["vae"]
@@ -351,7 +339,8 @@ class QwenImage21Model(
                 )
         return resized, torch.cat(packed, dim=1)
 
-    @uses_components("text_encoder", memoize=True, memo_dependencies=_ENCODER_CODE)
+    @memoize
+    @uses_components("text_encoder")
     def encode_image_prompt(self, prompt: str, images: list[Any]) -> tuple[Any, Any, Any]:
         """Encode the instruction and ordered reference images as one condition."""
         encoder = self.graph.components["text_encoder"]
@@ -391,7 +380,7 @@ class QwenImage21Model(
         state, is F32."""
         transformer = self.graph.components["transformer"]
         if not transformer.config.causal_condition:
-            raise ConformanceError("Qwen Image 2.1 denoises with causal conditioning", code="artifact_config")
+            raise UnsupportedInput("Qwen Image 2.1 denoises with causal conditioning", code="artifact_config")
         device = torch.device(str(self.device))
         pipeline = self._pipeline(sigmas, scheduler)
         euler: Any = pipeline.scheduler

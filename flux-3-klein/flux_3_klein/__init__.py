@@ -7,31 +7,20 @@ from collections.abc import Callable
 from typing import Annotated, Literal
 
 import msgspec
-from cozy_runtime.author import (
-    MEGAPIXEL,
-    Adjustments,
-    Advanced,
-    App,
-    AspectRatio,
+from cozy_runtime.author import Adjustments, App, Context, Memoize, Outputs, Seed, Telemetry
+from cozy_runtime.fields import Advanced, AspectRatio, Image, Prompt, Ratios, name_key
+from cozy_runtime.image import (
     Box,
-    Context,
     Guidance,
-    Image,
     ImageRequest,
     ImageResult,
-    Memoize,
+    MEGAPIXEL,
     NegativePrompt,
-    Outputs,
-    Prompt,
-    Ratios,
     Region,
-    Seed,
     Sizes,
     Steps,
-    Telemetry,
     corners,
     held,
-    name_key,
 )
 from PIL import Image as PILImage
 

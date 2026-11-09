@@ -18,15 +18,16 @@ from typing import Any
 
 import numpy as np
 import torch
-from cozy_runtime import lora, rng
+from cozy_runtime import rng
+from cozy_runtime.accel import hold_dtype, lora
 from cozy_runtime.author import (
-    OutputError,
     Config,
     Loader,
     Model,
     ModelAssets,
+    OutputError,
     Telemetry,
-    hold_dtype,
+    memoize,
     uses_components,
 )
 from diffusers import AutoencoderKLFlux2, Flux2KleinPipeline, Flux2Pipeline, Flux2Transformer2DModel
@@ -187,7 +188,7 @@ def _bn(vae: Any, like: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     return mean, std
 
 
-class Flux2(Model[Flux2Graph], encoded_leaves="accept"):
+class Flux2(Model[Flux2Graph]):
     """One FLUX.2 checkpoint: [dev] (embedded guidance) or a [klein], which runs as Base (CFG) or
     distilled (no guidance) as the function names it: the pipeline's `is_distilled` never reaches
     the model's config."""
@@ -196,7 +197,7 @@ class Flux2(Model[Flux2Graph], encoded_leaves="accept"):
     tokenizer: Any
 
     def load(self, loader: Loader) -> None:
-        self.graph = loader.construct(Flux2Graph, factory=Flux2Graph)
+        self.graph = loader.construct(Flux2Graph)
         self.tokenizer = processor(loader.assets) if self.dev else tokenizer(loader.assets)
 
     @property
@@ -204,7 +205,8 @@ class Flux2(Model[Flux2Graph], encoded_leaves="accept"):
         """[dev]: Mistral-conditioned, guidance-distilled, with an embedded guidance input."""
         return self.graph.family == "mistral3"
 
-    @uses_components("text_encoder", memoize=True, memo_dependencies=(tokenizer, processor, text_encoder, _conditioning_only))
+    @memoize
+    @uses_components("text_encoder")
     def encode(self, prompt: str) -> torch.Tensor:
         encoder = self.graph.components["text_encoder"]
         device = torch.device(str(self.device))
@@ -230,7 +232,8 @@ class Flux2(Model[Flux2Graph], encoded_leaves="accept"):
             hold_dtype(vae, VAE_DTYPE)
             tel.log("vae representation", dtype=str(VAE_DTYPE).removeprefix("torch."))
 
-    @uses_components("vae", memoize=True)
+    @memoize
+    @uses_components("vae")
     def encode_references(self, references: list[Image.Image]) -> tuple[torch.Tensor, torch.Tensor]:
         """Normalized packed latents of the prepared references as one token sequence, with ids."""
         vae = self.graph.components["vae"]

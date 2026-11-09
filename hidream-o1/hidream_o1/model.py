@@ -426,14 +426,14 @@ class Recipe:
     clip: float = 0.0
 
 
-class HiDreamO1(Model[O1Graph], encoded_leaves="accept"):
+class HiDreamO1(Model[O1Graph]):
     """One HiDream-O1-Image checkpoint, full or Dev."""
 
     graph: O1Graph
     processor: Any
 
     def load(self, loader: Loader) -> None:
-        self.graph = loader.construct(O1Graph, factory=O1Graph)
+        self.graph = loader.construct(O1Graph)
         self.processor = vlm.processor(loader.assets)
 
     @property

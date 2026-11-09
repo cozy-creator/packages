@@ -5,7 +5,7 @@ encoding of its Flux3 modular pipeline); reference preparation and sampling foll
 code (`black-forest-labs/flux-3-image-klein`, `flux3/pipeline.py`, `flux3/sampling.py`). The
 transformer's forward is the package's: every block is one parallel block over one token sequence,
 as in BFL's code, which Runtime fuses (`BLOCK`). Runtime constructs and fills the modules and owns
-their residency. A caller's LoRAs adapt the DiT through Runtime's PEFT layers (`__adapter_compatibility__`).
+their residency. A caller's LoRAs adapt the DiT through Runtime's PEFT layers (`serving.loras`).
 """
 
 from __future__ import annotations
@@ -19,19 +19,20 @@ from typing import Any, NamedTuple
 import numpy as np
 import torch
 import torch.nn.functional as F
-from cozy_runtime import fusion, rng, vlm
+from cozy_runtime import rng, vlm
+from cozy_runtime.accel import fusion, hold_dtype
 from cozy_runtime.author import (
-    AdapterCompatibility,
-    OutputError,
     Config,
     Loader,
     Model,
+    OutputError,
+    Serving,
     Telemetry,
-    hold_dtype,
+    memoize,
     retained,
     uses_components,
 )
-from cozy_runtime.author.kernels import Plan
+from cozy_runtime.accel.kernels import Plan
 from diffusers import AutoencoderKLFlux2, Flux3Transformer2DModel
 from diffusers.models.transformers.transformer_flux3 import (
     Flux3ModeTransformerBlock,
@@ -263,33 +264,30 @@ def _velocity(tf: Any, x: torch.Tensor, temb: torch.Tensor, cond: torch.Tensor, 
     return tf.proj_out(tf.norm_out(tokens[:, : image.shape[1]], temb[:, None]))
 
 
-class Klein(
-    Model[KleinGraph],
-    encoded_leaves="accept",
-    # As BFL's int8 release (`comfy_attention.config`): the image and joint blocks' attention at 8
-    # bits; the text and reference early blocks keep exact attention.
-    attention_bits={
-        "transformer.mode_blocks.image.": 8,
-        "transformer.single_transformer_blocks.": 8,
-    },
-):
+class Klein(Model[KleinGraph]):
     """One Klein checkpoint: the distilled flow map (no guidance) or the base model (CFG)."""
 
-    #: Caller LoRAs on the DiT, at any strength: the Runtime bakes them into the weights.
-    __adapter_compatibility__ = (AdapterCompatibility("lora", "", ("transformer",), -math.inf, math.inf),)
+    #: Attention as BFL's int8 release (`comfy_attention.config`): the image and joint blocks at 8 bits; the
+    #: text and reference early blocks keep exact attention. Caller LoRAs on the DiT, at any strength: the
+    #: Runtime bakes them into the weights.
+    serving = Serving(
+        attention_bits={"transformer.mode_blocks.image.": 8, "transformer.single_transformer_blocks.": 8},
+        loras=("transformer",),
+    )
 
     graph: KleinGraph
     processor: Qwen3VLProcessor
 
     def load(self, loader: Loader) -> None:
-        self.graph = loader.construct(KleinGraph, factory=KleinGraph)
+        self.graph = loader.construct(KleinGraph)
         self.processor = vlm.processor(loader.assets, "text_encoder/")
 
     @property
     def flow_map(self) -> bool:
         return bool(self.graph.components["transformer"].config.flow_map)
 
-    @uses_components("text_encoder", memoize=True, memo_dependencies=(vlm.processor, _conditioning_only))
+    @memoize
+    @uses_components("text_encoder")
     def encode(self, prompt: str) -> torch.Tensor:
         encoder = self.graph.components["text_encoder"]
         with torch.inference_mode():
@@ -312,7 +310,8 @@ class Klein(
             hold_dtype(vae, VAE_DTYPE)
             tel.log("vae representation", dtype=str(VAE_DTYPE).removeprefix("torch."))
 
-    @uses_components("vae", memoize=True)
+    @memoize
+    @uses_components("vae")
     def encode_references(self, references: list[Image.Image]) -> tuple[torch.Tensor, torch.Tensor]:
         """Normalized packed latents of the prepared references as one token sequence, with ids."""
         vae = self.graph.components["vae"]
