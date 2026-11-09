@@ -23,8 +23,8 @@ interpreter.InterpretedFunction.params = property(
 import torch  # noqa: E402 (after the interpreter shim)
 from torch import nn  # noqa: E402 (after the interpreter shim)
 
-from cozy_runtime import moe  # noqa: E402 (after the interpreter shim)
-from cozy_runtime.author.kernels import INT8_CONVROT  # noqa: E402 (after the interpreter shim)
+from cozy_runtime.accel import moe  # noqa: E402 (after the interpreter shim)
+from cozy_runtime.accel.kernels import INT8_CONVROT  # noqa: E402 (after the interpreter shim)
 from cozy_runtime.internal import int8_linear  # noqa: E402 (after the interpreter shim)
 from cozy_runtime.internal.encoding.formats import hadamard256  # noqa: E402 (after the interpreter shim)
 

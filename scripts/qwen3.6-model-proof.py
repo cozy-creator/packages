@@ -24,7 +24,8 @@ import torch
 from PIL import Image
 from transformers import AutoConfig, AutoModelForImageTextToText, GenerationConfig
 
-from cozy_runtime import moe, vlm
+from cozy_runtime import vlm
+from cozy_runtime.accel import moe
 
 FILES = Path(sys.argv[1])
 

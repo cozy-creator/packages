@@ -22,8 +22,9 @@ import time
 
 import msgspec
 
-from cozy_runtime import moe
-from cozy_runtime.author import App, ImageFile
+from cozy_runtime.accel import moe
+from cozy_runtime.author import App
+from cozy_runtime.media import ImageFile
 from cozy_runtime.vlm import Question, VisionLM
 
 #: Expert caches replayed, in experts: 3.15 MB each at int8, 1.77 MB at 4-bit (35B-A3B); 5,400 int8

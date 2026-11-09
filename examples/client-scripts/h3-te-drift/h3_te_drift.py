@@ -27,7 +27,9 @@ from typing import Annotated, Any
 import msgspec
 import numpy as np
 import torch
-from cozy_runtime.author import App, FileBound, Context, File, Telemetry, Weights
+from cozy_runtime.author import App, Context, Telemetry, Weights
+from cozy_runtime.fields import FileBound
+from cozy_runtime.media import File
 from safetensors.torch import load
 from transformers import Qwen3VLTextConfig
 from transformers.models.qwen3_vl.modeling_qwen3_vl import (

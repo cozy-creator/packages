@@ -22,9 +22,9 @@ import msgspec
 import torch
 from torch import nn
 
-from cozy_runtime import moe
+from cozy_runtime.accel import moe
 from cozy_runtime.author import App, Telemetry
-from cozy_runtime.author.kernels import INT8_CONVROT
+from cozy_runtime.accel.kernels import INT8_CONVROT
 from cozy_runtime.internal import int8_linear
 from cozy_runtime.internal.encoding.formats import hadamard256
 
