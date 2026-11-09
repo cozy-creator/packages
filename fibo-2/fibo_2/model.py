@@ -2,13 +2,12 @@
 
 The architecture, caption handling and sampling are Diffusers' (main `48cdbaef`, #14991, verified by
 Bria against its reference code). Runtime constructs and fills the modules and owns their residency:
-the pipeline's own run encodes the prompts, and its denoising loop is one `denoise_loop`. A caller's LoRAs
-adapt the DiT through Runtime's PEFT layers (`__adapter_compatibility__`).
+the pipeline's own run encodes the prompts, and `Fibo2.denoise` is its denoising loop. A caller's LoRAs
+adapt the DiT through Runtime's PEFT layers (`serving.loras`).
 """
 
 from __future__ import annotations
 
-import math
 from collections.abc import Callable
 from importlib.resources import files
 from typing import Any
@@ -16,16 +15,15 @@ from typing import Any
 import numpy as np
 import torch
 from cozy_runtime import rng, vlm
+from cozy_runtime.accel import hold_dtype
 from cozy_runtime.author import (
-    AdapterCompatibility,
     Config,
     Loader,
-    MemoDistribution,
     Model,
     OutputError,
+    Serving,
     Telemetry,
-    denoise_loop,
-    hold_dtype,
+    memoize,
     uses_components,
 )
 from diffusers import (
@@ -107,21 +105,17 @@ class FiboGraph:
         self.processor_config = config.section("processor").mapping() if "processor" in config.keys() else {}
 
 
-#: Code the stages read beyond their own bodies: their memo keys bind it.
-_CODE = (_Staged, vlm.processor, MemoDistribution("diffusers"), MemoDistribution("transformers"))
-
-
-class Fibo2(Model[FiboGraph], encoded_leaves="accept"):
+class Fibo2(Model[FiboGraph]):
     """One Fibo 2.0 checkpoint: Dev (CFG) or Edit Turbo (4 steps, no guidance)."""
 
     #: Caller LoRAs on the DiT, at any strength: the Runtime bakes them into the weights.
-    __adapter_compatibility__ = (AdapterCompatibility("lora", "", ("transformer",), -math.inf, math.inf),)
+    serving = Serving(loras=("transformer",))
 
     graph: FiboGraph
     processor: Qwen3VLProcessor
 
     def load(self, loader: Loader) -> None:
-        self.graph = loader.construct(FiboGraph, factory=FiboGraph)
+        self.graph = loader.construct(FiboGraph)
         self.processor = vlm.processor(loader.assets, "processor/", self.graph.processor_config)
 
     def _pipeline(self, component: str) -> _Staged:
@@ -142,7 +136,8 @@ class Fibo2(Model[FiboGraph], encoded_leaves="accept"):
             hold_dtype(vae, VAE_DTYPE)
             tel.log("vae representation", dtype=str(VAE_DTYPE).removeprefix("torch."))
 
-    @uses_components("text_encoder", memoize=True, memo_dependencies=_CODE)
+    @memoize
+    @uses_components("text_encoder")
     def encode(
         self, prompt: str, images: list[Image.Image], *, width: int, height: int, guidance: float, negative: str | None
     ) -> dict[str, Encoding]:
@@ -164,7 +159,8 @@ class Fibo2(Model[FiboGraph], encoded_leaves="accept"):
             return roles
         raise RuntimeError("the pipeline never reached its latents")
 
-    @uses_components("vae", memoize=True, memo_dependencies=_CODE)
+    @memoize
+    @uses_components("vae")
     def encode_images(self, images: list[Image.Image], *, width: int, height: int) -> list[torch.Tensor]:
         """The images to edit as the pipeline crops and normalizes them, as latents."""
         pipe = self._pipeline("vae")
@@ -187,19 +183,18 @@ class Fibo2(Model[FiboGraph], encoded_leaves="accept"):
         steps: int,
         guidance: float,
         seed: int,
-        on_step: Callable[[int], None],
+        progress: Callable[[int, int], None],
     ) -> torch.Tensor:
-        """`BriaFibo2Pipeline.__call__`'s loop as one `denoise_loop`: Euler from sigma 1 to 1/steps,
+        """`BriaFibo2Pipeline.__call__`'s loop: `FlowMatchEulerDiscreteScheduler` from sigma 1 to 1/steps,
         shifted by the image size, the noise drawn on the CPU from `seed` and kept in float32 across
         steps, CFG as a second pass. A generation with text images reads `base` while the noise level
-        is above `text_images_max_noise_level`: the step's label."""
+        is above `text_images_max_noise_level`."""
         pipe = self._pipeline("transformer")
-        transformer, scheduler, device = pipe.transformer, pipe.scheduler, pipe.stage_device
-        roles = tuple(role for role in ("prompt", "base", "negative") if role in encoded)
-        masked = tuple(encoded[role][1] is not None for role in roles)
+        transformer, device = pipe.transformer, pipe.stage_device
+        scheduler: Any = pipe.scheduler
         cfg = guidance > 1.0
         batch = encoded["prompt"][0].shape[0]
-        with torch.inference_mode(False), torch.no_grad():
+        with torch.no_grad():
             shape = (batch, transformer.config.in_channels, height // pipe.vae_scale_factor, width // pipe.vae_scale_factor)
             latents = rng.noise(shape, seed, device=device)
             patch = transformer.config.patch_size
@@ -208,42 +203,30 @@ class Fibo2(Model[FiboGraph], encoded_leaves="accept"):
                 (latents.shape[2] // patch) * (latents.shape[3] // patch),
                 config.base_image_seq_len, config.max_image_seq_len, config.base_shift, config.max_shift,
             )
-            timesteps, _ = retrieve_timesteps(scheduler, steps, device, sigmas=np.linspace(1.0, 1 / steps, steps), mu=mu)
-            deltas = scheduler.sigmas[1:] - scheduler.sigmas[:-1]
-            conditions: list[torch.Tensor] = []
-            for role in roles:
-                embeds, mask = encoded[role]
-                conditions += [embeds.to(device)] + ([] if mask is None else [mask.to(device)])
-            context = [tensor.to(device=device, dtype=transformer.dtype) for tensor in image_latents]
-        base = "base" in encoded
-        labels = [not base or t / 1000 <= pipe.text_images_max_noise_level for t in timesteps.tolist()]
-
-        def step(i: torch.Tensor, latents: torch.Tensor, timesteps: torch.Tensor, deltas: torch.Tensor,
-                 *tensors: torch.Tensor, label: bool) -> None:
-            it = iter(tensors)
-            texts = {role: (next(it), next(it) if has else None) for role, has in zip(roles, masked, strict=True)}
-            images = list(it) or None
-            timestep = timesteps.index_select(0, i).expand(latents.shape[0]) / 1000
-            hidden = latents.to(transformer.dtype)
-
-            def predict(role: str) -> torch.Tensor:
-                text, mask = texts[role]
-                return transformer(
-                    hidden_states=hidden, timestep=timestep, encoder_hidden_states=text,
-                    encoder_attention_mask=mask, context_latents=images, return_dict=False,
-                )[0].float()
-
-            noise_pred = predict("prompt" if label else "base")
-            if cfg:
-                unconditional = predict("negative")
-                noise_pred = unconditional + guidance * (noise_pred - unconditional)
-            delta = deltas.index_select(0, i).reshape(())
-            latents.copy_((latents.float() + delta * noise_pred).to(noise_pred.dtype))
-
-        denoise_loop(
-            step, range(steps), state=(latents,), inputs=(timesteps, deltas, *conditions, *context),
-            labels=labels, key=("fibo-2.denoise/1", roles, masked, guidance if cfg else None), on_step=on_step,
-        )
+            retrieve_timesteps(scheduler, steps, device, sigmas=np.linspace(1.0, 1 / steps, steps), mu=mu)
+            timesteps = scheduler.timesteps
+            texts = {
+                role: (embeds.to(device), None if mask is None else mask.to(device))
+                for role, (embeds, mask) in encoded.items()
+            }
+            images = [tensor.to(device=device, dtype=transformer.dtype) for tensor in image_latents] or None
+            for i, t in enumerate(timesteps.tolist()):
+                timestep = timesteps[i].expand(latents.shape[0]) / 1000
+                hidden = latents.to(transformer.dtype)
+                text_images = "base" not in texts or t / 1000 <= pipe.text_images_max_noise_level
+                roles = ["prompt" if text_images else "base", *(["negative"] if cfg else [])]
+                predictions = [
+                    transformer(
+                        hidden_states=hidden, timestep=timestep, encoder_hidden_states=texts[role][0],
+                        encoder_attention_mask=texts[role][1], context_latents=images, return_dict=False,
+                    )[0].float()
+                    for role in roles
+                ]
+                noise_pred = predictions[0]
+                if cfg:
+                    noise_pred = predictions[1] + guidance * (noise_pred - predictions[1])
+                latents = scheduler.step(noise_pred, timesteps[i], latents, return_dict=False)[0]
+                progress(i, steps)
         return latents.cpu()
 
     @uses_components("vae")

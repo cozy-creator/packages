@@ -20,7 +20,7 @@ import numpy as np
 import torch
 from cozy_runtime import rng, vlm
 from cozy_runtime.attention import Attention
-from cozy_runtime.author import Config, Loader, Model, denoise_loop, uses_components
+from cozy_runtime.author import Config, Loader, Model, retained, uses_components
 from PIL import Image, ImageDraw
 from transformers import (
     Qwen3VLConfig,
@@ -29,11 +29,6 @@ from transformers.initialization import no_init_weights
 from transformers.models.qwen3_vl.modeling_qwen3_vl import Qwen3VLTextModel, Qwen3VLVisionModel
 
 from .sampling import Euler, Flash, UniPC
-
-try:
-    from cozy_runtime.author import retained
-except ImportError:  # a Runtime without `retained`: each step recomputes the prefix
-    retained = None
 
 COMPONENT = "model"
 PATCH = 32
@@ -377,40 +372,27 @@ def _layer(
 @dataclass
 class Prefix:
     """A caption's causal prefix: each layer's keys and values as the Runtime holds them
-    (`retained`), and the bf16 RoPE tables of the tokens after it. With no store, `kv` is empty
-    and `again` recomputes them for each step."""
+    (`retained`), and the bf16 RoPE tables of the tokens after it."""
 
     kv: list[Any]
     cos: torch.Tensor
     sin: torch.Tensor
-    again: Callable[[], Prefix] | None = None
 
     def layers(self) -> Iterator[tuple[torch.Tensor, torch.Tensor]]:
         """Each layer's keys and values in turn, read as its layer runs: a held layer is resident
         only while it is read."""
-        for state in (self.again().kv if self.again is not None else self.kv):
+        for state in self.kv:
             yield state.get()
 
 
-class _Held:
-    """A layer's keys and values kept as they are: a recomputed prefix lives one step."""
-
-    def __init__(self, k: torch.Tensor, v: torch.Tensor) -> None:
-        self.kv = k, v
-
-    def get(self) -> tuple[torch.Tensor, torch.Tensor]:
-        return self.kv
-
-
 def _prefix(body: Body, seq: Sequence, vision: tuple[torch.Tensor, list[torch.Tensor]] | None,
-            image_token: int, device: torch.device, held: Any = None) -> Prefix:
+            image_token: int, device: torch.device, held: Any) -> Prefix:
     """The prefix's keys and values, the vision tower's tokens in place of its image pads and its
     deepstack features added after the first layers, as Qwen3-VL's text model adds them. Each
     layer's go to the Runtime's store `held` as they are made, so none outlives its layer as a
     plain tensor."""
     text = body.language_model
     h = text.embed_tokens(seq.ids[:, : seq.prefix].to(device))
-    # The image pads' places from the host's ids: a recomputed prefix runs inside a step.
     pads = (seq.ids[0, : seq.prefix] == image_token).nonzero().squeeze(1).to(device)
     if vision is not None:
         h[0, pads] = vision[0].to(h.dtype)
@@ -418,7 +400,7 @@ def _prefix(body: Body, seq: Sequence, vision: tuple[torch.Tensor, list[torch.Te
     kv = []
     for index, layer in enumerate(text.layers):
         h, k, v = _layer(layer, h, cos[:, : seq.prefix], sin[:, : seq.prefix], None)
-        kv.append(_Held(k, v) if held is None else held.put(k, v))
+        kv.append(held.put(k, v))
         if vision is not None and index < len(vision[1]):
             h[0, pads] = h[0, pads] + vision[1][index].to(h.dtype)
     return Prefix(kv, cos[:, seq.prefix :], sin[:, seq.prefix :])
@@ -444,14 +426,14 @@ class Recipe:
     clip: float = 0.0
 
 
-class HiDreamO1(Model[O1Graph], encoded_leaves="accept"):
+class HiDreamO1(Model[O1Graph]):
     """One HiDream-O1-Image checkpoint, full or Dev."""
 
     graph: O1Graph
     processor: Any
 
     def load(self, loader: Loader) -> None:
-        self.graph = loader.construct(O1Graph, factory=O1Graph)
+        self.graph = loader.construct(O1Graph)
         self.processor = vlm.processor(loader.assets)
 
     @property
@@ -472,12 +454,11 @@ class HiDreamO1(Model[O1Graph], encoded_leaves="accept"):
         steps: int,
         guidance: float,
         seed: int,
-        on_step: Callable[[int], None],
+        progress: Callable[[int, int], None],
         interval: bool,
     ) -> Image.Image:
-        """Upstream's `generate_image` from prepared references (each on the 32 px grid) as one
-        `denoise_loop`: CFG against `negative` when it is given, over the first `GUIDED` of the
-        steps if `interval`. Whether a step runs CFG, and the sampler's choices, are its label."""
+        """Upstream's `generate_image` from prepared references (each on the 32 px grid): CFG against
+        `negative` when it is given, over the first `GUIDED` of the steps if `interval`."""
         body = self.body
         image_token = self.processor.tokenizer.convert_tokens_to_ids("<|image_pad|>")
         device = torch.device(str(self.device))
@@ -486,56 +467,40 @@ class HiDreamO1(Model[O1Graph], encoded_leaves="accept"):
         conditions = [condition_image(r, len(references)) for r in references]
         grids = [(r.height // PATCH, r.width // PATCH) for r in references]
         captions = [caption] if negative is None else [caption, negative]
-        with torch.inference_mode():
+        seqs = [sequence(self.processor, text, conditions, grids, rows, columns) for text in captions]
+        # Every caption's prefix K/V is read by every step: the Runtime holds it (on the card while
+        # there is room, else refilled from pinned host memory) until the loop ends.
+        config = body.language_model.config
+        per_token = 2 * config.num_key_value_heads * config.head_dim * torch.bfloat16.itemsize
+        nbytes = sum(seq.prefix for seq in seqs) * per_token * config.num_hidden_layers
+        with torch.inference_mode(), retained(nbytes) as held:
             vision = None
-            seqs = [sequence(self.processor, text, conditions, grids, rows, columns) for text in captions]
-            # Every caption's prefix K/V is read by every step: the Runtime holds it (on the card
-            # while there is room, else refilled from pinned host memory), or each step recomputes it.
-            config = body.language_model.config
-            per_token = 2 * config.num_key_value_heads * config.head_dim * torch.bfloat16.itemsize
-            nbytes = sum(seq.prefix for seq in seqs) * per_token * config.num_hidden_layers
-            held = None if retained is None else retained(nbytes)
             prefixes = []
             for seq in seqs:
                 if seq.pixel_values is not None and seq.grid is not None and vision is None:
                     out = body.visual(seq.pixel_values.to(device, torch.bfloat16), grid_thw=seq.grid.to(device))
                     vision = (out.pooler_output, out.deepstack_features)
-                prefix = _prefix(body, seq, vision, image_token, device, held)
-                if held is None:
-                    prefix = Prefix([], prefix.cos, prefix.sin, again=lambda seq=seq, vision=vision: _prefix(
-                        body, seq, vision, image_token, device))
-                prefixes.append(prefix)
-            if held is not None:
-                vision = out = None  # read by the prefixes alone
+                prefixes.append(_prefix(body, seq, vision, image_token, device, held))
+            vision = out = None  # read by the prefixes alone
             refs = (torch.cat([patches(r) for r in references]).to(device, torch.bfloat16)[None]
                     if references else None)
             noise = recipe.noise * rng.noise((1, 3, height, width), seed + 1)
             sampler: Euler | UniPC
             if recipe.sampler == "unipc":
-                sampler = UniPC(steps, recipe.shift)
+                sampler = UniPC(device, steps, recipe.shift)
             elif recipe.sampler == "flash":
-                sampler = Flash(seed + 1, recipe.noise, recipe.clip)
+                sampler = Flash(device, seed + 1, recipe.noise, recipe.clip)
             else:
-                sampler = Euler()
+                sampler = Euler(device)
             count = len(sampler.timesteps)
-            labels = [
-                (len(prefixes) > 1 and (not interval or index < round(GUIDED * count)), sampled)
-                for index, sampled in enumerate(sampler.labels())
-            ]
-            with torch.inference_mode(False):
-                z = to_rows(noise[0].to(device, torch.bfloat16))
-                history = sampler.carried(z)
-                times = torch.tensor([float(t) for t in sampler.timesteps], device=device) / 1000.0
-                tables = sampler.tables(device)
-            extra = () if refs is None else (refs,)
-
-            def step(i: torch.Tensor, z: torch.Tensor, *tensors: torch.Tensor, label: tuple[bool, Any]) -> None:
-                carried, times, rest = tensors[: len(history)], tensors[len(history)], tensors[len(history) + 1:]
-                refs, tables = rest[: len(extra)], rest[len(extra):]
-                guided, sampled = label
-                t = times.index_select(0, i).reshape(())
+            guided_steps = round(GUIDED * count) if interval else count
+            z = to_rows(noise[0].to(device, torch.bfloat16))
+            times = torch.tensor([float(t) for t in sampler.timesteps], device=device) / 1000.0
+            for i in range(count):
+                guided = len(prefixes) > 1 and i < guided_steps
+                t = times[i]
                 sigma = t.clamp_min(T_EPS)
-                inputs = torch.cat([z, *refs], dim=1) if refs else z
+                inputs = z if refs is None else torch.cat([z, refs], dim=1)
                 velocities = [
                     (_predict(body, prefix, 1.0 - t, inputs, n).float() - z.float()) / sigma
                     for prefix in (prefixes if guided else prefixes[:1])
@@ -543,16 +508,8 @@ class HiDreamO1(Model[O1Graph], encoded_leaves="accept"):
                 velocity = velocities[0]
                 if guided:
                     velocity = velocities[1] + guidance * (velocities[0] - velocities[1])
-                z.copy_(sampler.step(i, sampled, -velocity, z.float(), carried, tables).to(torch.bfloat16))
-
-            # Eager: the prefix's K/V are read from the Runtime's store as each layer runs.
-            denoise_loop(step, range(count), state=(z,), carried=history, inputs=(times, *extra, *tables),
-                         labels=labels, on_step=on_step)
-            # The prefixes die with the loop. A store from a Runtime before `close` lets its regions
-            # go with their last reference.
-            prefixes = []
-            if held is not None and hasattr(held, "close"):
-                held.close()
+                z = sampler.step(i, -velocity, z.float()).to(torch.bfloat16)
+                progress(i, count)
             image = unpatch((z + 1) / 2, height, width).cpu().float()
         pixels = np.round(np.clip(image.numpy().transpose(1, 2, 0) * 255, 0, 255)).astype(np.uint8)
         return Image.fromarray(pixels)

@@ -23,7 +23,7 @@ from typing import Any
 
 import torch
 from cozy_runtime import lm, vlm
-from cozy_runtime.author import Config, Loader, Model, UnsupportedInput, uses_components
+from cozy_runtime.author import Config, Loader, Model, Serving, UnsupportedInput, memoize, uses_components
 from PIL import Image, ImageOps
 from transformers import AutoConfig
 from transformers.initialization import no_init_weights
@@ -196,7 +196,7 @@ class DrafterGraph:
         self.components: dict[str, torch.nn.Module] = {DRAFT: head.to(torch.bfloat16).eval()}
 
 
-class Drafter(Model[DrafterGraph], encoded_leaves="accept"):
+class Drafter(Model[DrafterGraph]):
     """Qwen3.5-9B's multi-token-prediction head (BFL's upsampler is that model fine-tuned, its
     head left out). The upsampler drafts tokens with it and keeps the ones its own decode
     agrees with: ~1.9 tokens a step."""
@@ -204,7 +204,7 @@ class Drafter(Model[DrafterGraph], encoded_leaves="accept"):
     graph: DrafterGraph
 
     def load(self, loader: Loader) -> None:
-        self.graph = loader.construct(DrafterGraph, factory=DrafterGraph)
+        self.graph = loader.construct(DrafterGraph)
 
     @uses_components(DRAFT)
     def drafting(self, body: Callable[[], str]) -> str:
@@ -252,8 +252,10 @@ def policy_reference(image: Image.Image, n_refs: int) -> Image.Image:
     return Image.open(io.BytesIO(buffer.getvalue())).convert("RGB")
 
 
-class Upsampler(Model[UpsamplerGraph], encoded_leaves="accept", min_bits=4, phase="decode"):
+class Upsampler(Model[UpsamplerGraph]):
     """Rewrites a short request, and its references when editing, into the caption Klein wants."""
+
+    serving = Serving(min_bits=4, phase="decode")
 
     graph: UpsamplerGraph
     processor: Any
@@ -264,14 +266,12 @@ class Upsampler(Model[UpsamplerGraph], encoded_leaves="accept", min_bits=4, phas
         return lm.install(plan, self.graph.components[COMPONENT])
 
     def load(self, loader: Loader) -> None:
-        self.graph = loader.construct(UpsamplerGraph, factory=UpsamplerGraph)
+        self.graph = loader.construct(UpsamplerGraph)
         self.processor = vlm.processor(loader.assets)
         self.system_prompts = json.loads(files(__package__).joinpath("system_prompts.json").read_bytes())
 
-    @uses_components(
-        COMPONENT, memoize=True,
-        memo_dependencies=(policy_reference, detect, upsampling_input, reconcile, _valid_added),
-    )
+    @memoize
+    @uses_components(COMPONENT)
     def upsample(self, prompt: str, images: list[Image.Image], canvas: str | None, table: str = "") -> str:
         """`table` is the request's rows as JSON, locked; without them, boxes the prompt carries
         lock themselves."""

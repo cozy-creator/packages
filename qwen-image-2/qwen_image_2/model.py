@@ -4,14 +4,13 @@ The architecture and sampling are Diffusers' (`QwenImage21Pipeline`, Diffusers 0
 constructs and fills the modules and owns their residency; no Diffusers weight loader, device
 placement, or offload hook takes part in serving.
 
-A caller's LoRAs adapt the DiT through Runtime's PEFT layers (`__adapter_compatibility__`). The
+A caller's LoRAs adapt the DiT through Runtime's PEFT layers (`serving.loras`). The
 Turbo overlay (`turbo.FunAccLoRA`) reaches the DiT's linears through permanent hooks
 (`cozy_runtime.lora.Hook`), which Runtime bakes into the resident weights while it is armed.
 """
 
 from __future__ import annotations
 
-import math
 from collections.abc import Callable, Mapping, Sequence
 from functools import partial
 from typing import Any
@@ -53,23 +52,22 @@ from transformers import (
 from transformers import initialization as transformer_init
 from transformers.modeling_utils import local_torch_dtype
 
-from cozy_runtime import fusion, lora, rng, tiles, vlm
+from cozy_runtime import rng, tiles, vlm
+from cozy_runtime.accel import fusion, hold_dtype, lora
 from cozy_runtime.author import (
-    AdapterCompatibility,
     Config,
-    ConformanceError,
     Loader,
-    MemoDistribution,
     Model,
+    Serving,
     Telemetry,
-    denoise_loop,
-    hold_dtype,
+    UnsupportedInput,
+    memoize,
     retained,
     uses_components,
 )
-from cozy_runtime.author.kernels import Plan
+from cozy_runtime.accel.kernels import Plan
 
-from ._prepared import _FlowEuler, _full_step, _Joint, _Layout, _cached_step
+from ._prepared import _Joint, _Layout, cached_pass, joint_pass
 
 
 def _modulation(block: Any, arguments: Mapping[str, Any]) -> fusion.Modulation:
@@ -191,7 +189,7 @@ def _stored(config: Config, component: str, module: torch.nn.Module) -> torch.dt
     stored = {config.tensor_dtype(f"{component}.{name}", default="f32") for name, _ in module.named_parameters()}
     dtype = _DTYPES.get(next(iter(stored))) if len(stored) == 1 else None
     if dtype is None:
-        raise ConformanceError(
+        raise UnsupportedInput(
             f"{component} stores {sorted(stored)}; Qwen Image builds it in one of {sorted(_DTYPES)}",
             code="artifact_dtype",
             fields=[component],
@@ -255,30 +253,17 @@ class _StagedPipeline(QwenImage21Pipeline):
         return self.device_placed
 
 
-#: Code the encoders read beyond their own bodies: their memo key binds it.
-_ENCODER_CODE = (
-    _StagedPipeline,
-    vlm.processor,
-    MemoDistribution("diffusers"),
-    MemoDistribution("transformers"),
-)
-
-
-class QwenImage21Model(
-    Model[QwenImage21Graph],
-    encoded_leaves="accept",
-    # The 32 DiT blocks attend at 8 bits (comfy-kitchen INT8 on RTX 40-class cards): attention is
-    # two thirds of a 4 MP step. A 16-bit request attends exactly.
-    attention_bits={"transformer.transformer_blocks.": 8},
-):
-    #: Caller LoRAs on the DiT, at any strength: the Runtime bakes them into the weights.
-    __adapter_compatibility__ = (AdapterCompatibility("lora", "", ("transformer",), -math.inf, math.inf),)
+class QwenImage21Model(Model[QwenImage21Graph]):
+    #: The 32 DiT blocks attend at 8 bits (comfy-kitchen INT8 on RTX 40-class cards): attention is two thirds
+    #: of a 4 MP step; a 16-bit request attends exactly. Caller LoRAs on the DiT, at any strength: the Runtime
+    #: bakes them into the weights.
+    serving = Serving(attention_bits={"transformer.transformer_blocks.": 8}, loras=("transformer",))
 
     graph: QwenImage21Graph
     processor: Any
 
     def load(self, loader: Loader) -> None:
-        self.graph = loader.construct(QwenImage21Graph, factory=build_qwen_image21)
+        self.graph = loader.construct(build_qwen_image21)
         self.processor = vlm.processor(loader.assets, "processor/", self.graph.processor_config)
 
     def execution_plan(self, plan: Plan) -> str:
@@ -318,7 +303,8 @@ class QwenImage21Model(
         pipeline.device_placed = torch.device(str(self.device))
         return pipeline
 
-    @uses_components("text_encoder", memoize=True, memo_dependencies=_ENCODER_CODE)
+    @memoize
+    @uses_components("text_encoder")
     def encode(self, prompt: str) -> tuple[Any, Any]:
         encoder = self.graph.components["text_encoder"]
         with torch.inference_mode():
@@ -327,7 +313,8 @@ class QwenImage21Model(
             )
         return embeds, mask
 
-    @uses_components("vae", memoize=True, memo_dependencies=_ENCODER_CODE)
+    @memoize
+    @uses_components("vae")
     def encode_reference_images(self, images: list[Any]) -> tuple[list[Any], torch.Tensor]:
         """Encode each reference once, using Diffusers' 1 MP conditioning size."""
         vae = self.graph.components["vae"]
@@ -352,7 +339,8 @@ class QwenImage21Model(
                 )
         return resized, torch.cat(packed, dim=1)
 
-    @uses_components("text_encoder", memoize=True, memo_dependencies=_ENCODER_CODE)
+    @memoize
+    @uses_components("text_encoder")
     def encode_image_prompt(self, prompt: str, images: list[Any]) -> tuple[Any, Any, Any]:
         """Encode the instruction and ordered reference images as one condition."""
         encoder = self.graph.components["text_encoder"]
@@ -372,7 +360,7 @@ class QwenImage21Model(
         height: int,
         steps: int,
         seed: int,
-        on_step: Callable[[int], None],
+        progress: Callable[[int, int], None],
         sigmas: Sequence[float] | None = None,
         scheduler: Mapping[str, Any] | None = None,
         heads: torch.Tensor | None = None,
@@ -386,17 +374,16 @@ class QwenImage21Model(
 
         Text and reference tokens modulate from t = 0, so their K/V are every step's: step 0
         extracts them into the Runtime's store (`retained`) and steps 1..N-1 run the cached pass
-        over the target tokens as one `denoise_loop`. With no room for them, or a padded prompt,
-        every step is the whole joint pass. `sigmas`: a distilled schedule (its length is `steps`),
+        over the target tokens. With a padded prompt every step is the whole joint pass. `sigmas`: a distilled schedule (its length is `steps`),
         else the pipeline's uniform spacing; `scheduler`, an overlay's fields over the checkpoint's.
         `heads`: a parallel decoder's output projection per step (PDD), whose prediction, and so the
         state, is F32."""
         transformer = self.graph.components["transformer"]
         if not transformer.config.causal_condition:
-            raise ConformanceError("Qwen Image 2.1 denoises with causal conditioning", code="artifact_config")
+            raise UnsupportedInput("Qwen Image 2.1 denoises with causal conditioning", code="artifact_config")
         device = torch.device(str(self.device))
         pipeline = self._pipeline(sigmas, scheduler)
-        scheduler = pipeline.scheduler
+        euler: Any = pipeline.scheduler
         blocks = transformer.transformer_blocks
         multiple_of = pipeline.vae_scale_factor * 2
         width = width // multiple_of * multiple_of
@@ -404,7 +391,7 @@ class QwenImage21Model(
         factor = pipeline.vae_scale_factor
         sizes = [calculate_dimensions(1024 * 1024, image.width / image.height)[:2] for image in reference_images or []]
 
-        with torch.inference_mode(False), torch.no_grad():
+        with torch.no_grad():
             embeds = embeds.to(device=device, dtype=transformer.dtype)
             mask = None if mask is None else mask.to(device=device)
             references = () if reference_latents is None else (reference_latents.to(device=device, dtype=transformer.dtype),)
@@ -417,28 +404,35 @@ class QwenImage21Model(
             spacing = np.array(sigmas, dtype=np.float32) if sigmas else np.linspace(1.0, 1 / steps, steps)
             mu = calculate_shift(
                 latents.shape[1],
-                scheduler.config.get("base_image_seq_len", 256),
-                scheduler.config.get("max_image_seq_len", 4096),
-                scheduler.config.get("base_shift", 0.5),
-                scheduler.config.get("max_shift", 1.15),
+                euler.config.get("base_image_seq_len", 256),
+                euler.config.get("max_image_seq_len", 4096),
+                euler.config.get("base_shift", 0.5),
+                euler.config.get("max_shift", 1.15),
             )
-            timesteps, steps = retrieve_timesteps(scheduler, steps, device, sigmas=spacing, mu=mu)
-            scheduler.set_begin_index(0)
-            euler = _FlowEuler.from_scheduler(scheduler, device)
+            _, steps = retrieve_timesteps(euler, steps, device, sigmas=spacing, mu=mu)
+            euler.set_begin_index(0)
+            timesteps = euler.timesteps
+            # The pipeline casts the timestep to the latent dtype and only then divides by 1000.
+            times = timesteps.to(torch.bfloat16) / 1000
             # The joint sequence's image slots: the text encoder's for each reference, then one per
             # 2x2 group of target latents, as the pipeline appends them.
             slots = image_pad_mask if image_pad_mask is not None else embeds.new_zeros((1, embeds.shape[1]), dtype=torch.bool)
             img_mask = torch.cat([slots.to(device), slots.new_ones(1, latents.shape[1] // 4, device=device)], dim=1)
             img_shapes = [[*((1, h // factor, w // factor) for w, h in sizes), (1, height // factor, width // factor)]]
-            layout = _Layout(transformer, img_shapes, img_mask, device)
-            config = transformer.config
-            nbytes = 2 * layout.prefix_len * config.num_attention_heads * config.attention_head_dim
-            held = None if mask is not None else retained(nbytes * transformer.dtype.itemsize * len(blocks))
-            if held is None:
+            if mask is not None:
                 joint = _Joint(transformer, img_shapes, img_mask, mask, device)
                 # Under a parallel decoder the state is F32 from the first step, as `scheduler.step` makes it.
                 latents = latents if heads is None else latents.float()
-            else:
+                for i, t in enumerate(timesteps):
+                    noise = joint_pass(transformer, joint, times[i : i + 1], latents, embeds, references,
+                                       None if heads is None else heads[i])
+                    latents = euler.step(noise, t, latents, return_dict=False)[0]
+                    progress(i, steps)
+                return latents
+            layout = _Layout(transformer, img_shapes, img_mask, device)
+            config = transformer.config
+            nbytes = 2 * layout.prefix_len * config.num_attention_heads * config.attention_head_dim
+            with retained(nbytes * transformer.dtype.itemsize * len(blocks)) as held:
                 # Step 0 prefills each layer's prefix K/V into the store over the full joint sequence.
                 kv_cache = _RetainedKV(len(blocks), held)
                 first = None
@@ -464,28 +458,13 @@ class QwenImage21Model(
                 # A parallel decoder's prediction is F32, and so is the state from here (PDD's
                 # `native_time_fp32_state`); the DiT reads it in its own dtype.
                 noise = noise if heads is None else noise.float()
-                latents = scheduler.step(noise, timesteps[0], latents, return_dict=False)[0]
-                del noise
-                on_step(0)
-        projections = () if heads is None else (heads,)
-        if held is None:
-            denoise_loop(
-                _full_step(transformer, joint.segments, joint.length, latents.shape[1], mask is not None,
-                           heads=heads is not None),
-                range(steps), state=(latents,),
-                inputs=(euler.ts, euler.dt, *joint.inputs(), *projections, embeds, *references),
-                on_step=on_step,
-            )
-            return latents
-        with held:
-            if steps > 1:
-                denoise_loop(
-                    _cached_step(transformer, heads=heads is not None), range(1, steps), state=(latents,),
-                    inputs=(euler.ts, euler.dt, layout.rotary_emb, layout.modulation_mask, *projections,
-                            *(layer.state for layer in kv_cache.layer_caches)),
-                    key=("qwen-image-2.1.cached/1" if heads is None else "qwen-image-2.1.cached-heads/1", len(blocks)),
-                    on_step=on_step,
-                )
+                latents = euler.step(noise, timesteps[0], latents, return_dict=False)[0]
+                progress(0, steps)
+                for i in range(1, steps):
+                    noise = cached_pass(transformer, layout, kv_cache, times[i : i + 1], latents,
+                                        None if heads is None else heads[i])
+                    latents = euler.step(noise, timesteps[i], latents, return_dict=False)[0]
+                    progress(i, steps)
         return latents
 
     @uses_components("vae")

@@ -26,19 +26,20 @@ from typing import Any
 
 import numpy as np
 import torch
-from cozy_runtime import fusion, lora, rng, tiles
+from cozy_runtime import rng, tiles
+from cozy_runtime.accel import fusion, hold_dtype, lora
 from cozy_runtime.author import (
-    OutputError,
     Config,
     Loader,
     Model,
     ModelAssets,
+    OutputError,
+    Serving,
     Telemetry,
-    denoise_loop,
-    hold_dtype,
+    memoize,
     uses_components,
 )
-from cozy_runtime.author.kernels import Plan
+from cozy_runtime.accel.kernels import Plan
 from diffusers import (
     AutoencoderKLQwenImage,
     FlowMatchEulerDiscreteScheduler,
@@ -216,10 +217,6 @@ def reference_sizes(image: Image.Image) -> tuple[tuple[int, int], tuple[int, int
 References = tuple[torch.Tensor, list[tuple[int, int, int]]]
 
 
-#: Code the encoders read beyond their own bodies: their memo keys bind it.
-_ENCODER_CODE = (build_processor, reference_sizes, QwenImagePipeline, QwenImageEditPlusPipeline)
-
-
 def sample(
     transformer: nn.Module,
     device: torch.device,
@@ -234,22 +231,19 @@ def sample(
     steps: int,
     guidance: float,
     seed: int,
-    on_step: Callable[[int], None],
+    progress: Callable[[int, int], None],
 ) -> torch.Tensor:
-    """Upstream's sampling loop as one `denoise_loop`: seeded noise drawn on the CPU in the DiT's
-    dtype, Euler steps on `linspace(1, 1/steps)` shifted by `scheduler_config`, the references'
-    tokens beside the target, and true CFG with the conditional norm restored when `negative` is
-    given. Each step is the DiT's forward per prompt and `FlowMatchEulerDiscreteScheduler.step`."""
-    # Upstream's latents take the prompt's dtype, the DiT's (bf16).
+    """Upstream's sampling loop (`QwenImageEditPlusPipeline.__call__`): seeded noise drawn on the CPU in
+    the DiT's dtype, `FlowMatchEulerDiscreteScheduler` on `linspace(1, 1/steps)` shifted by the canvas,
+    the references' tokens beside the target, and true CFG with the conditional norm restored when
+    `negative` is given."""
     dtype = transformer.dtype
     rows, columns = height // PATCH, width // PATCH
-    scheduler = FlowMatchEulerDiscreteScheduler.from_config(dict(scheduler_config))
-    channels = transformer.config.in_channels // 4
-    grids = [(1, rows, columns), *(references[1] if references else [])]
-    texts = [(embeds, mask), *([negative] if negative is not None else [])]
-    masked = tuple(text_mask is not None for _, text_mask in texts)
+    scheduler: Any = FlowMatchEulerDiscreteScheduler.from_config(dict(scheduler_config))
     config = scheduler.config
-    with torch.inference_mode(False), torch.no_grad():
+    channels = transformer.config.in_channels // 4
+    img_shapes = [[(1, rows, columns), *(references[1] if references else [])]]
+    with torch.no_grad():
         noise = rng.noise((1, 1, channels, rows * 2, columns * 2), seed, dtype=dtype)
         latents = QwenImagePipeline._pack_latents(noise.to(device), 1, channels, rows * 2, columns * 2)
         mu = calculate_shift(
@@ -260,60 +254,44 @@ def sample(
             config.get("max_shift", 1.15),
         )
         retrieve_timesteps(scheduler, steps, device, sigmas=np.linspace(1.0, 1 / steps, steps), mu=mu)
-        # The pipeline casts the f32 timestep to the DiT's dtype, then divides by 1000; Euler adds
-        # the f32 sigma delta times the bf16 prediction to the latents in f32, then rounds to bf16.
-        times = scheduler.timesteps.to(dtype)
-        deltas = scheduler.sigmas[1:] - scheduler.sigmas[:-1]
-        conditions = [] if references is None else [references[0].to(device=device, dtype=dtype)]
-        for text, text_mask in texts:
-            conditions.append(text.to(device=device, dtype=dtype))
-            if text_mask is not None:
-                conditions.append(text_mask.to(device))
-    referenced, size = references is not None, latents.shape[1]
-
-    def step(i: torch.Tensor, latents: torch.Tensor, times: torch.Tensor, deltas: torch.Tensor,
-             *conditions: torch.Tensor) -> None:
-        tensors = iter(conditions)
-        model_input = torch.cat([latents, next(tensors)], dim=1) if referenced else latents
-        timestep = times.index_select(0, i)
-        predictions = []
-        for has_mask in masked:
-            text = next(tensors)
-            predictions.append(transformer(
-                hidden_states=model_input,
-                timestep=timestep / 1000,
-                encoder_hidden_states_mask=next(tensors) if has_mask else None,
-                encoder_hidden_states=text,
-                img_shapes=[grids],
-                attention_kwargs={},
-                return_dict=False,
-            )[0][:, :size])
-        prediction = predictions[0]
-        if len(predictions) > 1:
-            combined = predictions[1] + guidance * (prediction - predictions[1])
-            prediction = combined * (
-                torch.norm(prediction, dim=-1, keepdim=True)
-                / torch.norm(combined, dim=-1, keepdim=True)
-            )
-        delta = deltas.index_select(0, i).reshape(())
-        latents.copy_((latents.float() + delta * prediction).to(prediction.dtype))
-
-    denoise_loop(
-        step, range(steps), state=(latents,), inputs=(times, deltas, *conditions),
-        key=("qwen-image.sample/1", tuple(grids), masked, referenced,
-             guidance if negative is not None else None),
-        on_step=on_step,
-    )
+        image = None if references is None else references[0].to(device=device, dtype=dtype)
+        texts = [
+            (text.to(device=device, dtype=dtype), None if text_mask is None else text_mask.to(device))
+            for text, text_mask in [(embeds, mask), *([negative] if negative is not None else [])]
+        ]
+        for i, t in enumerate(scheduler.timesteps):
+            model_input = latents if image is None else torch.cat([latents, image], dim=1)
+            timestep = t.expand(latents.shape[0]).to(latents.dtype)
+            predictions = [
+                transformer(
+                    hidden_states=model_input,
+                    timestep=timestep / 1000,
+                    encoder_hidden_states_mask=text_mask,
+                    encoder_hidden_states=text,
+                    img_shapes=img_shapes,
+                    attention_kwargs={},
+                    return_dict=False,
+                )[0][:, : latents.shape[1]]
+                for text, text_mask in texts
+            ]
+            prediction = predictions[0]
+            if negative is not None:
+                combined = predictions[1] + guidance * (prediction - predictions[1])
+                prediction = combined * (
+                    torch.norm(prediction, dim=-1, keepdim=True) / torch.norm(combined, dim=-1, keepdim=True)
+                )
+            latents = scheduler.step(prediction, t, latents, return_dict=False)[0]
+            progress(i, steps)
     return latents.cpu()
 
 
-class QwenImageTransformer(Model[TransformerGraph], encoded_leaves="accept"):
+class QwenImageTransformer(Model[TransformerGraph]):
     """A Qwen-Image DiT alone (Qwen-Image-Edit-2511's): it denoises what a `QwenImage` encodes."""
 
     graph: TransformerGraph
 
     def load(self, loader: Loader) -> None:
-        self.graph = loader.construct(TransformerGraph, factory=TransformerGraph)
+        self.graph = loader.construct(TransformerGraph)
 
     @uses_components("transformer")
     def denoise(self, *args: Any, scheduler_config: Mapping[str, Any] | None = None, **kwargs: Any) -> torch.Tensor:
@@ -327,7 +305,7 @@ class QwenImageTransformer(Model[TransformerGraph], encoded_leaves="accept"):
         )
 
 
-class QwenImage(Model[QwenImageGraph], encoded_leaves="accept"):
+class QwenImage(Model[QwenImageGraph]):
     """A whole Qwen-Image checkpoint (Qwen-Image-2512): it encodes text and references for either
     DiT, denoises on its own and decodes."""
 
@@ -335,7 +313,7 @@ class QwenImage(Model[QwenImageGraph], encoded_leaves="accept"):
     processor: Qwen2VLProcessor
 
     def load(self, loader: Loader) -> None:
-        self.graph = loader.construct(QwenImageGraph, factory=QwenImageGraph)
+        self.graph = loader.construct(QwenImageGraph)
         self.processor = build_processor(loader.assets, self.graph.text_encoder_config)
 
     def execution_plan(self, plan: Plan) -> str:
@@ -375,7 +353,8 @@ class QwenImage(Model[QwenImageGraph], encoded_leaves="accept"):
             return QwenImageEditPlusPipeline(processor=self.processor, **parts)
         return QwenImagePipeline(**parts)
 
-    @uses_components("text_encoder", memoize=True, memo_dependencies=_ENCODER_CODE)
+    @memoize
+    @uses_components("text_encoder")
     def encode(self, prompt: str, images: list[Image.Image]) -> tuple[torch.Tensor, torch.Tensor | None]:
         """The prompt as upstream reads it, its embeddings and mask (None when every token is
         valid): with references, the edit template with each at its 384² area; without, the
@@ -393,7 +372,8 @@ class QwenImage(Model[QwenImageGraph], encoded_leaves="accept"):
                 embeds, mask = pipeline.encode_prompt(prompt, device=device, max_sequence_length=TEXT_TOKENS)
         return embeds.cpu(), None if mask is None else mask.cpu()
 
-    @uses_components("vae", memoize=True, memo_dependencies=_ENCODER_CODE)
+    @memoize
+    @uses_components("vae")
     def encode_references(self, images: list[Image.Image]) -> References:
         """Each reference at its 1024² area through the VAE (argmax), normalized and packed: the
         pipeline's `_encode_vae_image` of one frame without Diffusers' feature cache (each
@@ -564,11 +544,13 @@ class QwenImageLoRA(Model[LoRAGraph]):
     """A Qwen-Image LoRA on all twelve linears of every DiT block (the Lightning distillation),
     with the sampling it was distilled for."""
 
+    serving = Serving(encoded_leaves=False)
+
     graph: LoRAGraph
     scheduler_config: Mapping[str, Any] = LIGHTNING_SCHEDULER
 
     def load(self, loader: Loader) -> None:
-        self.graph = loader.construct(LoRAGraph, factory=build_lora)
+        self.graph = loader.construct(build_lora)
 
     @uses_components(LORA_COMPONENT)
     def denoise(self, base: QwenImage | QwenImageTransformer, *args: Any, **kwargs: Any) -> torch.Tensor:

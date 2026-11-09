@@ -1,10 +1,10 @@
 [project]
 name = "krea-2"
-version = "0.6.0"
+version = "0.6.1"
 description = "Cozy text-to-image with Krea 2: Raw, the full model, and Turbo, its 8-step distillation"
 requires-python = ">=3.12"
 dependencies = [
-    "cozy-runtime[adapters,media]>=0.43,<0.44",
+    "cozy-runtime[adapters,media]>=0.43.1,<0.44",
     # Krea2Pipeline and its modules are in Diffusers since 0.39.
     "diffusers>=0.39",
     "msgspec>=0.19",
@@ -42,3 +42,7 @@ explicit = true
 
 [tool.uv.sources]
 torch = { index = "pytorch-cu130", marker = "sys_platform == 'win32'" }
+# 0.22.1's Runtime (0.43.1: 0.43's tools with the 0.21.3 batch) and the TensorFS it pins, by git rev until
+# both publish: the release relocks to PyPI.
+cozy-runtime = { git = "https://github.com/cozy-creator/cozy-runtime", rev = "c79a97d957b047632ef2c11d374b77b78a30ac32" }
+tensorfs = { git = "https://github.com/cozy-creator/cozy-creator", rev = "11cb6fa563f9fc1e0ae68fa54502164431503846", subdirectory = "crates/tensorfs-py" }

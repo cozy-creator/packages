@@ -14,8 +14,8 @@ from __future__ import annotations
 from typing import Any
 
 import torch
-from cozy_runtime import lora
-from cozy_runtime.author import Config, Loader, Model, uses_components
+from cozy_runtime.accel import lora
+from cozy_runtime.author import Config, Loader, Model, Serving, uses_components
 from torch import nn
 
 from .model import PROJ_OUT, SITES, QwenImage21Model
@@ -69,14 +69,16 @@ class FunAccGraph:
         self.components: dict[str, nn.Module] = {COMPONENT: root.to(dtype)}
 
 
-class FunAccLoRA(Model[FunAccGraph], min_bits=16):
+class FunAccLoRA(Model[FunAccGraph]):
     """Fun Acc's factors and heads, kept at their stored 16 bits."""
+
+    serving = Serving(encoded_leaves=False, min_bits=16)
 
     graph: FunAccGraph
     steps = STEPS
 
     def load(self, loader: Loader) -> None:
-        self.graph = loader.construct(FunAccGraph, factory=FunAccGraph)
+        self.graph = loader.construct(FunAccGraph)
 
     @uses_components(COMPONENT)
     def denoise(self, base: QwenImage21Model, *args: Any, **kwargs: Any) -> Any:

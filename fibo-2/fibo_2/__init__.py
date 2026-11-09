@@ -7,28 +7,9 @@ import re
 from typing import Annotated
 
 import msgspec
-from cozy_runtime.author import (
-    Adjustments,
-    Advanced,
-    App,
-    AspectRatio,
-    Context,
-    Guidance,
-    Image,
-    ImageRequest,
-    ImageResult,
-    Memoize,
-    NegativePrompt,
-    Outputs,
-    Prompt,
-    Ratios,
-    Seed,
-    Sizes,
-    Steps,
-    Telemetry,
-    UnsupportedInput,
-    held,
-)
+from cozy_runtime.author import Adjustments, App, Context, Memoize, Outputs, Seed, Telemetry, UnsupportedInput
+from cozy_runtime.fields import Advanced, AspectRatio, Image, Prompt, Ratios
+from cozy_runtime.image import Guidance, ImageRequest, ImageResult, NegativePrompt, Sizes, Steps, held
 from PIL import Image as PILImage
 
 from .model import Fibo2
@@ -169,7 +150,7 @@ def _generate(
     with tel.stage("generating image", overall_range=(0.25, 0.95)):
         tokens = model.denoise(
             encoded, latents, width=width, height=height, steps=steps, guidance=guidance, seed=seed,
-            on_step=tel.step_callback(steps, stage="generating image", overall_range=(0.25, 0.95)),
+            progress=ctx.progress,
         )
     with tel.stage("decoding image", overall_range=(0.95, 0.99)):
         image = model.decode(tokens)

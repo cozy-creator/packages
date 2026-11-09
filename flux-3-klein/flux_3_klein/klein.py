@@ -5,7 +5,7 @@ encoding of its Flux3 modular pipeline); reference preparation and sampling foll
 code (`black-forest-labs/flux-3-image-klein`, `flux3/pipeline.py`, `flux3/sampling.py`). The
 transformer's forward is the package's: every block is one parallel block over one token sequence,
 as in BFL's code, which Runtime fuses (`BLOCK`). Runtime constructs and fills the modules and owns
-their residency. A caller's LoRAs adapt the DiT through Runtime's PEFT layers (`__adapter_compatibility__`).
+their residency. A caller's LoRAs adapt the DiT through Runtime's PEFT layers (`serving.loras`).
 """
 
 from __future__ import annotations
@@ -13,25 +13,26 @@ from __future__ import annotations
 import itertools
 import math
 from collections.abc import Callable, Mapping
+from contextlib import ExitStack
 from typing import Any, NamedTuple
 
 import numpy as np
 import torch
 import torch.nn.functional as F
-from cozy_runtime import fusion, rng, vlm
+from cozy_runtime import rng, vlm
+from cozy_runtime.accel import fusion, hold_dtype
 from cozy_runtime.author import (
-    AdapterCompatibility,
-    OutputError,
     Config,
     Loader,
     Model,
+    OutputError,
+    Serving,
     Telemetry,
-    denoise_loop,
-    hold_dtype,
+    memoize,
     retained,
     uses_components,
 )
-from cozy_runtime.author.kernels import Plan
+from cozy_runtime.accel.kernels import Plan
 from diffusers import AutoencoderKLFlux2, Flux3Transformer2DModel
 from diffusers.models.transformers.transformer_flux3 import (
     Flux3ModeTransformerBlock,
@@ -263,33 +264,30 @@ def _velocity(tf: Any, x: torch.Tensor, temb: torch.Tensor, cond: torch.Tensor, 
     return tf.proj_out(tf.norm_out(tokens[:, : image.shape[1]], temb[:, None]))
 
 
-class Klein(
-    Model[KleinGraph],
-    encoded_leaves="accept",
-    # As BFL's int8 release (`comfy_attention.config`): the image and joint blocks' attention at 8
-    # bits; the text and reference early blocks keep exact attention.
-    attention_bits={
-        "transformer.mode_blocks.image.": 8,
-        "transformer.single_transformer_blocks.": 8,
-    },
-):
+class Klein(Model[KleinGraph]):
     """One Klein checkpoint: the distilled flow map (no guidance) or the base model (CFG)."""
 
-    #: Caller LoRAs on the DiT, at any strength: the Runtime bakes them into the weights.
-    __adapter_compatibility__ = (AdapterCompatibility("lora", "", ("transformer",), -math.inf, math.inf),)
+    #: Attention as BFL's int8 release (`comfy_attention.config`): the image and joint blocks at 8 bits; the
+    #: text and reference early blocks keep exact attention. Caller LoRAs on the DiT, at any strength: the
+    #: Runtime bakes them into the weights.
+    serving = Serving(
+        attention_bits={"transformer.mode_blocks.image.": 8, "transformer.single_transformer_blocks.": 8},
+        loras=("transformer",),
+    )
 
     graph: KleinGraph
     processor: Qwen3VLProcessor
 
     def load(self, loader: Loader) -> None:
-        self.graph = loader.construct(KleinGraph, factory=KleinGraph)
+        self.graph = loader.construct(KleinGraph)
         self.processor = vlm.processor(loader.assets, "text_encoder/")
 
     @property
     def flow_map(self) -> bool:
         return bool(self.graph.components["transformer"].config.flow_map)
 
-    @uses_components("text_encoder", memoize=True, memo_dependencies=(vlm.processor, _conditioning_only))
+    @memoize
+    @uses_components("text_encoder")
     def encode(self, prompt: str) -> torch.Tensor:
         encoder = self.graph.components["text_encoder"]
         with torch.inference_mode():
@@ -312,7 +310,8 @@ class Klein(
             hold_dtype(vae, VAE_DTYPE)
             tel.log("vae representation", dtype=str(VAE_DTYPE).removeprefix("torch."))
 
-    @uses_components("vae", memoize=True)
+    @memoize
+    @uses_components("vae")
     def encode_references(self, references: list[Image.Image]) -> tuple[torch.Tensor, torch.Tensor]:
         """Normalized packed latents of the prepared references as one token sequence, with ids."""
         vae = self.graph.components["vae"]
@@ -346,27 +345,25 @@ class Klein(
         steps: int,
         guidance: float | None,
         seed: int,
-        on_step: Callable[[int], None],
+        progress: Callable[[int, int], None],
     ) -> torch.Tensor:
-        """BFL's Euler sampler as one `denoise_loop`: a flow map jumps to the next timestep; the
-        base model takes CFG.
+        """BFL's Euler sampler: a flow map jumps to the next timestep; the base model takes CFG.
 
         Text and references sit at t = 0, so the base model runs their early blocks once per
         request and the Runtime holds them (`retained`: on the card while there is room, else
-        refilled from pinned host memory), or each step recomputes them; a flow map adds each
-        step's target time to every mode, so it runs them per step.
+        refilled from pinned host memory); a flow map adds each step's target time to every mode,
+        so it runs them per step.
         """
         tf = self.graph.components["transformer"]
         device = torch.device(str(self.device))
         rows, columns = height // PATCH, width // PATCH
-        flow_map = self.flow_map
         timesteps = schedule(steps)
-        with torch.inference_mode(False), torch.no_grad():
+        with torch.no_grad():
             noise = rng.noise((rows * columns, tf.config.in_channels), seed)
             x = noise[None].to(torch.bfloat16).float().to(device)  # bf16 values, an fp32 state across steps
             texts = [embeds] if negative is None else [negative, embeds]
             texts = [t.to(device=device, dtype=torch.bfloat16) for t in texts]
-            refs = [] if references is None else [references[0].to(device)]
+            refs = None if references is None else references[0].to(device)
             zero = torch.zeros(1, dtype=torch.long, device=device)
             image_rope = tf.pos_embed(image_ids(rows, columns).to(device))
             text_ropes = [tf.pos_embed(text_ids(t.shape[1]).to(device)) for t in texts]
@@ -374,72 +371,41 @@ class Klein(
             joints = [_joint(image_rope, rope, ref_rope) for rope in text_ropes]
             at_zero = _embed(tf, tf.timestep_embedder, torch.zeros(1, dtype=torch.bfloat16, device=device))
             times = torch.tensor(timesteps, dtype=torch.bfloat16, device=device)
-            deltas = torch.tensor([b - a for a, b in itertools.pairwise(timesteps)], dtype=torch.float64)
-            deltas = deltas.float().to(device)
-            fixed: tuple[Any, ...] = ()
-            held = None
-            if not flow_map:
-                tokens, cond_rows = _conditions(tf, texts, text_ropes, refs[0] if refs else None, ref_rope,
-                                                F.silu(at_zero), zero)
-                held = retained(sum(t.nbytes for t in tokens) + cond_rows.nbytes)
-                fixed = () if held is None else (held.put(*tokens, cond_rows),)
-                del tokens, cond_rows
-        ropes = (image_rope, *text_ropes, *([] if ref_rope is None else [ref_rope]))
-        width_of = len(image_rope)
-        count, referenced = len(texts), references is not None
-
-        def step(i: torch.Tensor, x: torch.Tensor, *flat: torch.Tensor) -> None:
-            it = iter(flat)
-
-            def take(n: int) -> tuple[torch.Tensor, ...]:
-                return tuple(next(it) for _ in range(n))
-
-            times, deltas, at_zero, zero = take(4)
-            image_rope, *text_ropes = (take(width_of) for _ in range(1 + count))
-            ref_rope = take(width_of) if referenced else None
-            joints = [(take(width_of), next(it)) for _ in range(count)]
-            texts = list(take(count))
-            refs = next(it) if referenced else None
-            kept = list(it)
-            temb = _embed(tf, tf.timestep_embedder, times.index_select(0, i))
-            if kept:
-                conditions = (kept[:-1], kept[-1])
-            elif not flow_map:
-                conditions = _conditions(tf, texts, text_ropes, refs, ref_rope, F.silu(at_zero), zero)
-            else:
-                target = _embed(tf, tf.target_timestep_embedder, times.index_select(0, i + 1))
-                temb = temb + target
-                conditions = _conditions(tf, texts, text_ropes, refs, ref_rope, F.silu(at_zero + target), zero)
-            tokens, cond_rows = conditions
-            image = x.to(torch.bfloat16)
-            if len(tokens) == 2 and tokens[0].shape == tokens[1].shape:
-                # CFG texts of one length share the joint rope and rows: one call, batch 2.
-                both = _velocity(tf, image.repeat(2, 1, 1), temb, torch.cat(tokens), cond_rows,
-                                 image_rope, joints[0], zero)
-                velocities = list(both.float().split(1))
-            else:
-                velocities = [
-                    _velocity(tf, image, temb, cond, cond_rows, image_rope, joint, zero).float()
-                    for cond, joint in zip(tokens, joints, strict=True)
-                ]
-            if guidance is None:
-                (velocity,) = velocities
-            else:
-                unconditional, conditional = velocities
-                velocity = unconditional + guidance * (conditional - unconditional)
-            x.copy_(x + deltas.index_select(0, i).reshape(()) * velocity)
-
-        inputs = (
-            times, deltas, at_zero, zero, *(t for rope in ropes for t in rope),
-            *(t for rope, index in joints for t in (*rope, index)), *texts, *refs, *fixed,
-        )
-        try:
-            denoise_loop(step, range(steps), state=(x,), inputs=inputs, on_step=on_step,
-                         key=("flux-3-klein.denoise/1", flow_map, guidance, count, referenced, bool(fixed)))
-        finally:
-            # The conditions die with the loop.
-            if held is not None:
-                held.close()
+            with ExitStack() as stack:
+                held = None
+                if not self.flow_map:
+                    tokens, cond_rows = _conditions(tf, texts, text_ropes, refs, ref_rope, F.silu(at_zero), zero)
+                    # The conditions die with the loop.
+                    store = stack.enter_context(retained(sum(t.nbytes for t in tokens) + cond_rows.nbytes))
+                    held = store.put(*tokens, cond_rows)
+                    del tokens, cond_rows
+                for i, (now, then) in enumerate(itertools.pairwise(timesteps)):
+                    temb = _embed(tf, tf.timestep_embedder, times[i : i + 1])
+                    if held is not None:
+                        *tokens, cond_rows = held.get()
+                    else:
+                        target = _embed(tf, tf.target_timestep_embedder, times[i + 1 : i + 2])
+                        temb = temb + target
+                        tokens, cond_rows = _conditions(tf, texts, text_ropes, refs, ref_rope,
+                                                        F.silu(at_zero + target), zero)
+                    image = x.to(torch.bfloat16)
+                    if len(tokens) == 2 and tokens[0].shape == tokens[1].shape:
+                        # CFG texts of one length share the joint rope and rows: one call, batch 2.
+                        both = _velocity(tf, image.repeat(2, 1, 1), temb, torch.cat(tokens), cond_rows,
+                                         image_rope, joints[0], zero)
+                        velocities = list(both.float().split(1))
+                    else:
+                        velocities = [
+                            _velocity(tf, image, temb, cond, cond_rows, image_rope, joint, zero).float()
+                            for cond, joint in zip(tokens, joints, strict=True)
+                        ]
+                    if guidance is None:
+                        (velocity,) = velocities
+                    else:
+                        unconditional, conditional = velocities
+                        velocity = unconditional + guidance * (conditional - unconditional)
+                    x = x + (then - now) * velocity
+                    progress(i, steps)
         return x.cpu()
 
     @uses_components("vae")

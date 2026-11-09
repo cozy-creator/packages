@@ -15,7 +15,16 @@ from typing import Any
 
 import torch
 from cozy_runtime import lm
-from cozy_runtime.author import Config, Loader, Model, ModelAssets, UnsupportedInput, uses_components
+from cozy_runtime.author import (
+    Config,
+    Loader,
+    Model,
+    ModelAssets,
+    Serving,
+    UnsupportedInput,
+    memoize,
+    uses_components,
+)
 from diffusers.pipelines.ideogram4.pipeline_ideogram4 import Ideogram4Pipeline
 from diffusers.pipelines.ideogram4.prompt_enhancer import (
     CAPTION_SYSTEM_MESSAGE,
@@ -67,17 +76,18 @@ class EncoderGraph:
         self.components: dict[str, nn.Module] = {COMPONENT: model}
 
 
-class QwenEncoder(Model[EncoderGraph], encoded_leaves="accept"):
+class QwenEncoder(Model[EncoderGraph]):
     """Qwen3-VL-8B-Instruct as Ideogram 4's text encoder."""
 
     graph: EncoderGraph
     tokenizer: PreTrainedTokenizerFast
 
     def load(self, loader: Loader) -> None:
-        self.graph = loader.construct(EncoderGraph, factory=EncoderGraph)
+        self.graph = loader.construct(EncoderGraph)
         self.tokenizer = tokenizer(loader.assets)
 
-    @uses_components(COMPONENT, memoize=True, memo_dependencies=(tokenizer, language_model, _conditioning_only))
+    @memoize
+    @uses_components(COMPONENT)
     def encode(self, caption: str) -> torch.Tensor:
         """`Ideogram4Pipeline.encode_prompt` for one caption, unpadded: the hidden states of
         Ideogram's 13 layers concatenated per token, `[tokens, 53248]` in bf16."""
@@ -124,20 +134,23 @@ class Schema:
         return self.index.get_allowed_tokens(state)  # type: ignore[no-any-return]
 
 
-class QwenUpsampler(Model[UpsamplerGraph], encoded_leaves="accept", min_bits=4, phase="decode"):
+class QwenUpsampler(Model[UpsamplerGraph]):
     """Qwen3-VL-8B-Instruct writing Ideogram 4's structured caption from a plain prompt."""
+
+    serving = Serving(min_bits=4, phase="decode")
 
     graph: UpsamplerGraph
     tokenizer: PreTrainedTokenizerFast
     index: Any = None
 
     def load(self, loader: Loader) -> None:
-        self.graph = loader.construct(UpsamplerGraph, factory=UpsamplerGraph)
+        self.graph = loader.construct(UpsamplerGraph)
         self.tokenizer = tokenizer(loader.assets)
         # The caption schema's index over the vocabulary, compiled once (Diffusers' schema, outlines-core).
         self.index = build_caption_logits_processor(self.graph.components[COMPONENT], self.tokenizer).index
 
-    @uses_components(COMPONENT, memoize=True, memo_dependencies=(tokenizer, language_model, Schema))
+    @memoize
+    @uses_components(COMPONENT)
     def caption(self, prompt: str, *, width: int, height: int, seed: int) -> str:
         """Diffusers' `upsample_prompt` for one prompt: Ideogram's caption system message and the
         target aspect ratio, sampled at temperature 1 from `seed`, constrained to the caption's JSON

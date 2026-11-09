@@ -5,14 +5,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from cozy_runtime.author import (
-    Context,
-    EncodingRule,
-    QuantizationPlan,
-    Recipe,
-    SelectionPlan,
-    Telemetry,
-)
+from cozy_runtime.author import Context, EncodingRule, QuantizationPlan, Recipe, SelectionPlan, Telemetry
 
 from .klein import Klein, prepare_reference
 from .upsampler import Drafter, Upsampler
@@ -114,7 +107,7 @@ def calibrate(ctx: Context, tel: Telemetry, model: Klein, record: Any) -> None:
                     steps=steps,
                     guidance=guidance,
                     seed=seed,
-                    on_step=tel.step_callback(steps, stage="calibrating", overall_range=span),
+                    progress=lambda i, _total, step=tel.step_callback(steps, stage="calibrating", overall_range=span): step(i),
                 )
                 if references is None:
                     image = model.decode(tokens, width=size[0], height=size[1])

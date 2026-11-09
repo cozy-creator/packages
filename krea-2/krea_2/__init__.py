@@ -5,24 +5,9 @@ from __future__ import annotations
 from typing import Annotated, Literal
 
 import msgspec
-from cozy_runtime.author import (
-    Adjustments,
-    App,
-    AspectRatio,
-    Context,
-    Guidance,
-    ImageRequest,
-    ImageResult,
-    Memoize,
-    NegativePrompt,
-    Outputs,
-    Ratios,
-    Seed,
-    Sizes,
-    Steps,
-    Telemetry,
-    held,
-)
+from cozy_runtime.author import Adjustments, App, Context, Memoize, Outputs, Seed, Telemetry
+from cozy_runtime.fields import AspectRatio, Ratios
+from cozy_runtime.image import Guidance, ImageRequest, ImageResult, NegativePrompt, Sizes, Steps, held
 
 from . import quantize as quantize  # its recipes
 from .model import PATCH, Krea2
@@ -70,7 +55,7 @@ def _generate(ctx: Context, payload: TurboInput, model: Krea2, out: Outputs, tel
     with tel.stage("generating image", overall_range=(0.05, 0.95)):
         latents = model.denoise(
             positive, negative, width=width, height=height, steps=steps, guidance=guidance, seed=seed,
-            distilled=distilled, on_step=tel.step_callback(steps, stage="generating image", overall_range=(0.05, 0.95)),
+            distilled=distilled, progress=ctx.progress,
         )
     with tel.stage("decoding image", overall_range=(0.95, 0.99)):
         image = model.decode(latents, width=width, height=height)
@@ -82,19 +67,16 @@ def _generate(ctx: Context, payload: TurboInput, model: Krea2, out: Outputs, tel
 _RAW_MODEL = "krea/krea-2@0.1.0"
 _TURBO_MODEL = "krea/krea-2-turbo@0.1.0"
 _KREA = ("transformer", "text_encoder", "vae")
-_MEMO = ("krea_2", "krea_2.model")
 
 
-@app.entrypoint(defaults={"model": _RAW_MODEL}, components={"model": _KREA}, memoize=Memoize(requires=["seed"]),
-                memo_dependencies=_MEMO)
+@app.entrypoint(defaults={"model": _RAW_MODEL}, components={"model": _KREA}, memoize=Memoize(requires=["seed"]))
 def generate(ctx: Context, payload: GenerateInput, model: Krea2, out: Outputs, tel: Telemetry,
              adj: Adjustments) -> ImageResult:
     """The full model, Krea 2 Raw (or a fine-tune of it): 52 steps at guidance 3.5, 1 MP."""
     return _generate(ctx, payload, model, out, tel, adj, distilled=False)
 
 
-@app.entrypoint(defaults={"model": _TURBO_MODEL}, components={"model": _KREA}, memoize=Memoize(requires=["seed"]),
-                memo_dependencies=_MEMO)
+@app.entrypoint(defaults={"model": _TURBO_MODEL}, components={"model": _KREA}, memoize=Memoize(requires=["seed"]))
 def generate_turbo(ctx: Context, payload: TurboInput, model: Krea2, out: Outputs, tel: Telemetry,
                    adj: Adjustments) -> ImageResult:
     """The fast model, Krea 2 Turbo (or a fine-tune of it): 8 steps without guidance at its fixed shift, 2048²."""
@@ -118,7 +100,7 @@ class ImageBox(msgspec.Struct, kw_only=True):
 # Each checkpoint is built, and its weights fetched, only when a box asks for it.
 @app.tool(label="Image", named="image", defaults={"full": _RAW_MODEL, "model": _TURBO_MODEL},
           components={"full": _KREA, "model": _KREA}, on_demand=("full", "model"),
-          memoize=Memoize(requires=["seed"]), memo_dependencies=_MEMO)  # fmt: skip
+          memoize=Memoize(requires=["seed"]))  # fmt: skip
 def image(ctx: Context, payload: ImageBox, full: Krea2, model: Krea2, out: Outputs, tel: Telemetry,
           adj: Adjustments) -> ImageResult:
     """Krea 2 on a canvas: Turbo, or Raw, which loads only when asked for."""

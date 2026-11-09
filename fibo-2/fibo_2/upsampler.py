@@ -17,7 +17,7 @@ from typing import Any
 import torch
 import torch.nn.functional as F
 from cozy_runtime import lm, vlm
-from cozy_runtime.author import Config, Loader, Model, UnsupportedInput, uses_components
+from cozy_runtime.author import Config, Loader, Model, Serving, UnsupportedInput, memoize, uses_components
 from PIL import Image
 from transformers import (
     AutoConfig,
@@ -59,20 +59,23 @@ class CaptionerGraph:
         self.components: dict[str, torch.nn.Module] = {COMPONENT: model.eval()}
 
 
-class Captioner(Model[CaptionerGraph], encoded_leaves="accept", min_bits=4, phase="decode"):
+class Captioner(Model[CaptionerGraph]):
     """One of Bria's prompt-to-JSON VLMs."""
+
+    serving = Serving(min_bits=4, phase="decode")
 
     graph: CaptionerGraph
     processor: Qwen3VLProcessor
 
     def load(self, loader: Loader) -> None:
-        self.graph = loader.construct(CaptionerGraph, factory=CaptionerGraph)
+        self.graph = loader.construct(CaptionerGraph)
         self.processor = vlm.processor(loader.assets, image=BRIA_IMAGE)
 
     def execution_plan(self, plan: Any) -> str:
         return lm.install(plan, self.graph.components[COMPONENT])
 
-    @uses_components(COMPONENT, memoize=True, memo_dependencies=(vlm.processor,))
+    @memoize
+    @uses_components(COMPONENT)
     def caption(self, prompt: str, image: Image.Image | None) -> str:
         """The structured caption for `prompt` (`<generate>`), or with `image` the edit's caption
         with its `edit_instruction` (`<edit>`), as compact JSON."""

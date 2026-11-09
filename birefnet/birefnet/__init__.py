@@ -7,7 +7,9 @@ from typing import Annotated
 import msgspec
 from PIL import Image
 
-from cozy_runtime.author import App, FileBound, Context, ImageFile, Outputs, Telemetry
+from cozy_runtime.author import App, Context, Outputs, Telemetry
+from cozy_runtime.fields import FileBound
+from cozy_runtime.media import ImageFile
 
 from .model import BackgroundRemovalModel
 

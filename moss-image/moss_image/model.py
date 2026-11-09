@@ -3,8 +3,7 @@
 The DiT, its timestep grid and the sampling loop follow upstream's `pipeline_moss_image.py`
 (OpenMOSS-Team/MOSS-Image-SFT `f972bd4b`, Apache-2.0) module for module, with its state-dict names;
 Diffusers has no MOSS-Image. The text encoder is Transformers' Qwen3.5 text model and the VAE Diffusers'
-`AutoencoderKLFlux2`. Runtime constructs and fills the modules and owns their residency; the denoise is
-one `denoise_loop`.
+`AutoencoderKLFlux2`. Runtime constructs and fills the modules and owns their residency.
 
 On a GPU a DiT block runs as ComfyUI's MOSS-Image does, with the Runtime's prebuilt kernels: each
 modulated RMSNorm and SiTU comes out of the int8 leaves' quantization pass (`int8_rows`, the norm
@@ -24,19 +23,19 @@ from typing import Any
 import torch
 from cozy_runtime import rng
 from cozy_runtime.attention import Attention
+from cozy_runtime.accel import hold_dtype
 from cozy_runtime.author import (
-    OutputError,
     Config,
     Loader,
-    MemoDistribution,
     Model,
     ModelAssets,
+    OutputError,
+    Serving,
     Telemetry,
-    denoise_loop,
-    hold_dtype,
+    memoize,
     uses_components,
 )
-from cozy_runtime.author.kernels import PreQuantized, int8_rows, native, quantize_once, rms_rope_split_half
+from cozy_runtime.accel.kernels import PreQuantized, int8_rows, native, quantize_once, rms_rope_split_half
 from diffusers import AutoencoderKLFlux2, FlowMatchEulerDiscreteScheduler
 from diffusers.configuration_utils import register_to_config
 from diffusers.image_processor import VaeImageProcessor
@@ -178,8 +177,8 @@ class Block(torch.nn.Module):
 class MossTransformer(torch.nn.Module):
     """Upstream's `MOSSImageTransformer` for one sample: image tokens then text tokens in one stream,
     one shared modulation for every block. Its RoPE bands are derived constants, computed in f32 on the
-    CPU as training built them; the checkpoint's `rope.bands` is not read. The denoise composes its
-    parts: the text stream and RoPE once a request, the modulation, blocks and head each step."""
+    CPU as training built them; the checkpoint's `rope.bands` is not read. The text stream
+    and RoPE are built once a request (`text`, `table`/`rotations`); `forward` is one step for one prompt."""
 
     def __init__(self, dim: int = 3072, ffn_dim: int = 8192, num_heads: int = 24, num_layers: int = 42,
                  text_dim: int = 4096, freq_dim: int = 256, latent_channels: int = 128,
@@ -250,6 +249,18 @@ class MossTransformer(torch.nn.Module):
         x = self.final_linear_video((x * (1 + head[:, 1, None]) + head[:, 0, None]).to(DTYPE))
         return x.transpose(1, 2).reshape(1, -1, height, width).float()
 
+    def forward(self, latents: torch.Tensor, timestep: torch.Tensor, text: torch.Tensor, rope: torch.Tensor,
+                skip: frozenset[int] = frozenset()) -> torch.Tensor:
+        """The f32 velocity [1, C, H, W] of `latents` at `timestep` [1] for one prompt: its text stream
+        (`text`) and RoPE. `skip`: blocks left out, upstream's unconditional branch."""
+        modulation, head = self.modulation(timestep)
+        video = self.video_embedder(latents.flatten(2).transpose(1, 2).to(DTYPE).contiguous())
+        x = torch.cat((video, text), 1)
+        for index, block in enumerate(self.layers):
+            if index not in skip:
+                x = block(x, rope, modulation)
+        return self.velocity(x, head, latents.shape[2], latents.shape[3])
+
 
 class MossScheduler(FlowMatchEulerDiscreteScheduler):
     """Upstream's `MOSSImageScheduler`: Euler over sigmas shifted by `shift`, then snapped to the
@@ -312,18 +323,16 @@ def build_tokenizer(assets: ModelAssets) -> PreTrainedTokenizerFast:
     )
 
 
-#: Code the memoized encode reads beyond its own body.
-_CODE = (build_tokenizer, TextEncoder, MemoDistribution("transformers"), MemoDistribution("tokenizers"))
-
-
-class MossImage(Model[MossGraph], encoded_leaves="accept", attention_bits={"transformer.layers.": 8}):
+class MossImage(Model[MossGraph]):
     """One MOSS-Image checkpoint (Base or SFT)."""
+
+    serving = Serving(attention_bits={"transformer.layers.": 8})
 
     graph: MossGraph
     tokenizer: PreTrainedTokenizerFast
 
     def load(self, loader: Loader) -> None:
-        self.graph = loader.construct(MossGraph, factory=MossGraph)
+        self.graph = loader.construct(MossGraph)
         self.tokenizer = build_tokenizer(loader.assets)
 
     def hold_vae(self, tel: Telemetry) -> None:
@@ -334,7 +343,8 @@ class MossImage(Model[MossGraph], encoded_leaves="accept", attention_bits={"tran
             hold_dtype(vae, VAE_DTYPE)
             tel.log("vae representation", dtype=str(VAE_DTYPE).removeprefix("torch."))
 
-    @uses_components("text_encoder", memoize=True, memo_dependencies=_CODE)
+    @memoize
+    @uses_components("text_encoder")
     def encode(self, prompt: str) -> torch.Tensor:
         """The prompt's last hidden state [S, 4096] (bf16, on the CPU): the user turn of the chat
         template with thinking open, at most 4096 tokens, one unpadded forward. One prompt a call, so
@@ -364,50 +374,42 @@ class MossImage(Model[MossGraph], encoded_leaves="accept", attention_bits={"tran
         steps: int,
         guidance: float,
         seed: int,
-        on_step: Callable[[int], None],
+        progress: Callable[[int, int], None],
         tel: Telemetry,
     ) -> torch.Tensor:
-        """Upstream's sampler as one `denoise_loop`: f32 noise from `seed` on the CPU, CFG against
-        `negative` with block 22 skipped in its branch, Euler in f32. Returns the latents
-        [1, 128, H/16, W/16] on the CPU.
+        """Upstream's sampler: f32 noise from `seed` on the CPU, CFG against `negative` with block 22
+        skipped in its branch, Euler (`MossScheduler`) in f32. Returns the latents [1, 128, H/16, W/16]
+        on the CPU.
 
-        Each prompt's text stream and RoPE are built once, before the loop; with CFG both branches
-        pass through each block in turn, so a streamed block comes in once per step. Their text
-        lengths differ, so the branches are two streams, not one batch (ComfyUI runs two forwards)."""
+        Each prompt's text stream and RoPE are built once, before the loop; with CFG each branch is
+        one forward of the transformer (their text lengths differ, so not one batch; ComfyUI runs two
+        forwards too), which the Runtime may replay as a CUDA graph."""
         transformer = self.graph.components["transformer"]
         device = torch.device(str(self.device))
         rows, columns = height // PATCH, width // PATCH
         fused = device.type == "cuda" and not native()
-        scheduler = MossScheduler.from_config(self.graph.scheduler_config)
+        scheduler: Any = MossScheduler.from_config(self.graph.scheduler_config)
         scheduler.set_timesteps(steps, device=device)
-        with torch.inference_mode(False), torch.no_grad():
+        with torch.no_grad():
             latents = rng.noise((1, transformer.latent_channels, rows, columns), seed, device=device)
-            branches: list[torch.Tensor] = []
+            texts, ropes = [], []
             for text in (positive, *([] if negative is None else [negative])):
                 context = text[None].to(device)
                 phase = transformer.phase(transformer.positions(rows, columns, context.shape[1], device))
-                branches += [transformer.text(context), transformer.rotations(phase) if fused else transformer.table(phase)]
-            times = scheduler.timesteps.to(device=device, dtype=torch.float32)
-            deltas = (scheduler.sigmas[1:] - scheduler.sigmas[:-1]).to(device=device, dtype=torch.float32)
-        blocks = transformer.layers
-
-        def step(i: torch.Tensor, latents: torch.Tensor, times: torch.Tensor, deltas: torch.Tensor,
-                 *branches: torch.Tensor) -> None:
-            modulation, head = transformer.modulation(times.index_select(0, i))
-            video = transformer.video_embedder(latents.flatten(2).transpose(1, 2).to(DTYPE).contiguous())
-            streams = [torch.cat((video, text), 1) for text in branches[0::2]]
-            ropes = branches[1::2]
-            for index, block in enumerate(blocks):
-                streams = [x if branch and index in UNCOND_SKIP else block(x, rope, modulation)
-                           for branch, (x, rope) in enumerate(zip(streams, ropes, strict=True))]
-            velocity = [transformer.velocity(x, head, rows, columns) for x in streams]
-            prediction = velocity[0]
-            if len(velocity) > 1:
-                prediction = velocity[1] + guidance * (velocity[0] - velocity[1])
-            latents.add_(deltas.index_select(0, i) * prediction)
-
-        denoise_loop(step, range(len(times)), state=(latents,), inputs=(times, deltas, *branches), on_step=on_step)
-        tel.log("dit block", rope="fused" if fused else "eager", **blocks[0].served)
+                texts.append(transformer.text(context))
+                ropes.append(transformer.rotations(phase) if fused else transformer.table(phase))
+            timesteps = scheduler.timesteps
+            for i, t in enumerate(timesteps):
+                velocity = [
+                    transformer(latents, t[None], text, rope, UNCOND_SKIP if branch else frozenset())
+                    for branch, (text, rope) in enumerate(zip(texts, ropes, strict=True))
+                ]
+                prediction = velocity[0]
+                if len(velocity) > 1:
+                    prediction = velocity[1] + guidance * (velocity[0] - velocity[1])
+                latents = scheduler.step(prediction, t, latents, return_dict=False)[0]
+                progress(i, len(timesteps))
+        tel.log("dit block", rope="fused" if fused else "eager", **transformer.layers[0].served)
         return latents.cpu()
 
     @uses_components("vae")

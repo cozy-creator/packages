@@ -9,25 +9,17 @@ import torch
 from cozy_runtime.author import (
     Adjustments,
     App,
-    AspectRatio,
     Context,
-    Guidance,
     ImageFrame,
-    ImageRequest,
-    ImageResult,
-    Label,
     Memoize,
-    NegativePrompt,
     Outputs,
     QuantizationPlan,
-    Ratios,
     Recipe,
     Seed,
-    Sizes,
-    Steps,
     Telemetry,
-    held,
 )
+from cozy_runtime.fields import AspectRatio, Label, Ratios
+from cozy_runtime.image import Guidance, ImageRequest, ImageResult, NegativePrompt, Sizes, Steps, held
 
 from .model import _SAVE, AnimaModel, _Phases
 
@@ -106,8 +98,6 @@ def generate(
 ) -> ImageResult:
     """Generate one native-resolution Anima image."""
     model.hold_vae(tel)
-    # Both prompt branches are conditioned before the repeated transformer phase.
-    ctx.plan("text_encoder", "text_conditioner", "transformer", "vae")
     prompt = payload.prompt
     width, height = payload.size(adj, None, SIZES, megapixels=SIZES.megapixels[1])
     steps = held(adj, "steps", payload.steps or _STEPS[0], *_STEPS[1:])

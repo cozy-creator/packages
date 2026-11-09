@@ -7,24 +7,16 @@ from typing import Annotated, Any, Literal
 
 import msgspec
 import numpy as np
-from cozy_runtime.author import (
-    MEGAPIXEL,
-    Adjustments,
-    App,
-    AspectRatio,
-    Context,
+from cozy_runtime.author import Adjustments, App, Context, Memoize, Outputs, Seed, Telemetry, UnsupportedInput
+from cozy_runtime.fields import AspectRatio, Ratios
+from cozy_runtime.image import (
     Guidance,
     ImageRequest,
     ImageResult,
-    Memoize,
-    Outputs,
-    Ratios,
+    MEGAPIXEL,
     Region,
-    Seed,
     Sizes,
     Steps,
-    Telemetry,
-    UnsupportedInput,
     corners,
     held,
 )
@@ -142,7 +134,7 @@ def generate(ctx: Context, payload: GenerateInput, model: Ideogram4, text_encode
     with tel.stage("generating image", overall_range=(0.2, 0.96)):
         latents = model.denoise(
             features, width=width, height=height, guidance=guidance_schedule(steps, weight), seed=seed,
-            on_step=tel.step_callback(steps, stage="generating image", overall_range=(0.2, 0.96)),
+            progress=ctx.progress,
         )
     with tel.stage("decoding image", overall_range=(0.96, 0.99)):
         image = model.decode(latents, width=width, height=height)
