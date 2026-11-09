@@ -118,15 +118,41 @@ BLOCK = fusion.DiTBlock(
 )
 
 
+class Transformer(Flux3Transformer2DModel):
+    """`Flux3Transformer2DModel` whose forward is one step past the conditions: BFL's layout, the image's
+    early blocks, then the joint blocks over [image, text, references]."""
+
+    def forward(  # type: ignore[override]
+        self, x: torch.Tensor, temb: torch.Tensor, conditions: list[torch.Tensor], cond_rows: torch.Tensor,
+        image_rope: Any, joints: list[tuple[Any, tuple[int, ...]]],
+    ) -> list[torch.Tensor]:
+        """The velocity of `x` for each of `conditions` (`_conditions`: a prompt's tokens after their
+        early blocks, `cond_rows` their modes' rows), with that prompt's joint rope and mode sizes."""
+        act = F.silu(temb)
+        zero = torch.zeros(1, dtype=torch.long, device=x.device)
+        velocities = []
+        for cond, (rope, sizes) in zip(conditions, joints, strict=False):
+            image = _early(self.mode_blocks["image"], self.x_embedders["image"](x),
+                           self.early_stream_modulations["image"], act, image_rope, zero)
+            index = torch.cat([torch.full((size,), mode, device=x.device) for mode, size in enumerate(sizes)])
+            rows = Rows(torch.cat([self.single_stream_modulations["image"](act), cond_rows]), index)
+            tokens = torch.cat([image, cond], dim=1)
+            for block in self.single_transformer_blocks:
+                tokens = block(tokens, rows, rope)
+            velocities.append(self.proj_out(self.norm_out(tokens[:, : image.shape[1]], temb[:, None])))
+        return velocities
+
+
 class KleinGraph:
     def __init__(self, config: Config) -> None:
         with transformer_init.no_init_weights():
-            transformer = Flux3Transformer2DModel.from_config(config.section("transformer").mapping())
+            transformer: Any = Flux3Transformer2DModel.from_config(config.section("transformer").mapping())
             text_encoder = AutoModelForImageTextToText.from_config(
                 Qwen3VLConfig(**config.section("text_encoder").mapping()), dtype=torch.bfloat16
             )
             vae = AutoencoderKLFlux2.from_config(config.section("vae").mapping())
         _conditioning_only(text_encoder)
+        transformer.__class__ = Transformer
         for block in transformer.modules():
             if type(block) in (Flux3ModeTransformerBlock, Flux3SingleTransformerBlock):
                 block.__class__ = KleinBlock
@@ -213,13 +239,10 @@ def _embed(tf: Any, embedder: Any, now: torch.Tensor) -> torch.Tensor:
     return embedder(tf.time_proj(now * 1000).to(torch.bfloat16))
 
 
-def _joint(*ropes: Any) -> tuple[Any, torch.Tensor]:
-    """A joint sequence's rotary tables, and each token's row: the index of its mode."""
+def _joint(*ropes: Any) -> tuple[Any, tuple[int, ...]]:
+    """A joint sequence's rotary tables, and each mode's token count, in order."""
     present = [rope for rope in ropes if rope is not None]
-    cos = present[0][0]
-    lengths = torch.tensor([len(rope[0]) for rope in present], device=cos.device)
-    modes = torch.arange(len(present), device=cos.device)
-    return tuple(torch.cat(axis) for axis in zip(*present, strict=True)), modes.repeat_interleave(lengths)
+    return tuple(torch.cat(axis) for axis in zip(*present, strict=True)), tuple(len(rope[0]) for rope in present)
 
 
 def _early(blocks: Any, tokens: torch.Tensor, modulation: Any, act: torch.Tensor, rope: Any,
@@ -248,20 +271,6 @@ def _conditions(
                      act, rope, zero)
         tokens.append(txt if ref is None else torch.cat([txt, ref], dim=1))
     return tokens, torch.cat([tf.single_stream_modulations[mode](act) for mode in modes])
-
-
-def _velocity(tf: Any, x: torch.Tensor, temb: torch.Tensor, cond: torch.Tensor, cond_rows: torch.Tensor,
-              image_rope: Any, joint: tuple[Any, torch.Tensor], zero: torch.Tensor) -> torch.Tensor:
-    """One transformer call: the image's early blocks, then the joint blocks over [image, cond]."""
-    act = F.silu(temb)
-    image = _early(tf.mode_blocks["image"], tf.x_embedders["image"](x), tf.early_stream_modulations["image"],
-                   act, image_rope, zero)
-    rope, index = joint
-    rows = Rows(torch.cat([tf.single_stream_modulations["image"](act), cond_rows]), index)
-    tokens = torch.cat([image, cond], dim=1)
-    for block in tf.single_transformer_blocks:
-        tokens = block(tokens, rows, rope)
-    return tf.proj_out(tf.norm_out(tokens[:, : image.shape[1]], temb[:, None]))
 
 
 class Klein(Model[KleinGraph]):
@@ -390,15 +399,11 @@ class Klein(Model[KleinGraph]):
                                                         F.silu(at_zero + target), zero)
                     image = x.to(torch.bfloat16)
                     if len(tokens) == 2 and tokens[0].shape == tokens[1].shape:
-                        # CFG texts of one length share the joint rope and rows: one call, batch 2.
-                        both = _velocity(tf, image.repeat(2, 1, 1), temb, torch.cat(tokens), cond_rows,
-                                         image_rope, joints[0], zero)
+                        # CFG texts of one length share the joint rope and rows: batch 2.
+                        (both,) = tf(image.repeat(2, 1, 1), temb, [torch.cat(tokens)], cond_rows, image_rope, joints)
                         velocities = list(both.float().split(1))
                     else:
-                        velocities = [
-                            _velocity(tf, image, temb, cond, cond_rows, image_rope, joint, zero).float()
-                            for cond, joint in zip(tokens, joints, strict=True)
-                        ]
+                        velocities = [v.float() for v in tf(image, temb, list(tokens), cond_rows, image_rope, joints)]
                     if guidance is None:
                         (velocity,) = velocities
                     else:

@@ -12,7 +12,7 @@ everything, every step. Runtime constructs and fills the modules and owns their 
 from __future__ import annotations
 
 import math
-from collections.abc import Callable, Iterator
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
@@ -101,6 +101,18 @@ class Root(torch.nn.Module):
     def __init__(self, config: Qwen3VLConfig) -> None:
         super().__init__()
         self.model = Body(config)
+
+    def forward(self, t: torch.Tensor, inputs: torch.Tensor, n: int, cos: torch.Tensor, sin: torch.Tensor,
+                prefix: list[tuple[torch.Tensor, torch.Tensor]]) -> torch.Tensor:
+        """The pixel head's prediction of the target's clean patches (bf16 [1, n, 3072]) from the
+        timestep `t`, the noisy target's and the references' patches, the RoPE tables of those tokens
+        and each layer's prefix keys and values."""
+        body = self.model
+        text = body.language_model
+        h = torch.cat([body.t_embedder1(t.view(1))[:, None], body.x_embedder(inputs)], dim=1)
+        for layer, past in zip(text.layers, prefix, strict=True):
+            h = _layer(layer, h, cos, sin, past)[0]
+        return body.final_layer2(text.norm(h[:, 1 : 1 + n]))  # type: ignore[no-any-return]
 
 
 class O1Graph:
@@ -378,11 +390,9 @@ class Prefix:
     cos: torch.Tensor
     sin: torch.Tensor
 
-    def layers(self) -> Iterator[tuple[torch.Tensor, torch.Tensor]]:
-        """Each layer's keys and values in turn, read as its layer runs: a held layer is resident
-        only while it is read."""
-        for state in self.kv:
-            yield state.get()
+    def layers(self) -> list[tuple[torch.Tensor, torch.Tensor]]:
+        """Each layer's keys and values, as a step reads them."""
+        return [state.get() for state in self.kv]
 
 
 def _prefix(body: Body, seq: Sequence, vision: tuple[torch.Tensor, list[torch.Tensor]] | None,
@@ -404,16 +414,6 @@ def _prefix(body: Body, seq: Sequence, vision: tuple[torch.Tensor, list[torch.Te
         if vision is not None and index < len(vision[1]):
             h[0, pads] = h[0, pads] + vision[1][index].to(h.dtype)
     return Prefix(kv, cos[:, seq.prefix :], sin[:, seq.prefix :])
-
-
-def _predict(body: Body, prefix: Prefix, t: torch.Tensor, inputs: torch.Tensor, n: int) -> torch.Tensor:
-    """The pixel head's prediction of the target's clean patches (bf16 [1, n, 3072]) from the
-    timestep `t` and the noisy target's and the references' patches."""
-    text = body.language_model
-    h = torch.cat([body.t_embedder1(t.view(1))[:, None], body.x_embedder(inputs)], dim=1)
-    for layer, past in zip(text.layers, prefix.layers(), strict=True):
-        h = _layer(layer, h, prefix.cos, prefix.sin, past)[0]
-    return body.final_layer2(text.norm(h[:, 1 : 1 + n]))
 
 
 @dataclass(frozen=True)
@@ -459,7 +459,7 @@ class HiDreamO1(Model[O1Graph]):
     ) -> Image.Image:
         """Upstream's `generate_image` from prepared references (each on the 32 px grid): CFG against
         `negative` when it is given, over the first `GUIDED` of the steps if `interval`."""
-        body = self.body
+        body, root = self.body, self.graph.components[COMPONENT]
         image_token = self.processor.tokenizer.convert_tokens_to_ids("<|image_pad|>")
         device = torch.device(str(self.device))
         rows, columns = height // PATCH, width // PATCH
@@ -502,7 +502,7 @@ class HiDreamO1(Model[O1Graph]):
                 sigma = t.clamp_min(T_EPS)
                 inputs = z if refs is None else torch.cat([z, refs], dim=1)
                 velocities = [
-                    (_predict(body, prefix, 1.0 - t, inputs, n).float() - z.float()) / sigma
+                    (root(1.0 - t, inputs, n, prefix.cos, prefix.sin, prefix.layers()).float() - z.float()) / sigma
                     for prefix in (prefixes if guided else prefixes[:1])
                 ]
                 velocity = velocities[0]
