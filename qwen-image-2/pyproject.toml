@@ -1,10 +1,10 @@
 [project]
 name = "qwen-image-2"
-version = "0.6.2"
+version = "0.7.1"
 description = "Cozy image generation and reference editing using Qwen-Image-2.1"
 requires-python = ">=3.12"
 dependencies = [
-    "cozy-runtime[adapters,media]>=0.42.3",
+    "cozy-runtime[adapters,media]>=0.43.1",
     "diffusers>=0.41,<0.42",
     "msgspec>=0.19",
     "numpy>=1.26",
@@ -43,7 +43,7 @@ explicit = true
 [tool.uv.sources]
 torch = { index = "pytorch-cu130", marker = "sys_platform == 'win32'" }
 torchvision = { index = "pytorch-cu130", marker = "sys_platform == 'win32'" }
-# The 0.22 line's Runtime (0.43's tools with the 0.21.3 batch) and the TensorFS it pins, by git rev until
+# 0.22.1's Runtime (0.43.1: 0.43's tools with the 0.21.3 batch) and the TensorFS it pins, by git rev until
 # both publish: the release relocks to PyPI.
-cozy-runtime = { git = "https://github.com/cozy-creator/cozy-runtime", rev = "81a12bc0a05ca21dab266149537cb6a82210a1af" }
+cozy-runtime = { git = "https://github.com/cozy-creator/cozy-runtime", rev = "858f6cc5df6fc7a7c0bee0fc9478706daa621a53" }
 tensorfs = { git = "https://github.com/cozy-creator/cozy-creator", rev = "7956c48e26c35a6a2ce47d52b273e5b1cd298e1b", subdirectory = "crates/tensorfs-py" }
