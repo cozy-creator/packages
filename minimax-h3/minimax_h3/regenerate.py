@@ -3,18 +3,18 @@ in latent space (`latent_upscaler`), re-noised to its start sigma and refined at
 through the FL2VA DiT under the Regenerate overlay; `open_h3/pipeline.py` `upscale` and `refine`.
 
 The refine is text-only T2VA: `[text | clean silent audio | video]`, CFG 1, Euler on video alone.
-When the whole canvas's rows do not fit the card, it refines overlapping temporal windows that
-share each step's state and blend their velocities, so the clip still completes, slower.
+A clip whose rows do not fit one forward refines in overlapping temporal windows that share each
+step's state and blend their velocities (`plan_windows`).
 """
 
 from __future__ import annotations
 
-import math
 from collections.abc import Callable
 from typing import Any
 
 import torch
-from cozy_runtime.author import AttentionLayout
+from cozy_runtime import rng
+from cozy_runtime.author import AttentionLayout, Cut, Windows, windows
 from cozy_runtime.author import device as placed_device
 from diffusers.modular_pipelines.minimax_h3.before_denoise import (
     MiniMaxH3PrepareLayoutStep,
@@ -56,17 +56,17 @@ VIDEO_TAG, TEXT_TAG, AUDIO_TAG = 0, 1, 2
 AUDIO_CHANNELS = 2
 #: Latent frames neighbouring windows share (about one second).
 OVERLAP = 7
-#: What a refine holds per packed row at a block's peak: 5.5 bf16 rows of hidden 5376 (its
-#: input, residual, norm and attention output are whole; the Runtime cuts only attention and
-#: FFN working sets, and reclaims cached weights only there). And what a card holds beside
-#: them. Measured: 1440p 15 s whole fits 24 GB (run 20382); 2160p 15 s whole needs more than
-#: 48 GB (run 20468), and runs in three windows on 24 GB (run 20470).
-_ROW_BYTES = 11 * 5376
-_BESIDE = 2 << 30
-#: The most video rows one forward has refined at a normal step time (1440p 15 s, run 20382).
-#: A proven bound, not a fix: 465k rows (2160p 15 s in two windows on 48 GB, run 20476) made no
-#: progress in an hour.
+#: The most video rows one forward has refined at a normal step time (1440p 15 s whole, run 20382;
+#: 2160p 15 s in three windows, run 20470): 465k rows (2160p 15 s in two windows on 48 GB, sized
+#: from total memory, run 20476) made no progress in an hour.
 _MOST_ROWS = 107 * 3600
+#: The refine's windows: None, as few as the card's room holds (`_ROW_BYTES` a row); a row count,
+#: windows of at most that many rows from the shape alone, the same on every card (`_MOST_ROWS`).
+WINDOW_ROWS: int | None = None
+#: What a refine holds per packed row at a block's peak: 5.5 bf16 rows of hidden 5376 (its input,
+#: residual, norm and attention output are whole; the Runtime cuts the attention and FFN working
+#: sets). 2160p 15 s whole needs more than 48 GB (run 20468) and runs in three windows on 24 GB.
+_ROW_BYTES = 11 * 5376
 
 
 def latent_size(resolution: str) -> tuple[int, int]:
@@ -86,30 +86,6 @@ def upscale_passes(resolution: str) -> list[tuple[int, int]]:
 def frames_of(latent_frames: int) -> int:
     """Video frames of `5n + 2` latent frames on the VAE's `17n + 5` grid."""
     return (latent_frames - 2) // LATENTS_PER_CHUNK * FRAMES_PER_CHUNK + 5
-
-
-def windows(latent_frames: int, rows_per_frame: int, capacity: int) -> list[tuple[int, int]]:
-    """`(first latent frame, latent frames)` spans: the whole clip when its rows fit `capacity`
-    bytes and `_MOST_ROWS`, else the fewest equal `5n + 2` windows overlapping by at least
-    OVERLAP that do, each starting on the VAE's latent chunk grid (a multiple of
-    LATENTS_PER_CHUNK). A window is laid out as a clip of its own, and H3's rotary clock spaces
-    latent frames 5/3 x (1, 4, 4, 4, 4) from a clip's start, so a window off the grid gives each
-    chunk's one-frame latent a four-frame step: it flickers at every chunk (run 22567, the middle
-    of three windows, starting at 32)."""
-    # A card that can't hold the smallest window still gets it: the Runtime pages what doesn't fit.
-    fit = max(min(max(0, capacity - _BESIDE) // _ROW_BYTES, _MOST_ROWS) // rows_per_frame, 2 * OVERLAP + 2)
-    if latent_frames <= fit:
-        return [(0, latent_frames)]
-    count = 2
-    while True:
-        need = math.ceil((latent_frames + (count - 1) * OVERLAP) / count)
-        length = need + (-(need - 2)) % LATENTS_PER_CHUNK
-        if length <= fit:
-            chunks = (latent_frames - length) // LATENTS_PER_CHUNK
-            starts = [LATENTS_PER_CHUNK * round(index * chunks / (count - 1)) for index in range(count)]
-            if all(start + length - after >= OVERLAP for start, after in zip(starts, starts[1:], strict=False)):
-                return [(start, length) for start in starts]
-        count += 1
 
 
 def blend(spans: list[tuple[int, int]], latent_frames: int, rows_per_frame: int, device: Any) -> list[torch.Tensor]:
@@ -143,12 +119,18 @@ def unpatchify(rows: torch.Tensor, latent_frames: int, height: int, width: int) 
     return value.permute(0, 4, 1, 5, 2, 6, 3, 7).reshape(1, channels, latent_frames, height, width)
 
 
-def plan_windows(shape: tuple[int, ...]) -> list[tuple[int, int]]:
-    """The refine's windows for `(1, 24, T, H, W)` latents on this process's card."""
-    device = torch.device(str(placed_device()))
+def plan_windows(shape: tuple[int, ...]) -> Windows:
+    """The refine's windows over `(1, 24, T, H, W)` latents' frames, chosen once for its loop: the
+    fewest equal `5n + 2` clips sharing at least OVERLAP frames, each starting on the VAE's latent
+    chunk grid (a multiple of LATENTS_PER_CHUNK), within `WINDOW_ROWS`. A window is laid out as a
+    clip of its own, and H3's rotary clock spaces latent frames 5/3 x (1, 4, 4, 4, 4) from a clip's
+    start, so a window off the grid gives each chunk's one-frame latent a four-frame step: it
+    flickers at every chunk (run 22567, the middle of three windows, starting at 32)."""
     _, _, latent_frames, height, width = shape
-    capacity = int(torch.cuda.mem_get_info(device)[1]) if device.type == "cuda" else 1 << 62
-    return windows(latent_frames, (height // PATCH_SIZE[1]) * (width // PATCH_SIZE[2]), capacity)
+    rows = (height // PATCH_SIZE[1]) * (width // PATCH_SIZE[2])
+    cut = Cut(0, overlap=OVERLAP, align=LATENTS_PER_CHUNK)
+    return windows("minimax-h3.refine", (latent_frames, rows), cut, per_element_bytes=_ROW_BYTES,
+                   most=WINDOW_ROWS, equal=True)  # fmt: skip
 
 
 def refine(
@@ -158,26 +140,25 @@ def refine(
     latents: torch.Tensor,
     prompt_embeds: torch.Tensor,
     text_tags: torch.Tensor,
-    spans: list[tuple[int, int]],
+    layout: Windows,
     audio: torch.Tensor,
     schedule: Schedule,
     seed: int,
     preset: str,
     on_step: Callable[[int], None],
 ) -> torch.Tensor:
-    """Refine normalized `(1, 24, T, H, W)` latents at their size over `spans` (`plan_windows`),
-    each window carrying the clean `audio` rows of its length; the refined latents.
-
-    The noise is drawn as `infer.py` draws it (a CUDA generator over the `[1, rows, 96]` video
-    rows), so a seed reproduces the reference's refine on the same latent.
+    """Refine normalized `(1, 24, T, H, W)` latents at their size over `layout` (`plan_windows`),
+    each window carrying the clean `audio` rows of its length; the refined latents. The noise
+    over the video rows is the Runtime's (`rng.noise`, drawn on the CPU from `seed`), the same on
+    every card.
     """
     device = torch.device(str(placed_device()))
     _, _, latent_frames, height, width = (int(value) for value in latents.shape)
     rows_per_frame = (height // PATCH_SIZE[1]) * (width // PATCH_SIZE[2])
+    spans = [(first, stop - first) for first, stop in layout]
     length = spans[0][1]
     low = patchify_video_latents(latents.to(device, torch.float32), PATCH_SIZE)
-    generator = torch.Generator(device=device).manual_seed(seed)
-    noise = torch.randn((1, *low.shape), device=device, dtype=torch.float32, generator=generator)[0]
+    noise = rng.noise(low.shape, seed, device=device)
     start = schedule.start
     video = (1 - start) * low + start * noise
     del low, noise
@@ -226,6 +207,7 @@ def refine(
         plan=[(times.to(device), rows.to(device)) for times, rows in plan],
         sigmas=torch.tensor(schedule.video_sigmas, dtype=torch.float32, device=device),
         windows=[(first * rows_per_frame, length * rows_per_frame) for first, _ in spans],
+        piece=layout.piece,
         weights=blend(spans, latent_frames, rows_per_frame, device),
         dense_steps=dense,
         layout_at=lambda step: AttentionLayout(

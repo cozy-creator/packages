@@ -4,8 +4,6 @@ The ComfyUI node, checkpoint loading, global model cache, and device selection a
 excluded. Runtime owns construction, weights, placement, and model residency.
 """
 
-import gc
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -18,23 +16,6 @@ def zero_module(module):
     for p in module.parameters():
         p.detach().zero_()
     return module
-
-
-class AttnBlock3D(nn.Module):
-    def __init__(self, in_channels):
-        super().__init__()
-        self.norm = normalization(in_channels)
-        self.q = nn.Conv3d(in_channels, in_channels, 1)
-        self.k = nn.Conv3d(in_channels, in_channels, 1)
-        self.v = nn.Conv3d(in_channels, in_channels, 1)
-        self.proj_out = nn.Conv3d(in_channels, in_channels, 1)
-
-    def forward(self, x):
-        h = self.norm(x)
-        rows = lambda y: y.flatten(2).transpose(1, 2)[:, None]  # b c t h w -> b 1 (t h w) c
-        h = F.scaled_dot_product_attention(rows(self.q(h)), rows(self.k(h)), rows(self.v(h)))
-        h = h[:, 0].transpose(1, 2).reshape(x.shape)
-        return x + self.proj_out(h)
 
 
 class ResBlockEmb3D(nn.Module):
@@ -93,7 +74,7 @@ class TemporalConv(nn.Module):
 
 class LatentResizer3D(nn.Module):
     def __init__(self, in_channels=24, in_blocks=12, out_blocks=12,
-                 channels=512, dropout=0.1, attn=False,
+                 channels=512, dropout=0.1,
                  temporal_every=2, temporal_kernel=5):
         super().__init__()
         self.conv_in = nn.Conv3d(in_channels, channels, 3, padding=1)
@@ -103,16 +84,12 @@ class LatentResizer3D(nn.Module):
 
         self.in_blocks = nn.ModuleList()
         for b in range(in_blocks):
-            if (b == 1 or b == in_blocks - 1) and attn:
-                self.in_blocks.append(AttnBlock3D(channels))
             self.in_blocks.append(ResBlockEmb3D(channels, embed_dim, dropout))
             if temporal_every > 0 and b % temporal_every == 0:
                 self.in_blocks.append(TemporalConv(channels, temporal_kernel))
 
         self.out_blocks = nn.ModuleList()
         for b in range(out_blocks):
-            if (b == 1 or b == out_blocks - 1) and attn:
-                self.out_blocks.append(AttnBlock3D(channels))
             self.out_blocks.append(ResBlockEmb3D(channels, embed_dim, dropout))
             if temporal_every > 0 and b % temporal_every == 0:
                 self.out_blocks.append(TemporalConv(channels, temporal_kernel))
@@ -120,74 +97,16 @@ class LatentResizer3D(nn.Module):
         self.norm_out = normalization(channels)
         self.conv_out = nn.Conv3d(channels, in_channels, 3, padding=1)
 
-    def forward(self, x, scale=None, target_size=None, enable_chunking=True):
+    def forward(self, x, scale=None, target_size=None):
         if target_size is not None:
             size = target_size
         elif scale is not None:
             size = tuple(int(round(s * scale)) for s in x.shape[-3:])
         else:
             return x
-
         if size == x.shape[-3:]:
             return x
-
-        B, C, T, H, W = x.shape
-
-        tk = 0
-        for b in self.in_blocks:
-            if isinstance(b, TemporalConv):
-                tk = b.dwconv.weight.shape[2]
-                break
-
-        overlap = tk
-        chunk = 32
-
-        if not enable_chunking or T <= chunk:
-            return self._forward_seg(x, scale, size)
-
-        print(f"[MinimaxH3-3D] temporal chunking: T={T} chunks={(T + chunk - 1) // chunk} overlap={overlap}")
-
-        x_padded = F.pad(x, (0, 0, 0, 0, overlap, overlap), mode='replicate')
-
-        out_full = torch.zeros(B, C, T, size[-2], size[-1], device=x.device, dtype=x.dtype)
-        weight_full = torch.zeros(1, 1, T, 1, 1, device=x.device, dtype=x.dtype)
-
-        start = 0
-        while start < T:
-            seg_start = start
-            seg_end = min(T, start + chunk)
-            out_start = max(0, seg_start - overlap)
-            out_end = min(T, seg_end + overlap)
-            lo = max(0, out_start - overlap)
-            hi = min(T + 2 * overlap, out_end + overlap)
-
-            seg = x_padded[:, :, lo:hi].contiguous()
-            seg_size = (hi - lo, size[-2], size[-1])
-            seg_out = self._forward_seg(seg, scale, seg_size)
-
-            s0 = (out_start + overlap) - lo
-            s1 = s0 + (out_end - out_start)
-            valid_out = seg_out[:, :, s0:s1]
-            n_valid = out_end - out_start
-
-            weight = torch.ones(n_valid, device=x.device, dtype=x.dtype)
-            if seg_start > out_start:
-                blend_len = seg_start - out_start
-                weight[:blend_len] = torch.arange(1, blend_len + 1, device=x.device, dtype=x.dtype) / (blend_len + 1)
-            if out_end > seg_end:
-                blend_len = out_end - seg_end
-                weight[-blend_len:] = torch.arange(blend_len, 0, -1, device=x.device, dtype=x.dtype) / (blend_len + 1)
-
-            out_full[:, :, out_start:out_end] += valid_out * weight.view(1, 1, n_valid, 1, 1)
-            weight_full[:, :, out_start:out_end] += weight.view(1, 1, n_valid, 1, 1)
-
-            start += chunk
-            del seg, seg_out, valid_out
-            if start % (chunk * 4) == 0:
-                gc.collect()
-
-        out_full = out_full / weight_full.clamp(min=1e-8)
-        return out_full
+        return self._forward_seg(x, scale, size)
 
     def _forward_seg(self, x, scale, size):
         scale_emb = torch.tensor(

@@ -85,6 +85,10 @@ class ClipRows:
         """Before the first evaluation: keep every `FRAME_STRIDE`-th latent frame of each clip."""
         self._drop(block_state, lambda frame: frame % FRAME_STRIDE != 0)
 
+    def releases(self) -> bool:
+        """Whether `release` drops any rows: some clip's latent frames are still in the sequence."""
+        return bool((self.frame >= 0).any())
+
     def release(self, block_state: Any) -> None:
         """Before the first sparse evaluation: every clip's latent rows leave."""
         self._drop(block_state, lambda frame: torch.ones_like(frame, dtype=torch.bool))

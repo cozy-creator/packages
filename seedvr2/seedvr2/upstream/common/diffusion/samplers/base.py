@@ -20,7 +20,6 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Callable
 import torch
-from tqdm import tqdm
 
 from ..schedules.base import Schedule
 from ..timesteps.base import SamplingTimesteps
@@ -96,13 +95,3 @@ class Sampler(ABC):
         """
         x_0, x_T = self.schedule.convert_from_pred(pred, self.prediction_type, x_t, t)
         return x_0 if self.timesteps.direction == SamplingDirection.backward else x_T
-
-    def get_progress_bar(self):
-        """
-        Get progress bar for sampling.
-        """
-        return tqdm(
-            iterable=range(len(self.timesteps) - (0 if self.return_endpoint else 1)),
-            dynamic_ncols=True,
-            desc=self.__class__.__name__,
-        )

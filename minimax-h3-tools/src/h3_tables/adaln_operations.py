@@ -260,9 +260,6 @@ async def compute_adaln_tables(
             code="adaln_projection",
         )
     order = tuple((component, key) for key in table_shapes(topology, plan))
-    if ctx.device.type == "cuda":
-        torch.backends.cuda.matmul.allow_tf32 = False
-    torch.set_float32_matmul_precision("highest")
     with ctx.output("model", Derivation(base=None, sources=(opened,), order=order)) as out:
         if out.done is None:
             copy_assets(out, opened, component, omit=(METADATA,))

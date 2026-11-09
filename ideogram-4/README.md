@@ -46,7 +46,8 @@ Ideogram 4 reads only JSON captions (`high_level_description`, `style_descriptio
 [prompting guide](https://github.com/ideogram-oss/ideogram4/blob/main/docs/prompting.md)). A JSON
 `prompt` is used as given. A plain one is expanded by the upsampler: Diffusers' local prompt enhancer,
 the same Qwen3-VL with its language head, Ideogram's system message and the target ratio, sampled at
-temperature 1 from the request's seed and constrained to the caption schema (`outlines`). A plain prompt
+temperature 1 from the request's seed by the Runtime's `lm.generate`, constrained to the caption schema
+(outlines-core's index, `allowed=`). A plain prompt
 with `prompt_upsampling=false` is refused: the model reads only captions, and draws its own refusal card
 on a bare description.
 
@@ -65,9 +66,10 @@ the style `prompt` gives. Each region is appended to the caption's elements as I
 Conditioning, sampling and decoding are Diffusers' `Ideogram4Pipeline` (0.41.0), run per component:
 the caption is read unpadded (Ideogram's own code; Diffusers left-pads to 2048 tokens), the logit-normal
 schedule is shifted by the image size with the preset's (mu, std) nearest the step count, latents stay
-float32 and noise is drawn on the CPU from the seed. With tiny random modules on CPU the package's text
-features, latents and images equal the pipeline's exactly (three sizes and step counts), and its
-upsampler's text equals the pipeline's `upsample_prompt`.
+float32 and noise is drawn on the CPU from the seed. The steps run as one `denoise_loop`. The caption's
+text rows are projected once before it: the image rows never carry Diffusers' zero text features
+(53,248 wide per image token). With tiny random modules on CPU, both DiTs' velocities equal the
+pipeline's forward exactly.
 
 ## Prepare the models
 

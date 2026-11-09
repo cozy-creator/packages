@@ -60,7 +60,8 @@ It follows BFL's reference code (`black-forest-labs/flux2` 50fe516): the text en
 schedule (linear times shifted by the token count's empirical mu); [klein] Base's CFG against
 BFL's empty negative prompt. Turbo runs fal's card as written: its sigmas
 `1, 0.6509, … 0.00031` through Diffusers' `Flux2Pipeline`, which shifts them by mu as well, at guidance
-2.5. The modules are Diffusers' (main 7ecb1e1b).
+2.5. The modules are Diffusers' (main 7ecb1e1b). The steps are one `author.denoise_loop`, which the
+Runtime runs eagerly or as one recorded program.
 
 `prompt_upsampling` is BFL's local upsampler: [dev]'s Mistral-Small-3.2 as the full vision-language model,
 with BFL's system prompts, used for [klein] too. It decodes greedily (BFL samples at temperature 0.15).

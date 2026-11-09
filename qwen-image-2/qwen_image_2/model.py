@@ -9,8 +9,7 @@ layers (`__adapter_compatibility__`).
 from __future__ import annotations
 
 import math
-from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
-from contextvars import ContextVar
+from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
 import numpy as np
@@ -29,13 +28,13 @@ from diffusers.models.autoencoders.autoencoder_kl_qwenimage21 import (
     QwenImage21ResidualUpBlock,
     QwenImage21RMS_norm,
     QwenImage21Upsample,
+    _patchify,
 )
 from diffusers.models.transformers.transformer_qwenimage21 import (
     QwenImage21KVCache,
     QwenImage21KVLayerCache,
     QwenImage21TransformerBlock,
 )
-from diffusers.pipelines.qwenimage21 import pipeline_qwenimage21
 from diffusers.pipelines.qwenimage21.pipeline_qwenimage21 import (
     calculate_dimensions,
     calculate_shift,
@@ -59,16 +58,12 @@ from cozy_runtime.author import (
     Telemetry,
     denoise_loop,
     hold_dtype,
+    retained,
     uses_components,
 )
 from cozy_runtime.author.kernels import Plan
 
-try:
-    from cozy_runtime.author import retained
-except ImportError:  # a Runtime without `retained` (0.42.1): the prefix is recomputed each step
-    retained = None
-
-from ._prepared import _FlowEuler, _Layout, _cached_step
+from ._prepared import _FlowEuler, _full_step, _Joint, _Layout, _cached_step
 
 
 def _modulation(block: Any, arguments: Mapping[str, Any]) -> fusion.Modulation:
@@ -125,10 +120,6 @@ VAE_NORM = fusion.ChannelNorm(
 VAE_FRAME = fusion.LoneFrame(QwenImage21CausalConv3d, upsample=QwenImage21Upsample)
 
 
-#: Where the pipeline's call keeps its prefix K/V (`_RetainedKV`), set around that call.
-_RETAINED: ContextVar[Any] = ContextVar("qwen_image_2_retained", default=None)
-
-
 class _RetainedLayer(QwenImage21KVLayerCache):
     """A layer's prefix K/V held by the Runtime (`retained`): on the card while there is room,
     else in pinned host RAM, filled ahead of the layer's next step."""
@@ -147,42 +138,12 @@ class _RetainedLayer(QwenImage21KVLayerCache):
 
 
 class _RetainedKV(QwenImage21KVCache):
-    """Diffusers' prefix cache, its layers held by the Runtime when the call sets a store. Two
-    references' 8k conditioning tokens keep 132 MiB a block, 7.9 GB over the stack: kept as
-    tensors they outgrew an 8 GB card in step 1 (runs 39611, 39615)."""
+    """Diffusers' prefix cache, its layers held by the Runtime. Two references' 8k conditioning
+    tokens keep 132 MiB a block, 7.9 GB over the stack: kept as tensors they outgrew an 8 GB card
+    in step 1 (runs 39611, 39615)."""
 
-    def __init__(self, num_layers: int) -> None:
-        held = _RETAINED.get()
-        if held is None:
-            super().__init__(num_layers)
-        else:
-            self.layer_caches = [_RetainedLayer(held) for _ in range(num_layers)]
-
-
-# The pipeline builds its cache by this name.
-pipeline_qwenimage21.QwenImage21KVCache = _RetainedKV
-
-
-class _Progress[T]:
-    """Pipeline iteration without tqdm: a disabled bar still starts a monitor thread, and
-    Runtime reports progress through Telemetry."""
-
-    def __init__(self, iterable: Iterable[T] | None = None, total: int | None = None) -> None:
-        self.iterable = iterable
-
-    def __iter__(self) -> Iterator[T]:
-        if self.iterable is None:
-            raise TypeError("progress has no iterable")
-        return iter(self.iterable)
-
-    def update(self, n: int = 1) -> None:
-        pass
-
-    def __enter__(self) -> _Progress[T]:
-        return self
-
-    def __exit__(self, *exc: object) -> None:
-        return None
+    def __init__(self, num_layers: int, held: Any) -> None:
+        self.layer_caches = [_RetainedLayer(held) for _ in range(num_layers)]
 
 
 _DTYPES = {"f32": torch.float32, "bf16": torch.bfloat16, "f16": torch.float16}
@@ -245,38 +206,14 @@ def build_qwen_image21(config: Config) -> QwenImage21Graph:
 
 
 class _StagedPipeline(QwenImage21Pipeline):
-    reference_latents: torch.Tensor | None = None
-    reference_pad_mask: torch.Tensor | None = None
     #: The device the Runtime runs the model on (`Model.device`).
     device_placed: torch.device = torch.device("cpu")
-
-    def progress_bar[T](
-        self, iterable: Iterable[T] | None = None, total: int | None = None
-    ) -> _Progress[T]:
-        return _Progress(iterable, total)
 
     @property
     def _execution_device(self) -> torch.device:
         # Diffusers reads the first registered module's (the VAE's) parameters, which may sit
         # paged on the CPU while the Runtime runs the model: the Runtime's device instead.
         return self.device_placed
-
-    def encode_prompt(self, *args: Any, **kwargs: Any) -> Any:
-        # The denoiser must reuse the vision token positions from the separately
-        # leased text encoder. Diffusers otherwise rejects precomputed image embeds.
-        if self.reference_pad_mask is not None:
-            kwargs["image_pad_mask"] = self.reference_pad_mask
-        return super().encode_prompt(*args, **kwargs)
-
-    def prepare_latents(self, images: Any, *args: Any, **kwargs: Any) -> Any:
-        # References were encoded while the VAE had its own residency lease.
-        # Never invoke that parked component from the transformer-only lease.
-        latents, image_latents = super().prepare_latents(
-            None if self.reference_latents is not None else images, *args, **kwargs
-        )
-        if self.reference_latents is not None:
-            image_latents = self.reference_latents.to(device=latents.device, dtype=latents.dtype)
-        return latents, image_latents
 
 
 #: Code the encoders read beyond their own bodies: their memo key binds it.
@@ -363,8 +300,7 @@ class QwenImage21Model(
                     .unsqueeze(2)
                     .to(device=device, dtype=vae.dtype)
                 )
-                # argmax encoding is deterministic and consumes no sampler RNG.
-                encoded = pipeline._encode_vae_image(pixels, generator=None)
+                encoded = _encoded(vae, pixels)
                 packed.append(
                     pipeline._pack_latents(
                         encoded, 1, pipeline.latent_channels, encoded.shape[3], encoded.shape[4]
@@ -393,79 +329,44 @@ class QwenImage21Model(
         steps: int,
         seed: int,
         on_step: Callable[[int], None],
-        cancel: Callable[[], None],
         sigmas: Sequence[float] | None = None,
         reference_images: list[Any] | None = None,
         reference_latents: torch.Tensor | None = None,
         image_pad_mask: torch.Tensor | None = None,
     ) -> Any:
-        """Text-to-image with an unpadded prompt runs the cached loop; edits and
-        padded prompts run the Diffusers pipeline, uncached. `sigmas`: a distilled schedule (its
-        length is `steps`), else the pipeline's uniform spacing."""
-        cancel()
-        if reference_latents is None and reference_images is None and mask is None:
-            return self._denoise_cached(
-                embeds, width=width, height=height, steps=steps, seed=seed, on_step=on_step,
-                sigmas=sigmas,
-            )
-        return self._denoise_eager(
-            embeds,
-            mask,
-            width=width,
-            height=height,
-            steps=steps,
-            seed=seed,
-            sigmas=sigmas,
-            on_step=on_step,
-            cancel=cancel,
-            reference_images=reference_images,
-            reference_latents=reference_latents,
-            image_pad_mask=image_pad_mask,
-        )
+        """`QwenImage21Pipeline.__call__`'s loop, the references' latent tokens before the target's.
+        Its preparation mirrors the pipeline's, reusing its `prepare_latents`, `calculate_shift`
+        and `retrieve_timesteps`, so the schedule, noise and layout match the Diffusers loop.
 
-    def _denoise_cached(
-        self,
-        embeds: Any,
-        *,
-        width: int,
-        height: int,
-        steps: int,
-        seed: int,
-        on_step: Callable[[int], None],
-        sigmas: Sequence[float] | None = None,
-    ) -> Any:
-        """Extract step 0 eagerly, then steps ``1..N-1`` in cached mode as one `denoise_loop`.
-
-        The preparation mirrors `QwenImage21Pipeline.__call__` for the text-to-image case,
-        reusing the pipeline's own `prepare_latents`/`calculate_shift`/`retrieve_timesteps` so
-        the schedule, noise and layout match the Diffusers loop exactly.
-        """
+        Text and reference tokens modulate from t = 0, so their K/V are every step's: step 0
+        extracts them into the Runtime's store (`retained`) and steps 1..N-1 run the cached pass
+        over the target tokens as one `denoise_loop`. With no room for them, or a padded prompt,
+        every step is the whole joint pass. `sigmas`: a distilled schedule (its length is `steps`),
+        else the pipeline's uniform spacing."""
         transformer = self.graph.components["transformer"]
+        if not transformer.config.causal_condition:
+            raise ConformanceError("Qwen Image 2.1 denoises with causal conditioning", code="artifact_config")
         device = torch.device(str(self.device))
         pipeline = self._pipeline(sigmas)
         scheduler = pipeline.scheduler
+        blocks = transformer.transformer_blocks
         multiple_of = pipeline.vae_scale_factor * 2
         width = width // multiple_of * multiple_of
         height = height // multiple_of * multiple_of
+        factor = pipeline.vae_scale_factor
+        sizes = [calculate_dimensions(1024 * 1024, image.width / image.height)[:2] for image in reference_images or []]
 
         with torch.inference_mode(False), torch.no_grad():
             embeds = embeds.to(device=device, dtype=transformer.dtype)
+            mask = None if mask is None else mask.to(device=device)
+            references = () if reference_latents is None else (reference_latents.to(device=device, dtype=transformer.dtype),)
             latents, _ = pipeline.prepare_latents(
-                None,
-                1,
-                transformer.config.in_channels,
-                height,
-                width,
-                transformer.dtype,
-                device,
-                rng.generator(seed),
-                None,
+                None, 1, transformer.config.in_channels, height, width, transformer.dtype, device,
+                rng.generator(seed), None,
             )
             # The distilled schedule when given (Turbo), else the uniform spacing the pipeline uses
             # when no `sigmas` is passed. The dynamic shift follows the canvas.
-            spacing = (
-                np.array(sigmas, dtype=np.float32) if sigmas else np.linspace(1.0, 1 / steps, steps)
-            )
+            spacing = np.array(sigmas, dtype=np.float32) if sigmas else np.linspace(1.0, 1 / steps, steps)
             mu = calculate_shift(
                 latents.shape[1],
                 scheduler.config.get("base_image_seq_len", 256),
@@ -475,106 +376,52 @@ class QwenImage21Model(
             )
             timesteps, steps = retrieve_timesteps(scheduler, steps, device, sigmas=spacing, mu=mu)
             scheduler.set_begin_index(0)
-
-            # The joint-sequence image mask: no condition images for text-to-image, then one
-            # vision-language slot per 2x2 group of target latents, as the pipeline appends.
-            image_pad_mask = embeds.new_zeros((1, embeds.shape[1]), dtype=torch.bool)
-            image_pad_mask = torch.cat(
-                [image_pad_mask, image_pad_mask.new_ones(1, latents.shape[1] // 4)], dim=1
-            )
-            img_shapes = [[(1, height // pipeline.vae_scale_factor, width // pipeline.vae_scale_factor)]]
-            layout = _Layout(transformer, img_shapes, image_pad_mask, device)
-
-            # Step 0 prefills the prefix K/V over the full joint sequence.
-            kv_cache = QwenImage21KVCache(len(transformer.transformer_blocks))
-            timestep = timesteps[0:1].to(transformer.dtype) / 1000
-            noise = transformer(
-                hidden_states=latents,
-                timestep=timestep,
-                encoder_hidden_states=embeds,
-                encoder_hidden_states_mask=None,
-                img_shapes=img_shapes,
-                img_mask=image_pad_mask,
-                attention_kwargs={},
-                kv_cache=kv_cache,
-                kv_cache_mode="extract",
-                return_dict=False,
-            )[0]
-            noise = noise[:, -latents.shape[1] :]
-            latents = scheduler.step(noise, timesteps[0], latents, return_dict=False)[0]
-            on_step(0)
-            if steps < 2:
-                return latents
             euler = _FlowEuler.from_scheduler(scheduler, device)
-        blocks = transformer.transformer_blocks
-        prefix = tuple(
-            tensor
-            for layer in range(len(blocks))
-            for tensor in kv_cache.get_layer(layer).get()
-        )
-        denoise_loop(
-            _cached_step(transformer), range(1, steps), state=(latents,),
-            inputs=(euler.ts, euler.dt, layout.rotary_emb, layout.modulation_mask, *prefix),
-            key=("qwen-image-2.1.cached/1", len(blocks)), on_step=on_step,
-        )
+            # The joint sequence's image slots: the text encoder's for each reference, then one per
+            # 2x2 group of target latents, as the pipeline appends them.
+            slots = image_pad_mask if image_pad_mask is not None else embeds.new_zeros((1, embeds.shape[1]), dtype=torch.bool)
+            img_mask = torch.cat([slots.to(device), slots.new_ones(1, latents.shape[1] // 4, device=device)], dim=1)
+            img_shapes = [[*((1, h // factor, w // factor) for w, h in sizes), (1, height // factor, width // factor)]]
+            layout = _Layout(transformer, img_shapes, img_mask, device)
+            config = transformer.config
+            nbytes = 2 * layout.prefix_len * config.num_attention_heads * config.attention_head_dim
+            held = None if mask is not None else retained(nbytes * transformer.dtype.itemsize * len(blocks))
+            if held is None:
+                joint = _Joint(transformer, img_shapes, img_mask, mask, device)
+            else:
+                # Step 0 prefills each layer's prefix K/V into the store over the full joint sequence.
+                kv_cache = _RetainedKV(len(blocks), held)
+                noise = transformer(
+                    hidden_states=torch.cat([*references, latents], dim=1),
+                    timestep=timesteps[0:1].to(transformer.dtype) / 1000,
+                    encoder_hidden_states=embeds,
+                    encoder_hidden_states_mask=None,
+                    img_shapes=img_shapes,
+                    img_mask=img_mask,
+                    attention_kwargs={},
+                    kv_cache=kv_cache,
+                    kv_cache_mode="extract",
+                    return_dict=False,
+                )[0]
+                latents = scheduler.step(noise[:, -latents.shape[1] :], timesteps[0], latents, return_dict=False)[0]
+                del noise
+                on_step(0)
+        if held is None:
+            denoise_loop(
+                _full_step(transformer, joint.segments, joint.length, latents.shape[1], mask is not None), range(steps),
+                state=(latents,), inputs=(euler.ts, euler.dt, *joint.inputs(), embeds, *references),
+                on_step=on_step,
+            )
+            return latents
+        with held:
+            if steps > 1:
+                denoise_loop(
+                    _cached_step(transformer), range(1, steps), state=(latents,),
+                    inputs=(euler.ts, euler.dt, layout.rotary_emb, layout.modulation_mask,
+                            *(layer.state for layer in kv_cache.layer_caches)),
+                    key=("qwen-image-2.1.cached/1", len(blocks)), on_step=on_step,
+                )
         return latents
-
-    def _denoise_eager(
-        self,
-        embeds: Any,
-        mask: Any,
-        *,
-        width: int,
-        height: int,
-        steps: int,
-        seed: int,
-        on_step: Callable[[int], None],
-        cancel: Callable[[], None],
-        sigmas: Sequence[float] | None = None,
-        reference_images: list[Any] | None = None,
-        reference_latents: torch.Tensor | None = None,
-        image_pad_mask: torch.Tensor | None = None,
-    ) -> Any:
-        transformer = self.graph.components["transformer"]
-        device = torch.device(str(self.device))
-        pipeline = self._pipeline(sigmas)
-        pipeline.reference_latents = reference_latents
-        if image_pad_mask is not None:
-            pipeline.reference_pad_mask = image_pad_mask.to(device=device)
-
-        def observed(_pipeline: Any, step: int, _timestep: Any, values: Any) -> Any:
-            cancel()
-            on_step(step)
-            return values
-
-        # The prefix (text and reference tokens) keeps its K/V across steps: the Runtime holds
-        # it, or with no room for it each step recomputes it.
-        prefix = embeds.shape[1] + (0 if reference_latents is None else reference_latents.shape[1])
-        config = transformer.config
-        width_bytes = config.num_attention_heads * config.attention_head_dim * transformer.dtype.itemsize
-        nbytes = 2 * prefix * width_bytes * len(transformer.transformer_blocks)
-        held = None if retained is None else retained(nbytes)
-        token = _RETAINED.set(held)
-        try:
-            with torch.inference_mode():
-                return pipeline(
-                    image=reference_images,
-                    prompt_embeds=embeds.to(device=device, dtype=transformer.dtype),
-                    prompt_embeds_mask=None if mask is None else mask.to(device=device),
-                    width=width,
-                    height=height,
-                    num_inference_steps=steps,
-                    generator=rng.generator(seed),
-                    output_type="latent",
-                    callback_on_step_end=observed,
-                    use_kv_cache=held is not None,
-                ).images
-        finally:
-            _RETAINED.reset(token)
-            # Its K/V dies with the loop, so the decode after it gets the room. A store from a Runtime
-            # before `close` (dev builds of 0.42.1) lets its regions go with their last reference.
-            if held is not None and hasattr(held, "close"):
-                held.close()
 
     @uses_components("vae")
     def decode(self, latents: Any, *, width: int, height: int) -> Any:
@@ -586,6 +433,18 @@ class QwenImage21Model(
             mean = latents.new_tensor(vae.config.latents_mean).view(1, vae.config.z_dim, 1, 1, 1)
             std = latents.new_tensor(vae.config.latents_std).view(1, vae.config.z_dim, 1, 1, 1)
             return _decoded(vae, latents * std + mean).clamp(-1.0, 1.0)[:, :, 0]
+
+
+def _encoded(vae: Any, pixels: torch.Tensor) -> torch.Tensor:
+    """The pipeline's `_encode_vae_image` of one frame (argmax, normalized): Diffusers' `encode`
+    without its feature cache (each convolution's input kept on the VAE for a next frame an image
+    never has)."""
+    x = pixels if vae.config.patch_size is None else _patchify(pixels, patch_size=vae.config.patch_size)
+    z = vae.config.z_dim
+    latents = vae.quant_conv(vae.encoder(x))[:, :z]
+    mean = torch.tensor(vae.config.latents_mean).view(1, z, 1, 1, 1).to(latents)
+    std = torch.tensor(vae.config.latents_std).view(1, z, 1, 1, 1).to(latents)
+    return (latents - mean) / std
 
 
 def _decoded(vae: Any, z: torch.Tensor) -> torch.Tensor:

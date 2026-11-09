@@ -29,7 +29,6 @@ from __future__ import annotations
 import hashlib
 import inspect
 import json
-import sys
 import time
 from collections.abc import Callable, Iterator, Mapping
 from contextvars import ContextVar
@@ -47,6 +46,7 @@ from diffusers.models.transformers.transformer_minimax_h3 import (
     _apply_rotary_emb,
 )
 
+from cozy_runtime import rng
 from cozy_runtime.author import CapabilityError, Cut, plain_forward, split
 from cozy_runtime.author.kernels import (
     ROWWISE_FP8,
@@ -716,20 +716,20 @@ def warm(launch: Launch, device: Any, *, heads: int, fp8: bool) -> float:
     milliseconds the first launches took to enqueue."""
     started = time.perf_counter()
     rows, table = 2, 3
-    x = torch.randn(1, rows, HIDDEN, device=device, dtype=torch.bfloat16)
+    x = torch.ones(1, rows, HIDDEN, device=device, dtype=torch.bfloat16)
     weight = torch.ones(HIDDEN, device=device, dtype=torch.bfloat16)
-    tables = torch.randn(table, 6 * HIDDEN, device=device, dtype=torch.bfloat16).chunk(6, dim=-1)
+    tables = torch.ones(table, 6 * HIDDEN, device=device, dtype=torch.bfloat16).chunk(6, dim=-1)
     index = torch.arange(rows, device=device) % table
     for quant in {False, fp8}:
         rmsnorm_modulate(launch, x, weight, tables[1], tables[0], index, 1e-5, fp8=quant)
         gate_add_rmsnorm_modulate(
             launch, x, tables[2], x, index, weight, tables[4], tables[3], 1e-5, fp8=quant
         )
-        ffn = torch.randn(1, rows, 2 * FFN, device=device, dtype=torch.bfloat16)
+        ffn = torch.ones(1, rows, 2 * FFN, device=device, dtype=torch.bfloat16)
         swiglu(launch, ffn, fp8=quant)
     gate_add(launch, x, tables[5], x, index)
-    q = torch.randn(1, rows, heads, HEAD_DIM, device=device, dtype=torch.bfloat16)
-    angles = torch.randn(rows, ROTARY, device=device)
+    q = torch.ones(1, rows, heads, HEAD_DIM, device=device, dtype=torch.bfloat16)
+    angles = torch.zeros(rows, ROTARY, device=device)
     head_weight = torch.ones(HEAD_DIM, device=device, dtype=torch.bfloat16)
     rmsnorm_rope(launch, q, head_weight, angles, angles, 1e-5)
     key_sums(launch, q)
@@ -747,11 +747,10 @@ def _off(got: Any, want: Any) -> float:
 def checked(launch: Launch, device: Any, *, heads: int, fp8: bool) -> str:
     """Each entry against its arithmetic in float64 on this card: what disagrees, or "". Rounding to
     bf16 loses 1e-3 and an e4m3 row 5e-2; a misaddressed tile or a wrong dtype loses O(1)."""
-    generator = torch.Generator(device=device).manual_seed(20261104)
+    generator = rng.generator(20261104)
 
     def random(*shape: int, by: float = 1.0) -> Any:
-        values = torch.randn(*shape, generator=generator, device=device, dtype=torch.float32)
-        return (values * by).to(torch.bfloat16)
+        return (rng.noise(shape, generator, device=device) * by).to(torch.bfloat16)
 
     rows, table, eps = 3, 5, 1e-5
     x, branch = random(1, rows, HIDDEN), random(1, rows, HIDDEN)
@@ -789,7 +788,7 @@ def checked(launch: Launch, device: Any, *, heads: int, fp8: bool) -> str:
             decoded = quantized.payload.double() * quantized.scale.double()
             errors[name] = _off(decoded.view_as(want), want), 0.1
         q = random(1, rows, heads, HEAD_DIM)
-        angles = torch.rand(rows, ROTARY, generator=generator, device=device, dtype=torch.float32) * 6.0
+        angles = torch.rand(rows, ROTARY, generator=generator, dtype=torch.float32).to(device) * 6.0
         cos, sin = torch.cos(angles), torch.sin(angles)
         head_weight = random(HEAD_DIM, by=0.1)
         rms = q.double() * torch.rsqrt(q.double().pow(2).mean(-1, keepdim=True) + eps) * head_weight.double()
@@ -1159,18 +1158,13 @@ def _require_calls() -> None:
 
 def record(model: object, plan: Plan, name: str, document: Mapping[str, object]) -> None:
     """One part of the execution plan's outcome, named by its kernel set (`GLUE.name`): on the
-    model (`_cozy_fusion_report[name]`), in the executor's log, and in the construction's
-    receipts where the Runtime's plan takes reports (0.31: `measurements.execution.plan_reports`),
-    so `run show` names a refusal. An install deferred to a request boundary reports again,
-    through the same plan, when it lands; one whose build fails never reaches the package, and
-    Runtime reports that under the same kernel-set name. A plan without `report` (before 0.31)
-    keeps the log line."""
+    model (`_cozy_fusion_report[name]`) and in the construction's
+    receipts (`measurements.execution.plan_reports`), so `run show` names a refusal. An install
+    deferred to a request boundary reports again, through the same plan, when it lands; one whose
+    build fails never reaches the package, and Runtime reports that under the same kernel-set name."""
     if hasattr(model, "__dict__"):
         vars(model).setdefault("_cozy_fusion_report", {})[name] = dict(document)
-    print(f"[minimax-h3] {name} fusion: {json.dumps(document, sort_keys=True)}", file=sys.stderr)
-    report = getattr(plan, "report", None)
-    if report is not None:
-        report(name, document)
+    plan.report(name, document)
 
 
 def _record(model: object, plan: Plan, result: Applied) -> Applied:

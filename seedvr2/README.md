@@ -1,17 +1,19 @@
 # SeedVR2 video restoration
 
 Managed SeedVR2 7B restoration with the upstream Apache-2.0 architecture, one-step sampler,
-fixed conditioning, standard PyTorch SDPA and Runtime-owned DiT/VAE weights. `upscale` takes a
-video, `resolution` (`1080p`, `1440p`, `2160p`), a deterministic `seed`, and `aspect_ratio`
-(`source` by default, or `16:9` for an exact letterboxed canvas). Frame presentation timestamps
-and audio pass through Runtime's streaming media API.
+fixed conditioning, Runtime-selected attention kernels and Runtime-owned DiT/VAE weights.
+`upscale` takes a video, `resolution` (`1080p`, `1440p`, `2160p`), a `seed` (all noise is drawn
+on the CPU, so a seed restores the same video on any device), and `aspect_ratio` (`source` by
+default, or `16:9` for an exact letterboxed canvas). Frame presentation timestamps and audio pass
+through Runtime's streaming media API.
 
 Resolution defines the maximum 16:9 canvas; source-aspect output fits inside it. Internally,
 padding meets the model's 16-pixel grid and is cropped from the result. Audio is decoded and
 re-encoded by Runtime with its source clock; it is not copied byte-for-byte. `aspect_ratio=16:9`
 outputs exactly 1920×1080, 2560×1440 or 3840×2160 using Pillow letterboxing; the subject is never
-stretched. The Runtime sizes the VAE's tiles and the DiT's pieces from the GPU's free memory, and
-frames stay in host memory between passes, so a whole clip restores on an 8 GB card.
+stretched. The VAE's tiles and the DiT's pieces come from the clip's shape, each declaring its
+peak so the Runtime makes room for it, and frames stay in host memory between passes, so a whole
+clip restores on an 8 GB card.
 
 ## Tuning
 

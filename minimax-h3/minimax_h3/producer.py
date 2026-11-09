@@ -84,7 +84,10 @@ class RequestState:
     # The attention modules whose `Carry` slot a call of the current denoise loop has written.
     carried: set[int] = field(default_factory=set)
 
-    def close(self) -> None:
+    def end_loop(self) -> None:
+        """One loop's key means, rotary presentation and Kitchen's packed table of it go as the loop
+        returns (the Runtime calls this as `denoise_loop` returns), so none stays through the decode
+        after it."""
         self.statistics.clear()
         self.carried.clear()
         self.parallel_rotary.clear()
@@ -96,6 +99,8 @@ class RequestState:
                 if reference() is self.rope[2]:
                     cached.pop(key, None)
         self.rope = None
+
+    close = end_loop
 
 
 @dataclass(frozen=True, slots=True)
@@ -130,7 +135,7 @@ def present(
 ) -> None:
     """Before a `denoise_loop`: the rotary presentation these sites' sparse calls read, and
     Kitchen's packed table of it, made eagerly so no recorded step allocates them from its pool.
-    `RequestState.close` forgets the table."""
+    `RequestState.end_loop` forgets the table."""
     states = {
         id(state): state
         for site in sites
@@ -141,6 +146,11 @@ def present(
     for state in states.values():
         state.carried.clear()  # this loop's slots start unwritten
     first, *others = states.values()
+    # Sharded, `rotary` holds this GPU's rows; the calls attend whole sequences, with the tables
+    # `retain_rotary` kept before the split.
+    rotary = first.parallel_rotary.get(
+        getattr(sites[0].module, "_cozy_producer_rotary_key", None), rotary
+    )
     presentation = rope_presentation(rotary, tokens, first)
     for state in others:
         state.rope = (rotary[0], rotary[1], presentation)
@@ -266,7 +276,7 @@ def rope_presentation(
     rotary: tuple[torch.Tensor, torch.Tensor], tokens: int, state: RequestState
 ) -> torch.Tensor:
     # Kept while the step's rotary tables are the same tensors, which the transformer computes
-    # once per layout (`adaln_pruned.StepInvariants`), so every step of a phase reuses one
+    # once before each loop (`steps.denoise_official`), so every step of a phase reuses one
     # presentation, and Kitchen's table cache keyed on it. The held tensors cannot be reused
     # under another identity. A value key would read the device every call; a shape key would
     # serve one document's angles to another of the same length (a continuation's shifted
@@ -700,9 +710,12 @@ class _RetainRotary(ModelHook):  # type: ignore[misc]  # untyped Diffusers hook 
     def post_forward(self, module: object, output: object) -> object:
         if getattr(self.component, "_parallel_config", None) is None:
             return output  # one GPU: the producer reads the rotary its call receives
-        state = PRODUCERS[FIXED_MEANS].request_state()
-        if state is not None and isinstance(output, tuple) and len(output) == 2:
-            state.parallel_rotary[self.key] = output
+        if not (isinstance(output, tuple) and len(output) == 2):
+            return output
+        for producer in PRODUCERS.values():  # whichever recipe serves this request's calls
+            state = producer.request_state() if producer.context_parallel else None
+            if state is not None:
+                state.parallel_rotary[self.key] = output
         return output
 
 

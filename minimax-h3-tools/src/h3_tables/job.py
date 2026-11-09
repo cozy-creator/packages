@@ -171,8 +171,6 @@ def _require_cuda(ctx: Context) -> None:
             "H3 AdaLN timestep tables need a CUDA worker; run on a GPU rental",
             code="h3_tables_need_cuda",
         )
-    torch.backends.cuda.matmul.allow_tf32 = False
-    torch.set_float32_matmul_precision("highest")
 
 
 def _tables(

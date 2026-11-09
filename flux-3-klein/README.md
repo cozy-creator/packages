@@ -92,7 +92,8 @@ steps with a constant shift (alpha) of 16, CFG 4 for the base model, and noise f
 with an fp32 state across steps. BFL raised alpha from the release's 6.93 and CFG from 3.5 on
 2026-10-17; Diffusers and ComfyUI still default to 6.93.
 The distilled model also embeds the timestep each step jumps to. The base model runs CFG with an empty
-negative prompt. A lone reference is padded to the 16-pixel grid at up to 4 MP, with no upscaling.
+negative prompt; its text and reference tokens are computed once and held by the Runtime (`retained`),
+or recomputed each step when there is no room for them. The steps run as one `denoise_loop`. A lone reference is padded to the 16-pixel grid at up to 4 MP, with no upscaling.
 With several references, each is cropped to the grid at up to 1 MP. The modules are Diffusers'
 (main `7ecb1e1b`; Flux3 is in no release yet).
 

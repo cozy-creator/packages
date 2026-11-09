@@ -14,8 +14,7 @@
 
 from typing import List, Optional, Tuple, Union
 import torch
-from einops import rearrange
-from omegaconf import DictConfig, ListConfig
+from omegaconf import DictConfig
 from torch import Tensor
 
 from seedvr2.upstream.common.diffusion import (
@@ -24,15 +23,6 @@ from seedvr2.upstream.common.diffusion import (
     create_sampling_timesteps_from_config,
     create_schedule_from_config,
 )
-from seedvr2.upstream.common.distributed import (
-    get_global_rank,
-)
-
-from seedvr2.upstream.common.distributed.meta_init_utils import (
-    meta_non_persistent_buffer_init_fn,
-)
-# from common.fs import download
-
 from seedvr2.upstream.models.dit import na
 
 class VideoDiffusionInfer():
@@ -83,91 +73,6 @@ class VideoDiffusionInfer():
             timesteps=self.sampling_timesteps,
         )
 
-    # -------------------------------- Helper ------------------------------- #
-
-    @torch.no_grad()
-    def vae_encode(self, samples: List[Tensor]) -> List[Tensor]:
-        use_sample = self.config.vae.get("use_sample", True)
-        latents = []
-        if len(samples) > 0:
-            device = next(self.vae.parameters()).device
-            dtype = getattr(torch, self.config.vae.dtype)
-            scale = self.config.vae.scaling_factor
-            shift = self.config.vae.get("shifting_factor", 0.0)
-
-            if isinstance(scale, ListConfig):
-                scale = torch.tensor(scale, device=device, dtype=dtype)
-            if isinstance(shift, ListConfig):
-                shift = torch.tensor(shift, device=device, dtype=dtype)
-
-            # Group samples of the same shape to batches if enabled.
-            if self.config.vae.grouping:
-                batches, indices = na.pack(samples)
-            else:
-                batches = [sample.unsqueeze(0) for sample in samples]
-
-            # Vae process by each group.
-            for sample in batches:
-                sample = sample.to(device, dtype)
-                if hasattr(self.vae, "preprocess"):
-                    sample = self.vae.preprocess(sample)
-                if use_sample:
-                    latent = self.vae.encode(sample).latent
-                else:
-                    # Deterministic vae encode, only used for i2v inference (optionally)
-                    latent = self.vae.encode(sample).posterior.mode().squeeze(2)
-                latent = latent.unsqueeze(2) if latent.ndim == 4 else latent
-                latent = rearrange(latent, "b c ... -> b ... c")
-                latent = (latent - shift) * scale
-                latents.append(latent)
-
-            # Ungroup back to individual latent with the original order.
-            if self.config.vae.grouping:
-                latents = na.unpack(latents, indices)
-            else:
-                latents = [latent.squeeze(0) for latent in latents]
-
-        return latents
-
-    @torch.no_grad()
-    def vae_decode(self, latents: List[Tensor]) -> List[Tensor]:
-        samples = []
-        if len(latents) > 0:
-            device = next(self.vae.parameters()).device
-            dtype = getattr(torch, self.config.vae.dtype)
-            scale = self.config.vae.scaling_factor
-            shift = self.config.vae.get("shifting_factor", 0.0)
-
-            if isinstance(scale, ListConfig):
-                scale = torch.tensor(scale, device=device, dtype=dtype)
-            if isinstance(shift, ListConfig):
-                shift = torch.tensor(shift, device=device, dtype=dtype)
-
-            # Group latents of the same shape to batches if enabled.
-            if self.config.vae.grouping:
-                latents, indices = na.pack(latents)
-            else:
-                latents = [latent.unsqueeze(0) for latent in latents]
-
-            # Vae process by each group.
-            for latent in latents:
-                latent = latent.to(device, dtype)
-                latent = latent / scale + shift
-                latent = rearrange(latent, "b ... c -> b c ...")
-                latent = latent.squeeze(2)
-                sample = self.vae.decode(latent).sample
-                if hasattr(self.vae, "postprocess"):
-                    sample = self.vae.postprocess(sample)
-                samples.append(sample)
-
-            # Ungroup back to individual sample with the original order.
-            if self.config.vae.grouping:
-                samples = na.unpack(samples, indices)
-            else:
-                samples = [sample.squeeze(0) for sample in samples]
-
-        return samples
-
     def timestep_transform(self, timesteps: Tensor, latents_shapes: Tensor):
         # Skip if not needed.
         if not self.config.diffusion.timesteps.get("transform", False):
@@ -208,7 +113,6 @@ class VideoDiffusionInfer():
         texts_pos: Union[List[str], List[Tensor], List[Tuple[Tensor]]],
         texts_neg: Union[List[str], List[Tensor], List[Tuple[Tensor]]],
         cfg_scale: Optional[float] = None,
-        decode: bool = True,
     ) -> List[Tensor]:
         assert len(noises) == len(conditions) == len(texts_pos) == len(texts_neg)
         batch_size = len(noises)
@@ -281,8 +185,4 @@ class VideoDiffusionInfer():
         self.dit.train(was_training)
 
         # Unflatten.
-        latents = na.unflatten(latents, latents_shapes)
-
-
-        # The adapter can time denoising and decoding as separate Runtime stages.
-        return self.vae_decode(latents) if decode else latents
+        return na.unflatten(latents, latents_shapes)
