@@ -98,6 +98,7 @@ def calibrate(ctx: Context, tel: Telemetry, model: Klein, record: Any) -> None:
                 span = (0.3 * (2 * seed + n) / runs, 0.3 * (2 * seed + n + 1) / runs)
                 embeds = model.encode(text)
                 negative = model.encode("") if guidance is not None else None
+                step = tel.step_callback(steps, stage="calibrating", overall_range=span)
                 tokens = model.denoise(
                     embeds,
                     negative,
@@ -107,7 +108,7 @@ def calibrate(ctx: Context, tel: Telemetry, model: Klein, record: Any) -> None:
                     steps=steps,
                     guidance=guidance,
                     seed=seed,
-                    progress=lambda i, _total, step=tel.step_callback(steps, stage="calibrating", overall_range=span): step(i),
+                    progress=lambda i, _total: step(i),
                 )
                 if references is None:
                     image = model.decode(tokens, width=size[0], height=size[1])
