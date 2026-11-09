@@ -57,8 +57,8 @@ _CHECKED: ContextVar[bool] = ContextVar("minimax_h3_checked_loop", default=False
 
 @contextmanager
 def checked_loop() -> Iterator[None]:
-    """A denoise that checked every step's rows before its `denoise_loop`: its forwards read no
-    device value on the host and keep the overlay it armed before the loop."""
+    """A denoise that checked every step's rows before its loop: its forwards skip the check and
+    keep the overlay it armed before the loop."""
     token = _CHECKED.set(True)
     try:
         yield
@@ -264,10 +264,10 @@ class AdaLNPrunedMiniMaxH3Transformer(MiniMaxH3Transformer3DModel):  # type: ign
         """Diffusers 0.41's forward, the projected rows scoped to the packing: Diffusers keeps
         them to its end, the video's float32 rows (2.25 GB a GPU at H3 15 s, degree 2) through
         every block. It checks the rows and arms a turbo bank `attention_kwargs` names (`_arm`)
-        and ends disarmed, in the forward, as a package forward hook would keep it out of native
-        loops; unless its denoise checked every step's rows ahead (`checked_loop`): a
-        `denoise_loop` step, which keeps the overlay its denoise armed before the loop and passes
-        the `rotary` tables (`rope`) and `text` rows (`text_rows`) it computed before it."""
+        and ends disarmed, in the forward; unless its denoise checked every step's rows ahead
+        (`checked_loop`): a loop's step, which keeps the overlay its denoise armed before the loop
+        and passes the `rotary` tables (`rope`) and `text` rows (`text_rows`) it computed before
+        it."""
         looped = _CHECKED.get()
         if not looped:
             self._arm(timestep, timestep_indices, token_tags, attention_kwargs)

@@ -197,7 +197,7 @@ def refine(
     ]
     dense, tau = PRESETS[quality]
     dense = len(plan) if dense is None else dense
-    denoise_refine(
+    video = denoise_refine(
         transformer,
         overlay,
         video=video,

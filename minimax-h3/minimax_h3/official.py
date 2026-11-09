@@ -1539,7 +1539,7 @@ class OfficialH3Pipeline:
             references, latents = state.normalized_references, state.condition_latents
             clips = ClipRows(block_state, references, latents, scoped.patch_size, start=guided)
             clips.thin(block_state)
-        # Every path runs `denoise_official`; on several ranks each rank's loop runs its steps eagerly.
+        # Every path runs `denoise_official`; on several ranks each rank runs the loop.
         cancel()
         loop_over = partial(
             denoise_official,
@@ -1549,7 +1549,6 @@ class OfficialH3Pipeline:
             lambda step: _attention_layout(block_state, step, sol_dense_steps=sol_dense_steps, tau=tau),
             sol_dense_steps,
             on_step,
-            trunk=_TRUNK[task],
             overlay=(block_state.attention_kwargs or {}).get(OVERLAY_KWARG),
             cache=cache,
         )

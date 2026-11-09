@@ -89,9 +89,8 @@ class RequestState:
     carried: set[int] = field(default_factory=set)
 
     def end_loop(self) -> None:
-        """One loop's key means, rotary presentation and Kitchen's packed table of it go as the loop
-        returns (the Runtime calls this as `denoise_loop` returns), so none stays through the decode
-        after it."""
+        """One loop's key means, rotary presentation and Kitchen's packed table of it go after the
+        loop's last step (`end_loop`, from `steps`), so none stays through the decode after it."""
         self.statistics.clear()
         self.carried.clear()
         self.parallel_rotary.clear()
@@ -109,13 +108,12 @@ class RequestState:
 
 @dataclass(frozen=True, slots=True)
 class Carry:
-    """One `denoise_loop` step's Kitchen key means: a carried F32 [H, 128] slot per site, by
-    attention module. A rolling step's calls read the previous step's mean from their slot; every
-    sparse call leaves its own there, and the last dense step's calls seed it (`seeding`; a step
-    loop seeds `RequestState.statistics` the same way), so the first sparse step reads one too
-    instead of measuring its keys in a second producer pass. Eager
-    reuse decides on `layout.step` in Python, which a recorded step would freeze; the step's label
-    decides instead (`rolling`, `seeding`)."""
+    """One denoise step's Kitchen key means: an F32 [H, 128] slot per site, by attention module.
+    A rolling step's calls read the previous step's mean from their slot; every sparse call leaves
+    its own there, and the last dense step's calls seed it (`seeding`), so the first sparse step
+    reads one too instead of measuring its keys in a second producer pass. The loop says which
+    step rolls and which seeds; a call outside one decides on `layout.step`
+    (`RequestState.statistics`)."""
 
     slots: Mapping[int, torch.Tensor]
     rolling: bool
@@ -137,9 +135,8 @@ def carrying(carry: Carry) -> Iterator[None]:
 def present(
     sites: Sequence[ProducerSite], rotary: tuple[torch.Tensor, torch.Tensor], tokens: int
 ) -> None:
-    """Before a `denoise_loop`: the rotary presentation these sites' sparse calls read, and
-    Kitchen's packed table of it, made eagerly so no recorded step allocates them from its pool.
-    `RequestState.end_loop` forgets the table."""
+    """Before a denoise loop: the rotary presentation these sites' sparse calls read, and
+    Kitchen's packed table of it, made once. `end_loop` forgets the table."""
     states = {
         id(state): state
         for site in sites
@@ -358,7 +355,7 @@ def produce(
         state.replay_inputs.pop(key, None)
         carry, seed = _CARRY.get(), None
         if not parallel and producing(layout, call.path):
-            if carry is not None:  # `denoise_loop`: the label says which step seeds
+            if carry is not None:  # a denoise loop says which step seeds
                 seed = KeyMean(carry.slots[id(attn)]) if carry.seeding else None
             elif layout.step == layout.dense_until_step - 1:  # a step loop: the last dense step
                 held = hidden_states.value if isinstance(hidden_states, Owned) else hidden_states
@@ -393,8 +390,8 @@ def produce(
 class _Means:
     """A one-GPU call's Kitchen key means, F32 [heads, 128]: the previous step's (`prior`, or None
     where the call measures its keys) and this call's, which each head window writes its rows of
-    (`keep`). `close` leaves them where the next step reads them, the module's `Carry` slot in
-    `denoise_loop`, else `RequestState.statistics` under the call's key, after the whole call:
+    (`keep`). `close` leaves them where the next step reads them, the module's `Carry` slot in a
+    denoise loop, else `RequestState.statistics` under the call's key, after the whole call:
     a split the Runtime retries in smaller windows reads the same prior."""
 
     __slots__ = ("call", "carry", "geometry", "key", "mean", "prior")
@@ -697,6 +694,15 @@ PRODUCERS = {
         _register(FAST, "kitchen-sol"),
     )
 }
+
+
+def end_loop() -> None:
+    """After a denoise loop's last step, never before it: this request's producer states forget
+    the loop (`RequestState.end_loop`), the rotary tables its calls read among them."""
+    for registered in PRODUCERS.values():
+        state = registered.request_state()
+        if isinstance(state, RequestState):
+            state.end_loop()
 
 
 class _RetainRotary(ModelHook):  # type: ignore[misc]  # untyped Diffusers hook API
