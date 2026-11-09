@@ -134,7 +134,7 @@ def euler_schedule(scheduler: Any, device: Any) -> torch.Tensor:
 
 def euler_step(
     unet: Any, index: torch.Tensor, state: torch.Tensor, prompt: torch.Tensor, pooled: torch.Tensor,
-    time_ids: torch.Tensor, guidance: float, v: bool, table: torch.Tensor,
+    time_ids: torch.Tensor, guidance: float, table: torch.Tensor, v: bool,
 ) -> None:
     """Diffusers' Euler step in its operation order, `v` its v prediction."""
     rows = table.index_select(1, index)
