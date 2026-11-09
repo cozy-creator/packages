@@ -332,7 +332,7 @@ class AdaLNPrunedMiniMaxH3Transformer(MiniMaxH3Transformer3DModel):  # type: ign
             if stated:
                 priors = key_means if key_means is not None else (None,) * len(self.transformer_blocks)
                 for block, prior in zip(self.transformer_blocks, priors, strict=True):
-                    block.attn._key_means = KeyMeans(prior, keep_key_means, rope_presentation)
+                    cast(Any, block).attn._key_means = KeyMeans(prior, keep_key_means, rope_presentation)
             try:
                 for block in self.transformer_blocks:
                     if torch.is_grad_enabled() and self.gradient_checkpointing:
@@ -340,14 +340,14 @@ class AdaLNPrunedMiniMaxH3Transformer(MiniMaxH3Transformer3DModel):  # type: ign
                     else:
                         rows = block(rows, temb, adaln_indices, rotary_emb)
                 means = (
-                    tuple(block.attn._key_means.mean for block in self.transformer_blocks)
+                    tuple(cast(Any, block).attn._key_means.mean for block in self.transformer_blocks)
                     if keep_key_means
                     else None
                 )
             finally:
                 if stated:
                     for block in self.transformer_blocks:
-                        block.attn._key_means = None
+                        cast(Any, block).attn._key_means = None
             dtype = get_parameter_dtype(self.proj_out)
             if rows.shape[1] != sequence_length:
                 # Across GPUs `rows` is this GPU's share: the `_cp_plan` split it at the first
