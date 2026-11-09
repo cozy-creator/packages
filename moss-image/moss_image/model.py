@@ -178,7 +178,7 @@ class MossTransformer(torch.nn.Module):
     """Upstream's `MOSSImageTransformer` for one sample: image tokens then text tokens in one stream,
     one shared modulation for every block. Its RoPE bands are derived constants, computed in f32 on the
     CPU as training built them; the checkpoint's `rope.bands` is not read. The text stream
-    and RoPE are built once a request (`text`, `table`/`rotations`); `forward` is one step for one prompt."""
+    and RoPE are built once a request (`text`, `table`/`rotations`); `forward` is one step for its prompts."""
 
     def __init__(self, dim: int = 3072, ffn_dim: int = 8192, num_heads: int = 24, num_layers: int = 42,
                  text_dim: int = 4096, freq_dim: int = 256, latent_channels: int = 128,
@@ -249,17 +249,18 @@ class MossTransformer(torch.nn.Module):
         x = self.final_linear_video((x * (1 + head[:, 1, None]) + head[:, 0, None]).to(DTYPE))
         return x.transpose(1, 2).reshape(1, -1, height, width).float()
 
-    def forward(self, latents: torch.Tensor, timestep: torch.Tensor, text: torch.Tensor, rope: torch.Tensor,
-                skip: frozenset[int] = frozenset()) -> torch.Tensor:
-        """The f32 velocity [1, C, H, W] of `latents` at `timestep` [1] for one prompt: its text stream
-        (`text`) and RoPE. `skip`: blocks left out, upstream's unconditional branch."""
+    def forward(self, latents: torch.Tensor, timestep: torch.Tensor, texts: list[torch.Tensor],
+                ropes: list[torch.Tensor]) -> list[torch.Tensor]:
+        """Each prompt's f32 velocity [1, C, H, W] of `latents` at `timestep` [1]: its text stream and
+        RoPE, the conditional prompt first. The prompts pass through each block in turn, so a streamed
+        block comes in once per step; a later prompt skips `UNCOND_SKIP`, upstream's unconditional branch."""
         modulation, head = self.modulation(timestep)
         video = self.video_embedder(latents.flatten(2).transpose(1, 2).to(DTYPE).contiguous())
-        x = torch.cat((video, text), 1)
+        streams = [torch.cat((video, text), 1) for text in texts]
         for index, block in enumerate(self.layers):
-            if index not in skip:
-                x = block(x, rope, modulation)
-        return self.velocity(x, head, latents.shape[2], latents.shape[3])
+            streams = [x if branch and index in UNCOND_SKIP else block(x, rope, modulation)
+                       for branch, (x, rope) in enumerate(zip(streams, ropes, strict=True))]
+        return [self.velocity(x, head, latents.shape[2], latents.shape[3]) for x in streams]
 
 
 class MossScheduler(FlowMatchEulerDiscreteScheduler):
@@ -381,9 +382,9 @@ class MossImage(Model[MossGraph]):
         skipped in its branch, Euler (`MossScheduler`) in f32. Returns the latents [1, 128, H/16, W/16]
         on the CPU.
 
-        Each prompt's text stream and RoPE are built once, before the loop; with CFG each branch is
-        one forward of the transformer (their text lengths differ, so not one batch; ComfyUI runs two
-        forwards too), which the Runtime may replay as a CUDA graph."""
+        Each prompt's text stream and RoPE are built once, before the loop; with CFG both branches
+        pass through each block in turn inside one call of the transformer, so a streamed block comes in
+        once per step. Their text lengths differ, so the branches are two streams, not one batch."""
         transformer = self.graph.components["transformer"]
         device = torch.device(str(self.device))
         rows, columns = height // PATCH, width // PATCH
@@ -400,10 +401,7 @@ class MossImage(Model[MossGraph]):
                 ropes.append(transformer.rotations(phase) if fused else transformer.table(phase))
             timesteps = scheduler.timesteps
             for i, t in enumerate(timesteps):
-                velocity = [
-                    transformer(latents, t[None], text, rope, UNCOND_SKIP if branch else frozenset())
-                    for branch, (text, rope) in enumerate(zip(texts, ropes, strict=True))
-                ]
+                velocity = transformer(latents, t[None], texts, ropes)
                 prediction = velocity[0]
                 if len(velocity) > 1:
                     prediction = velocity[1] + guidance * (velocity[0] - velocity[1])
