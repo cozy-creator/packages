@@ -785,6 +785,11 @@ _TURBO_LORA = "alibaba-pai/minimax-h3-turbo-lora@1.0.1"
 _REGENERATE_LORA = "efficient-large-model/open-h3-regenerate-2k@0.1.0"
 _LATENT_UPSCALER = "lbh-123-ai/h3-latent-upscaler@0.1.0"
 
+#: The components each task runs. A machine downloads these first and the rest behind the
+#: run, so a pod's first request pays for one DiT, not two.
+_FL2VA = ("text_encoder", "transformer", "vae", "audio_vae")
+_REF2VA = ("text_encoder", "transformer_ref", "vae", "audio_vae")
+
 
 #: The output canvas the Regenerate route computes (`regenerate.TARGETS`): the demand axis beside
 #: the frames.
@@ -1249,6 +1254,7 @@ def _sampling(payload: FL2VAInput | Ref2VAInput, turbo_lora: H3TurboLoRA) -> H3T
 
 @invocable(
     defaults={"base_model": _MODEL, "turbo_lora": _TURBO_LORA},
+    components={"base_model": _REF2VA, "turbo_lora": ("ref2va_turbo",)},
     memoize=True,
 )
 async def ref2va_segment(
@@ -1350,6 +1356,7 @@ def _retargeted(adapters: Sequence[Any], dit: str) -> list[str]:
 
 @invocable(
     defaults={"base_model": _MODEL, "turbo_lora": _TURBO_LORA},
+    components={"base_model": _FL2VA, "turbo_lora": ("fl2va_turbo",)},
     memoize=True,
 )
 async def fl2va_segment(
@@ -1387,6 +1394,7 @@ app.entrypoint(fl2va_segment, private=True)
 
 @invocable(
     defaults={"base_model": _MODEL, "regenerate_lora": _REGENERATE_LORA, "latent_upscaler": _LATENT_UPSCALER},
+    components={"base_model": _FL2VA, "regenerate_lora": ("fl2va_regenerate",), "latent_upscaler": ("upscaler",)},
     memoize=True,
 )
 async def regenerate_shot(
