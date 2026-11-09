@@ -34,6 +34,26 @@ DTYPE = torch.bfloat16
 VAE_DTYPE = torch.float16
 
 
+class Transformer(Ideogram4Transformer2DModel):
+    """`Ideogram4Transformer2DModel` whose forward is one velocity past the text rows no step changes."""
+
+    def forward(  # type: ignore[override]
+        self, image: torch.Tensor, prefix: torch.Tensor | None, t: torch.Tensor, cos: torch.Tensor,
+        sin: torch.Tensor, segment_ids: torch.Tensor,
+    ) -> torch.Tensor:
+        """`Ideogram4Transformer2DModel.forward` past its text rows: the image tokens embedded beside
+        `prefix` (`_text_rows`; None: image tokens alone), the blocks, and the final layer over the
+        image rows."""
+        hidden = self.input_proj(image) + self.embed_image_indicator(torch.ones(1, dtype=torch.long, device=image.device))
+        if prefix is not None:
+            hidden = torch.cat([prefix, hidden], dim=1)
+        adaln = F.silu(self.adaln_proj(self.t_embedding(t).unsqueeze(1)))
+        mask = (segment_ids.unsqueeze(2) == segment_ids.unsqueeze(1)).unsqueeze(1)
+        for block in self.layers:
+            hidden = block(hidden, mask, (cos, sin), adaln)
+        return self.final_layer(hidden[:, hidden.shape[1] - image.shape[1] :], conditioning=adaln)  # type: ignore[no-any-return]
+
+
 class IdeogramGraph:
     def __init__(self, config: Config) -> None:
         # Ideogram's official fp8 release carries no transformer configs: Diffusers' defaults are its geometry.
@@ -43,6 +63,8 @@ class IdeogramGraph:
             ).to(dtype=torch.bfloat16)
             for name in ("transformer", "unconditional_transformer")
         }
+        for model in self.components.values():
+            model.__class__ = Transformer
         self.components["vae"] = AutoencoderKLFlux2.from_config(config.section("vae").mapping()).to(dtype=torch.bfloat16)
         self.scheduler_config = config.section("scheduler").mapping()
 
@@ -75,20 +97,6 @@ def _rotary(tf: Any, position_ids: torch.Tensor) -> tuple[torch.Tensor, torch.Te
     """The forward's MRoPE tables for `position_ids`, in its activations' dtype."""
     cos, sin = tf.rotary_emb(position_ids)
     return cos.to(DTYPE), sin.to(DTYPE)
-
-
-def _velocity(tf: Any, image: torch.Tensor, prefix: torch.Tensor | None, t: torch.Tensor, cos: torch.Tensor,
-              sin: torch.Tensor, segment_ids: torch.Tensor) -> torch.Tensor:
-    """`Ideogram4Transformer2DModel.forward` past its text rows: the image tokens embedded beside
-    `prefix` (None: image tokens alone), the blocks, and the final layer over the image rows."""
-    hidden = tf.input_proj(image) + tf.embed_image_indicator(torch.ones(1, dtype=torch.long, device=image.device))
-    if prefix is not None:
-        hidden = torch.cat([prefix, hidden], dim=1)
-    adaln = F.silu(tf.adaln_proj(tf.t_embedding(t).unsqueeze(1)))
-    mask = (segment_ids.unsqueeze(2) == segment_ids.unsqueeze(1)).unsqueeze(1)
-    for block in tf.layers:
-        hidden = block(hidden, mask, (cos, sin), adaln)
-    return tf.final_layer(hidden[:, hidden.shape[1] - image.shape[1] :], conditioning=adaln)  # type: ignore[no-any-return]
 
 
 class Ideogram4(Model[IdeogramGraph]):
@@ -147,8 +155,8 @@ class Ideogram4(Model[IdeogramGraph]):
             for i, t in enumerate(scheduler.timesteps):
                 t_model = (1.0 - t.float() / num_train_timesteps).expand(1).to(DTYPE)
                 image = latents.to(DTYPE)
-                positive = _velocity(tf, image, prefix, t_model, *positive_rope).to(torch.float32)
-                negative = _velocity(uncond, image, None, t_model, *negative_rope).to(torch.float32)
+                positive = tf(image, prefix, t_model, *positive_rope).to(torch.float32)
+                negative = uncond(image, None, t_model, *negative_rope).to(torch.float32)
                 velocity = guidance[i] * positive + (1.0 - guidance[i]) * negative
                 latents = scheduler.step(-velocity, t, latents, return_dict=False)[0]
                 progress(i, steps)
