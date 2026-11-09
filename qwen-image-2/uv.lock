@@ -168,7 +168,7 @@ wheels = [
 [[package]]
 name = "cozy-runtime"
 version = "0.43.1"
-source = { git = "https://github.com/cozy-creator/cozy-runtime?rev=f1cec0d53ff1e82573e1ad2090f81bdea543e51a#f1cec0d53ff1e82573e1ad2090f81bdea543e51a" }
+source = { git = "https://github.com/cozy-creator/cozy-runtime?rev=c20f84fc160701bcfef055dcb26d9d55ac07143a#c20f84fc160701bcfef055dcb26d9d55ac07143a" }
 dependencies = [
     { name = "msgspec" },
     { name = "numpy" },
@@ -586,7 +586,7 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
-    { name = "cozy-runtime", extras = ["adapters", "media"], git = "https://github.com/cozy-creator/cozy-runtime?rev=f1cec0d53ff1e82573e1ad2090f81bdea543e51a" },
+    { name = "cozy-runtime", extras = ["adapters", "media"], git = "https://github.com/cozy-creator/cozy-runtime?rev=c20f84fc160701bcfef055dcb26d9d55ac07143a" },
     { name = "diffusers", specifier = ">=0.41,<0.42" },
     { name = "msgspec", specifier = ">=0.19" },
     { name = "numpy", specifier = ">=1.26" },
@@ -703,7 +703,7 @@ wheels = [
 [[package]]
 name = "tensorfs"
 version = "0.22.1"
-source = { git = "https://github.com/cozy-creator/cozy-creator?subdirectory=crates%2Ftensorfs-py&rev=2df21cbc053a6a793e56ab59d02a25aaad5f6727#2df21cbc053a6a793e56ab59d02a25aaad5f6727" }
+source = { git = "https://github.com/cozy-creator/cozy-creator?subdirectory=crates%2Ftensorfs-py&rev=bd45de6e451f3f415901715b7f440761933581fa#bd45de6e451f3f415901715b7f440761933581fa" }
 
 [[package]]
 name = "tokenizers"
