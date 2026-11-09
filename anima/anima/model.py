@@ -241,7 +241,7 @@ class _Denoise(AnimaDenoiseStep):
         dtype, timesteps, latents = block_state.dtype, block_state.timesteps, block_state.latents
         steps = len(timesteps)
         positive = block_state.prompt_embeds.to(dtype)
-        negative = getattr(block_state, "negative_prompt_embeds", None)
+        negative: Any = getattr(block_state, "negative_prompt_embeds", None)
         if negative is not None:
             negative = torch.cat([positive, negative.to(dtype)]) if self.batched else negative.to(dtype)
 
