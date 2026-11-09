@@ -67,7 +67,7 @@ from cozy_runtime.author import (
 )
 from cozy_runtime.accel.kernels import Plan
 
-from ._prepared import _Joint, _Layout, cached_pass, joint_pass
+from ._prepared import KV, Transformer, _Joint, _Layout
 
 
 def _modulation(block: Any, arguments: Mapping[str, Any]) -> fusion.Modulation:
@@ -149,6 +149,10 @@ class _RetainedKV(QwenImage21KVCache):
     def __init__(self, num_layers: int, held: Any) -> None:
         self.layer_caches = [_RetainedLayer(held) for _ in range(num_layers)]
 
+    def prefix(self) -> list[KV]:
+        """Each layer's keys and values, as a cached step reads them."""
+        return [layer.get() for layer in self.layer_caches]
+
 
 _DTYPES = {"f32": torch.float32, "bf16": torch.bfloat16, "f16": torch.float16}
 
@@ -208,6 +212,7 @@ class QwenImage21Graph:
                 transformer = QwenImage21Transformer2DModel.from_config(
                     config.section("transformer").mapping()
                 )
+            transformer.__class__ = Transformer
             transformer._cozy_overlay = None
             for path in SITES:
                 transformer.get_submodule(path).register_forward_hook(lora.Hook(partial(_armed, transformer, path)))
@@ -424,8 +429,8 @@ class QwenImage21Model(Model[QwenImage21Graph]):
                 # Under a parallel decoder the state is F32 from the first step, as `scheduler.step` makes it.
                 latents = latents if heads is None else latents.float()
                 for i, t in enumerate(timesteps):
-                    noise = joint_pass(transformer, joint, times[i : i + 1], latents, embeds, references,
-                                       None if heads is None else heads[i])
+                    noise = transformer(latents, joint=(times[i : i + 1], embeds, references, *joint.inputs()),
+                                        projection=None if heads is None else heads[i])
                     latents = euler.step(noise, t, latents, return_dict=False)[0]
                     progress(i, steps)
                 return latents
@@ -461,8 +466,8 @@ class QwenImage21Model(Model[QwenImage21Graph]):
                 latents = euler.step(noise, timesteps[0], latents, return_dict=False)[0]
                 progress(0, steps)
                 for i in range(1, steps):
-                    noise = cached_pass(transformer, layout, kv_cache, times[i : i + 1], latents,
-                                        None if heads is None else heads[i])
+                    cached = (times[i : i + 1], layout.rotary_emb, layout.modulation_mask, kv_cache.prefix())
+                    noise = transformer(latents, cached=cached, projection=None if heads is None else heads[i])
                     latents = euler.step(noise, timesteps[i], latents, return_dict=False)[0]
                     progress(i, steps)
         return latents

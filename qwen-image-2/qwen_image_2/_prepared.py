@@ -1,14 +1,15 @@
-"""Qwen-Image-2.1's transformer passes, their layouts derived once per request.
+"""Qwen-Image-2.1's transformer with a sampling step's two passes, their layouts derived once per request.
 
 Step 0 runs in the transformer's ``extract`` mode, prefilling the per-layer text and
 condition-image K/V cache over the full joint sequence. Steps ``1..N-1`` are the ``cached`` pass
-over the target-image tokens only (`cached_pass`). A padded prompt keeps no prefix: every step is
-the whole joint pass (`joint_pass`).
+over the target-image tokens only (`Transformer.forward(cached=...)`). A padded prompt keeps no
+prefix: every step is the whole joint pass (`forward(joint=...)`).
 
 `QwenImage21Transformer2DModel.forward` derives its layout on the host every call (boolean
-scatters, a `tolist`); `_Layout` and `_Joint` derive it once, so a step waits on nothing. The
-passes call the transformer's own ``img_in``/``time_text_embed``/``modulation``/``norm_out``/
-``proj_out`` and the installed blocks, so the numerics are the Diffusers/Runtime ones.
+scatters, a `tolist`); `_Layout` and `_Joint` derive it once, so a step waits on nothing and is one
+call of the transformer over tensors alone. The passes call the transformer's own ``img_in``/
+``time_text_embed``/``modulation``/``norm_out``/``proj_out`` and the installed blocks, so the
+numerics are the Diffusers/Runtime ones.
 """
 
 from __future__ import annotations
@@ -17,10 +18,14 @@ from typing import Any
 
 import torch
 import torch.nn.functional as F
+from diffusers import QwenImage21Transformer2DModel
 from diffusers.models.transformers.transformer_qwenimage21 import (
-    QwenImage21KVCache,
+    QwenImage21KVLayerCache,
     _qwenimage21_prefix_segments,
 )
+
+#: A layer's prefix keys and values.
+KV = tuple[torch.Tensor, torch.Tensor]
 
 
 def _timestep(t: torch.Tensor) -> torch.Tensor:
@@ -29,65 +34,80 @@ def _timestep(t: torch.Tensor) -> torch.Tensor:
     return torch.cat([t, t.new_zeros(1)], dim=0)
 
 
-def cached_pass(
-    transformer: Any, layout: _Layout, kv_cache: QwenImage21KVCache, t: torch.Tensor, latents: torch.Tensor,
-    projection: torch.Tensor | None = None,
-) -> torch.Tensor:
-    """The prediction at timestep `t` ([1], already over 1000) from the target tokens and the
-    prefix's cached K/V. `projection`: a parallel decoder's output projection for this step (PDD),
-    whose prediction is F32."""
-    hidden = transformer.img_in(latents.to(transformer.dtype))
-    temb = transformer.time_text_embed(_timestep(t), hidden)
-    modulation = transformer.modulation(temb)
-    for layer, block in enumerate(transformer.transformer_blocks):
-        hidden = block(
-            hidden_states=hidden,
-            modulation=modulation,
-            rotary_emb=layout.rotary_emb,
-            attention_mask=None,
-            target_token_mask=layout.modulation_mask,
-            layer_cache=kv_cache.layer_caches[layer],
-            kv_cache_mode="cached",
-            cache_write_slice=None,
-            segments=None,
-            key_valid=None,
-        )
-    hidden = transformer.norm_out(hidden, temb, layout.modulation_mask)
-    if projection is None:
-        return transformer.proj_out(hidden)  # type: ignore[no-any-return]
-    return F.linear(hidden, projection).float()
+class Transformer(QwenImage21Transformer2DModel):
+    """`QwenImage21Transformer2DModel` whose forward is also a step past its layout: `cached` =
+    (t, rotary table, target mask, each layer's prefix K/V), or `joint` = (t, text embeds, reference
+    latents, *`_Joint.inputs()`). `t` is [1], already over 1000. `projection`: a parallel decoder's
+    output projection for this step (PDD), whose prediction is F32."""
 
+    def forward(  # type: ignore[override]
+        self, hidden_states: torch.Tensor, *args: Any, cached: tuple[Any, ...] | None = None,
+        joint: tuple[Any, ...] | None = None, projection: torch.Tensor | None = None, **kwargs: Any,
+    ) -> Any:
+        if cached is not None:
+            return self._cached(hidden_states, *cached, projection)
+        if joint is not None:
+            return self._joint(hidden_states, *joint, projection)
+        return super().forward(hidden_states, *args, **kwargs)
 
-def joint_pass(
-    transformer: Any, joint: _Joint, t: torch.Tensor, latents: torch.Tensor, embeds: torch.Tensor,
-    references: tuple[torch.Tensor, ...], projection: torch.Tensor | None = None,
-) -> torch.Tensor:
-    """The prediction at `t` over the whole joint sequence: `forward` with no cache past its layout."""
-    targets = latents.shape[1]
-    images = transformer.img_in(torch.cat([*references, latents.to(transformer.dtype)], dim=1))
-    text = transformer.txt_in(embeds)
-    hidden = images.new_empty(images.shape[0], joint.length, images.shape[2])
-    hidden[:, joint.text_index] = text[:, joint.text_source]
-    hidden[:, joint.image_index] = images
-    temb = transformer.time_text_embed(_timestep(t), images)
-    modulation = transformer.modulation(temb)
-    for block in transformer.transformer_blocks:
-        hidden = block(
-            hidden_states=hidden,
-            modulation=modulation,
-            rotary_emb=joint.rotary_emb,
-            attention_mask=None,
-            target_token_mask=joint.target_mask,
-            layer_cache=None,
-            kv_cache_mode=None,
-            cache_write_slice=None,
-            segments=joint.segments,
-            key_valid=joint.key_valid,
-        )
-    hidden = transformer.norm_out(hidden, temb, joint.target_mask)
-    if projection is None:
-        return transformer.proj_out(hidden)[:, -targets:]  # type: ignore[no-any-return]
-    return F.linear(hidden[:, -targets:], projection).float()
+    def _cached(self, latents: torch.Tensor, t: torch.Tensor, rotary: Any, target: torch.Tensor,
+                prefix: list[KV], projection: torch.Tensor | None) -> torch.Tensor:
+        """The prediction from the target tokens and the prefix's cached K/V."""
+        hidden = self.img_in(latents.to(self.dtype))
+        temb = self.time_text_embed(_timestep(t), hidden)
+        modulation = self.modulation(temb)
+        for layer, block in enumerate(self.transformer_blocks):
+            cache = QwenImage21KVLayerCache()
+            cache.store(*prefix[layer])
+            hidden = block(
+                hidden_states=hidden,
+                modulation=modulation,
+                rotary_emb=rotary,
+                attention_mask=None,
+                target_token_mask=target,
+                layer_cache=cache,
+                kv_cache_mode="cached",
+                cache_write_slice=None,
+                segments=None,
+                key_valid=None,
+            )
+        hidden = self.norm_out(hidden, temb, target)
+        if projection is None:
+            return self.proj_out(hidden)  # type: ignore[no-any-return]
+        return F.linear(hidden, projection).float()
+
+    def _joint(
+        self, latents: torch.Tensor, t: torch.Tensor, embeds: torch.Tensor, references: tuple[torch.Tensor, ...],
+        image_index: torch.Tensor, text_index: torch.Tensor, text_source: torch.Tensor, rotary: Any,
+        target: torch.Tensor, key_valid: torch.Tensor | None, segments: list[tuple[int, int, bool]], length: int,
+        projection: torch.Tensor | None,
+    ) -> torch.Tensor:
+        """The prediction over the whole joint sequence: `forward` with no cache past its layout."""
+        targets = latents.shape[1]
+        images = self.img_in(torch.cat([*references, latents.to(self.dtype)], dim=1))
+        text = self.txt_in(embeds)
+        hidden = images.new_empty(images.shape[0], length, images.shape[2])
+        hidden[:, text_index] = text[:, text_source]
+        hidden[:, image_index] = images
+        temb = self.time_text_embed(_timestep(t), images)
+        modulation = self.modulation(temb)
+        for block in self.transformer_blocks:
+            hidden = block(
+                hidden_states=hidden,
+                modulation=modulation,
+                rotary_emb=rotary,
+                attention_mask=None,
+                target_token_mask=target,
+                layer_cache=None,
+                kv_cache_mode=None,
+                cache_write_slice=None,
+                segments=segments,
+                key_valid=key_valid,
+            )
+        hidden = self.norm_out(hidden, temb, target)
+        if projection is None:
+            return self.proj_out(hidden)[:, -targets:]  # type: ignore[no-any-return]
+        return F.linear(hidden[:, -targets:], projection).float()
 
 
 class _Layout:
@@ -148,3 +168,8 @@ class _Joint:
         self.rotary_emb = transformer.pos_embed(img_shapes[0], expanded, device=device)
         image_ids, self.target_mask = transformer.build_token_metadata(expanded, img_shapes[0])
         self.segments = _qwenimage21_prefix_segments(image_ids, int((~self.target_mask).sum()))
+
+    def inputs(self) -> tuple[Any, ...]:
+        """What `Transformer.forward(joint=...)` reads after the timestep, embeds and references."""
+        return (self.image_index, self.text_index, self.text_source, self.rotary_emb, self.target_mask,
+                self.key_valid, self.segments, self.length)
