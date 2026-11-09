@@ -10,10 +10,14 @@ projected once, before Kitchen's pass, for its scale, and that pass reads it bac
 (`project_values`). Dense steps, dense paths and exact paths call the site's own processor,
 served by the producer's Runtime base backend.
 
-The approved SM120 recipe (`kitchen-sol-producer-fp4-fixed-means-shared-qkv`) serves dense
-calls with Sage3 fixed-means NVFP4 and also shards over Ulysses: its projection runs on the
-local token shard, the exchange gathers whole sequences per head subset, and the rotary
-tables are the full ones a hook keeps before Diffusers splits them (`retain_rotary`).
+The approved SM120 recipe (`kitchen-sol-producer-fp4-fixed-means-shared-qkv`, dense calls on Sage3
+fixed-means NVFP4) and the consumer cards' (`kitchen-sol-producer-int4qk-shared-qkv`, dense calls
+on int4 Q·Kᵀ) also shard over Ulysses (`_parallel_produce`): the projection runs on the local token
+shard, the exchange gathers whole sequences per head subset, and the rotary tables are the full
+ones a hook keeps before Diffusers splits them (`retain_rotary`). That is exact because every
+statistic Kitchen keeps is per head (key means and value scales [heads, 128], routing per head,
+sink ranges per token): a GPU's head subset over the whole sequence is a head window of one GPU's
+call (`_Heads`), and each recipe's dense base is head-local.
 """
 
 from __future__ import annotations
@@ -689,14 +693,14 @@ PRODUCERS = {
     for producer in (
         _register(FIXED_MEANS, "kitchen-sol-fp4-fixed-means", context_parallel=True),
         _register(FP4_LOWMEM, "kitchen-sol-fp4-lowmem"),
-        _register(INT4QK, "kitchen-sol-int4qk"),
+        _register(INT4QK, "kitchen-sol-int4qk", context_parallel=True),
         _register(FAST, "kitchen-sol"),
     )
 }
 
 
 class _RetainRotary(ModelHook):  # type: ignore[misc]  # untyped Diffusers hook API
-    """Keeps a sharded component's full rotary tables for the CP recipe's sparse calls, before
+    """Keeps a sharded component's full rotary tables for the CP recipes' sparse calls, before
     Diffusers' split hook (registered after this one) shards them. Returns them unchanged.
     Kept whenever the component runs context-parallel, whatever serves now: the transformer
     computes the rotary once per layout, on a dense step, and the recipe can land after it
