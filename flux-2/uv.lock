@@ -151,7 +151,7 @@ wheels = [
 [[package]]
 name = "cozy-runtime"
 version = "0.43.1"
-source = { git = "https://github.com/cozy-creator/cozy-runtime?rev=858643167e58fb16558f1cb51ffaaddf71229034#858643167e58fb16558f1cb51ffaaddf71229034" }
+source = { git = "https://github.com/cozy-creator/cozy-runtime?rev=c79a97d957b047632ef2c11d374b77b78a30ac32#c79a97d957b047632ef2c11d374b77b78a30ac32" }
 dependencies = [
     { name = "msgspec" },
     { name = "numpy" },
@@ -206,12 +206,12 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
-    { name = "cozy-runtime", extras = ["media"], git = "https://github.com/cozy-creator/cozy-runtime?rev=858643167e58fb16558f1cb51ffaaddf71229034" },
+    { name = "cozy-runtime", extras = ["media"], git = "https://github.com/cozy-creator/cozy-runtime?rev=c79a97d957b047632ef2c11d374b77b78a30ac32" },
     { name = "diffusers", git = "https://github.com/huggingface/diffusers?rev=7ecb1e1b4fe500be7fb7381a7bb79a24d7fa3941" },
     { name = "msgspec", specifier = ">=0.19" },
     { name = "numpy", specifier = ">=1.26" },
     { name = "pillow", specifier = ">=12" },
-    { name = "tensorfs", git = "https://github.com/cozy-creator/cozy-creator?subdirectory=crates%2Ftensorfs-py&rev=06043efb9122fa4f8a11b51ce7335924c7777339" },
+    { name = "tensorfs", git = "https://github.com/cozy-creator/cozy-creator?subdirectory=crates%2Ftensorfs-py&rev=11cb6fa563f9fc1e0ae68fa54502164431503846" },
     { name = "tokenizers", specifier = ">=0.23.1" },
     { name = "torch", marker = "sys_platform != 'win32'", specifier = ">=2.6" },
     { name = "torch", marker = "sys_platform == 'win32'", specifier = ">=2.6", index = "https://download.pytorch.org/whl/cu130" },
@@ -651,7 +651,7 @@ wheels = [
 [[package]]
 name = "tensorfs"
 version = "0.22.1"
-source = { git = "https://github.com/cozy-creator/cozy-creator?subdirectory=crates%2Ftensorfs-py&rev=06043efb9122fa4f8a11b51ce7335924c7777339#06043efb9122fa4f8a11b51ce7335924c7777339" }
+source = { git = "https://github.com/cozy-creator/cozy-creator?subdirectory=crates%2Ftensorfs-py&rev=11cb6fa563f9fc1e0ae68fa54502164431503846#11cb6fa563f9fc1e0ae68fa54502164431503846" }
 
 [[package]]
 name = "tokenizers"
