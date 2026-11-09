@@ -128,9 +128,9 @@ stay resident beside it on a 24 GB card.
 
 Reference VAE encoding (without Diffusers' per-convolution feature cache) and multimodal prompt
 encoding each run once before denoising, in separate component residency leases. Step 0 extracts the
-text and reference tokens' K/V into the Runtime's store (`retained`), and the later steps run as one
-`denoise_loop` over the target's tokens. With no room for that prefix, every step is the whole joint
-pass, again one `denoise_loop`. Reference images add tokens and memory demand, so compare editing
+text and reference tokens' K/V into the Runtime's store (`retained`), and the later steps run over the
+target's tokens alone. With a padded prompt, every step is the whole joint pass. The steps are a plain
+loop over Diffusers' `FlowMatchEulerDiscreteScheduler`. Reference images add tokens and memory demand, so compare editing
 benchmarks separately from text-only runs.
 
 The upstream model is under the Qwen Research License, for noncommercial research

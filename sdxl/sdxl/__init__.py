@@ -3,7 +3,7 @@
 The second launch family, and the ENGINELESS-PATH REFERENCE (`cozy-runtime-sdxl.md`): one
 `Model` class with author-written `load`, public methods each declaring the
 heavyweight components it may touch, one entrypoint. Runtime owns placement, offload and
-pinning, and runs the Euler steps (`denoise_loop`) eagerly or as a native program.
+pinning; the Euler steps are a plain loop over Diffusers' scheduler.
 
 What it adds over cr-008b's corpus fixture, which it is otherwise faithful to:
 
@@ -32,6 +32,7 @@ import dataclasses
 import functools
 import json
 import math
+from collections.abc import Callable
 from pathlib import Path
 from typing import Annotated, Any, Literal
 
@@ -67,7 +68,6 @@ from cozy_runtime.author import (
     Sizes,
     Steps,
     Telemetry,
-    denoise_loop,
     held,
     uses_components,
 )
@@ -84,15 +84,7 @@ from transformers import (
 )
 from transformers import initialization as transformer_init
 
-from ._numerics import (
-    ddim_schedule,
-    ddim_step,
-    decode_latents,
-    encode_tokens,
-    euler_schedule,
-    euler_step,
-    hold_decode_dtype,
-)
+from ._numerics import decode_latents, encode_tokens, guided, hold_decode_dtype
 
 app = App()
 
@@ -342,80 +334,51 @@ class SdxlModel(Model[SdxlPipeline], encoded_leaves="accept"):
         guidance: float,
         hidiffusion: bool,
         seed: int,
-        on_step: Any,
+        progress: Callable[[int, int], None],
     ) -> tuple[Any, Any, Any, Any]:
-        """Text encoding, every step and the decode as one `denoise_loop`: the encoders in
-        `before`, the VAE in `after`. Euler, or with HiDiffusion its recipe's DDIM at eta 1, each
-        step labelled with its index: HiDiffusion's blocks choose by step (RAU-Net's switch, each
-        window's shift). Returns the image, conditioning and latents."""
+        """Text encoding, every step and the decode: Diffusers' `EulerDiscreteScheduler`, or with
+        HiDiffusion its recipe's `DDIMScheduler` at eta 1. HiDiffusion's blocks choose by step
+        (RAU-Net's switch, each window's shift). Returns the image, conditioning and latents."""
         first, second, unet, vae = (
             self.pipe.components[name]
             for name in ("text_encoder", "text_encoder_2", "unet", "vae")
         )
         device = torch.device(str(self.device))
-        sampler_type = DDIMScheduler if hidiffusion else EulerDiscreteScheduler
-        scheduler = sampler_type.from_config(self.pipe.scheduler_config)  # type: ignore[attr-defined]
-        scheduler.set_timesteps(steps, device=device)
-        unet.begin_denoise_request(steps, hidiffusion, seed)
-        unet.cozy_step = 0
-        classifier_free = negative_tokens is not None
-        batch = 2 if classifier_free else 1
-        dtype, scale = next(vae.parameters()).dtype, self.pipe.vae_scale
         generator = rng.generator(seed)
-        shape = (1, 4, height // 8, width // 8)
-        latents = rng.noise(shape, generator, dtype=torch.float16, device=device) * scheduler.init_noise_sigma
-        prediction = scheduler.config.prediction_type
+        scheduler: Any
         if hidiffusion:
-            schedule, advance = ddim_schedule(scheduler, device, generator, shape), ddim_step
+            scheduler = DDIMScheduler.from_config(self.pipe.scheduler_config)
+            advance = functools.partial(scheduler.step, eta=1.0, generator=generator, return_dict=False)
         else:
-            schedule = (euler_schedule(scheduler, device),)
-            advance = functools.partial(euler_step, v=prediction == "v_prediction")
-        image = torch.empty((1, 3, height, width), dtype=dtype, device=device)
-        prompt = torch.empty(
-            (batch, tokens[0].shape[-1], first.config.hidden_size + second.config.hidden_size),
-            dtype=torch.float16,
-            device=device,
-        )
-        pooled = torch.empty((batch, second.config.projection_dim), dtype=torch.float16, device=device)
+            scheduler = EulerDiscreteScheduler.from_config(self.pipe.scheduler_config)
+            advance = functools.partial(scheduler.step, return_dict=False)
+        scheduler.set_timesteps(steps, device=device)
+        if not hidiffusion:
+            scheduler.set_begin_index(0)
+        unet.begin_denoise_request(steps, hidiffusion, seed)
+        batch = 1 if negative_tokens is None else 2
+        dtype, scale = next(vae.parameters()).dtype, self.pipe.vae_scale
+        latents = rng.noise((1, 4, height // 8, width // 8), generator, dtype=torch.float16, device=device)
+        latents = latents * scheduler.init_noise_sigma
         # SDXL's micro-conditioning: (original_h, original_w, crop_top, crop_left, target_h,
         # target_w). The bucket IS the original size — these fine-tunes were trained on it.
         time_ids = torch.tensor(
             [[height, width, 0, 0, height, width]] * batch, device=device, dtype=torch.float16
         )
-        ids = tuple(t.to(device) for t in (*tokens, *(negative_tokens or ())))
-        count = len(ids)
-
-        def before(latents: Any, image: Any, prompt: Any, pooled: Any, *inputs: Any) -> None:
-            positive, positive_pool = encode_tokens(first, second, inputs[0], inputs[1])
-            if classifier_free:
-                negative, negative_pool = encode_tokens(first, second, inputs[2], inputs[3])
-                prompt.copy_(torch.cat([negative, positive]))
-                pooled.copy_(torch.cat([negative_pool, positive_pool]))
-            else:
-                prompt.copy_(positive)
-                pooled.copy_(positive_pool)
-
-        def step(i: Any, latents: Any, image: Any, prompt: Any, pooled: Any, *inputs: Any, label: Any = None) -> None:
-            if label is not None:
-                unet.cozy_step = label
-            advance(unet, i, latents, prompt, pooled, inputs[count], guidance, *inputs[count + 1 :])
-
-        def after(latents: Any, image: Any, prompt: Any, pooled: Any, *inputs: Any) -> None:
-            image.copy_(decode_latents(vae, latents.to(dtype=dtype), scale))
-
-        denoise_loop(
-            step,
-            range(len(scheduler.timesteps)),
-            state=(latents, image),
-            carried=(prompt, pooled),
-            inputs=(*ids, time_ids, *schedule),
-            labels=range(len(scheduler.timesteps)) if hidiffusion else None,
-            # HiDiffusion's window shifts follow the seed, so its program is the call's alone.
-            key=None if hidiffusion else ("sdxl.euler", prediction, float(guidance)),
-            before=before,
-            after=after,
-            on_step=on_step,
-        )
+        with torch.no_grad():
+            prompt, pooled = encode_tokens(first, second, *(t.to(device) for t in tokens))
+            if negative_tokens is not None:
+                negative, negative_pool = encode_tokens(first, second, *(t.to(device) for t in negative_tokens))
+                prompt, pooled = torch.cat([negative, prompt]), torch.cat([negative_pool, pooled])
+            prompt, pooled = prompt.to(torch.float16), pooled.to(torch.float16)
+            # The schedulers read their own tables by the host timestep; the UNet takes the device one.
+            for i, t in enumerate(scheduler.timesteps.tolist()):
+                unet.cozy_step = i
+                noise = guided(unet, scheduler.scale_model_input(latents, t), scheduler.timesteps[i], prompt,
+                               pooled, time_ids, guidance)
+                latents = advance(noise, t, latents)[0]
+                progress(i, steps)
+            image = decode_latents(vae, latents.to(dtype=dtype), scale)
         return image, prompt, pooled, latents
 
 
@@ -523,14 +486,14 @@ def _sample(
     hidiffusion_applied: bool,
     seed: int,
     tel: Telemetry,
+    progress: Callable[[int, int], None],
 ) -> Any:
-    """Encode, denoise and decode as one `denoise_loop`: Euler, or HiDiffusion's DDIM."""
-    on_step = tel.step_callback(steps, stage="denoise", overall_range=(0.02, 0.98))
+    """Encode, denoise and decode: Euler, or HiDiffusion's DDIM."""
     with tel.stage("generate", overall_range=(0.02, 0.98)):
         image, prompt, pooled, latents = model.generate(
             tokens, negative_tokens if guidance > 1.0 else None,
             width=width, height=height, steps=steps, guidance=guidance,
-            hidiffusion=hidiffusion_applied, seed=seed, on_step=on_step,
+            hidiffusion=hidiffusion_applied, seed=seed, progress=progress,
         )
     tel.metric("prompt_absmax", _finite(torch, prompt))
     tel.metric("pooled_absmax", _finite(torch, pooled))
@@ -605,7 +568,7 @@ def generate(
     image = _sample(
         model, (ids, ids_2), (neg, neg_2) if classifier_free else None,
         width=width, height=height, steps=steps, guidance=guidance,
-        hidiffusion_applied=hidiffusion_applied, seed=seed, tel=tel,
+        hidiffusion_applied=hidiffusion_applied, seed=seed, tel=tel, progress=ctx.progress,
     )
     tel.metric("image_absmax", _finite(torch, image))
     # F32 and rounded, as Diffusers' `VaeImageProcessor`: bf16 then truncation darkened every pixel.

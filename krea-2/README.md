@@ -56,8 +56,7 @@ Turbo: 1.15), bf16 noise from `seed` drawn on the CPU, and the VAE in bf16. Two 
 - Only the text encoder's layers 0–34 are built; layer 35, the final norm and the vision tower are never
   read.
 
-The steps are one `author.denoise_loop` (Runtime ≥ 0.35.0), which the Runtime runs eagerly, as one
-resident program or as streamed blocks. The step is `Krea2Transformer2DModel.forward` op for op, with what
+The steps are a plain loop over Diffusers' `FlowMatchEulerDiscreteScheduler`. Each step is `Krea2Transformer2DModel.forward` op for op, with what
 no step changes built once: each prompt's text fusion and projection, and its rotary tables. With CFG the
 two branches pass through each block in turn, so a streamed block comes in once per step, not twice.
 

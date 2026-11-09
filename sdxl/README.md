@@ -38,13 +38,10 @@ one.
 Its recipes write the model's `fp8`, `int8` and `w4a8` lanes, for model authors
 (`cozy model quantize <model> --lane int8 --package sdxl`).
 
-Encoding, every step and the decode run as one `denoise_loop`: Euler (epsilon or v), or with
-HiDiffusion its DDIM at eta 1, each step labelled with its index. The Runtime runs the steps eagerly or
-as a native program (resident or streamed UNet blocks), by card and free memory, and records which in
-the run record's `loops`. The VAE decodes whole where it fits, else in the fewest windows that do (a
+Encoding, every step and the decode run in one call: a plain loop over Diffusers' `EulerDiscreteScheduler`
+(epsilon or v), or with HiDiffusion its `DDIMScheduler` at eta 1. The VAE decodes whole where it fits, else in the fewest windows that do (a
 `split` site, neighbours cross-faded over 256 px). Every request holds
 the VAE in its decode dtype for good (a cast of the stored bytes on its next fill; no request
 converts VAE weights). CLIP conditioning calls the encoders' layers directly, avoiding
 Transformers' lazy output-collection hooks; its original 5.16.1 forward is the numerical oracle.
 
-It requires a Runtime with `cozy_runtime.author.denoise_loop`.

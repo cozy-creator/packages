@@ -4,14 +4,14 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable
-from contextlib import AbstractContextManager
+from contextlib import AbstractContextManager, nullcontext
 from pathlib import Path
 from types import TracebackType
 from typing import Any, NamedTuple
 
 import torch
 from cozy_runtime import fusion, rng, stepcache
-from cozy_runtime.author import Loader, Model, Telemetry, denoise_loop, hold_dtype, uses_components
+from cozy_runtime.author import Loader, Model, Telemetry, hold_dtype, uses_components
 from cozy_runtime.author.kernels import Plan
 from diffusers import (
     AnimaAutoBlocks,
@@ -182,7 +182,7 @@ def _text2image_pipeline(
     device: Any, phases: _Phases, batched: bool, fused: bool, cache: stepcache.Policy | None
 ) -> Any:
     """The text2image pipeline, instrumented on the blocks it will actually run, its denoise loop
-    one `denoise_loop` (`_Denoise`), its padding mask at latent size when `fused`.
+    `_Denoise`, its padding mask at latent size when `fused`.
 
     `ModularPipeline.blocks` is a property returning a DEEPCOPY, so a hook installed through
     it is thrown away and the meter never moves — the whole of the frozen `conditioning 0%`
@@ -221,14 +221,13 @@ def _text2image_pipeline(
 
 
 class _Denoise(AnimaDenoiseStep):
-    """Diffusers' Anima denoise loop as one `denoise_loop`: each step is `AnimaLoopBeforeDenoiser`,
-    `AnimaLoopDenoiser` under the CFG guider as `render` sets it (its scale and interval), and
-    `AnimaLoopAfterDenoiser`'s Euler step. The guider's choice of one condition or two is read
-    before the loop as each step's label. With `batched`, a guided step's two conditions run as one
-    forward: in a small pool every forward streams the whole transformer through the card, so this
-    halves a CFG step's copies (C4 of the small-pool analysis). `cache` is FBCache as a `stepcache`
-    policy: each forward of a step (the condition, then the unconditional one) keeps its own state,
-    as Diffusers' per-condition cache contexts did."""
+    """Diffusers' Anima denoise loop: each step is `AnimaLoopBeforeDenoiser`, `AnimaLoopDenoiser` under
+    the CFG guider as `render` sets it (its scale and interval), and `AnimaLoopAfterDenoiser`'s Euler
+    step. With `batched`, a guided step's two conditions run as one forward: in a small pool every
+    forward streams the whole transformer through the card, so this halves a CFG step's copies (C4 of
+    the small-pool analysis). `cache` is FBCache as a `stepcache` policy: each forward of a step (the
+    condition, then the unconditional one) keeps its own state, as Diffusers' per-condition cache
+    contexts did."""
 
     def __init__(self, phases: _Phases, batched: bool, cache: stepcache.Policy | None) -> None:
         super().__init__()
@@ -237,53 +236,41 @@ class _Denoise(AnimaDenoiseStep):
     @torch.no_grad()
     def __call__(self, components: Any, state: Any) -> Any:
         block_state = self.get_block_state(state)
-        guider, transformer = components.guider, components.transformer
-        scheduler, dtype = components.scheduler, block_state.dtype
-        timesteps, steps = block_state.timesteps, block_state.num_inference_steps
-        labels = []
-        for i in range(len(timesteps)):
-            guider.set_state(step=i, num_inference_steps=steps, timestep=timesteps[i])
-            labels.append(guider.num_conditions)
-        scale, batched = guider.guidance_scale, self.batched
-        with torch.inference_mode(False), torch.no_grad():
-            # The latents start f32 and leave each Euler step rounded to the prediction's dtype
-            # (`FlowMatchEulerDiscreteScheduler.step`): their f32 state holds those values.
-            latents = block_state.latents
-            times = timesteps.to(dtype) / scheduler.config.num_train_timesteps
-            deltas = scheduler.sigmas[1:] - scheduler.sigmas[:-1]
-            texts = [block_state.prompt_embeds.to(dtype)]
-            if max(labels) > 1:
-                negative = block_state.negative_prompt_embeds.to(dtype)
-                texts.append(torch.cat([texts[0], negative]) if batched else negative)
-            inputs = (times, deltas, block_state.padding_mask, *texts)
+        guider, transformer, scheduler = components.guider, components.transformer, components.scheduler
+        dtype, timesteps, latents = block_state.dtype, block_state.timesteps, block_state.latents
+        steps = len(timesteps)
+        positive = block_state.prompt_embeds.to(dtype)
+        negative = getattr(block_state, "negative_prompt_embeds", None)
+        if negative is not None:
+            negative = torch.cat([positive, negative.to(dtype)]) if self.batched else negative.to(dtype)
 
-        def step(i: torch.Tensor, latents: torch.Tensor, times: torch.Tensor, deltas: torch.Tensor,
-                 mask: torch.Tensor, *texts: torch.Tensor, label: int) -> None:
-            hidden, timestep = latents.to(dtype), times.index_select(0, i)
-
-            def predict(hidden: torch.Tensor, text: torch.Tensor) -> torch.Tensor:
-                return transformer(
-                    hidden_states=hidden, timestep=timestep, padding_mask=mask, return_dict=False,
-                    encoder_hidden_states=text,
-                )[0]
-
-            if label == 1:
-                prediction = predict(hidden, texts[0])
-            else:
-                if batched:
-                    conditional, unconditional = predict(torch.cat([hidden] * 2), texts[1]).chunk(2)
-                else:
-                    conditional, unconditional = predict(hidden, texts[0]), predict(hidden, texts[1])
-                prediction = unconditional + scale * (conditional - unconditional)
-            delta = deltas.index_select(0, i).reshape(())
-            latents.copy_((latents + delta * prediction).to(prediction.dtype))
+        def predict(hidden: torch.Tensor, timestep: torch.Tensor, text: torch.Tensor) -> torch.Tensor:
+            return transformer(  # type: ignore[no-any-return]
+                hidden_states=hidden, timestep=timestep, padding_mask=block_state.padding_mask,
+                encoder_hidden_states=text, return_dict=False,
+            )[0]
 
         self.phases.enter(_DENOISE)
-        denoise_loop(
-            step, range(len(timesteps)), state=(latents,), inputs=inputs, labels=labels,
-            key=("anima.denoise/1", scale, batched), on_step=self.phases.steps(len(timesteps)),
-            cache=self.cache,
-        )
+        on_step = self.phases.steps(steps)
+        cached = nullcontext() if self.cache is None else stepcache.running(self.cache, steps, latents.device)
+        with cached as run:
+            for i, t in enumerate(timesteps):
+                if run is not None:
+                    run.step(i)
+                guider.set_state(step=i, num_inference_steps=block_state.num_inference_steps, timestep=t)
+                hidden = latents.to(dtype)
+                timestep = t.expand(1).to(dtype) / scheduler.config.num_train_timesteps
+                if guider.num_conditions == 1:
+                    prediction = predict(hidden, timestep, positive)
+                else:
+                    if self.batched:
+                        conditional, unconditional = predict(torch.cat([hidden] * 2), timestep, negative).chunk(2)
+                    else:
+                        conditional = predict(hidden, timestep, positive)
+                        unconditional = predict(hidden, timestep, negative)
+                    prediction = unconditional + guider.guidance_scale * (conditional - unconditional)
+                latents = scheduler.step(prediction, t, latents, return_dict=False)[0]
+                on_step(i)
         self.phases.enter(_DECODE)
         block_state.latents = latents
         self.set_block_state(state, block_state)

@@ -1,119 +1,97 @@
-"""Qwen-Image-2.1's denoise steps: its Euler tables and the layouts they read.
+"""Qwen-Image-2.1's transformer passes, their layouts derived once per request.
 
 Step 0 runs in the transformer's ``extract`` mode, prefilling the per-layer text and
 condition-image K/V cache over the full joint sequence. Steps ``1..N-1`` are the ``cached`` pass
-over the target-image tokens only, identical from one step to the next but for the timestep and
-the running latent, so they run as one `denoise_loop` the Runtime may capture. With no room to
-keep that prefix (`retained` None), every step is the whole joint pass (`_full_step`).
+over the target-image tokens only (`cached_pass`). A padded prompt keeps no prefix: every step is
+the whole joint pass (`joint_pass`).
 
-The rotary tables and target-token modulation mask are derived once by `_Layout`, so the step
-carries no host sync, no Python scalar read and no data-dependent shape. The prefix K/V is
-prompt-specific. It joins the layout and schedules as explicitly declared per-call inputs;
-no retained step closure owns a previous prompt's tensors. The step calls the transformer's
-own ``img_in``/``time_text_embed``/
-``modulation``/``norm_out``/``proj_out`` and the installed blocks, so the numerics are the
-Diffusers/Runtime ones.
+`QwenImage21Transformer2DModel.forward` derives its layout on the host every call (boolean
+scatters, a `tolist`); `_Layout` and `_Joint` derive it once, so a step waits on nothing. The
+passes call the transformer's own ``img_in``/``time_text_embed``/``modulation``/``norm_out``/
+``proj_out`` and the installed blocks, so the numerics are the Diffusers/Runtime ones.
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable
-from dataclasses import dataclass
 from typing import Any
 
 import torch
 import torch.nn.functional as F
 from diffusers.models.transformers.transformer_qwenimage21 import (
-    QwenImage21KVLayerCache,
+    QwenImage21KVCache,
     _qwenimage21_prefix_segments,
 )
 
 
-@dataclass(frozen=True)
-class _FlowEuler:
-    """FlowMatch Euler device schedules, indexed by the global step.
+def _timestep(t: torch.Tensor) -> torch.Tensor:
+    """causal_condition: the sampled row for the target tokens plus the trailing t=0 row the cached
+    text/condition tokens modulate from, exactly as the transformer forward builds it."""
+    return torch.cat([t, t.new_zeros(1)], dim=0)
 
-    The pipeline casts the timestep to the latent dtype and only then divides by 1000, so the
-    captured step must round in that order; `ts` holds that bf16 value. The non-stochastic
-    update is ``sample + (sigma_next - sigma) * model_output`` upcast to f32, so `dt` is the
-    per-step sigma delta in f32 — the exact `FlowMatchEulerDiscreteScheduler.step` arithmetic.
-    """
 
-    ts: torch.Tensor
-    dt: torch.Tensor
-
-    @classmethod
-    def from_scheduler(cls, scheduler: Any, device: Any) -> _FlowEuler:
-        sigmas = scheduler.sigmas
-        return cls(
-            (scheduler.timesteps.to(torch.bfloat16) / 1000).to(device=device),
-            (sigmas[1:] - sigmas[:-1]).to(device=device),
+def cached_pass(
+    transformer: Any, layout: _Layout, kv_cache: QwenImage21KVCache, t: torch.Tensor, latents: torch.Tensor,
+    projection: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """The prediction at timestep `t` ([1], already over 1000) from the target tokens and the
+    prefix's cached K/V. `projection`: a parallel decoder's output projection for this step (PDD),
+    whose prediction is F32."""
+    hidden = transformer.img_in(latents.to(transformer.dtype))
+    temb = transformer.time_text_embed(_timestep(t), hidden)
+    modulation = transformer.modulation(temb)
+    for layer, block in enumerate(transformer.transformer_blocks):
+        hidden = block(
+            hidden_states=hidden,
+            modulation=modulation,
+            rotary_emb=layout.rotary_emb,
+            attention_mask=None,
+            target_token_mask=layout.modulation_mask,
+            layer_cache=kv_cache.layer_caches[layer],
+            kv_cache_mode="cached",
+            cache_write_slice=None,
+            segments=None,
+            key_valid=None,
         )
-
-    def timestep(self, index: torch.Tensor) -> torch.Tensor:
-        # causal_condition: the sampled row for the target tokens plus the trailing t=0 row the
-        # cached text/condition tokens modulate from, exactly as the transformer forward builds it.
-        t = self.ts.index_select(0, index)
-        return torch.cat([t, t.new_zeros(1)], dim=0)
-
-    def delta(self, index: torch.Tensor) -> torch.Tensor:
-        return self.dt.index_select(0, index).reshape(())
+    hidden = transformer.norm_out(hidden, temb, layout.modulation_mask)
+    if projection is None:
+        return transformer.proj_out(hidden)  # type: ignore[no-any-return]
+    return F.linear(hidden, projection).float()
 
 
-def _cached_step(transformer: Any, *, heads: bool = False) -> Callable[..., None]:
-    """A step whose only closed-over owner is the placed transformer.
-
-    Schedules, target layout and every prefix K/V arrive as declared tensors.
-    Rebuilding the small cache wrappers from those arguments also works when
-    Runtime records on its own copies and later copies a new prompt into them.
-    With `heads`, the first input after the layout is a parallel decoder's output projection per
-    step (PDD): its prediction is F32, and so is the state, which the DiT reads in its own dtype.
-    """
-    blocks = transformer.transformer_blocks
-
-    def step(
-        index: torch.Tensor,
-        latents: torch.Tensor,
-        timesteps: torch.Tensor,
-        deltas: torch.Tensor,
-        rotary: torch.Tensor,
-        target: torch.Tensor,
-        *rest: torch.Tensor,
-    ) -> None:
-        projections, prefix = (rest[0], rest[1:]) if heads else (None, rest)
-        with torch.no_grad():
-            euler = _FlowEuler(timesteps, deltas)
-            hidden = transformer.img_in(latents.to(transformer.dtype))
-            temb = transformer.time_text_embed(euler.timestep(index), hidden)
-            modulation = transformer.modulation(temb)
-            for layer, block in enumerate(blocks):
-                cache = QwenImage21KVLayerCache()
-                cache.store(prefix[2 * layer], prefix[2 * layer + 1])
-                hidden = block(
-                    hidden_states=hidden,
-                    modulation=modulation,
-                    rotary_emb=rotary,
-                    attention_mask=None,
-                    target_token_mask=target,
-                    layer_cache=cache,
-                    kv_cache_mode="cached",
-                    cache_write_slice=None,
-                    segments=None,
-                    key_valid=None,
-                )
-            hidden = transformer.norm_out(hidden, temb, target)
-            if projections is None:
-                noise = transformer.proj_out(hidden)
-            else:
-                noise = F.linear(hidden, projections.index_select(0, index)[0]).float()
-            latents.copy_((latents.float() + euler.delta(index) * noise).to(latents.dtype))
-
-    return step
+def joint_pass(
+    transformer: Any, joint: _Joint, t: torch.Tensor, latents: torch.Tensor, embeds: torch.Tensor,
+    references: tuple[torch.Tensor, ...], projection: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """The prediction at `t` over the whole joint sequence: `forward` with no cache past its layout."""
+    targets = latents.shape[1]
+    images = transformer.img_in(torch.cat([*references, latents.to(transformer.dtype)], dim=1))
+    text = transformer.txt_in(embeds)
+    hidden = images.new_empty(images.shape[0], joint.length, images.shape[2])
+    hidden[:, joint.text_index] = text[:, joint.text_source]
+    hidden[:, joint.image_index] = images
+    temb = transformer.time_text_embed(_timestep(t), images)
+    modulation = transformer.modulation(temb)
+    for block in transformer.transformer_blocks:
+        hidden = block(
+            hidden_states=hidden,
+            modulation=modulation,
+            rotary_emb=joint.rotary_emb,
+            attention_mask=None,
+            target_token_mask=joint.target_mask,
+            layer_cache=None,
+            kv_cache_mode=None,
+            cache_write_slice=None,
+            segments=joint.segments,
+            key_valid=joint.key_valid,
+        )
+    hidden = transformer.norm_out(hidden, temb, joint.target_mask)
+    if projection is None:
+        return transformer.proj_out(hidden)[:, -targets:]  # type: ignore[no-any-return]
+    return F.linear(hidden[:, -targets:], projection).float()
 
 
 class _Layout:
-    """The cached-mode layout tensors the transformer forward derives every step, hoisted out
-    of the captured body so the body is sync-free and shape-static.
+    """The cached-mode layout tensors the transformer forward derives every step.
 
     This reproduces `QwenImage21Transformer2DModel.forward`'s preamble for ``kv_cache_mode ==
     "cached"`` using the model's own ``pos_embed`` and ``build_token_metadata``, so the values
@@ -170,63 +148,3 @@ class _Joint:
         self.rotary_emb = transformer.pos_embed(img_shapes[0], expanded, device=device)
         image_ids, self.target_mask = transformer.build_token_metadata(expanded, img_shapes[0])
         self.segments = _qwenimage21_prefix_segments(image_ids, int((~self.target_mask).sum()))
-
-    def inputs(self) -> tuple[torch.Tensor, ...]:
-        masks = () if self.key_valid is None else (self.key_valid,)
-        return self.image_index, self.text_index, self.text_source, self.rotary_emb, self.target_mask, *masks
-
-
-def _full_step(
-    transformer: Any, segments: list[tuple[int, int, bool]], length: int, targets: int, masked: bool,
-    *, heads: bool = False,
-) -> Callable[..., None]:
-    """A step over the whole joint sequence, `forward` with no cache past its layout (`_Joint`):
-    `masked`, its key mask follows the layout's inputs; `heads`, a parallel decoder's output projection
-    per step follows them, as in `_cached_step`. `segments` and `length` are host values of one layout,
-    so its loop takes no key."""
-    blocks = transformer.transformer_blocks
-
-    def step(
-        index: torch.Tensor,
-        latents: torch.Tensor,
-        timesteps: torch.Tensor,
-        deltas: torch.Tensor,
-        image_index: torch.Tensor,
-        text_index: torch.Tensor,
-        text_source: torch.Tensor,
-        rotary: torch.Tensor,
-        target: torch.Tensor,
-        *rest: torch.Tensor,
-    ) -> None:
-        key_valid, rest = (rest[0], rest[1:]) if masked else (None, rest)
-        projections, (embeds, *references) = (rest[0], rest[1:]) if heads else (None, rest)
-        with torch.no_grad():
-            euler = _FlowEuler(timesteps, deltas)
-            images = transformer.img_in(torch.cat([*references, latents.to(transformer.dtype)], dim=1))
-            text = transformer.txt_in(embeds)
-            hidden = images.new_empty(images.shape[0], length, images.shape[2])
-            hidden[:, text_index] = text[:, text_source]
-            hidden[:, image_index] = images
-            temb = transformer.time_text_embed(euler.timestep(index), images)
-            modulation = transformer.modulation(temb)
-            for block in blocks:
-                hidden = block(
-                    hidden_states=hidden,
-                    modulation=modulation,
-                    rotary_emb=rotary,
-                    attention_mask=None,
-                    target_token_mask=target,
-                    layer_cache=None,
-                    kv_cache_mode=None,
-                    cache_write_slice=None,
-                    segments=segments,
-                    key_valid=key_valid,
-                )
-            hidden = transformer.norm_out(hidden, temb, target)
-            if projections is None:
-                noise = transformer.proj_out(hidden)[:, -targets:]
-            else:
-                noise = F.linear(hidden[:, -targets:], projections.index_select(0, index)[0]).float()
-            latents.copy_((latents.float() + euler.delta(index) * noise).to(latents.dtype))
-
-    return step

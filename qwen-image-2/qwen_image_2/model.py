@@ -62,14 +62,13 @@ from cozy_runtime.author import (
     MemoDistribution,
     Model,
     Telemetry,
-    denoise_loop,
     hold_dtype,
     retained,
     uses_components,
 )
 from cozy_runtime.author.kernels import Plan
 
-from ._prepared import _FlowEuler, _full_step, _Joint, _Layout, _cached_step
+from ._prepared import _Joint, _Layout, cached_pass, joint_pass
 
 
 def _modulation(block: Any, arguments: Mapping[str, Any]) -> fusion.Modulation:
@@ -372,7 +371,7 @@ class QwenImage21Model(
         height: int,
         steps: int,
         seed: int,
-        on_step: Callable[[int], None],
+        progress: Callable[[int, int], None],
         sigmas: Sequence[float] | None = None,
         scheduler: Mapping[str, Any] | None = None,
         heads: torch.Tensor | None = None,
@@ -386,8 +385,7 @@ class QwenImage21Model(
 
         Text and reference tokens modulate from t = 0, so their K/V are every step's: step 0
         extracts them into the Runtime's store (`retained`) and steps 1..N-1 run the cached pass
-        over the target tokens as one `denoise_loop`. With no room for them, or a padded prompt,
-        every step is the whole joint pass. `sigmas`: a distilled schedule (its length is `steps`),
+        over the target tokens. With a padded prompt every step is the whole joint pass. `sigmas`: a distilled schedule (its length is `steps`),
         else the pipeline's uniform spacing; `scheduler`, an overlay's fields over the checkpoint's.
         `heads`: a parallel decoder's output projection per step (PDD), whose prediction, and so the
         state, is F32."""
@@ -404,7 +402,7 @@ class QwenImage21Model(
         factor = pipeline.vae_scale_factor
         sizes = [calculate_dimensions(1024 * 1024, image.width / image.height)[:2] for image in reference_images or []]
 
-        with torch.inference_mode(False), torch.no_grad():
+        with torch.no_grad():
             embeds = embeds.to(device=device, dtype=transformer.dtype)
             mask = None if mask is None else mask.to(device=device)
             references = () if reference_latents is None else (reference_latents.to(device=device, dtype=transformer.dtype),)
@@ -424,21 +422,27 @@ class QwenImage21Model(
             )
             timesteps, steps = retrieve_timesteps(scheduler, steps, device, sigmas=spacing, mu=mu)
             scheduler.set_begin_index(0)
-            euler = _FlowEuler.from_scheduler(scheduler, device)
+            # The pipeline casts the timestep to the latent dtype and only then divides by 1000.
+            times = timesteps.to(torch.bfloat16) / 1000
             # The joint sequence's image slots: the text encoder's for each reference, then one per
             # 2x2 group of target latents, as the pipeline appends them.
             slots = image_pad_mask if image_pad_mask is not None else embeds.new_zeros((1, embeds.shape[1]), dtype=torch.bool)
             img_mask = torch.cat([slots.to(device), slots.new_ones(1, latents.shape[1] // 4, device=device)], dim=1)
             img_shapes = [[*((1, h // factor, w // factor) for w, h in sizes), (1, height // factor, width // factor)]]
-            layout = _Layout(transformer, img_shapes, img_mask, device)
-            config = transformer.config
-            nbytes = 2 * layout.prefix_len * config.num_attention_heads * config.attention_head_dim
-            held = None if mask is not None else retained(nbytes * transformer.dtype.itemsize * len(blocks))
-            if held is None:
+            if mask is not None:
                 joint = _Joint(transformer, img_shapes, img_mask, mask, device)
                 # Under a parallel decoder the state is F32 from the first step, as `scheduler.step` makes it.
                 latents = latents if heads is None else latents.float()
-            else:
+                for i, t in enumerate(timesteps):
+                    noise = joint_pass(transformer, joint, times[i : i + 1], latents, embeds, references,
+                                       None if heads is None else heads[i])
+                    latents = scheduler.step(noise, t, latents, return_dict=False)[0]
+                    progress(i, steps)
+                return latents
+            layout = _Layout(transformer, img_shapes, img_mask, device)
+            config = transformer.config
+            nbytes = 2 * layout.prefix_len * config.num_attention_heads * config.attention_head_dim
+            with retained(nbytes * transformer.dtype.itemsize * len(blocks)) as held:
                 # Step 0 prefills each layer's prefix K/V into the store over the full joint sequence.
                 kv_cache = _RetainedKV(len(blocks), held)
                 first = None
@@ -465,27 +469,12 @@ class QwenImage21Model(
                 # `native_time_fp32_state`); the DiT reads it in its own dtype.
                 noise = noise if heads is None else noise.float()
                 latents = scheduler.step(noise, timesteps[0], latents, return_dict=False)[0]
-                del noise
-                on_step(0)
-        projections = () if heads is None else (heads,)
-        if held is None:
-            denoise_loop(
-                _full_step(transformer, joint.segments, joint.length, latents.shape[1], mask is not None,
-                           heads=heads is not None),
-                range(steps), state=(latents,),
-                inputs=(euler.ts, euler.dt, *joint.inputs(), *projections, embeds, *references),
-                on_step=on_step,
-            )
-            return latents
-        with held:
-            if steps > 1:
-                denoise_loop(
-                    _cached_step(transformer, heads=heads is not None), range(1, steps), state=(latents,),
-                    inputs=(euler.ts, euler.dt, layout.rotary_emb, layout.modulation_mask, *projections,
-                            *(layer.state for layer in kv_cache.layer_caches)),
-                    key=("qwen-image-2.1.cached/1" if heads is None else "qwen-image-2.1.cached-heads/1", len(blocks)),
-                    on_step=on_step,
-                )
+                progress(0, steps)
+                for i in range(1, steps):
+                    noise = cached_pass(transformer, layout, kv_cache, times[i : i + 1], latents,
+                                        None if heads is None else heads[i])
+                    latents = scheduler.step(noise, timesteps[i], latents, return_dict=False)[0]
+                    progress(i, steps)
         return latents
 
     @uses_components("vae")

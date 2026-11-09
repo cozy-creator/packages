@@ -114,7 +114,7 @@ def calibrate(ctx: Context, tel: Telemetry, model: Klein, record: Any) -> None:
                     steps=steps,
                     guidance=guidance,
                     seed=seed,
-                    on_step=tel.step_callback(steps, stage="calibrating", overall_range=span),
+                    progress=lambda i, _total, step=tel.step_callback(steps, stage="calibrating", overall_range=span): step(i),
                 )
                 if references is None:
                     image = model.decode(tokens, width=size[0], height=size[1])

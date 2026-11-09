@@ -132,7 +132,7 @@ def _render(
         tokens = model.denoise(
             embeds, negatives, references,
             width=width, height=height, steps=steps, guidance=guidance, seed=seed,
-            on_step=tel.step_callback(steps, stage="generating image", overall_range=(0.25, 0.95)),
+            progress=ctx.progress,
         )
     with tel.stage("decoding image", overall_range=(0.95, 0.99)):
         image = model.decode(tokens, width=width, height=height)

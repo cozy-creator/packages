@@ -167,8 +167,8 @@ def _generate(
     model.hold_vae(tel)
     ctx.raise_if_cancelled()
     begin = 0.3 if payload.prompt_upsampling else 0.0
-    # Phase order for residency: references encode on the VAE first, then the transformer denoise (the
-    # `denoise_loop`), and the VAE decode. The text encoder is another slot's construction: a plan naming it
+    # Phase order for residency: references encode on the VAE first, then the transformer denoise, and
+    # the VAE decode. The text encoder is another slot's construction: a plan naming it
     # resolves in neither, so it plans nothing and the DiT streams its weights at a third of its speed.
     if pictures:
         ctx.plan("vae", "transformer", "vae")
@@ -197,7 +197,7 @@ def _generate(
             height=height,
             steps=steps,
             seed=seed,
-            on_step=tel.step_callback(steps, stage="generating image", overall_range=(begin + 0.1, 0.9)),
+            progress=ctx.progress,
             reference_images=reference_images,
             reference_latents=reference_latents,
             image_pad_mask=image_pad_mask,

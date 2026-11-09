@@ -68,8 +68,8 @@ the style `prompt` gives. Each region is appended to the caption's elements as I
 Conditioning, sampling and decoding are Diffusers' `Ideogram4Pipeline` (0.41.0), run per component:
 the caption is read unpadded (Ideogram's own code; Diffusers left-pads to 2048 tokens), the logit-normal
 schedule is shifted by the image size with the preset's (mu, std) nearest the step count, latents stay
-float32 and noise is drawn on the CPU from the seed. The steps run as one `denoise_loop`. The caption's
-text rows are projected once before it: the image rows never carry Diffusers' zero text features
+float32 and noise is drawn on the CPU from the seed. The steps are a plain loop over Diffusers'
+`FlowMatchEulerDiscreteScheduler`. The caption's text rows are projected once before it: the image rows never carry Diffusers' zero text features
 (53,248 wide per image token). With tiny random modules on CPU, both DiTs' velocities equal the
 pipeline's forward exactly.
 
