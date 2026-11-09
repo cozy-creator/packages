@@ -33,7 +33,7 @@ import time
 from collections.abc import Callable, Iterator, Mapping
 from contextvars import ContextVar
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import torch
 from diffusers.models.activations import SwiGLU
@@ -68,6 +68,8 @@ try:
     import triton.language as tl
     from triton.language.extra import libdevice
 except ImportError as _absent:  # pragma: no cover - a CPU-only or non-Linux environment
+    if TYPE_CHECKING:
+        raise
     TRITON_ABSENT = f"triton does not import ({_absent})"
 else:
     TRITON_ABSENT = ""
