@@ -376,7 +376,7 @@ class MossImage(Model[MossGraph], encoded_leaves="accept", attention_bits={"tran
         device = torch.device(str(self.device))
         rows, columns = height // PATCH, width // PATCH
         fused = device.type == "cuda" and not native()
-        scheduler = MossScheduler.from_config(self.graph.scheduler_config)
+        scheduler: Any = MossScheduler.from_config(self.graph.scheduler_config)
         scheduler.set_timesteps(steps, device=device)
         blocks = transformer.layers
         with torch.no_grad():

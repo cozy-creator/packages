@@ -345,15 +345,13 @@ class SdxlModel(Model[SdxlPipeline], encoded_leaves="accept"):
         )
         device = torch.device(str(self.device))
         generator = rng.generator(seed)
-        scheduler: Any
-        if hidiffusion:
-            scheduler = DDIMScheduler.from_config(self.pipe.scheduler_config)
-            advance = functools.partial(scheduler.step, eta=1.0, generator=generator, return_dict=False)
-        else:
-            scheduler = EulerDiscreteScheduler.from_config(self.pipe.scheduler_config)
-            advance = functools.partial(scheduler.step, return_dict=False)
+        sampler: Any = DDIMScheduler if hidiffusion else EulerDiscreteScheduler
+        scheduler = sampler.from_config(self.pipe.scheduler_config)
         scheduler.set_timesteps(steps, device=device)
-        if not hidiffusion:
+        advance = functools.partial(scheduler.step, return_dict=False)
+        if hidiffusion:
+            advance = functools.partial(advance, eta=1.0, generator=generator)
+        else:
             scheduler.set_begin_index(0)
         unet.begin_denoise_request(steps, hidiffusion, seed)
         batch = 1 if negative_tokens is None else 2

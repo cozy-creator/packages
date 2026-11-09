@@ -193,7 +193,8 @@ class Fibo2(Model[FiboGraph], encoded_leaves="accept"):
         steps, CFG as a second pass. A generation with text images reads `base` while the noise level
         is above `text_images_max_noise_level`."""
         pipe = self._pipeline("transformer")
-        transformer, scheduler, device = pipe.transformer, pipe.scheduler, pipe.stage_device
+        transformer, device = pipe.transformer, pipe.stage_device
+        scheduler: Any = pipe.scheduler
         cfg = guidance > 1.0
         batch = encoded["prompt"][0].shape[0]
         with torch.no_grad():
@@ -205,7 +206,8 @@ class Fibo2(Model[FiboGraph], encoded_leaves="accept"):
                 (latents.shape[2] // patch) * (latents.shape[3] // patch),
                 config.base_image_seq_len, config.max_image_seq_len, config.base_shift, config.max_shift,
             )
-            timesteps, _ = retrieve_timesteps(scheduler, steps, device, sigmas=np.linspace(1.0, 1 / steps, steps), mu=mu)
+            retrieve_timesteps(scheduler, steps, device, sigmas=np.linspace(1.0, 1 / steps, steps), mu=mu)
+            timesteps = scheduler.timesteps
             texts = {
                 role: (embeds.to(device), None if mask is None else mask.to(device))
                 for role, (embeds, mask) in encoded.items()

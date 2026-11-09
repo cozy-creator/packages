@@ -241,7 +241,7 @@ def sample(
     `negative` is given."""
     dtype = transformer.dtype
     rows, columns = height // PATCH, width // PATCH
-    scheduler = FlowMatchEulerDiscreteScheduler.from_config(dict(scheduler_config))
+    scheduler: Any = FlowMatchEulerDiscreteScheduler.from_config(dict(scheduler_config))
     config = scheduler.config
     channels = transformer.config.in_channels // 4
     img_shapes = [[(1, rows, columns), *(references[1] if references else [])]]
@@ -255,13 +255,13 @@ def sample(
             config.get("base_shift", 0.5),
             config.get("max_shift", 1.15),
         )
-        timesteps, _ = retrieve_timesteps(scheduler, steps, device, sigmas=np.linspace(1.0, 1 / steps, steps), mu=mu)
+        retrieve_timesteps(scheduler, steps, device, sigmas=np.linspace(1.0, 1 / steps, steps), mu=mu)
         image = None if references is None else references[0].to(device=device, dtype=dtype)
         texts = [
             (text.to(device=device, dtype=dtype), None if text_mask is None else text_mask.to(device))
             for text, text_mask in [(embeds, mask), *([negative] if negative is not None else [])]
         ]
-        for i, t in enumerate(timesteps):
+        for i, t in enumerate(scheduler.timesteps):
             model_input = latents if image is None else torch.cat([latents, image], dim=1)
             timestep = t.expand(latents.shape[0]).to(latents.dtype)
             predictions = [
@@ -283,7 +283,7 @@ def sample(
                     torch.norm(prediction, dim=-1, keepdim=True) / torch.norm(combined, dim=-1, keepdim=True)
                 )
             latents = scheduler.step(prediction, t, latents, return_dict=False)[0]
-            progress(i, len(timesteps))
+            progress(i, steps)
     return latents.cpu()
 
 

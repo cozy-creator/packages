@@ -131,7 +131,7 @@ class Ideogram4(Model[IdeogramGraph], encoded_leaves="accept"):
         rows, columns = height // PATCH, width // PATCH
         tokens, texts = rows * columns, features.shape[0]
         mu, std = schedule_shape(steps)
-        scheduler = FlowMatchEulerDiscreteScheduler.from_config(self.graph.scheduler_config)
+        scheduler: Any = FlowMatchEulerDiscreteScheduler.from_config(self.graph.scheduler_config)
         if scheduler.config.stochastic_sampling:
             raise ValueError("Ideogram 4 samples with deterministic Euler")
         sigmas = _logit_normal_sigmas(steps, _resolution_aware_mu(height, width, mu), std=std, device=device)

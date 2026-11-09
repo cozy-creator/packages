@@ -290,13 +290,13 @@ class Krea2(Model[Krea2Graph], encoded_leaves="accept"):
         device = torch.device(str(self.device))
         rows, columns = height // PATCH, width // PATCH
         channels = transformer.config.in_channels // 4
-        scheduler = FlowMatchEulerDiscreteScheduler.from_config(dict(self.graph.scheduler_config))
+        scheduler: Any = FlowMatchEulerDiscreteScheduler.from_config(dict(self.graph.scheduler_config))
         config = scheduler.config
         mu = DISTILLED_MU if distilled else calculate_shift(
             rows * columns, config.get("base_image_seq_len", 256), config.get("max_image_seq_len", 6400),
             config.get("base_shift", 0.5), config.get("max_shift", 1.15),
         )
-        timesteps, _ = retrieve_timesteps(scheduler, steps, device, sigmas=np.linspace(1.0, 1 / steps, steps), mu=mu)
+        retrieve_timesteps(scheduler, steps, device, sigmas=np.linspace(1.0, 1 / steps, steps), mu=mu)
         blocks = transformer.transformer_blocks
         with torch.no_grad():
             noise = rng.noise((1, channels, rows * 2, columns * 2), seed, dtype=DTYPE)
@@ -308,7 +308,7 @@ class Krea2(Model[Krea2Graph], encoded_leaves="accept"):
                 ids = Krea2Pipeline.prepare_position_ids(text.shape[1], rows, columns, device)
                 texts.append(fused_text(transformer, text))
                 rotary.append(transformer.rotary_emb(ids))
-            for i, t in enumerate(timesteps):
+            for i, t in enumerate(scheduler.timesteps):
                 # The embedders and the final layer run in their stored F32; the blocks in bf16.
                 timestep = (t / config.num_train_timesteps).expand(1).to(DTYPE)
                 temb = transformer.time_embed(timestep, dtype=_dtype(transformer.time_embed))

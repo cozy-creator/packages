@@ -394,7 +394,7 @@ class QwenImage21Model(
             raise ConformanceError("Qwen Image 2.1 denoises with causal conditioning", code="artifact_config")
         device = torch.device(str(self.device))
         pipeline = self._pipeline(sigmas, scheduler)
-        scheduler = pipeline.scheduler
+        euler: Any = pipeline.scheduler
         blocks = transformer.transformer_blocks
         multiple_of = pipeline.vae_scale_factor * 2
         width = width // multiple_of * multiple_of
@@ -415,13 +415,14 @@ class QwenImage21Model(
             spacing = np.array(sigmas, dtype=np.float32) if sigmas else np.linspace(1.0, 1 / steps, steps)
             mu = calculate_shift(
                 latents.shape[1],
-                scheduler.config.get("base_image_seq_len", 256),
-                scheduler.config.get("max_image_seq_len", 4096),
-                scheduler.config.get("base_shift", 0.5),
-                scheduler.config.get("max_shift", 1.15),
+                euler.config.get("base_image_seq_len", 256),
+                euler.config.get("max_image_seq_len", 4096),
+                euler.config.get("base_shift", 0.5),
+                euler.config.get("max_shift", 1.15),
             )
-            timesteps, steps = retrieve_timesteps(scheduler, steps, device, sigmas=spacing, mu=mu)
-            scheduler.set_begin_index(0)
+            _, steps = retrieve_timesteps(euler, steps, device, sigmas=spacing, mu=mu)
+            euler.set_begin_index(0)
+            timesteps = euler.timesteps
             # The pipeline casts the timestep to the latent dtype and only then divides by 1000.
             times = timesteps.to(torch.bfloat16) / 1000
             # The joint sequence's image slots: the text encoder's for each reference, then one per
@@ -436,7 +437,7 @@ class QwenImage21Model(
                 for i, t in enumerate(timesteps):
                     noise = joint_pass(transformer, joint, times[i : i + 1], latents, embeds, references,
                                        None if heads is None else heads[i])
-                    latents = scheduler.step(noise, t, latents, return_dict=False)[0]
+                    latents = euler.step(noise, t, latents, return_dict=False)[0]
                     progress(i, steps)
                 return latents
             layout = _Layout(transformer, img_shapes, img_mask, device)
@@ -468,12 +469,12 @@ class QwenImage21Model(
                 # A parallel decoder's prediction is F32, and so is the state from here (PDD's
                 # `native_time_fp32_state`); the DiT reads it in its own dtype.
                 noise = noise if heads is None else noise.float()
-                latents = scheduler.step(noise, timesteps[0], latents, return_dict=False)[0]
+                latents = euler.step(noise, timesteps[0], latents, return_dict=False)[0]
                 progress(0, steps)
                 for i in range(1, steps):
                     noise = cached_pass(transformer, layout, kv_cache, times[i : i + 1], latents,
                                         None if heads is None else heads[i])
-                    latents = scheduler.step(noise, timesteps[i], latents, return_dict=False)[0]
+                    latents = euler.step(noise, timesteps[i], latents, return_dict=False)[0]
                     progress(i, steps)
         return latents
 

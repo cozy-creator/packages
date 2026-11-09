@@ -31,10 +31,10 @@ class Euler:
 
     def __init__(self, device: torch.device, timesteps: tuple[int, ...] = DEV_TIMESTEPS) -> None:
         self.timesteps = list(timesteps)
-        self.scheduler = FlowMatchEulerDiscreteScheduler(shift=1.0)
+        self.scheduler: Any = FlowMatchEulerDiscreteScheduler(shift=1.0)
         self.scheduler.set_timesteps(sigmas=[t / 1000.0 for t in timesteps], device=device)
         self.scheduler.set_begin_index(0)
-        self.sigmas = self.scheduler.sigmas
+        self.sigmas: torch.Tensor = self.scheduler.sigmas
 
     def step(self, i: int, flow: torch.Tensor, sample: torch.Tensor) -> torch.Tensor:
         out: torch.Tensor = self.scheduler.step(flow, self.scheduler.timesteps[i], sample, return_dict=False)[0]
