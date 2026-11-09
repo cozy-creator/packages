@@ -31,7 +31,6 @@ from cozy_runtime.weights_store import Checkpoint, Derivation, Output
 
 from . import adaln_operations as _adaln_operations
 from . import lanes as _lanes
-from ._memo import LANES as LANES_MEMO
 from .kernel import H3Topology, curve_shapes, removed_keys, source_shapes, table_bytes, table_shapes
 from .lanes import (
     COMPONENT_MAX_NEW_BYTES,
@@ -412,19 +411,19 @@ def _produce_lane(
 
 
 # One function per lane: Runtime requires a receipt for EVERY declared weights output.
-@invocable(memo_version="h3-lane/1", memo_dependencies=LANES_MEMO)
+@invocable
 async def bf16_full(ctx: Context, *, source: Weights[Any], tel: Telemetry) -> ModelArtifact:
     """The reviewed full-precision lane: source-only rows dropped, video VAE normalised."""
     return _produce_lane(ctx, tel, source, "bf16-full")
 
 
-@invocable(memo_version="h3-lane/1", memo_dependencies=LANES_MEMO)
+@invocable
 async def bf16_pruned(ctx: Context, *, source: Weights[Any], tel: Telemetry) -> ModelArtifact:
     """AdaLN-pruned BF16: 106 modulation rows per DiT replaced by timestep tables."""
     return _produce_lane(ctx, tel, source, "bf16")
 
 
-@invocable(memo_version="h3-lane/1", memo_dependencies=LANES_MEMO)
+@invocable
 async def curve_pruned(ctx: Context, *, source: Weights[Any], tel: Telemetry) -> ModelArtifact:
     """AdaLN-pruned BF16 from ComfyUI's curve-form DiTs (TensorFS `h3.curve`).
 
@@ -432,7 +431,7 @@ async def curve_pruned(ctx: Context, *, source: Weights[Any], tel: Telemetry) ->
     return _produce_lane(ctx, tel, source, "bf16", curve=True)
 
 
-@invocable(memo_version="h3-lane/1", memo_dependencies=LANES_MEMO)
+@invocable
 async def fp8_pruned(
     ctx: Context,
     *,
@@ -450,7 +449,7 @@ app.entrypoint(
     weights=(WeightsOutput("bf16-full", max_new_bytes=MAX_FULL_BYTES + MAX_VIDEO_VAE_BYTES),),
     accelerator=False,
 )
-@invocable(memo_version="h3-lane/1", memo_dependencies=LANES_MEMO)
+@invocable
 async def vae(ctx: Context, *, source: Weights[Any], tel: Telemetry) -> ModelArtifact:
     """A lane's video VAE alone, normalised.
 
@@ -713,7 +712,7 @@ def retable_rows(
     return tables
 
 
-@invocable(memo_version="h3-retable/1", memo_dependencies=LANES_MEMO)
+@invocable
 async def retable(
     ctx: Context,
     *,

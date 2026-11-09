@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import math
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
@@ -12,21 +11,20 @@ from typing import Any, Literal
 import torch
 from diffusers.models.autoencoders.autoencoder_kl_minimax_h3 import MiniMaxH3VideoTransformerBlock
 
-from cozy_runtime import fusion, rng, stepcache
+from cozy_runtime import rng
+from cozy_runtime.accel import fusion, stepcache
 from diffusers import MiniMaxH3Transformer3DModel
+from cozy_runtime.accel import concurrently, placeable, sequence_parallel
 from cozy_runtime.author import (
-    AdapterCompatibility,
+    Serving,
     DerivedCache,
     Loader,
     Model,
     Telemetry,
-    concurrently,
-    placeable,
-    sequence_parallel,
-    Windows,
     uses_components,
+    Windows,
 )
-from cozy_runtime.author.kernels import Plan
+from cozy_runtime.accel.kernels import Plan
 
 from . import glue, producer, regenerate, shot_latents
 from .latent_upscaler import H3LatentUpscaler as H3LatentUpscaler
@@ -85,7 +83,7 @@ VAE_BLOCK = fusion.DiTBlock(
 
 def condition_references(model: H3Model, task: Task, state: Any, *, tel: Telemetry) -> None:
     """`condition_text` and `condition_ref2va_media` of one `ref2va` request, overlapped where
-    the group keeps the text encoder on a follower (`author.concurrently`): rank 0 encodes
+    the group keeps the text encoder on a follower (`accel.concurrently`): rank 0 encodes
     the references while the follower runs the conditioner.
 
     Both read only the prompt and the references and write disjoint outputs. The text block
@@ -125,14 +123,7 @@ FULL_BALANCED = FullRecipe()
 
 @placeable("text_encoder")
 @sequence_parallel(degrees=(2, 4, 7, 8))
-class H3Model(
-    Model[OfficialH3Pipeline],
-    encoded_leaves="accept",
-    # The DiTs' attention holds at 4 bits (fp4 where the GPU has it), the video VAE decoder's at 8
-    # (Kitchen INT8 on consumer cards, as ComfyUI's int8 decoder); the audio VAE and the text
-    # encoder keep exact attention.
-    attention_bits={"transformer": 4, "transformer_ref": 4, "vae": 8},
-):
+class H3Model(Model[OfficialH3Pipeline]):
     """H3 is head-shardable at every divisor of its 56 attention heads up to eight GPUs.
 
     The upstream `_cp_plan` shards the packed sequence itself with `tensor_split`, so any
@@ -150,15 +141,19 @@ class H3Model(
     have not yet run on GPUs (h3a-019).
     """
 
-    __adapter_compatibility__ = (
-        AdapterCompatibility("lora", "", ("transformer", "transformer_ref"), -math.inf, math.inf),
+    # The DiTs' attention holds at 4 bits (fp4 where the GPU has it), the video VAE decoder's at 8
+    # (Kitchen INT8 on consumer cards, as ComfyUI's int8 decoder); the audio VAE and the text
+    # encoder keep exact attention.
+    serving = Serving(
+        attention_bits={"transformer": 4, "transformer_ref": 4, "vae": 8},
+        loras=("transformer", "transformer_ref"),
     )
 
     pipe: OfficialH3Pipeline
 
     def load(self, loader: Loader) -> None:
         plans = model_plans(loader.assets)
-        self.pipe = loader.construct(OfficialH3Pipeline, factory=partial(build_h3_pipeline, plans=plans))
+        self.pipe = loader.construct(partial(build_h3_pipeline, plans=plans))
         self._declare_caches(loader)
 
     def _declare_caches(self, loader: Loader) -> None:
@@ -260,7 +255,7 @@ class H3Model(
         return self.pipe.denoise("ref2va", state, on_step=on_step, cancel=cancel, **recipe.denoise())
 
 
-class H3TurboBase(H3Model, encoded_leaves="accept"):
+class H3TurboBase(H3Model):
     """The five-root base checkpoint with construction-time turbo consumers.
 
     ``sol_dense_steps`` counts initial transformer evaluations, not scheduler
@@ -272,7 +267,7 @@ class H3TurboBase(H3Model, encoded_leaves="accept"):
 
     def load(self, loader: Loader) -> None:
         plans = model_plans(loader.assets)
-        self.pipe = loader.construct(OfficialH3Pipeline, factory=partial(build_h3_turbo_base, plans=plans))
+        self.pipe = loader.construct(partial(build_h3_turbo_base, plans=plans))
         self._declare_caches(loader)
 
     @uses_components("transformer")
@@ -334,14 +329,14 @@ class H3TurboBase(H3Model, encoded_leaves="accept"):
 
 
 @sequence_parallel(degrees=(2, 4, 7, 8))
-class H3TurboLoRA(Model[OfficialH3TurboLoRA], encoded_leaves="accept"):
+class H3TurboLoRA(Model[OfficialH3TurboLoRA]):
     """Independent PDD weights, replicated alongside the base on every CP rank."""
 
     pipe: OfficialH3TurboLoRA
 
     def load(self, loader: Loader) -> None:
         plans = model_plans(loader.assets, turbo=True)
-        self.pipe = loader.construct(OfficialH3TurboLoRA, factory=partial(build_h3_turbo_lora, plans=plans))
+        self.pipe = loader.construct(partial(build_h3_turbo_lora, plans=plans))
 
     def unload(self, loader: Loader) -> None:
         return None
@@ -415,16 +410,14 @@ class H3TurboLoRA(Model[OfficialH3TurboLoRA], encoded_leaves="accept"):
 
 
 @sequence_parallel(degrees=(2, 4, 7, 8))
-class H3RegenerateLoRA(Model[OfficialH3RegenerateLoRA], encoded_leaves="accept"):
+class H3RegenerateLoRA(Model[OfficialH3RegenerateLoRA]):
     """Open-H3-Regenerate-2K's refine overlay, replicated beside the base on every CP rank."""
 
     pipe: OfficialH3RegenerateLoRA
 
     def load(self, loader: Loader) -> None:
         plan = regenerate_plan(loader.assets)
-        self.pipe = loader.construct(
-            OfficialH3RegenerateLoRA, factory=partial(build_h3_regenerate_lora, plan=plan)
-        )
+        self.pipe = loader.construct(partial(build_h3_regenerate_lora, plan=plan))
 
     def unload(self, loader: Loader) -> None:
         return None

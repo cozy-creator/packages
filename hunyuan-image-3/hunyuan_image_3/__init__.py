@@ -7,24 +7,9 @@ import secrets
 from typing import Annotated
 
 import msgspec
-from cozy_runtime.author import (
-    Adjustments,
-    Advanced,
-    App,
-    AspectRatio,
-    Context,
-    Guidance,
-    Image,
-    ImageResult,
-    Memoize,
-    Outputs,
-    Prompt,
-    Ratios,
-    Seed,
-    Steps,
-    Telemetry,
-    ratio_of,
-)
+from cozy_runtime.author import Adjustments, App, Context, Memoize, Outputs, Seed, Telemetry
+from cozy_runtime.fields import Advanced, AspectRatio, Image, Prompt, Ratios
+from cozy_runtime.image import Guidance, ImageResult, ratio_of, Steps
 
 from .model import GUIDANCE, MAX_NEW_TOKENS, HunyuanImage3, caption
 from . import quantize as quantize  # its recipes
@@ -113,12 +98,11 @@ def _generate(ctx: Context, payload: HunyuanRequest, steps: int, model: HunyuanI
     return ImageResult(asset, image.width, image.height, seed, caption(cot, prompt))
 
 
-_COMPONENTS = {"model": ("model",)}
 _DISTIL = "tencent/hunyuan-image-3-instruct-distil@0.1.1"
 _INSTRUCT = "tencent/hunyuan-image-3-instruct@0.1.1"
 
 
-@app.entrypoint(defaults={"model": _DISTIL}, components=_COMPONENTS, memoize=Memoize(requires=["seed"]))
+@app.entrypoint(defaults={"model": _DISTIL}, memoize=Memoize(requires=["seed"]))
 def generate_turbo(ctx: Context, payload: HunyuanRequest, model: HunyuanImage3, out: Outputs, tel: Telemetry,
                    adj: Adjustments) -> ImageResult:
     """HunyuanImage 3.0 Instruct-Distil, 8 steps at guidance 2.5: text to image, or an edit of up to three pictures.
@@ -127,7 +111,7 @@ def generate_turbo(ctx: Context, payload: HunyuanRequest, model: HunyuanImage3, 
     return _generate(ctx, payload, payload.steps or DISTIL_STEPS, model, out, tel, adj)
 
 
-@app.entrypoint(defaults={"model": _INSTRUCT}, components=_COMPONENTS, memoize=Memoize(requires=["seed"]))
+@app.entrypoint(defaults={"model": _INSTRUCT}, memoize=Memoize(requires=["seed"]))
 def generate(ctx: Context, payload: HunyuanRequest, model: HunyuanImage3, out: Outputs, tel: Telemetry,
              adj: Adjustments) -> ImageResult:
     """HunyuanImage 3.0 Instruct, 50 steps with CFG 2.5: text to image, or an edit of up to three pictures.
@@ -151,7 +135,7 @@ class ImageBox(msgspec.Struct, kw_only=True):
 
 # Each checkpoint is built, and its weights fetched, only when a render asks for it.
 @app.tool(label="Image", named="image", defaults={"model": _DISTIL, "full": _INSTRUCT},
-          components={"model": ("model",), "full": ("model",)}, on_demand=("full", "model"),
+          on_demand=("full", "model"),
           memoize=Memoize(requires=["seed"]))
 def image(ctx: Context, payload: ImageBox, full: HunyuanImage3, model: HunyuanImage3, out: Outputs, tel: Telemetry,
           adj: Adjustments) -> ImageResult:

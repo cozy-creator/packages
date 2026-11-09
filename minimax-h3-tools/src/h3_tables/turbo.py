@@ -17,7 +17,6 @@ from cozy_runtime.author import (
 )
 from cozy_runtime.weights_store import Checkpoint, Derivation
 
-from ._memo import TURBO
 from .adaln_operations import _sections, _validate_generators
 from .kernel import H3Topology, LowRankAdapter, adapter_shapes, table_shapes
 from .model_config import DIT_COMPONENT
@@ -162,7 +161,7 @@ def _topologies() -> tuple[dict[Task, dict[str, Any]], dict[Task, H3Topology]]:
     return configs, {task: H3Topology.from_config(configs[task]) for task in TASKS}
 
 
-@invocable(memo_version="h3-turbo-lora/1", memo_dependencies=TURBO)
+@invocable
 async def turbo_lora(
     ctx: Context,
     *,

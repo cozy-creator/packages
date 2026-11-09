@@ -17,10 +17,10 @@ from types import SimpleNamespace
 from typing import Any
 
 import torch
-from cozy_runtime import moe
+from cozy_runtime.accel import moe
 from cozy_runtime.author import Config, Loader, Model, uses_components
-from cozy_runtime.author.kernels import Plan
-from cozy_runtime.moe import Routing
+from cozy_runtime.accel.kernels import Plan
+from cozy_runtime.accel.moe import Routing
 from PIL import Image
 from tokenizers import Tokenizer
 
@@ -91,14 +91,13 @@ def caption(cot: str | None, prompt: str) -> str:
     return found.group(1).strip() if found else prompt
 
 
-class HunyuanImage3(Model[Graph], encoded_leaves="accept"):
-    """Text to image, or an edit of up to three ordered references, with the thinking stage optional. The image
-    steps after the first are a `denoise_loop` the Runtime may record; the think decodes eagerly."""
+class HunyuanImage3(Model[Graph]):
+    """Text to image, or an edit of up to three ordered references, with the thinking stage optional."""
 
     graph: Graph
 
     def load(self, loader: Loader) -> None:
-        self.graph = loader.construct(Graph, factory=Graph)
+        self.graph = loader.construct(Graph)
         model = self.graph.components[COMPONENT]
         model._tokenizer = _tokenizer(loader.assets.read)
         model.generation_config = SimpleNamespace(**GENERATION)
@@ -153,8 +152,7 @@ class HunyuanImage3(Model[Graph], encoded_leaves="accept"):
     def paint(self, prompt: str, references: list[Image.Image], cot: str | None, *, size: tuple[int, int],
               steps: int, guidance: float, seed: int, on_step: Callable[[int], None],
               cancel: Callable[[], None]) -> Image.Image:
-        """Tencent's image stage at an explicit `size` (width, height), after `think` or without it. Its steps
-        after the first are a `denoise_loop`, so no routing trace reads the experts' counts on the host."""
+        """Tencent's image stage at an explicit `size` (width, height), after `think` or without it."""
         model = self.graph.components[COMPONENT]
         width, height = size
         with torch.inference_mode():

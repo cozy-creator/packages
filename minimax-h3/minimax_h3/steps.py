@@ -1,38 +1,25 @@
-"""FL2VA's denoise as an `author.denoise_loop`: the Runtime runs it eagerly or natively.
+"""H3's denoise loops: FL2VA's and Ref2VA's official loop, and the Regenerate refine.
 
-The step is the official loop step (`MiniMaxH3LoopDenoiser`, then `MiniMaxH3LoopSchedulerStep`)
-over tensors alone. It reads its timesteps and sigmas from tables at the step index, and takes
-every host decision from its label: dense or sparse attention, how many distinct timesteps its
-rows hold, and whether the Kitchen producer's sites reuse the previous step's key means, which
-it carries in one slot per site (`producer.Carry`); the last dense step seeds them. FL2VA's loop
-reaches every per-call tensor through its inputs, so the Runtime keeps its program for the next
-call of the same key.
+Each step is the official loop step (`MiniMaxH3LoopDenoiser`, then `MiniMaxH3LoopSchedulerStep`):
+the DiT's velocities, then each modality's scheduler step. H3 owns its attention layouts, so every
+DiT call names its own: dense for the first `sol_dense_steps` steps and the token refiner, sparse
+after. The Kitchen producer's sites reuse the previous step's key means, kept in one slot per site
+(`producer.Carry`); the last dense step seeds them.
 """
 
 from __future__ import annotations
 
 from collections.abc import Callable
-from contextlib import AbstractContextManager
-from dataclasses import dataclass
+from contextlib import AbstractContextManager, nullcontext
 from typing import Any
 
 import torch
-from cozy_runtime import stepcache
-from cozy_runtime.author import AttentionLayout, attention_scope, denoise_loop, producer_sites
+from cozy_runtime.accel import stepcache
+from cozy_runtime.accel.attention import attention_scope, AttentionLayout, producer_sites
 
 from . import producer
 from .adaln_pruned import checked_loop
 from .overlay import ATTENTION_KWARG, OVERLAY_KWARG, Overlay
-
-
-@dataclass(frozen=True, slots=True)
-class Label:
-    sparse: bool
-    rows: int
-    rolling: bool
-    seeding: bool
-    #: Turbo: the evaluation whose collapsed output heads serve the step.
-    head: int = 0
 
 
 def denoise_official(
@@ -41,24 +28,25 @@ def denoise_official(
     state: Any,
     layout_at: Callable[[int], AttentionLayout],
     sol_dense_steps: int,
-    on_step: Callable[[int], None],
+    on_step: Callable[[int], object],
     *,
-    trunk: str,
     steps: range | None = None,
     overlay: Overlay | None = None,
     cache: stepcache.Policy | None = None,
 ) -> None:
-    """One rank's denoise of the loop's block `state` on `trunk`'s DiT (FL2VA's or Ref2VA's), its
-    latents advanced in place over `steps` of its plan (all of them by default): under the turbo `overlay` (its tables and LoRA, armed before the
-    loop, and each step's collapsed heads, its label's), its DiT's stack under `cache` when a
-    preset names one."""
+    """One rank's denoise of the loop's block `state` on its DiT (FL2VA's or Ref2VA's), its latents
+    advanced over `steps` of its plan (all of them by default) by `schedulers`' own steps: under
+    the turbo `overlay` (its tables and LoRA, and each step's collapsed heads), its DiT's stack
+    under `cache` when a preset names one."""
     plan = state.row_timestep_plan
     steps = range(len(plan)) if steps is None else steps
     fields = state.denoiser_input_fields
     position_ids, tags = fields["position_ids"], fields["token_tags"]
-    device = state.latents.device
+    video, audio = state.latents, state.audio_latents
+    video_rows, audio_rows = state.num_condition_video_rows, state.num_condition_audio_rows
     selector = None if overlay is None else {ATTENTION_KWARG: overlay.bank, OVERLAY_KWARG: overlay}
-    heads = [overlay.schedule.step(times) if overlay is not None and overlay.heads else 0 for times, _ in plan]
+    schedule = None if overlay is None else overlay.schedule  # a turbo bank's evaluations select its heads
+    heads = [0 if schedule is None else schedule.step(times) for times, _ in plan]
     with torch.no_grad(), checked_loop():
         for times, rows in plan:  # an uncovered row refuses here, never inside the loop
             transformer._arm(times, rows, tags, selector)
@@ -66,78 +54,59 @@ def denoise_official(
         sites = producer_sites(transformer)
         rotary = transformer.rope(position_ids)
         producer.present(sites, rotary, tags.numel())
-        if overlay is not None:  # armed before the loop, as `denoise_loop` requires
+        if overlay is not None:
             transformer._engage(overlay, heads[steps.start])
-        layouts = {sparse: layout_at(sol_dense_steps if sparse else 0) for sparse in (False, True)}
-        # The token refiner's attention is a site too: it runs under the dense layout, as a step's would.
-        with attention_scope(layouts[False]):
-            text = transformer.text_rows(state.prompt_embeds)
-        timesteps = torch.zeros(len(plan), max(t.numel() for t, _ in plan), device=device)
-        for index, (times, _) in enumerate(plan):
-            timesteps[index, : times.numel()] = times
-        indices = torch.stack([rows for _, rows in plan])
-        # A loop's first step measures its own key means: none of its loop's steps left one.
-        labels = tuple(
-            Label(
-                index >= sol_dense_steps,
-                plan[index][0].numel(),
-                bool(sites) and index >= max(sol_dense_steps, 1) and index > steps.start,
-                bool(sites) and index == sol_dense_steps - 1,
-                heads[index],
-            )
-            for index in steps
-        )
-        keys = tuple(id(site.module) for site in sites)
-        slots = tuple(torch.zeros(site.module.heads, 128, device=device) for site in sites)
-        video_rows, audio_rows = state.num_condition_video_rows, state.num_condition_audio_rows
-        inputs = (
-            state.prompt_embeds, timesteps, indices, tags, position_ids, fields["video_indices"],
-            fields["audio_indices"], fields["text_indices"], *rotary, text, state.timesteps,
-            state.audio_timesteps, schedulers.scheduler.sigmas, schedulers.audio_scheduler.sigmas,
-        )  # fmt: skip
-
-        def step(i: torch.Tensor, video: Any, audio: Any, *rest: Any, label: Label) -> None:
-            means, given = rest[: len(keys)], rest[len(keys) :]
-            prompt, times, rows, tags, positions, at_video, at_audio, at_text, *more = given
-            cos, sin, text, video_t, audio_t, video_sigmas, audio_sigmas = more
-            carry = producer.Carry(dict(zip(keys, means, strict=True)), label.rolling, label.seeding)
-            if overlay is not None and overlay.heads:  # the same overlay, this step's heads
-                transformer._engage(overlay, label.head)
-            with attention_scope(layouts[label.sparse]), producer.carrying(carry):
-                velocity, audio_velocity = transformer(
-                    hidden_states=video[None],
-                    audio_hidden_states=audio[None],
-                    encoder_hidden_states=prompt,
-                    timestep=times.index_select(0, i)[0, : label.rows],
-                    timestep_indices=rows.index_select(0, i)[0],
-                    token_tags=tags,
-                    position_ids=positions,
-                    video_indices=at_video,
-                    audio_indices=at_audio,
-                    text_indices=at_text,
-                    return_dict=False,
-                    rotary=(cos, sin),
-                    text=text,
-                )
-            velocity, audio_velocity = velocity[0, video_rows:], audio_velocity[0, audio_rows:]
-            euler(video[video_rows:], velocity.float(), i, video_t, video_sigmas)
-            euler(audio[audio_rows:], audio_velocity.float(), i, audio_t, audio_sigmas)
-
-        bank = None if overlay is None else overlay.bank
+        dense, sparse = layout_at(0), layout_at(sol_dense_steps)
+        means = {id(site.module): torch.zeros(site.module.heads, 128, device=video.device) for site in sites}
+        caching = nullcontext() if cache is None else stepcache.running(cache, len(steps), video.device)
         try:
-            denoise_loop(
-                step,
-                steps,
-                state=(state.latents, state.audio_latents),
-                carried=slots,
-                inputs=inputs,
-                labels=labels,
-                key=("minimax-h3.official/1", trunk, bank, layouts[False], layouts[True], video_rows, audio_rows),
-                on_step=on_step,
-                cache=cache,
-            )
+            # The token refiner's attention is a site too: dense, as a dense step's.
+            with attention_scope(dense):
+                text = transformer.text_rows(state.prompt_embeds)
+            with caching as run:
+                for i in steps:
+                    if run is not None:
+                        run.step(i - steps.start)
+                    times, rows = plan[i]
+                    # A loop's first step measures its own key means: none of its steps left one.
+                    carry = producer.Carry(
+                        means,
+                        rolling=bool(sites) and i >= max(sol_dense_steps, 1) and i > steps.start,
+                        seeding=bool(sites) and i == sol_dense_steps - 1,
+                    )
+                    if overlay is not None and overlay.heads:  # the same overlay, this step's heads
+                        transformer._engage(overlay, heads[i])
+                    layout = sparse if i >= sol_dense_steps else dense
+                    with attention_scope(layout), producer.carrying(carry):
+                        velocity, audio_velocity = transformer(
+                            hidden_states=video[None],
+                            audio_hidden_states=audio[None],
+                            encoder_hidden_states=state.prompt_embeds,
+                            timestep=times,
+                            timestep_indices=rows,
+                            token_tags=tags,
+                            position_ids=position_ids,
+                            video_indices=fields["video_indices"],
+                            audio_indices=fields["audio_indices"],
+                            text_indices=fields["text_indices"],
+                            return_dict=False,
+                            rotary=rotary,
+                            text=text,
+                        )
+                    video[video_rows:] = schedulers.scheduler.step(
+                        velocity[0, video_rows:].float(), state.timesteps[i], video[video_rows:], return_dict=False
+                    )[0]
+                    audio[audio_rows:] = schedulers.audio_scheduler.step(
+                        audio_velocity[0, audio_rows:].float(),
+                        state.audio_timesteps[i],
+                        audio[audio_rows:],
+                        return_dict=False,
+                    )[0]
+                    del velocity, audio_velocity
+                    on_step(i)
         finally:
             transformer._release()
+            producer.end_loop()  # after the last step: it forgets the rotary this loop's calls read
     state.noise_pred = state.audio_noise_pred = None  # the official loop's outputs; none reads them
 
 
@@ -156,10 +125,10 @@ def denoise_refine(
     weights: list[torch.Tensor],
     dense_steps: int,
     layout_at: Callable[[int], AttentionLayout],
-    on_step: Callable[[int], None],
-) -> None:
-    """The Regenerate refine (NVlabs `open_h3/pipeline.py` `refine`) as a `denoise_loop`: Euler on
-    the video rows `video` alone, every step's velocity from the FL2VA DiT under `overlay`.
+    on_step: Callable[[int], object],
+) -> torch.Tensor:
+    """The Regenerate refine (NVlabs `open_h3/pipeline.py` `refine`): Euler on the video rows
+    `video` alone, every step's velocity from the FL2VA DiT under `overlay`; the refined rows.
 
     `windows` are equal row spans of `video`, each laid out as a clip of its own (`fields`: H3's
     positions start at every clip's text), so one layout and one rotary table serve them all;
@@ -167,7 +136,6 @@ def denoise_refine(
     `(timesteps, timestep_indices)`.
     """
     position_ids, tags = fields["position_ids"], fields["token_tags"]
-    device = video.device
     selector = {ATTENTION_KWARG: overlay.bank, OVERLAY_KWARG: overlay}
     with torch.no_grad(), checked_loop():
         for times, rows in plan:  # an uncovered row refuses here, never inside the loop
@@ -176,67 +144,46 @@ def denoise_refine(
         sites = producer_sites(transformer)
         rotary = transformer.rope(position_ids)
         producer.present(sites, rotary, tags.numel())
-        timesteps = torch.stack([times for times, _ in plan]).to(device)
-        indices = torch.stack([rows for _, rows in plan]).to(device)
         # The first `dense_steps` run dense (the preset's), the last of them seeding the Kitchen
         # producer's key means. A key mean carried from a step's last window is no other window's:
         # windows compute their own statistics.
         single = bool(sites) and len(windows) == 1
-        labels = tuple(
-            Label(index >= dense_steps, int(times.numel()), single and index >= max(dense_steps, 1),
-                  single and index == dense_steps - 1)  # fmt: skip
-            for index, (times, _) in enumerate(plan)
-        )
-        layouts = {sparse: layout_at(dense_steps if sparse else 0) for sparse in (False, True)}
-        keys = tuple(id(site.module) for site in sites)
-        slots = tuple(torch.zeros(site.module.heads, 128, device=device) for site in sites)
-
-        def step(i: torch.Tensor, rows: Any, *means: Any, label: Label) -> None:
-            carry = producer.Carry(dict(zip(keys, means, strict=True)), label.rolling, label.seeding)
-            velocity = torch.zeros_like(rows)
-            for (start, count), weight in zip(windows, weights, strict=True):
-                with piece(), attention_scope(layouts[label.sparse]), producer.carrying(carry):
-                    predicted, _ = transformer(
-                        hidden_states=rows[None, start : start + count],
-                        audio_hidden_states=audio[None],
-                        encoder_hidden_states=prompt_embeds,
-                        timestep=timesteps.index_select(0, i)[0, : label.rows],
-                        timestep_indices=indices.index_select(0, i)[0],
-                        token_tags=tags,
-                        position_ids=position_ids,
-                        video_indices=fields["video_indices"],
-                        audio_indices=fields["audio_indices"],
-                        text_indices=fields["text_indices"],
-                        return_dict=False,
-                        rotary=rotary,
-                        text=text,
-                    )
-                velocity[start : start + count].addcmul_(predicted[0].float(), weight[:, None])
-            delta = sigmas.index_select(0, i) - sigmas.index_select(0, i + 1)
-            rows.add_(velocity * delta.reshape(1, 1))
-
-        transformer._engage(overlay, 0)  # armed before the loop, as `denoise_loop` requires
+        dense, sparse = layout_at(0), layout_at(dense_steps)
+        means = {id(site.module): torch.zeros(site.module.heads, 128, device=video.device) for site in sites}
+        transformer._engage(overlay, 0)
         try:
-            with attention_scope(layouts[False]):  # under the overlay, as every step reads it
+            with attention_scope(dense):  # under the overlay, as every step reads it
                 text = transformer.text_rows(prompt_embeds)
-            denoise_loop(
-                step, range(len(plan)), state=(video,), carried=slots, labels=labels, on_step=on_step
-            )
+            for i, (times, rows) in enumerate(plan):
+                carry = producer.Carry(
+                    means,
+                    rolling=single and i >= max(dense_steps, 1),
+                    seeding=single and i == dense_steps - 1,
+                )
+                layout = sparse if i >= dense_steps else dense
+                velocity = torch.zeros_like(video)
+                for (start, count), weight in zip(windows, weights, strict=True):
+                    with piece(), attention_scope(layout), producer.carrying(carry):
+                        predicted, _ = transformer(
+                            hidden_states=video[None, start : start + count],
+                            audio_hidden_states=audio[None],
+                            encoder_hidden_states=prompt_embeds,
+                            timestep=times,
+                            timestep_indices=rows,
+                            token_tags=tags,
+                            position_ids=position_ids,
+                            video_indices=fields["video_indices"],
+                            audio_indices=fields["audio_indices"],
+                            text_indices=fields["text_indices"],
+                            return_dict=False,
+                            rotary=rotary,
+                            text=text,
+                        )
+                    velocity[start : start + count].addcmul_(predicted[0].float(), weight[:, None])
+                    del predicted
+                video = video + velocity * (sigmas[i] - sigmas[i + 1])
+                on_step(i)
         finally:
             transformer._release()
-
-
-def euler(
-    sample: torch.Tensor,
-    velocity: torch.Tensor,
-    i: torch.Tensor,
-    timesteps: torch.Tensor,
-    sigmas: torch.Tensor,
-) -> None:
-    """`MiniMaxH3Scheduler.step` (eta 0) at step `i`, in its order of operations, in place."""
-    sigma_from_timestep = 1 - timesteps.index_select(0, i).reshape(()).to(sample.dtype)
-    denoised = sample + sigma_from_timestep.reshape((1,) * sample.ndim) * velocity
-    dtype = torch.float32 if sample.dtype in (torch.float16, torch.bfloat16) else sample.dtype
-    sigma = sigmas.index_select(0, i).reshape(()).to(dtype)
-    ratio = sigmas.index_select(0, i + 1).reshape(()).to(dtype) / sigma
-    sample.copy_((ratio * sample.to(dtype) + (1.0 - ratio) * denoised.to(dtype)).to(sample.dtype))
+            producer.end_loop()  # after the last step: it forgets the rotary this loop's calls read
+    return video

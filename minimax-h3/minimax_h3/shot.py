@@ -14,12 +14,25 @@ from typing import Annotated, Literal, NamedTuple
 import msgspec
 import numpy as np
 import torch
-from cozy_runtime.author import (
+from cozy_runtime.author import InvalidRequest, OutputError, Outputs, Seed
+from cozy_runtime.fields import (
     Advanced,
     AspectRatio,
     Audio,
-    AudioFile,
     Count,
+    FileBound,
+    Image,
+    Pickup,
+    Placeholder,
+    Prompt,
+    Range,
+    Ratios,
+    Snap,
+    Total,
+    Video,
+)
+from cozy_runtime.media import (
+    AudioFile,
     DecodedAudioChunk,
     DecodedAudioFormat,
     DecodedMediaEvent,
@@ -27,22 +40,8 @@ from cozy_runtime.author import (
     DecodedVideoFormat,
     DecodedVideoFrame,
     File,
-    FileBound,
-    Image,
     ImageFile,
-    InvalidRequest,
     Latents,
-    OutputError,
-    Outputs,
-    Pickup,
-    Placeholder,
-    Prompt,
-    Range,
-    Ratios,
-    Seed,
-    Snap,
-    Total,
-    Video,
     VideoFile,
 )
 from PIL import Image as PILImage

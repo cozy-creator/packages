@@ -11,7 +11,7 @@ import torch
 from omegaconf import OmegaConf
 from PIL import Image, ImageOps
 from cozy_runtime import rng
-from cozy_runtime.author import Config, Cut, Loader, Model, Telemetry, split, uses_components
+from cozy_runtime.author import Config, Cut, Loader, Model, Serving, Telemetry, split, uses_components
 
 from .color import Correction, correct
 from .frames import extend
@@ -110,16 +110,16 @@ def build(config: Config) -> Graph:
     return Graph(config)
 
 
-class RestorationModel(
-    Model[Graph], encoded_leaves="accept", unloaded=("dit.blocks.*.attn.rope.rope.freqs",)
-):
+class RestorationModel(Model[Graph]):
     """Each phase declares the components it uses, so the Runtime places each on its own:
     the VAE's activations take the room the transformer's weights held while it ran."""
+
+    serving = Serving(unloaded=("dit.blocks.*.attn.rope.rope.freqs",))
 
     graph: Graph
 
     def load(self, loader: Loader) -> None:
-        self.graph = loader.construct(Graph, factory=build)
+        self.graph = loader.construct(build)
 
     @uses_components("vae")
     def encode(self, pixels: torch.Tensor, generator: torch.Generator) -> torch.Tensor:

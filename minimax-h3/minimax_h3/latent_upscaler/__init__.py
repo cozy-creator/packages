@@ -9,7 +9,8 @@ from importlib.resources import files
 from typing import cast
 
 import torch
-from cozy_runtime.author import Config, Loader, Model, sequence_parallel, uses_components
+from cozy_runtime.accel import sequence_parallel
+from cozy_runtime.author import Config, Loader, Model, uses_components
 
 from .architecture import LatentResizer3D
 
@@ -38,7 +39,7 @@ class H3LatentUpscaler(Model[UpscalerGraph]):
     graph: UpscalerGraph
 
     def load(self, loader: Loader) -> None:
-        self.graph = loader.construct(UpscalerGraph, factory=build_upscaler)
+        self.graph = loader.construct(build_upscaler)
 
     @uses_components("upscaler")
     def upscale(self, latents: torch.Tensor, *, height: int, width: int) -> torch.Tensor:

@@ -29,7 +29,7 @@ INT8 = Recipe(
 )
 
 
-@app.entrypoint(defaults={"model": "qwen/qwen3.5-9b@0.2.0"}, memoize=True, memo_version="ask-v1")
+@app.entrypoint(defaults={"model": "qwen/qwen3.5-9b@0.2.0"}, memoize=True)
 def ask(ctx: Context, payload: AskRequest, model: VisionLM, tel: Telemetry) -> AskResult:
     """Answer each prompt about its text, images and videos, all prompts in one pass."""
     return vlm.ask(ctx, payload, model, tel)
@@ -39,7 +39,7 @@ def ask(ctx: Context, payload: AskRequest, model: VisionLM, tel: Telemetry) -> A
 _CAPTION = "Say what this shows, in one or two plain sentences, for someone who can't see it: who or what it is and how it looks. Say only what you can see."
 
 
-@app.entrypoint(defaults={"model": "qwen/qwen3.5-9b@0.2.0"}, memoize=True, memo_version="caption-v1")
+@app.entrypoint(defaults={"model": "qwen/qwen3.5-9b@0.2.0"}, memoize=True)
 def caption(ctx: Context, payload: AskRequest, model: VisionLM, tel: Telemetry) -> AskResult:
     """What a picture or a video shows, in this package's own question: `images` or `videos`, and nothing to ask."""
     return vlm.ask(ctx, msgspec.structs.replace(payload, prompt=_CAPTION), model, tel)

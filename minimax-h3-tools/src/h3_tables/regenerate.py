@@ -25,7 +25,6 @@ from cozy_runtime.author import (
 )
 from cozy_runtime.weights_store import Derivation
 
-from ._memo import REGENERATE
 from .adaln_operations import _sections, _validate_generators
 from .kernel import CurveAdapter, H3Topology, table_shapes
 from .model_config import DIT_COMPONENT
@@ -136,7 +135,7 @@ def _source(present: Rows, config: dict[str, Any]) -> str:
     return name
 
 
-@invocable(memo_version="h3-regenerate-lora/1", memo_dependencies=REGENERATE)
+@invocable
 async def regenerate_lora(
     ctx: Context,
     *,

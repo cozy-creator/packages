@@ -30,8 +30,7 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 
-from cozy_runtime import lora
-from cozy_runtime.author import ConformanceError
+from cozy_runtime.accel import lora
 
 #: The forward-call selector: `attention_kwargs={ATTENTION_KWARG: TURBO_BANK}` names the bank
 #: one DiT forward serves. Absent, the forward is the base's, whatever overlay is attached.
@@ -136,9 +135,8 @@ class TurboSchedule:
         present = set(timestep.detach().to(torch.float32).cpu().tolist())
         steps = [index for index, value in enumerate(self.video) if value in present]
         if len(steps) != 1 or self.audio[steps[0]] not in present:
-            raise ConformanceError(
+            raise ValueError(
                 f"timesteps {sorted(present)} do not name one turbo evaluation",
-                code="artifact_config",
             )
         return steps[0]
 
@@ -280,10 +278,9 @@ class Overlay(nn.Module):  # type: ignore[misc]
         values = timestep.to(dtype=torch.float32).reshape(-1, 1)
         matches = values == self.timesteps.reshape(1, -1)
         if not bool(torch.all(matches.sum(dim=1) == 1)):
-            raise ConformanceError(
+            raise ValueError(
                 f"timestep rows are not covered exactly by the {self.bank} plan: "
                 f"{timestep.detach().float().cpu().tolist()}",
-                code="artifact_config",
             )
         return matches.to(dtype=torch.int64).argmax(dim=1)
 

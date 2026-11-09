@@ -13,22 +13,9 @@ import msgspec
 import torch
 from PIL import Image, ImageOps
 from torchvision.transforms import functional as vision
-from cozy_runtime.author import (
-    Advanced,
-    App,
-    AspectRatio,
-    FileBound,
-    Context,
-    DecodedAudioChunk,
-    DecodedMediaHeader,
-    DecodedVideoFrame,
-    Outputs,
-    Ratios,
-    Seed,
-    Shape,
-    Telemetry,
-    VideoFile,
-)
+from cozy_runtime.author import App, Context, Outputs, Seed, Telemetry
+from cozy_runtime.fields import Advanced, AspectRatio, FileBound, Ratios, Shape
+from cozy_runtime.media import DecodedAudioChunk, DecodedMediaHeader, DecodedVideoFrame, VideoFile
 from .color import Correction
 from .frames import extend
 from .model import RestorationModel, restore as restore_window

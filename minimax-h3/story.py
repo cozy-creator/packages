@@ -8,7 +8,8 @@ from itertools import pairwise
 from typing import Literal, NamedTuple
 
 import msgspec
-from cozy_runtime.author import AudioFile, AudioPreparation, ImageFile, VideoFile
+from cozy_runtime.fields import AudioPreparation
+from cozy_runtime.media import AudioFile, ImageFile, VideoFile
 
 from minimax_h3.official import MAX_AUDIO_REFERENCES, MAX_IMAGE_REFERENCES, MAX_REFERENCES, MAX_VIDEO_REFERENCES, Task
 

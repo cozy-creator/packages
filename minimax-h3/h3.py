@@ -26,44 +26,48 @@ from typing import Annotated, Any, Literal, NamedTuple, cast
 import msgspec
 import numpy as np
 import torch
-from cozy_runtime import stepcache
+from cozy_runtime.accel import stepcache
 from cozy_runtime.author import (
-    Advanced,
     App,
-    AudioFile,
     ChildCallError,
     Context,
+    InvalidRequest,
+    invocable,
+    Lora,
+    ModelChoice,
+    OutputError,
+    Outputs,
+    prefetch,
+    SavedVideo,
+    Seed,
+    Telemetry,
+    ThreadPoolExecutor,
+    UnsupportedInput,
+)
+from cozy_runtime.fields import (
+    Advanced,
     Count,
+    FileBound,
+    FileLimits,
+    ImagePreparation,
+    Label,
+    Range,
+    Shape,
+    Spans,
+)
+from cozy_runtime.image import ratio_of
+from cozy_runtime.media import (
+    AudioFile,
     DecodedAudioChunk,
     DecodedAudioFormat,
     DecodedMediaHeader,
     DecodedVideoFormat,
     DecodedVideoFrame,
     File,
-    FileBound,
-    FileLimits,
     Files,
     ImageFile,
-    ImagePreparation,
-    InvalidRequest,
-    Label,
     Latents,
-    Lora,
-    ModelChoice,
-    OutputError,
-    Outputs,
-    Range,
-    SavedVideo,
-    Seed,
-    Shape,
-    Spans,
-    Telemetry,
-    ThreadPoolExecutor,
-    UnsupportedInput,
     VideoFile,
-    invocable,
-    prefetch,
-    ratio_of,
 )
 from msgspec.structs import replace
 from PIL import Image as PILImage
@@ -781,7 +785,6 @@ _TURBO_LORA = "alibaba-pai/minimax-h3-turbo-lora@1.0.1"
 _REGENERATE_LORA = "efficient-large-model/open-h3-regenerate-2k@0.1.0"
 _LATENT_UPSCALER = "lbh-123-ai/h3-latent-upscaler@0.1.0"
 
-
 #: The components each task runs. A machine downloads these first and the rest behind the
 #: run, so a pod's first request pays for one DiT, not two.
 _FL2VA = ("text_encoder", "transformer", "vae", "audio_vae")
@@ -951,9 +954,6 @@ def _render_keyframes(
     hand a successor its carry, and `ended` its last frame (`fl2va_segment`)."""
     plan = _plan(model, turbo_lora, "fl2va")
     steps = plan.schedule(steps).transformer_evaluations
-    keyframes = ("vae",) if first is not None or last is not None else ()
-    dit = "transformer" if turbo_lora is None else {"transformer", "fl2va_turbo"}
-    ctx.plan("text_encoder", *keyframes, dit, "audio_vae", "vae")
     ctx.raise_if_cancelled()
     view = model.for_request(ctx, seed=seed)
     notes = _retargeted(view.adapters, "transformer")
@@ -1016,9 +1016,7 @@ def _references_to_video(
 ) -> H3VideoOutput:
     plan = _plan(model, turbo_lora, "ref2va")
     steps = plan.schedule(payload.steps).transformer_evaluations
-    dit = "transformer_ref" if turbo_lora is None else {"transformer_ref", "ref2va_turbo"}
     # A cut video's sound is encoded first: what the segment carries starts from it.
-    ctx.plan(*(() if sound is None else ("audio_vae",)), "text_encoder", {"vae", "audio_vae"}, dit, "audio_vae", "vae")
     ctx.raise_if_cancelled()
     view = model.for_request(ctx, seed=payload.seed)
     notes = _retargeted(view.adapters, "transformer_ref")
@@ -1303,7 +1301,7 @@ async def ref2va_segment(
     return SegmentOutput(segment.video, [*segment.warnings, *handed.warnings], observed, handed.file("context"), ended[0], handed.file("latents"))
 
 
-app.child_task(ref2va_segment)
+app.entrypoint(ref2va_segment, private=True)
 
 
 def log_prompt(tel: Telemetry, event: str, prompt: str, **fields: str | int) -> None:
@@ -1391,7 +1389,7 @@ async def fl2va_segment(
     return SegmentOutput(shot.video, [*shot.warnings, *handed.warnings], observed, handed.file("context"), ended[0], handed.file("latents"))
 
 
-app.child_task(fl2va_segment)
+app.entrypoint(fl2va_segment, private=True)
 
 
 @invocable(
@@ -1423,9 +1421,6 @@ async def regenerate_shot(
         except InvalidRequest as refused:
             latents = None
             warnings.append(f"these latents can't be used, so it works from the video: {refused.message}")
-    # In the order they run; the shot's own latents skip the encode.
-    encode = () if latents is not None else ("vae",)
-    ctx.plan(*encode, "upscaler", "text_encoder", "audio_vae", {"transformer", "fl2va_regenerate"}, "vae")
     cancel = ctx.raise_if_cancelled
     if latents is None:
         with tel.stage("read_video", overall_range=(0.00, 0.03)):
@@ -1489,7 +1484,7 @@ async def regenerate_shot(
     return RegenerateOutput(saved.video, warnings)
 
 
-app.child_task(regenerate_shot)
+app.entrypoint(regenerate_shot, private=True)
 
 
 # --- the three tools ---------------------------------------------------------------------
@@ -1707,7 +1702,7 @@ async def _render(ctx: Context, shot: Shot, out: Outputs, tel: Telemetry, *, pla
                       kept_s=begun if take is not None else None)  # fmt: skip
 
 
-@app.tool(label="Shot", named="shot", emits_media=True, accelerator=False, reserved=_RESERVED)
+@app.tool(label="Shot", named="shot", accelerator=False, reserved=_RESERVED)
 async def generate(ctx: Context, payload: Shot, out: Outputs, tel: Telemetry) -> ShotResult:
     """One continuous shot of any length, with sound (README.md): a summary, then what happens, beat by beat, each text
     with the references it mentions; an optional first and last frame; and Pick up from here, which goes on from a take
@@ -1759,7 +1754,7 @@ class Edit(msgspec.Struct, kw_only=True):
     seed: Seed | None = None
 
 
-@app.tool(label="Edit", named="edit", emits_media=True, accelerator=False, reserved=_RESERVED)
+@app.tool(label="Edit", named="edit", accelerator=False, reserved=_RESERVED)
 async def edit(ctx: Context, payload: Edit, out: Outputs, tel: Telemetry) -> ShotResult:
     """A plate edited by its beats, on Ref2VA under the chosen edit LoRA, its trigger opening each beat. With no picture
     in a beat, the plate's own first frame is the picture."""
@@ -1786,7 +1781,7 @@ class UpscaleOutput(msgspec.Struct):
     warnings: list[str] = msgspec.field(default_factory=list)
 
 
-@app.tool(label="Upscale", named="upscale", emits_media=True, accelerator=False)
+@app.tool(label="Upscale", named="upscale", accelerator=False)
 async def upscale(ctx: Context, payload: Upscale, out: Outputs, tel: Telemetry) -> UpscaleOutput:
     """A take at 1080p, 1440p or 2160p, its sound kept (UPSCALE.md): its 768p latents upscaled and refined by H3 under
     the Regenerate LoRA, from the text they carry, else its frames from its description. A video already that big comes

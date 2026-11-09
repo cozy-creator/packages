@@ -31,7 +31,8 @@ from diffusers.models.autoencoders.vae import DiagonalGaussianDistribution
 from diffusers.models.modeling_utils import get_parameter_dtype
 
 from cozy_runtime import rng
-from cozy_runtime.author import Cut, split, spread
+from cozy_runtime.accel import spread
+from cozy_runtime.author import Cut, split
 from cozy_runtime.author import device as placed_device
 
 
@@ -89,7 +90,7 @@ class TileBatchedVideoVAE(AutoencoderKLMiniMaxH3):  # type: ignore[misc]
             (z[:, :, i * tokens_chunk_size : (i + 1) * tokens_chunk_size + self.token_overlap],)
             for i in range(num_chunks)
         )
-        for clip in spread(self, "_decode_clip", windows):
+        for clip in spread(self._decode_clip, windows):
             for j in range(int(token_drop > 0) + 1):
                 frame_start = j * chunk_num_frames
                 chunk = clip[:, :, frame_start : frame_start + chunk_num_frames]
@@ -117,7 +118,7 @@ class TileBatchedVideoVAE(AutoencoderKLMiniMaxH3):  # type: ignore[misc]
             pad = x[:, :, -1:].repeat(1, 1, (-x.shape[2]) % clip_length, 1, 1)
             x = torch.cat([x, pad], dim=2)
         clips = ((x[:, :, i : i + clip_length],) for i in range(0, x.shape[2], clip_length))
-        moments = torch.cat(list(spread(self, "_encode_clip", clips)), dim=2)
+        moments = torch.cat(list(spread(self._encode_clip, clips)), dim=2)
         token_drop = self.config.token_drop
         return moments[:, :, :-token_drop] if token_drop > 0 else moments
 
@@ -140,7 +141,7 @@ class TileBatchedVideoVAE(AutoencoderKLMiniMaxH3):  # type: ignore[misc]
             (pixels[:, :, i : i + clip_length], pixel_mean, pixel_std)
             for i in range(0, pixels.shape[2], clip_length)
         )
-        moments = torch.cat(list(spread(self, "_encode_frames_clip", clips)), dim=2)
+        moments = torch.cat(list(spread(self._encode_frames_clip, clips)), dim=2)
         token_drop = self.config.token_drop
         if token_drop > 0:
             moments = moments[:, :, :-token_drop]
@@ -217,7 +218,7 @@ class TileBatchedVideoVAE(AutoencoderKLMiniMaxH3):  # type: ignore[misc]
         pixel_std: tuple[float, float, float],
         seed: int,
     ) -> torch.Tensor:
-        """`encode_condition` as this component's method, so `author.spread` can run it on
+        """`encode_condition` as this component's method, so `accel.spread` can run it on
         another rank of the group."""
         return encode_condition(self, pixels, pixel_mean, pixel_std, seed)
 

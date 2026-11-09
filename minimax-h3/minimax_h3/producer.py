@@ -10,10 +10,14 @@ projected once, before Kitchen's pass, for its scale, and that pass reads it bac
 (`project_values`). Dense steps, dense paths and exact paths call the site's own processor,
 served by the producer's Runtime base backend.
 
-The approved SM120 recipe (`kitchen-sol-producer-fp4-fixed-means-shared-qkv`) serves dense
-calls with Sage3 fixed-means NVFP4 and also shards over Ulysses: its projection runs on the
-local token shard, the exchange gathers whole sequences per head subset, and the rotary
-tables are the full ones a hook keeps before Diffusers splits them (`retain_rotary`).
+The approved SM120 recipe (`kitchen-sol-producer-fp4-fixed-means-shared-qkv`, dense calls on Sage3
+fixed-means NVFP4) and the consumer cards' (`kitchen-sol-producer-int4qk-shared-qkv`, dense calls
+on int4 Q·Kᵀ) also shard over Ulysses (`_parallel_produce`): the projection runs on the local token
+shard, the exchange gathers whole sequences per head subset, and the rotary tables are the full
+ones a hook keeps before Diffusers splits them (`retain_rotary`). That is exact because every
+statistic Kitchen keeps is per head (key means and value scales [heads, 128], routing per head,
+sink ranges per token): a GPU's head subset over the whole sequence is a head window of one GPU's
+call (`_Heads`), and each recipe's dense base is head-local.
 """
 
 from __future__ import annotations
@@ -36,19 +40,18 @@ from diffusers.models.transformers.transformer_minimax_h3 import (
 )
 from torch.nn.modules import module as torch_module
 
-from cozy_runtime import lora
-from cozy_runtime.author import (
+from cozy_runtime.accel import lora
+from cozy_runtime.accel.attention import (
     AttentionLayout,
     AttentionProducer,
-    Cut,
     ProducerCall,
     ProducerSite,
     register_attention,
-    split,
 )
-from cozy_runtime.author.kernels import ROWWISE_FP8, PreQuantized, quantize_once
-from cozy_runtime.rows import Rows
-from cozy_runtime.rows import rows as columns
+from cozy_runtime.author import Cut, split
+from cozy_runtime.accel.kernels import PreQuantized, quantize_once, ROWWISE_FP8
+from cozy_runtime.accel.rows import Rows
+from cozy_runtime.accel.rows import rows as columns
 
 from .glue import (
     HEAD_HOLDS,
@@ -85,9 +88,8 @@ class RequestState:
     carried: set[int] = field(default_factory=set)
 
     def end_loop(self) -> None:
-        """One loop's key means, rotary presentation and Kitchen's packed table of it go as the loop
-        returns (the Runtime calls this as `denoise_loop` returns), so none stays through the decode
-        after it."""
+        """One loop's key means, rotary presentation and Kitchen's packed table of it go after the
+        loop's last step (`end_loop`, from `steps`), so none stays through the decode after it."""
         self.statistics.clear()
         self.carried.clear()
         self.parallel_rotary.clear()
@@ -105,13 +107,12 @@ class RequestState:
 
 @dataclass(frozen=True, slots=True)
 class Carry:
-    """One `denoise_loop` step's Kitchen key means: a carried F32 [H, 128] slot per site, by
-    attention module. A rolling step's calls read the previous step's mean from their slot; every
-    sparse call leaves its own there, and the last dense step's calls seed it (`seeding`; a step
-    loop seeds `RequestState.statistics` the same way), so the first sparse step reads one too
-    instead of measuring its keys in a second producer pass. Eager
-    reuse decides on `layout.step` in Python, which a recorded step would freeze; the step's label
-    decides instead (`rolling`, `seeding`)."""
+    """One denoise step's Kitchen key means: an F32 [H, 128] slot per site, by attention module.
+    A rolling step's calls read the previous step's mean from their slot; every sparse call leaves
+    its own there, and the last dense step's calls seed it (`seeding`), so the first sparse step
+    reads one too instead of measuring its keys in a second producer pass. The loop says which
+    step rolls and which seeds; a call outside one decides on `layout.step`
+    (`RequestState.statistics`)."""
 
     slots: Mapping[int, torch.Tensor]
     rolling: bool
@@ -133,9 +134,8 @@ def carrying(carry: Carry) -> Iterator[None]:
 def present(
     sites: Sequence[ProducerSite], rotary: tuple[torch.Tensor, torch.Tensor], tokens: int
 ) -> None:
-    """Before a `denoise_loop`: the rotary presentation these sites' sparse calls read, and
-    Kitchen's packed table of it, made eagerly so no recorded step allocates them from its pool.
-    `RequestState.end_loop` forgets the table."""
+    """Before a denoise loop: the rotary presentation these sites' sparse calls read, and
+    Kitchen's packed table of it, made once. `end_loop` forgets the table."""
     states = {
         id(state): state
         for site in sites
@@ -354,7 +354,7 @@ def produce(
         state.replay_inputs.pop(key, None)
         carry, seed = _CARRY.get(), None
         if not parallel and producing(layout, call.path):
-            if carry is not None:  # `denoise_loop`: the label says which step seeds
+            if carry is not None:  # a denoise loop says which step seeds
                 seed = KeyMean(carry.slots[id(attn)]) if carry.seeding else None
             elif layout.step == layout.dense_until_step - 1:  # a step loop: the last dense step
                 held = hidden_states.value if isinstance(hidden_states, Owned) else hidden_states
@@ -389,8 +389,8 @@ def produce(
 class _Means:
     """A one-GPU call's Kitchen key means, F32 [heads, 128]: the previous step's (`prior`, or None
     where the call measures its keys) and this call's, which each head window writes its rows of
-    (`keep`). `close` leaves them where the next step reads them, the module's `Carry` slot in
-    `denoise_loop`, else `RequestState.statistics` under the call's key, after the whole call:
+    (`keep`). `close` leaves them where the next step reads them, the module's `Carry` slot in a
+    denoise loop, else `RequestState.statistics` under the call's key, after the whole call:
     a split the Runtime retries in smaller windows reads the same prior."""
 
     __slots__ = ("call", "carry", "geometry", "key", "mean", "prior")
@@ -689,14 +689,23 @@ PRODUCERS = {
     for producer in (
         _register(FIXED_MEANS, "kitchen-sol-fp4-fixed-means", context_parallel=True),
         _register(FP4_LOWMEM, "kitchen-sol-fp4-lowmem"),
-        _register(INT4QK, "kitchen-sol-int4qk"),
+        _register(INT4QK, "kitchen-sol-int4qk", context_parallel=True),
         _register(FAST, "kitchen-sol"),
     )
 }
 
 
+def end_loop() -> None:
+    """After a denoise loop's last step, never before it: this request's producer states forget
+    the loop (`RequestState.end_loop`), the rotary tables its calls read among them."""
+    for registered in PRODUCERS.values():
+        state = registered.request_state()
+        if isinstance(state, RequestState):
+            state.end_loop()
+
+
 class _RetainRotary(ModelHook):  # type: ignore[misc]  # untyped Diffusers hook API
-    """Keeps a sharded component's full rotary tables for the CP recipe's sparse calls, before
+    """Keeps a sharded component's full rotary tables for the CP recipes' sparse calls, before
     Diffusers' split hook (registered after this one) shards them. Returns them unchanged.
     Kept whenever the component runs context-parallel, whatever serves now: the transformer
     computes the rotary once per layout, on a dense step, and the recipe can land after it
