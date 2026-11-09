@@ -168,7 +168,7 @@ wheels = [
 [[package]]
 name = "cozy-runtime"
 version = "0.43.1"
-source = { git = "https://github.com/cozy-creator/cozy-runtime?rev=a48f016ef9a2ec42ea1d175327e0318b4af8ef28#a48f016ef9a2ec42ea1d175327e0318b4af8ef28" }
+source = { git = "https://github.com/cozy-creator/cozy-runtime?rev=d3a23142e843e59f74c35c11e2c1a166b100b180#d3a23142e843e59f74c35c11e2c1a166b100b180" }
 dependencies = [
     { name = "msgspec" },
     { name = "numpy" },
@@ -366,7 +366,7 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
-    { name = "cozy-runtime", extras = ["adapters", "media"], git = "https://github.com/cozy-creator/cozy-runtime?rev=a48f016ef9a2ec42ea1d175327e0318b4af8ef28" },
+    { name = "cozy-runtime", extras = ["adapters", "media"], git = "https://github.com/cozy-creator/cozy-runtime?rev=d3a23142e843e59f74c35c11e2c1a166b100b180" },
     { name = "diffusers", specifier = ">=0.41,<0.42" },
     { name = "hf-xet", specifier = ">=1.6.0" },
     { name = "minimax-h3-tools", specifier = ">=0.1.0", index = "https://tensorhub.com/v1/index/_/simple/" },
