@@ -70,7 +70,7 @@ def _generate(ctx: Context, payload: TurboInput, model: Krea2, out: Outputs, tel
     with tel.stage("generating image", overall_range=(0.05, 0.95)):
         latents = model.denoise(
             positive, negative, width=width, height=height, steps=steps, guidance=guidance, seed=seed,
-            distilled=distilled, on_step=tel.step_callback(steps, stage="generating image", overall_range=(0.05, 0.95)),
+            distilled=distilled, progress=ctx.progress,
         )
     with tel.stage("decoding image", overall_range=(0.95, 0.99)):
         image = model.decode(latents, width=width, height=height)

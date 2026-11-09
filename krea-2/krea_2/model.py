@@ -24,7 +24,6 @@ from cozy_runtime.author import (
     MemoDistribution,
     Model,
     ModelAssets,
-    denoise_loop,
     hold_dtype,
     uses_components,
 )
@@ -277,13 +276,14 @@ class Krea2(Model[Krea2Graph], encoded_leaves="accept"):
         guidance: float,
         seed: int,
         distilled: bool,
-        on_step: Callable[[int], None],
+        progress: Callable[[int, int], None],
     ) -> torch.Tensor:
-        """`Krea2Pipeline.__call__`'s loop as one `denoise_loop`: bf16 noise from `seed` drawn on the CPU,
-        Euler on `linspace(1, 1/steps)` time-shifted by mu, and Krea's guidance `cond + g(cond - uncond)`
-        when `negative` is given. Returns the packed latents [1, (H/16)(W/16), 64] on the CPU.
+        """`Krea2Pipeline.__call__`'s loop: bf16 noise from `seed` drawn on the CPU,
+        `FlowMatchEulerDiscreteScheduler` on `linspace(1, 1/steps)` time-shifted by mu, and Krea's guidance
+        `cond + g(cond - uncond)` when `negative` is given. Returns the packed latents [1, (H/16)(W/16), 64]
+        on the CPU.
 
-        The step is `Krea2Transformer2DModel.forward` op for op, with what no step changes built once
+        Each step is `Krea2Transformer2DModel.forward` op for op, with what no step changes built once
         before the loop: each prompt's text-fusion and projection, and its rotary tables. With CFG both
         branches pass through each block in turn, so a streamed block comes in once per step."""
         transformer = self.graph.components["transformer"]
@@ -296,42 +296,35 @@ class Krea2(Model[Krea2Graph], encoded_leaves="accept"):
             rows * columns, config.get("base_image_seq_len", 256), config.get("max_image_seq_len", 6400),
             config.get("base_shift", 0.5), config.get("max_shift", 1.15),
         )
-        retrieve_timesteps(scheduler, steps, device, sigmas=np.linspace(1.0, 1 / steps, steps), mu=mu)
-        with torch.inference_mode(False), torch.no_grad():
+        timesteps, _ = retrieve_timesteps(scheduler, steps, device, sigmas=np.linspace(1.0, 1 / steps, steps), mu=mu)
+        blocks = transformer.transformer_blocks
+        with torch.no_grad():
             noise = rng.noise((1, channels, rows * 2, columns * 2), seed, dtype=DTYPE)
             latents = noise.view(1, channels, rows, 2, columns, 2).permute(0, 2, 4, 1, 3, 5)
             latents = latents.reshape(1, rows * columns, channels * 4).to(device)
-            branches: list[torch.Tensor] = []
+            texts, rotary = [], []
             for text in (positive, *([] if negative is None else [negative])):
                 text = text.to(device=device, dtype=DTYPE)
                 ids = Krea2Pipeline.prepare_position_ids(text.shape[1], rows, columns, device)
-                branches += [fused_text(transformer, text), *transformer.rotary_emb(ids)]
-            # The pipeline divides the f32 timestep by 1000 and then casts it; Euler adds the bf16
-            # product of the f32 sigma delta and the bf16 velocity to the f32 latents.
-            times = (scheduler.timesteps / config.num_train_timesteps).to(DTYPE)
-            deltas = (scheduler.sigmas[1:] - scheduler.sigmas[:-1]).to(device)
-        blocks = transformer.transformer_blocks
-
-        def step(i: torch.Tensor, latents: torch.Tensor, times: torch.Tensor, deltas: torch.Tensor,
-                 *branches: torch.Tensor) -> None:
-            # The embedders and the final layer run in their stored F32; the blocks in bf16.
-            temb = transformer.time_embed(times.index_select(0, i), dtype=_dtype(transformer.time_embed))
-            modulation = transformer.time_mod_proj(F.gelu(temb, approximate="tanh").to(_dtype(transformer.time_mod_proj)))
-            image = transformer.img_in(latents.to(_dtype(transformer.img_in))).to(latents.dtype)
-            texts = branches[0::3]
-            hidden = [torch.cat([text, image], dim=1) for text in texts]
-            rotary = list(zip(branches[1::3], branches[2::3], strict=True))
-            for block in blocks:
-                hidden = [block(h, modulation, rope) for h, rope in zip(hidden, rotary, strict=True)]
-            velocity = [transformer.final_layer(h[:, text.shape[1]:], temb.to(_dtype(transformer.final_layer)))
-                        for h, text in zip(hidden, texts, strict=True)]
-            prediction = velocity[0]
-            if len(velocity) > 1:
-                prediction = prediction + guidance * (prediction - velocity[1])
-            delta = deltas.index_select(0, i).reshape(())
-            latents.copy_((latents.float() + delta * prediction).to(latents.dtype))
-
-        denoise_loop(step, range(steps), state=(latents,), inputs=(times, deltas, *branches), on_step=on_step)
+                texts.append(fused_text(transformer, text))
+                rotary.append(transformer.rotary_emb(ids))
+            for i, t in enumerate(timesteps):
+                # The embedders and the final layer run in their stored F32; the blocks in bf16.
+                timestep = (t / config.num_train_timesteps).expand(1).to(DTYPE)
+                temb = transformer.time_embed(timestep, dtype=_dtype(transformer.time_embed))
+                modulation = transformer.time_mod_proj(F.gelu(temb, approximate="tanh").to(_dtype(transformer.time_mod_proj)))
+                image = transformer.img_in(latents.to(_dtype(transformer.img_in))).to(latents.dtype)
+                hidden = [torch.cat([text, image], dim=1) for text in texts]
+                for block in blocks:
+                    hidden = [block(h, modulation, rope) for h, rope in zip(hidden, rotary, strict=True)]
+                velocity = [transformer.final_layer(h[:, text.shape[1]:], temb.to(_dtype(transformer.final_layer)))
+                            for h, text in zip(hidden, texts, strict=True)]
+                prediction = velocity[0]
+                if len(velocity) > 1:
+                    prediction = prediction + guidance * (prediction - velocity[1])
+                # The state stays bf16, as the pipeline's with a bf16 final layer.
+                latents = scheduler.step(prediction, t, latents, return_dict=False)[0].to(DTYPE)
+                progress(i, steps)
         return latents.cpu()
 
     @uses_components("vae")

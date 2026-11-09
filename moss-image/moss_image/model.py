@@ -3,8 +3,7 @@
 The DiT, its timestep grid and the sampling loop follow upstream's `pipeline_moss_image.py`
 (OpenMOSS-Team/MOSS-Image-SFT `f972bd4b`, Apache-2.0) module for module, with its state-dict names;
 Diffusers has no MOSS-Image. The text encoder is Transformers' Qwen3.5 text model and the VAE Diffusers'
-`AutoencoderKLFlux2`. Runtime constructs and fills the modules and owns their residency; the denoise is
-one `denoise_loop`.
+`AutoencoderKLFlux2`. Runtime constructs and fills the modules and owns their residency.
 
 On a GPU a DiT block runs as ComfyUI's MOSS-Image does, with the Runtime's prebuilt kernels: each
 modulated RMSNorm and SiTU comes out of the int8 leaves' quantization pass (`int8_rows`, the norm
@@ -32,7 +31,6 @@ from cozy_runtime.author import (
     Model,
     ModelAssets,
     Telemetry,
-    denoise_loop,
     hold_dtype,
     uses_components,
 )
@@ -364,12 +362,12 @@ class MossImage(Model[MossGraph], encoded_leaves="accept", attention_bits={"tran
         steps: int,
         guidance: float,
         seed: int,
-        on_step: Callable[[int], None],
+        progress: Callable[[int, int], None],
         tel: Telemetry,
     ) -> torch.Tensor:
-        """Upstream's sampler as one `denoise_loop`: f32 noise from `seed` on the CPU, CFG against
-        `negative` with block 22 skipped in its branch, Euler in f32. Returns the latents
-        [1, 128, H/16, W/16] on the CPU.
+        """Upstream's sampler: f32 noise from `seed` on the CPU, CFG against `negative` with block 22
+        skipped in its branch, Euler (`MossScheduler`) in f32. Returns the latents [1, 128, H/16, W/16]
+        on the CPU.
 
         Each prompt's text stream and RoPE are built once, before the loop; with CFG both branches
         pass through each block in turn, so a streamed block comes in once per step. Their text
@@ -380,33 +378,29 @@ class MossImage(Model[MossGraph], encoded_leaves="accept", attention_bits={"tran
         fused = device.type == "cuda" and not native()
         scheduler = MossScheduler.from_config(self.graph.scheduler_config)
         scheduler.set_timesteps(steps, device=device)
-        with torch.inference_mode(False), torch.no_grad():
+        blocks = transformer.layers
+        with torch.no_grad():
             latents = rng.noise((1, transformer.latent_channels, rows, columns), seed, device=device)
-            branches: list[torch.Tensor] = []
+            texts, ropes = [], []
             for text in (positive, *([] if negative is None else [negative])):
                 context = text[None].to(device)
                 phase = transformer.phase(transformer.positions(rows, columns, context.shape[1], device))
-                branches += [transformer.text(context), transformer.rotations(phase) if fused else transformer.table(phase)]
-            times = scheduler.timesteps.to(device=device, dtype=torch.float32)
-            deltas = (scheduler.sigmas[1:] - scheduler.sigmas[:-1]).to(device=device, dtype=torch.float32)
-        blocks = transformer.layers
-
-        def step(i: torch.Tensor, latents: torch.Tensor, times: torch.Tensor, deltas: torch.Tensor,
-                 *branches: torch.Tensor) -> None:
-            modulation, head = transformer.modulation(times.index_select(0, i))
-            video = transformer.video_embedder(latents.flatten(2).transpose(1, 2).to(DTYPE).contiguous())
-            streams = [torch.cat((video, text), 1) for text in branches[0::2]]
-            ropes = branches[1::2]
-            for index, block in enumerate(blocks):
-                streams = [x if branch and index in UNCOND_SKIP else block(x, rope, modulation)
-                           for branch, (x, rope) in enumerate(zip(streams, ropes, strict=True))]
-            velocity = [transformer.velocity(x, head, rows, columns) for x in streams]
-            prediction = velocity[0]
-            if len(velocity) > 1:
-                prediction = velocity[1] + guidance * (velocity[0] - velocity[1])
-            latents.add_(deltas.index_select(0, i) * prediction)
-
-        denoise_loop(step, range(len(times)), state=(latents,), inputs=(times, deltas, *branches), on_step=on_step)
+                texts.append(transformer.text(context))
+                ropes.append(transformer.rotations(phase) if fused else transformer.table(phase))
+            timesteps = scheduler.timesteps
+            for i, t in enumerate(timesteps):
+                modulation, head = transformer.modulation(t[None])
+                video = transformer.video_embedder(latents.flatten(2).transpose(1, 2).to(DTYPE).contiguous())
+                streams = [torch.cat((video, text), 1) for text in texts]
+                for index, block in enumerate(blocks):
+                    streams = [x if branch and index in UNCOND_SKIP else block(x, rope, modulation)
+                               for branch, (x, rope) in enumerate(zip(streams, ropes, strict=True))]
+                velocity = [transformer.velocity(x, head, rows, columns) for x in streams]
+                prediction = velocity[0]
+                if len(velocity) > 1:
+                    prediction = velocity[1] + guidance * (velocity[0] - velocity[1])
+                latents = scheduler.step(prediction, t, latents, return_dict=False)[0]
+                progress(i, len(timesteps))
         tel.log("dit block", rope="fused" if fused else "eager", **blocks[0].served)
         return latents.cpu()
 

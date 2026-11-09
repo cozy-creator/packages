@@ -14,7 +14,7 @@ from typing import Any
 import torch
 import torch.nn.functional as F
 from cozy_runtime import rng
-from cozy_runtime.author import OutputError, Config, Loader, Model, Telemetry, denoise_loop, hold_dtype, uses_components
+from cozy_runtime.author import OutputError, Config, Loader, Model, Telemetry, hold_dtype, uses_components
 from diffusers import AutoencoderKLFlux2, FlowMatchEulerDiscreteScheduler, Ideogram4Transformer2DModel
 from diffusers.image_processor import VaeImageProcessor
 from diffusers.pipelines.ideogram4.pipeline_ideogram4 import (
@@ -115,10 +115,10 @@ class Ideogram4(Model[IdeogramGraph], encoded_leaves="accept"):
         height: int,
         guidance: Sequence[float],
         seed: int,
-        on_step: Callable[[int], None],
+        progress: Callable[[int, int], None],
     ) -> torch.Tensor:
         """`Ideogram4Pipeline.__call__`'s loop for one caption whose `[tokens, 53248]` text features
-        are `features`, as one `denoise_loop`: Euler over the resolution-shifted logit-normal sigmas,
+        are `features`: `FlowMatchEulerDiscreteScheduler` over the resolution-shifted logit-normal sigmas,
         each step the conditional and unconditional velocities blended by its guidance weight,
         latents in float32, noise drawn on the CPU from `seed`.
 
@@ -136,31 +136,21 @@ class Ideogram4(Model[IdeogramGraph], encoded_leaves="accept"):
             raise ValueError("Ideogram 4 samples with deterministic Euler")
         sigmas = _logit_normal_sigmas(steps, _resolution_aware_mu(height, width, mu), std=std, device=device)
         scheduler.set_timesteps(sigmas=sigmas.tolist(), device=device)
-        with torch.inference_mode(False), torch.no_grad():
+        with torch.no_grad():
             position_ids, segment_ids, _ = Ideogram4Pipeline._prepare_ids([texts], rows, columns, texts, device)
             latents = rng.noise((1, tokens, tf.config.in_channels), seed, device=device)
             prefix = _text_rows(tf, features.to(device, DTYPE))
-            times = (1.0 - scheduler.timesteps.float() / scheduler.config.num_train_timesteps).to(DTYPE)
-            deltas = (scheduler.sigmas[1:] - scheduler.sigmas[:-1]).to(device)
-            weights = torch.tensor([[w for w in guidance], [1.0 - w for w in guidance]], dtype=torch.float64)
-            weights = weights.float().to(device)
-            branches = (
-                *_rotary(tf, position_ids), segment_ids,
-                *_rotary(uncond, position_ids[:, texts:]), segment_ids[:, texts:],
-            )
-
-        def step(i: torch.Tensor, latents: torch.Tensor, times: torch.Tensor, deltas: torch.Tensor,
-                 weights: torch.Tensor, prefix: torch.Tensor, *branches: torch.Tensor) -> None:
-            t = times.index_select(0, i)
-            image = latents.to(DTYPE)
-            positive = _velocity(tf, image, prefix, t, *branches[:3]).to(torch.float32)
-            negative = _velocity(uncond, image, None, t, *branches[3:]).to(torch.float32)
-            weight, rest = weights.index_select(1, i).unbind(0)
-            velocity = weight.reshape(()) * positive + rest.reshape(()) * negative
-            latents.copy_(latents + deltas.index_select(0, i).reshape(()) * -velocity)
-
-        denoise_loop(step, range(steps), state=(latents,), inputs=(times, deltas, weights, prefix, *branches),
-                     key=("ideogram-4.denoise/1",), on_step=on_step)
+            positive_rope = (*_rotary(tf, position_ids), segment_ids)
+            negative_rope = (*_rotary(uncond, position_ids[:, texts:]), segment_ids[:, texts:])
+            num_train_timesteps = scheduler.config.num_train_timesteps
+            for i, t in enumerate(scheduler.timesteps):
+                t_model = (1.0 - t.float() / num_train_timesteps).expand(1).to(DTYPE)
+                image = latents.to(DTYPE)
+                positive = _velocity(tf, image, prefix, t_model, *positive_rope).to(torch.float32)
+                negative = _velocity(uncond, image, None, t_model, *negative_rope).to(torch.float32)
+                velocity = guidance[i] * positive + (1.0 - guidance[i]) * negative
+                latents = scheduler.step(-velocity, t, latents, return_dict=False)[0]
+                progress(i, steps)
         return latents.cpu()
 
     @uses_components("vae")
