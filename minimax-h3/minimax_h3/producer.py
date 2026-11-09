@@ -10,10 +10,14 @@ projected once, before Kitchen's pass, for its scale, and that pass reads it bac
 (`project_values`). Dense steps, dense paths and exact paths call the site's own processor,
 served by the producer's Runtime base backend.
 
-The approved SM120 recipe (`kitchen-sol-producer-fp4-fixed-means-shared-qkv`) serves dense
-calls with Sage3 fixed-means NVFP4 and also shards over Ulysses: its projection runs on the
-local token shard, the exchange gathers whole sequences per head subset, and the rotary
-tables are the full ones a hook keeps before Diffusers splits them (`retain_rotary`).
+The approved SM120 recipe (`kitchen-sol-producer-fp4-fixed-means-shared-qkv`, dense calls on Sage3
+fixed-means NVFP4) and the consumer cards' (`kitchen-sol-producer-int4qk-shared-qkv`, dense calls
+on int4 Q·Kᵀ) also shard over Ulysses (`_parallel_produce`): the projection runs on the local token
+shard, the exchange gathers whole sequences per head subset, and the rotary tables are the full
+ones a hook keeps before Diffusers splits them (`retain_rotary`). That is exact because every
+statistic Kitchen keeps is per head (key means and value scales [heads, 128], routing per head,
+sink ranges per token): a GPU's head subset over the whole sequence is a head window of one GPU's
+call (`_Heads`), and each recipe's dense base is head-local.
 """
 
 from __future__ import annotations
@@ -146,6 +150,11 @@ def present(
     for state in states.values():
         state.carried.clear()  # this loop's slots start unwritten
     first, *others = states.values()
+    # Sharded, `rotary` holds this GPU's rows; the calls attend whole sequences, with the tables
+    # `retain_rotary` kept before the split.
+    rotary = first.parallel_rotary.get(
+        getattr(sites[0].module, "_cozy_producer_rotary_key", None), rotary
+    )
     presentation = rope_presentation(rotary, tokens, first)
     for state in others:
         state.rope = (rotary[0], rotary[1], presentation)
@@ -684,14 +693,14 @@ PRODUCERS = {
     for producer in (
         _register(FIXED_MEANS, "kitchen-sol-fp4-fixed-means", context_parallel=True),
         _register(FP4_LOWMEM, "kitchen-sol-fp4-lowmem"),
-        _register(INT4QK, "kitchen-sol-int4qk"),
+        _register(INT4QK, "kitchen-sol-int4qk", context_parallel=True),
         _register(FAST, "kitchen-sol"),
     )
 }
 
 
 class _RetainRotary(ModelHook):  # type: ignore[misc]  # untyped Diffusers hook API
-    """Keeps a sharded component's full rotary tables for the CP recipe's sparse calls, before
+    """Keeps a sharded component's full rotary tables for the CP recipes' sparse calls, before
     Diffusers' split hook (registered after this one) shards them. Returns them unchanged.
     Kept whenever the component runs context-parallel, whatever serves now: the transformer
     computes the rotary once per layout, on a dense step, and the recipe can land after it
@@ -705,9 +714,12 @@ class _RetainRotary(ModelHook):  # type: ignore[misc]  # untyped Diffusers hook 
     def post_forward(self, module: object, output: object) -> object:
         if getattr(self.component, "_parallel_config", None) is None:
             return output  # one GPU: the producer reads the rotary its call receives
-        state = PRODUCERS[FIXED_MEANS].request_state()
-        if state is not None and isinstance(output, tuple) and len(output) == 2:
-            state.parallel_rotary[self.key] = output
+        if not (isinstance(output, tuple) and len(output) == 2):
+            return output
+        for producer in PRODUCERS.values():  # whichever recipe serves this request's calls
+            state = producer.request_state() if producer.context_parallel else None
+            if state is not None:
+                state.parallel_rotary[self.key] = output
         return output
 
 
