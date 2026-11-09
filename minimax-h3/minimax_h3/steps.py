@@ -45,7 +45,8 @@ def denoise_official(
     video, audio = state.latents, state.audio_latents
     video_rows, audio_rows = state.num_condition_video_rows, state.num_condition_audio_rows
     selector = None if overlay is None else {ATTENTION_KWARG: overlay.bank, OVERLAY_KWARG: overlay}
-    heads = [overlay.schedule.step(times) if overlay is not None and overlay.heads else 0 for times, _ in plan]
+    schedule = None if overlay is None else overlay.schedule  # a turbo bank's evaluations select its heads
+    heads = [0 if schedule is None else schedule.step(times) for times, _ in plan]
     with torch.no_grad(), checked_loop():
         for times, rows in plan:  # an uncovered row refuses here, never inside the loop
             transformer._arm(times, rows, tags, selector)
