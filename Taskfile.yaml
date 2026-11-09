@@ -8,6 +8,11 @@ vars:
   YANKED: --yanked # `YANKED=` publishes live: a release proven before its publish (0.22.1's hard cut)
 
 tasks:
+  typecheck:
+    desc: basedpyright against the real Runtime and libraries; only errors missing from .basedpyright/baseline.json fail
+    cmds:
+      - scripts/typecheck.sh {{.CLI_ARGS}}
+
   # First-party packages publish at the root namespace (`--root`, Hub admins). Locks pin first-party callees exactly, so each release of X is followed by one of every package
   # whose lock holds X: relocked to it, patch-bumped, pushed to master, then published.
   # Every release is a candidate: published yanked, in one Hub call (an exact pin installs it; the unversioned default skips
