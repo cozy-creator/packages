@@ -87,10 +87,10 @@ def check(experts: moe.Experts, kind: str, tokens: int) -> dict[str, float]:
     hidden = torch.randn(tokens, H, dtype=torch.bfloat16, device="cuda")
     index = routing(tokens, len(experts))
     found = experts._operands(hidden.device)
-    assert found is not None and found[0] == kind, found
+    assert isinstance(found, tuple) and found[0] == kind, found
     table = found[1]
     flat = index.reshape(-1)
-    up = experts._project(launch, kind, table, 0, hidden, flat, 2 * INNER, K)
+    up = experts._gemv(launch, kind, table, flat.to(torch.int64), 0, hidden, 2 * INNER, K)
     worst = 0.0
     for p, e in enumerate(flat.tolist()):
         linear, x = experts[e].gate_and_up_proj, hidden[p // K : p // K + 1]
@@ -100,24 +100,24 @@ def check(experts: moe.Experts, kind: str, tokens: int) -> dict[str, float]:
         else:
             step = want.float().abs().clamp(min=1e-30) * 2**-7
             assert ((up[p].float() - want.float()).abs() <= step).all(), (kind, p)
-    whole, sorted_out = experts._run(launch, hidden, index), experts._sorted(hidden, index)
-    assert whole is not None
+    whole = experts._run(launch, kind, table, hidden, index)
+    sorted_out = experts._sorted(hidden, index)
     worst = (
         (whole.float() - sorted_out.float()).abs().max() / sorted_out.float().abs().max()
     ).item()
     assert worst < 2e-2, worst
     # One graph of the grouped path, replayed with other tokens and routing.
     static_hidden, static_index = hidden.clone(), index.clone()
-    experts._run(launch, static_hidden, static_index)
+    experts._run(launch, kind, table, static_hidden, static_index)
     torch.cuda.synchronize()
     graph = torch.cuda.CUDAGraph()
     with torch.cuda.graph(graph):
-        static_out = experts._run(launch, static_hidden, static_index)
+        static_out = experts._run(launch, kind, table, static_hidden, static_index)
     static_hidden.copy_(torch.randn_like(static_hidden))
     static_index.copy_(routing(tokens, len(experts)))
     graph.replay()
     torch.cuda.synchronize()
-    assert torch.equal(static_out, experts._run(launch, static_hidden, static_index)), (
+    assert torch.equal(static_out, experts._run(launch, kind, table, static_hidden, static_index)), (
         "graph replay"
     )
     return {"whole_path_rel": round(worst, 5)}
@@ -151,7 +151,10 @@ def main(payload: Nothing, tel: Telemetry) -> Passed:
         passed(f"int8 gate_first={gate_first}", check(experts, "int8", 5))
     decode = layer(256, True)
     hidden, index = torch.randn(1, H, dtype=torch.bfloat16, device="cuda"), routing(1, 256)
-    grouped = timed(lambda: decode._run(launch, hidden, index))
+    found = decode._operands(hidden.device)
+    assert isinstance(found, tuple), found
+    kind, table = found
+    grouped = timed(lambda: decode._run(launch, kind, table, hidden, index))
     passed(
         "decode layer us (bf16): grouped, sorted",
         (grouped, timed(lambda: decode._sorted(hidden, index))),

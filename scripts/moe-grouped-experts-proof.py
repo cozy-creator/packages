@@ -76,9 +76,10 @@ for gate_first in (True, False):
             for e in experts:
                 e.gate_and_up_proj = Int8Leaf(e.gate_and_up_proj.weight.data)
                 e.down_proj = Int8Leaf(e.down_proj.weight.data)
-        found, table = experts._operands(torch.device("cpu"))
-        assert found == kind, found
-        up = experts._project(launch, kind, table, 0, hidden, flat, 2 * INNER, K)
+        found = experts._operands(torch.device("cpu"))
+        assert isinstance(found, tuple) and found[0] == kind, found
+        table = found[1]
+        up = experts._gemv(launch, kind, table, flat.to(torch.int64), 0, hidden, 2 * INNER, K)
         for p, e in enumerate(flat.tolist()):
             linear, x = experts[e].gate_and_up_proj, hidden[p // K : p // K + 1]
             if kind == "bf16":
@@ -92,7 +93,8 @@ for gate_first in (True, False):
             else:  # f32 sums in another order: within one bf16 step
                 step = want.float().abs().clamp(min=1e-30) * 2**-7
                 assert ((up[p].float() - want.float()).abs() <= step).all(), (kind, p)
-        whole, sorted_out = experts._run(launch, hidden, index), experts._sorted(hidden, index)
+        whole = experts._run(launch, kind, table, hidden, index)
+        sorted_out = experts._sorted(hidden, index)
         rel = (
             (whole.float() - sorted_out.float()).abs().max() / sorted_out.float().abs().max()
         ).item()
@@ -101,7 +103,5 @@ for gate_first in (True, False):
         )
         assert rel < 3e-2, rel
 experts[3].down_proj.data = experts[3].down_proj.data.t()  # not contiguous: no address
-assert (
-    experts._operands(torch.device("cpu")) is None and experts._run(launch, hidden, index) is None
-)
+assert isinstance(experts._operands(torch.device("cpu")), str)
 print("ok")
