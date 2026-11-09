@@ -92,8 +92,7 @@ def caption(cot: str | None, prompt: str) -> str:
 
 
 class HunyuanImage3(Model[Graph], encoded_leaves="accept"):
-    """Text to image, or an edit of up to three ordered references, with the thinking stage optional. The image
-    steps after the first are a `denoise_loop` the Runtime may record; the think decodes eagerly."""
+    """Text to image, or an edit of up to three ordered references, with the thinking stage optional."""
 
     graph: Graph
 
@@ -153,8 +152,7 @@ class HunyuanImage3(Model[Graph], encoded_leaves="accept"):
     def paint(self, prompt: str, references: list[Image.Image], cot: str | None, *, size: tuple[int, int],
               steps: int, guidance: float, seed: int, on_step: Callable[[int], None],
               cancel: Callable[[], None]) -> Image.Image:
-        """Tencent's image stage at an explicit `size` (width, height), after `think` or without it. Its steps
-        after the first are a `denoise_loop`, so no routing trace reads the experts' counts on the host."""
+        """Tencent's image stage at an explicit `size` (width, height), after `think` or without it."""
         model = self.graph.components[COMPONENT]
         width, height = size
         with torch.inference_mode():

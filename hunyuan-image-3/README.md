@@ -62,8 +62,8 @@ Each of the 2,048 routed experts (37.7M parameters, 37.8 MB at int8, 93% of the 
 Runtime's weight paging, resident or paged on its own; attention, the shared expert, routers, embeddings and the
 image layers stay resident (about 8 GB at int8). Denoising sends 4,096 image tokens through every layer, so
 nearly every expert is used every step; the thinking stage uses 8 of 64 per layer per token. The routed experts
-run on the Runtime's grouped kernels (`moe.install`), routed on the device, and the image steps after the first
-are one `denoise_loop` the Runtime may record. A run with thinking logs its routing: experts hit per layer,
+run on the Runtime's grouped kernels (`moe.install`), routed on the device; the image steps after the first run
+the image tokens alone over the K/V step 0 kept. A run with thinking logs its routing: experts hit per layer,
 tokens per expert, and how often an expert cache would have held them.
 
 ## Implementation
