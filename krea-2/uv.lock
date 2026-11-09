@@ -168,7 +168,7 @@ wheels = [
 [[package]]
 name = "cozy-runtime"
 version = "0.43.1"
-source = { git = "https://github.com/cozy-creator/cozy-runtime?rev=c79a97d957b047632ef2c11d374b77b78a30ac32#c79a97d957b047632ef2c11d374b77b78a30ac32" }
+source = { git = "https://github.com/cozy-creator/cozy-runtime?rev=c3996c7af1b3b677f2461dc740ece930777a9a78#c3996c7af1b3b677f2461dc740ece930777a9a78" }
 dependencies = [
     { name = "msgspec" },
     { name = "numpy" },
@@ -340,12 +340,12 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
-    { name = "cozy-runtime", extras = ["adapters", "media"], git = "https://github.com/cozy-creator/cozy-runtime?rev=c79a97d957b047632ef2c11d374b77b78a30ac32" },
+    { name = "cozy-runtime", extras = ["adapters", "media"], git = "https://github.com/cozy-creator/cozy-runtime?rev=c3996c7af1b3b677f2461dc740ece930777a9a78" },
     { name = "diffusers", specifier = ">=0.39" },
     { name = "msgspec", specifier = ">=0.19" },
     { name = "numpy", specifier = ">=1.26" },
     { name = "pillow", specifier = ">=12" },
-    { name = "tensorfs", git = "https://github.com/cozy-creator/cozy-creator?subdirectory=crates%2Ftensorfs-py&rev=11cb6fa563f9fc1e0ae68fa54502164431503846" },
+    { name = "tensorfs", git = "https://github.com/cozy-creator/cozy-creator?subdirectory=crates%2Ftensorfs-py&rev=2df21cbc053a6a793e56ab59d02a25aaad5f6727" },
     { name = "tokenizers", specifier = ">=0.23.1" },
     { name = "torch", marker = "sys_platform != 'win32'", specifier = ">=2.6" },
     { name = "torch", marker = "sys_platform == 'win32'", specifier = ">=2.6", index = "https://download.pytorch.org/whl/cu130" },
@@ -721,7 +721,7 @@ wheels = [
 [[package]]
 name = "tensorfs"
 version = "0.22.1"
-source = { git = "https://github.com/cozy-creator/cozy-creator?subdirectory=crates%2Ftensorfs-py&rev=11cb6fa563f9fc1e0ae68fa54502164431503846#11cb6fa563f9fc1e0ae68fa54502164431503846" }
+source = { git = "https://github.com/cozy-creator/cozy-creator?subdirectory=crates%2Ftensorfs-py&rev=2df21cbc053a6a793e56ab59d02a25aaad5f6727#2df21cbc053a6a793e56ab59d02a25aaad5f6727" }
 
 [[package]]
 name = "tokenizers"
