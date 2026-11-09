@@ -1707,7 +1707,7 @@ async def _render(ctx: Context, shot: Shot, out: Outputs, tel: Telemetry, *, pla
                       kept_s=begun if take is not None else None)  # fmt: skip
 
 
-@app.tool(label="Video", named="shot", emits_media=True, accelerator=False, reserved=_RESERVED)
+@app.tool(label="Shot", named="shot", emits_media=True, accelerator=False, reserved=_RESERVED)
 async def generate(ctx: Context, payload: Shot, out: Outputs, tel: Telemetry) -> ShotResult:
     """One continuous shot of any length, with sound (README.md): a summary, then what happens, beat by beat, each text
     with the references it mentions; an optional first and last frame; and Pick up from here, which goes on from a take
