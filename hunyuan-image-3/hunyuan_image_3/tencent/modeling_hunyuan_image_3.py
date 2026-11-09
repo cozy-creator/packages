@@ -21,7 +21,8 @@ from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 import torch
 import torch.nn.functional as F
-from cozy_runtime import moe, rng
+from cozy_runtime import rng
+from cozy_runtime.accel import moe
 from cozy_runtime.attention import Attention
 from cozy_runtime.author import retained
 from einops import rearrange

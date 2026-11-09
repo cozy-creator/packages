@@ -53,24 +53,21 @@ from diffusers.modular_pipelines.modular_pipeline import PipelineState
 from diffusers.utils.torch_utils import randn_tensor
 from torch.nn.utils.weight_norm import WeightNorm
 
-from cozy_runtime import rng, stepcache, vlm
+from cozy_runtime import rng, vlm
+from cozy_runtime.accel import stepcache
+from cozy_runtime.accel import spread
+from cozy_runtime.accel.attention import AttentionLayout, expect_attention
 from cozy_runtime.author import (
-    AttentionLayout,
+    canonical_json,
     Config,
-    ConformanceError,
-    DecodedAudio,
-    DecodedAudioChunk,
-    DecodedVideoFrame,
     DerivedCache,
     Device,
-    Image,
     InvalidRequest,
     ModelAssets,
     ThreadPoolExecutor,
-    canonical_json,
-    expect_attention,
-    spread,
 )
+from cozy_runtime.fields import Image
+from cozy_runtime.media import DecodedAudio, DecodedAudioChunk, DecodedVideoFrame
 from h3_tables.table_layout import TableLayout
 
 from .adaln_pruned import AdaLNPrunedMiniMaxH3Transformer
@@ -433,9 +430,8 @@ class TimestepPlan:
                 and tuple(audio_timesteps) == schedule.audio_timesteps
             ):
                 return schedule
-        raise ConformanceError(
+        raise ValueError(
             f"the official {self.task} schedule differs from every plan schedule",
-            code="artifact_config",
         )
 
     @property
@@ -627,8 +623,8 @@ def timestep_plan(raw: bytes, trunk: Trunk) -> TimestepPlan:
             refine=refine,
         )
     except (KeyError, TypeError, ValueError, OverflowError) as exc:
-        raise ConformanceError(
-            f"the model's {trunk} timestep plan is malformed", code="artifact_config"
+        raise ValueError(
+            f"the model's {trunk} timestep plan is malformed"
         ) from exc
     return plan
 
@@ -657,7 +653,7 @@ def regenerate_plan(assets: ModelAssets) -> TimestepPlan:
         )
     plan = timestep_plan(assets.read(name), "fl2va")
     if not plan.refine:
-        raise ConformanceError("the Regenerate overlay's plan is not a refine plan", code="artifact_config")
+        raise ValueError("the Regenerate overlay's plan is not a refine plan")
     return plan
 
 
@@ -668,8 +664,8 @@ def _validate_plan(plan: TimestepPlan, trunk: Trunk, layout: TableLayout | None)
     schedules. Every schedule this plan offers must be covered by those actual rows.
     """
     if plan.task != trunk:
-        raise ConformanceError(
-            f"the model's {trunk} timestep plan names {plan.task}", code="artifact_config"
+        raise ValueError(
+            f"the model's {trunk} timestep plan names {plan.task}"
         )
     if layout is not None:
         for schedule in plan.schedules:
@@ -823,9 +819,8 @@ class _ScopedPipeline:
         if name.startswith("_"):
             object.__setattr__(self, name, value)
             return
-        raise ConformanceError(
+        raise ValueError(
             f"a wrapped Diffusers block set {name!r} on the request-local pipeline view",
-            code="artifact_config",
         )
 
 
@@ -848,19 +843,15 @@ class _ImageEdges:
             return getattr(self._config, name)
         edge = next(self._edges, None)
         if edge is None:
-            raise ConformanceError(
+            raise ValueError(
                 f"official ref2va setup read more than {self._count} image short edges",
-                code="artifact_config",
-                fields=["pipeline", "reference_image_short_edge"],
             )
         return edge
 
     def settle(self) -> None:
         if next(self._edges, None) is not None:
-            raise ConformanceError(
+            raise ValueError(
                 f"official ref2va setup read fewer than {self._count} image short edges",
-                code="artifact_config",
-                fields=["pipeline", "reference_image_short_edge"],
             )
 
 
@@ -993,9 +984,8 @@ class OfficialH3Pipeline:
         if isinstance(source, torch.Generator):
             return source
         if not isinstance(source, random.Random):
-            raise ConformanceError(
+            raise ValueError(
                 f"request generator has unsupported type {type(source).__name__}",
-                code="artifact_config",
             )
         return rng.generator(source.getrandbits(63))
 
@@ -1156,13 +1146,12 @@ class OfficialH3Pipeline:
         # plan is its turbo LoRA's, which the caller passes.
         if plan is None:
             if _BANK[task] is not None:
-                raise ConformanceError(
+                raise ValueError(
                     "a turbo request requires its selected overlay's timestep plan",
-                    code="artifact_config",
                 )
             plan = self.plans[_TRUNK[task]]
         if plan.task != _TRUNK[task]:
-            raise ConformanceError("timestep plan belongs to a different trunk", code="artifact_config")
+            raise ValueError("timestep plan belongs to a different trunk")
         schedule = plan.schedule(steps)
         state = PipelineState()
         fixed = {
@@ -1369,7 +1358,7 @@ class OfficialH3Pipeline:
           memoized per generation by an exact key (`ReferenceMemo`): a long-form segment's
           later shots reuse their references' latents. The audio encode is not: H3's audio
           is not bitwise reproducible run to run (h3a-088), so it runs every time.
-        - Image encodes that miss run across the group's idle ranks (`author.spread`,
+        - Image encodes that miss run across the group's idle ranks (`accel.spread`,
           sparing: the DiT the denoise needs next stays where it is), each on one rank from
           its own pixels, so each result is what rank 0 alone computes on an identical card.
         """
@@ -1406,7 +1395,7 @@ class OfficialH3Pipeline:
             )
             # Only H3's own VAE class carries the method a group rank can run.
             encoded = (
-                spread(vae, "encode_condition", arguments, spare=True)
+                spread(vae.encode_condition, arguments, spare=True)
                 if isinstance(vae, TileBatchedVideoVAE)
                 else (encode_condition(vae, *args) for args in arguments)
             )
@@ -1741,8 +1730,8 @@ def _diffusers_workflow(workflow: str) -> str:
 
 def _trunk_task(task: Task, trunk: Trunk) -> Task:
     if _TRUNK[task] != trunk:
-        raise ConformanceError(
-            f"{task} is not a {trunk} task", code="artifact_config", fields=["task"]
+        raise ValueError(
+            f"{task} is not a {trunk} task"
         )
     return task
 
@@ -1752,9 +1741,8 @@ class OfficialH3TurboLoRA:
 
     def __init__(self, config: Config, plans: Mapping[Trunk, TimestepPlan]) -> None:
         if not _OVERLAY_CONFIG_SECTIONS <= set(config.keys()):
-            raise ConformanceError(
+            raise ValueError(
                 "a turbo LoRA checkpoint contains exactly fl2va_turbo and ref2va_turbo",
-                code="artifact_config",
             )
         self.plans = {trunk: plans[trunk] for trunk in _TRUNKS}
         self.specs = {trunk: _overlay_spec(config, trunk, self.plans[trunk]) for trunk in _TRUNKS}
@@ -1768,9 +1756,8 @@ class OfficialH3TurboLoRA:
     def overlay(self, base: OfficialH3Pipeline, trunk: Trunk) -> Overlay:
         config, structure, _layout = base._dit_specs[trunk]
         if structure != "adaln-pruned" or config != self.specs[trunk][0]:
-            raise ConformanceError(
+            raise ValueError(
                 "turbo LoRA and AdaLN-pruned base must have the same DiT configuration",
-                code="artifact_config",
             )
         return self.components[_OVERLAY_COMPONENT[trunk]]
 
@@ -1779,7 +1766,7 @@ def build_h3_turbo_base(config: Config, plans: Mapping[Trunk, TimestepPlan]) -> 
     """The ordinary five-root artifact, with its turbo consumers installed before fill."""
     specs = _dit_specs(_artifact_sections(config))
     if any(structure != "adaln-pruned" for _config, structure, _layout in specs.values()):
-        raise ConformanceError("turbo requires an AdaLN-pruned base", code="artifact_config")
+        raise ValueError("turbo requires an AdaLN-pruned base")
     pipe = OfficialH3Pipeline(config, plans)
     for name in _DIT_COMPONENT.values():
         pipe.components[name].install_lora_consumers()
@@ -1801,7 +1788,7 @@ class OfficialH3RegenerateLoRA:
         section = dict(config.mapping())
         extension = section.pop("cozy_h3", None)
         if not isinstance(extension, dict):
-            raise ConformanceError("missing Regenerate metadata", code="artifact_config")
+            raise ValueError("missing Regenerate metadata")
         extension = dict(extension)
         layout = TableLayout.parse(extension.pop("table_keys", None))
         expected: dict[str, object] = {
@@ -1812,10 +1799,8 @@ class OfficialH3RegenerateLoRA:
             "lora_alpha": float(_REGENERATE_RANK),
         }
         if not section or extension != expected:
-            raise ConformanceError(
+            raise ValueError(
                 f"artifact config {REGENERATE_COMPONENT!r} is not the rank-576 Regenerate overlay",
-                code="artifact_config",
-                fields=[REGENERATE_COMPONENT, "cozy_h3"],
             )
         for schedule in plan.schedules:
             layout.require(schedule.video_timesteps, schedule.audio_timesteps)
@@ -1837,9 +1822,8 @@ class OfficialH3RegenerateLoRA:
     def overlay(self, base: OfficialH3Pipeline) -> Overlay:
         config, structure, _layout = base._dit_specs["fl2va"]
         if structure != "adaln-pruned" or config != self.spec:
-            raise ConformanceError(
+            raise ValueError(
                 "the Regenerate overlay and the AdaLN-pruned base must have the same DiT configuration",
-                code="artifact_config",
             )
         return self.components[REGENERATE_COMPONENT]
 
@@ -1856,10 +1840,8 @@ def _artifact_sections(config: Config) -> Config:
     present = set(config.keys())
     expected = _WEIGHTED_CONFIG_SECTIONS
     if missing := sorted(expected - present):
-        raise ConformanceError(
+        raise ValueError(
             f"artifact config sections differ from the uniform dual FULL contract: missing={missing}",
-            code="artifact_config",
-            fields=missing,
         )
     return config
 
@@ -1869,28 +1851,22 @@ def _dit_spec(config: Config, task: Trunk) -> tuple[dict[str, Any], str, TableLa
     upstream = config.section(component).mapping()
     extension = upstream.pop("cozy_h3", None)
     if not isinstance(extension, Mapping):
-        raise ConformanceError(
+        raise ValueError(
             f"artifact config {component!r} has no closed cozy_h3 structure",
-            code="artifact_config",
-            fields=[component, "cozy_h3"],
         )
     structure = extension.get("modulation")
     if structure not in {"full", "adaln-pruned"}:
-        raise ConformanceError(
+        raise ValueError(
             f"artifact config {component!r} has unknown modulation structure {structure!r}",
-            code="artifact_config",
-            fields=[component, "cozy_h3", "modulation"],
         )
     # FULL computes modulation from live weights. Pruned row identities belong to
     # the checkpoint, so adding or reordering table rows needs no package release.
     fields = {"task", "modulation"}
     if structure == "adaln-pruned":
         if "table_keys" not in extension:
-            raise ConformanceError(
+            raise ValueError(
                 f"model component {component!r} is missing its modulation table row labels; "
                 "regenerate the lane with minimax-h3-tools/bf16-pruned or fp8-pruned",
-                code="artifact_config",
-                fields=[component, "cozy_h3", "table_keys"],
             )
         fields.add("table_keys")
     if structure == "adaln-pruned" and "generating_projection_digest" in extension:
@@ -1901,25 +1877,19 @@ def _dit_spec(config: Config, task: Trunk) -> tuple[dict[str, Any], str, TableLa
             or not digest.startswith("sha256:")
             or any(c not in "0123456789abcdef" for c in digest[7:])
         ):
-            raise ConformanceError(
+            raise ValueError(
                 "AdaLN generating projection binding is not an exact digest",
-                code="artifact_config",
-                fields=[component, "cozy_h3", "generating_projection_digest"],
             )
         fields.add("generating_projection_digest")
     if set(extension) != fields:
-        raise ConformanceError(
+        raise ValueError(
             f"artifact config {component!r} has no closed cozy_h3 structure",
-            code="artifact_config",
-            fields=[component, "cozy_h3"],
         )
     expected: dict[str, str] = {"task": task}
     for name, want in expected.items():
         if extension[name] != want:
-            raise ConformanceError(
+            raise ValueError(
                 f"artifact config {component!r} {name!r} is {extension[name]!r}, expected {want!r}",
-                code="artifact_config",
-                fields=[component, "cozy_h3", name],
             )
     layout = TableLayout.parse(extension["table_keys"]) if structure == "adaln-pruned" else None
     return upstream, str(structure), layout
@@ -1928,16 +1898,12 @@ def _dit_spec(config: Config, task: Trunk) -> tuple[dict[str, Any], str, TableLa
 def _dit_specs(config: Config) -> dict[Trunk, tuple[dict[str, Any], str, TableLayout | None]]:
     specs = {trunk: _dit_spec(config, trunk) for trunk in _TRUNKS}
     if len({spec[1] for spec in specs.values()}) != 1:
-        raise ConformanceError(
+        raise ValueError(
             "FL2VA and Ref2VA DiTs use different modulation structures",
-            code="artifact_config",
-            fields=["transformer", "transformer_ref"],
         )
     if specs["fl2va"][0] != specs["ref2va"][0]:
-        raise ConformanceError(
+        raise ValueError(
             "FL2VA and Ref2VA DiTs do not carry the same upstream architecture config",
-            code="artifact_config",
-            fields=["transformer", "transformer_ref"],
         )
     return specs
 
@@ -1947,8 +1913,8 @@ def _build_dit(config: Mapping[str, Any], structure: str, layout: TableLayout | 
         transformer = MiniMaxH3Transformer3DModel.from_config(dict(config))
     else:
         if layout is None:
-            raise ConformanceError(
-                "pruned model is missing its table row labels", code="artifact_config"
+            raise ValueError(
+                "pruned model is missing its table row labels"
             )
         transformer = AdaLNPrunedMiniMaxH3Transformer.from_official_config(
             config,
@@ -1966,7 +1932,7 @@ def _overlay_spec(
     section = config.section(component).mapping()
     extension = section.pop("cozy_h3", None)
     if not isinstance(extension, dict):
-        raise ConformanceError("missing PDD metadata", code="artifact_config")
+        raise ValueError("missing PDD metadata")
     extension = dict(extension)
     layout = TableLayout.parse(extension.pop("table_keys", None))
     pdd_steps, pdd_block = 32, 4
@@ -1980,16 +1946,13 @@ def _overlay_spec(
         "pdd_block_size": pdd_block,
     }
     if not section or extension != expected:
-        raise ConformanceError(
+        raise ValueError(
             f"artifact config {component!r} is not the released rank-64 PDD-8 overlay",
-            code="artifact_config",
-            fields=[component, "cozy_h3"],
         )
     _validate_plan(plan, trunk, layout)
     if plan.steps != (pdd_steps // pdd_block,):
-        raise ConformanceError(
+        raise ValueError(
             "the PDD overlay's timestep plan must hold its one distilled schedule",
-            code="artifact_config",
         )
     return section, layout
 
@@ -2017,12 +1980,9 @@ def _build_overlay(
 def _validate_dual_topology(members: Mapping[Trunk, Any], names: Mapping[Trunk, str]) -> None:
     """Prove one architecture instantiated twice for two independent weight identities."""
     fl2va, ref2va = members["fl2va"], members["ref2va"]
-    fields = [names["fl2va"], names["ref2va"]]
     if fl2va is ref2va:
-        raise ConformanceError(
+        raise ValueError(
             "FL2VA and Ref2VA component names alias one module instance",
-            code="artifact_config",
-            fields=fields,
         )
 
     def topology(module: Any) -> tuple[tuple[str, tuple[int, ...], str], ...]:
@@ -2045,10 +2005,8 @@ def _validate_dual_topology(members: Mapping[Trunk, Any], names: Mapping[Trunk, 
         )
 
     if type(fl2va) is not type(ref2va) or topology(fl2va) != topology(ref2va):
-        raise ConformanceError(
+        raise ValueError(
             "FL2VA and Ref2VA components do not have one identical class and destination topology",
-            code="artifact_config",
-            fields=fields,
         )
 
 
@@ -2090,10 +2048,8 @@ def _apply_video_vae_dtype(vae: Any, config: Config | None = None) -> Any:
         key = f"vae.{name}"
         dtype = config.tensor_dtype(key, default="f32")
         if dtype not in supported:
-            raise ConformanceError(
+            raise ValueError(
                 f"{key} uses unsupported dtype {dtype!r}; expected f32 or f16",
-                code="artifact_dtype",
-                fields=[key],
             )
         parameter.data = parameter.data.to(dtype=supported[dtype])
     return vae.eval()
@@ -2162,25 +2118,19 @@ def _validate_model_contract(pipe: Any, transformer: Any, video_vae: Any, audio_
             if isinstance(want, tuple) and got is not None:
                 got = tuple(got)
             if got != want:
-                raise ConformanceError(
+                raise ValueError(
                     f"official H3 {component} config {name!r} is {got!r}, expected {want!r}",
-                    code="artifact_config",
-                    fields=[component, name],
                 )
     if pipe.config.get("reference_image_short_edge", 2048) != 2048:
-        raise ConformanceError(
+        raise ValueError(
             "official H3 reference image short edge differs from 2048",
-            code="artifact_config",
-            fields=["pipeline", "reference_image_short_edge"],
         )
     if (
         video_vae.tokens_chunk_size != LATENTS_PER_CHUNK
         or video_vae.spatial_compression_ratio != VAE_SPATIAL_RATIO
     ):
-        raise ConformanceError(
+        raise ValueError(
             "official H3 video VAE derived geometry differs from 5-token/16-pixel release",
-            code="artifact_config",
-            fields=["vae"],
         )
     # These four are hard-coded properties of the installed library, so this can only fire
     # when the DEPENDENCY moves — never on artifact drift, which is why it is not an
@@ -2321,7 +2271,7 @@ def read_reference_video(
             left, top = (event.width - cut_width) // 2, (event.height - cut_height) // 2
             out = np.empty((frames, *size, 3), dtype=np.uint8)
         elif held is not None and start < held[0]:
-            raise ConformanceError("reference video presentation time runs backwards",
+            raise InvalidRequest("reference video presentation time runs backwards",
                                    code="reference_policy")
         if held is not None:
             place(held[1], start)
@@ -2338,11 +2288,11 @@ def read_reference_video(
         held = (start, picture)
         end = start + event.duration * event.time_base
     if first is None or held is None or out is None:
-        raise ConformanceError("reference video has no frames", code="reference_policy")
+        raise InvalidRequest("reference video has no frames", code="reference_policy")
     end = min(end, origin + Fraction(frames, FPS))
     place(held[1], end)
     if kept == 0:
-        raise ConformanceError("reference video has no frame on the 24-fps clock", code="reference_policy")
+        raise InvalidRequest("reference video has no frame on the 24-fps clock", code="reference_policy")
     soundtrack = None
     if audio_start is not None:
         waveform = torch.from_numpy(np.stack([np.frombuffer(b"".join(c), dtype="<f4") for c in pcm]))
@@ -2350,7 +2300,7 @@ def read_reference_video(
         target = _round_fraction((end - origin) * rate)
         lo, hi = max(offset, 0), min(offset + int(waveform.shape[1]), target)
         if lo >= hi:
-            raise ConformanceError("reference soundtrack has no samples on its video's timeline",
+            raise InvalidRequest("reference soundtrack has no samples on its video's timeline",
                                    code="reference_policy")
         soundtrack = torch.zeros((len(pcm), target), dtype=torch.float32)
         soundtrack[:, lo:hi] = waveform[:, lo - offset : hi - offset]

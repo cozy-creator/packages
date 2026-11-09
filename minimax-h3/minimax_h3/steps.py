@@ -14,8 +14,8 @@ from contextlib import AbstractContextManager, nullcontext
 from typing import Any
 
 import torch
-from cozy_runtime import stepcache
-from cozy_runtime.author import AttentionLayout, attention_scope, producer_sites
+from cozy_runtime.accel import stepcache
+from cozy_runtime.accel.attention import attention_scope, AttentionLayout, producer_sites
 
 from . import producer
 from .adaln_pruned import checked_loop

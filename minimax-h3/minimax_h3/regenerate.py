@@ -14,7 +14,8 @@ from typing import Any
 
 import torch
 from cozy_runtime import rng
-from cozy_runtime.author import AttentionLayout, Cut, Windows, windows
+from cozy_runtime.accel.attention import AttentionLayout
+from cozy_runtime.author import Cut, Windows, windows
 from cozy_runtime.author import device as placed_device
 from diffusers.modular_pipelines.minimax_h3.before_denoise import (
     MiniMaxH3PrepareLayoutStep,

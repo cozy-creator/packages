@@ -9,7 +9,6 @@ from typing import Any, cast
 import torch
 from transformers import Qwen3VLConfig, Qwen3VLForConditionalGeneration
 
-from cozy_runtime.author import ConformanceError
 
 _SOURCE_ARCHITECTURE = "Qwen3VLForConditionalGeneration"
 _SOURCE_LAYERS = 64
@@ -96,33 +95,25 @@ def build_text_conditioner(config: Mapping[str, object]) -> Any:
     source = dict(config)
     extension = source.pop("cozy_h3", None)
     if extension != text_conditioner_config():
-        raise ConformanceError(
+        raise ValueError(
             "artifact config 'text_encoder.cozy_h3' does not declare the exact H3 "
             "50-layer pre-norm conditioner",
-            code="artifact_config",
-            fields=["text_encoder", "cozy_h3"],
         )
     if source.get("architectures") != [_SOURCE_ARCHITECTURE]:
-        raise ConformanceError(
+        raise ValueError(
             "text conditioner source architecture is not Qwen3VLForConditionalGeneration",
-            code="artifact_config",
-            fields=["text_encoder", "architectures"],
         )
     text = source.get("text_config")
     if not isinstance(text, Mapping) or text.get("num_hidden_layers") != _SOURCE_LAYERS:
-        raise ConformanceError(
+        raise ValueError(
             "text conditioner source must declare the exact 64-layer Qwen architecture",
-            code="artifact_config",
-            fields=["text_encoder", "text_config", "num_hidden_layers"],
         )
 
     model = Qwen3VLForConditionalGeneration(Qwen3VLConfig(**source))
     language = cast(Any, model.model.language_model)
     if len(language.layers) != _SOURCE_LAYERS:
-        raise ConformanceError(
+        raise ValueError(
             "constructed Qwen language stack disagrees with its source config",
-            code="artifact_config",
-            fields=["text_encoder", "text_config", "num_hidden_layers"],
         )
     language.layers = torch.nn.ModuleList(list(language.layers[:_RETAINED_LAYERS]))
     language.norm = torch.nn.Identity()
@@ -156,8 +147,6 @@ def _validate_census(model: Any, language: Any, torch: Any) -> None:
         if not ok
     ]
     if bad:
-        raise ConformanceError(
+        raise ValueError(
             "H3 text conditioner is not the truncated 50-layer pre-norm headless stack",
-            code="artifact_config",
-            fields=["text_encoder", *bad],
         )

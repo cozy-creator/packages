@@ -47,18 +47,19 @@ from diffusers.models.transformers.transformer_minimax_h3 import (
 )
 
 from cozy_runtime import rng
-from cozy_runtime.author import CapabilityError, Cut, plain_forward, split
-from cozy_runtime.author.kernels import (
-    ROWWISE_FP8,
+from cozy_runtime.accel import plain_forward
+from cozy_runtime.author import Cut, split
+from cozy_runtime.accel.kernels import (
+    int8_rows,
     KernelsUnavailable,
     Launch,
     Plan,
     PreQuantized,
+    ROWWISE_FP8,
     TritonEntry,
     TritonKernels,
-    int8_rows,
 )
-from cozy_runtime.rows import Rows, rows
+from cozy_runtime.accel.rows import Rows, rows
 
 from .adaln_pruned import AdaLNPrunedMiniMaxH3Transformer
 
@@ -131,11 +132,12 @@ NOT_INSTALLABLE = frozenset(
 
 
 
-class GlueRefusal(CapabilityError):
+class GlueRefusal(RuntimeError):
     """The fused plan cannot install as matched; `code` says why."""
 
     def __init__(self, code: str, detail: str) -> None:
-        super().__init__(detail, code=code)
+        super().__init__(f"{code}: {detail}")
+        self.code = code
 
 
 # ------- kernel sources (Triton hashes each one's line: a moved one rebuilds its set everywhere)

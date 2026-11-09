@@ -12,14 +12,13 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import NoReturn
 
-from cozy_runtime.author import ConformanceError
 
 _MODALITIES = ("video", "text", "audio")
 
 
 def _refuse(message: str) -> NoReturn:
-    raise ConformanceError(
-        f"model modulation tables {message}", code="artifact_config", fields=["table_keys"]
+    raise ValueError(
+        f"model modulation tables {message}"
     )
 
 

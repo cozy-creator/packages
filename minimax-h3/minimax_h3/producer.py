@@ -40,19 +40,18 @@ from diffusers.models.transformers.transformer_minimax_h3 import (
 )
 from torch.nn.modules import module as torch_module
 
-from cozy_runtime import lora
-from cozy_runtime.author import (
+from cozy_runtime.accel import lora
+from cozy_runtime.accel.attention import (
     AttentionLayout,
     AttentionProducer,
-    Cut,
     ProducerCall,
     ProducerSite,
     register_attention,
-    split,
 )
-from cozy_runtime.author.kernels import ROWWISE_FP8, PreQuantized, quantize_once
-from cozy_runtime.rows import Rows
-from cozy_runtime.rows import rows as columns
+from cozy_runtime.author import Cut, split
+from cozy_runtime.accel.kernels import PreQuantized, quantize_once, ROWWISE_FP8
+from cozy_runtime.accel.rows import Rows
+from cozy_runtime.accel.rows import rows as columns
 
 from .glue import (
     HEAD_HOLDS,

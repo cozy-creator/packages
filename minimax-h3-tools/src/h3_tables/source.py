@@ -8,7 +8,7 @@ from typing import Any
 
 import msgspec
 import torch
-from cozy_runtime.author import ConformanceError, Context, UnsupportedInput, Weights, canonical_json
+from cozy_runtime.author import Context, UnsupportedInput, Weights, canonical_json
 from cozy_runtime.weights_store import Checkpoint, Output, TensorMetadata
 
 from .kernel import (
@@ -90,7 +90,7 @@ def timestep_plan(source: Checkpoint, task: Task, *, component: str | None = Non
             required = {(plan.timesteps[row], tag) for row, tag in plan.block_rows}
             if not required <= available:
                 raise ValueError("the stored table rows do not cover the source plan")
-    except (ValueError, TypeError, OverflowError, ConformanceError) as exc:
+    except (ValueError, TypeError, OverflowError) as exc:
         raise UnsupportedInput(
             f"H3 source {name} has an invalid timestep plan or table layout: {exc}",
             code="adaln_plan",

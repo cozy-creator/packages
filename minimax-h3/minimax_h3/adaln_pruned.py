@@ -32,8 +32,7 @@ from diffusers.utils import apply_lora_scale
 from torch import nn
 from torch.nn import functional as F
 
-from cozy_runtime import lora
-from cozy_runtime.author import ConformanceError
+from cozy_runtime.accel import lora
 
 from .overlay import (
     ATTENTION_KWARG,
@@ -105,10 +104,9 @@ class _AdaLNPrunedTimestepLookup(nn.Module):  # type: ignore[misc]
         counts = matches.sum(dim=1)
         if not bool(torch.all(counts == 1)):
             unknown = timestep.detach().float().cpu().tolist()
-            raise ConformanceError(
+            raise ValueError(
                 f"model modulation tables do not cover the requested timesteps: {unknown}; "
                 "select a covered step count or regenerate the tables for this schedule",
-                code="artifact_config",
             )
         return matches.to(dtype=torch.int64).argmax(dim=1)
 
@@ -368,18 +366,16 @@ class AdaLNPrunedMiniMaxH3Transformer(MiniMaxH3Transformer3DModel):  # type: ign
             isinstance(value, torch.Tensor) for value in (timestep, timestep_indices, token_tags)
         ):
             if bank is not None:
-                raise ConformanceError(
+                raise ValueError(
                     "a turbo forward needs typed timestep, timestep_indices and token_tags",
-                    code="artifact_config",
                 )
             return  # Diffusers owns its ordinary argument diagnostics.
         assert isinstance(timestep, torch.Tensor)
         assert isinstance(timestep_indices, torch.Tensor)
         assert isinstance(token_tags, torch.Tensor)
         if bool(torch.any((token_tags < 0) | (token_tags > 2))):
-            raise ConformanceError(
+            raise ValueError(
                 "packed rows contain a modality tag outside the canonical 0/1/2 set",
-                code="artifact_config",
             )
         tables: Any = self
         try:
@@ -390,11 +386,9 @@ class AdaLNPrunedMiniMaxH3Transformer(MiniMaxH3Transformer3DModel):  # type: ign
                     or overlay.bank != bank
                     or not self._lora_hooks_installed
                 ):
-                    raise ConformanceError(
+                    raise ValueError(
                         f"bank {bank!r} requires an overlay-capable base and that bank's "
                         "prepared overlay component",
-                        code="artifact_config",
-                        fields=["attention_kwargs", ATTENTION_KWARG],
                     )
                 step = overlay.schedule.step(timestep) if overlay.heads else 0
                 self._engage(overlay, step)
@@ -404,10 +398,9 @@ class AdaLNPrunedMiniMaxH3Transformer(MiniMaxH3Transformer3DModel):  # type: ign
             table_index = tables.transformer_blocks[0].adaln_proj.table_index
             present = table_index[row_timesteps, token_tags] >= 0
             if not bool(torch.all(present)):
-                raise ConformanceError(
+                raise ValueError(
                     "model modulation tables do not cover a requested reference timestep/modality; "
                     "regenerate the tables with coverage for this reference type",
-                    code="artifact_config",
                 )
         except Exception:
             self._release()
@@ -422,9 +415,8 @@ class AdaLNPrunedMiniMaxH3Transformer(MiniMaxH3Transformer3DModel):  # type: ign
         for name in ("proj_out", "audio_proj_out") if overlay.heads else ():
             head = _projection_base(getattr(self, name))
             if not isinstance(head, _SelectableHead):
-                raise ConformanceError(
+                raise ValueError(
                     f"{name} is {type(head).__name__}, which cannot serve a turbo head",
-                    code="artifact_config",
                 )
             head._armed = _Armed(getattr(overlay, name), step)
 

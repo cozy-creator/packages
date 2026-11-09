@@ -18,7 +18,6 @@ from cozy_runtime.author import (
 )
 from cozy_runtime.weights_store import Checkpoint, Derivation
 
-from ._memo import ADALN
 from .kernel import H3Topology, removed_keys, source_shapes, table_shapes
 from .model_config import (
     COMPONENTS,
@@ -195,7 +194,7 @@ def _project(ctx: Context, source: Checkpoint, task: Task, output: str) -> Model
         return ctx.adopt_model(out)
 
 
-@invocable(memo_dependencies=ADALN)
+@invocable
 async def select_adaln_weights(ctx: Context, *, source: Weights[Any], task: Task) -> Selection:
     """One DiT's AdaLN generating weights, selected from a full or pruned checkpoint."""
     ctx.raise_if_cancelled()
@@ -232,7 +231,7 @@ def _bank_config(task: Task, projection: str, plan: TimestepPlan) -> bytes:
     )
 
 
-@invocable(memo_dependencies=ADALN)
+@invocable
 async def compute_adaln_tables(
     ctx: Context,
     *,
@@ -372,7 +371,7 @@ def _apply_adaln(
         return ctx.adopt_model(out)
 
 
-@invocable(memo_dependencies=ADALN)
+@invocable
 async def apply_adaln(
     ctx: Context,
     *,
@@ -384,7 +383,7 @@ async def apply_adaln(
     return _apply_adaln(ctx, source=source, fl2va=fl2va, ref2va=ref2va, require_pruned=False)
 
 
-@invocable(memo_dependencies=ADALN)
+@invocable
 async def retable_adaln(
     ctx: Context,
     *,
