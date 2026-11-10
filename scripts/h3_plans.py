@@ -23,7 +23,7 @@ sys.path.insert(0, str(ROOT / "minimax-h3"))
 sys.path.insert(0, str(ROOT / "minimax-h3-tools" / "src"))
 
 import torch  # noqa: E402
-from diffusers import MiniMaxH3Scheduler  # noqa: E402
+from diffusers.schedulers.scheduling_minimax_h3 import MiniMaxH3Scheduler  # noqa: E402
 from minimax_h3.official import Schedule, Task, TimestepPlan, Trunk  # noqa: E402
 
 VIDEO_SHIFT = 12.0
@@ -43,7 +43,8 @@ def official_schedule(steps: int) -> Schedule:
         for shift in (VIDEO_SHIFT, AUDIO_SHIFT):
             scheduler = MiniMaxH3Scheduler(shift=shift)
             scheduler.set_timesteps(steps + 1)
-            sigmas.append(tuple(float(value) for value in scheduler.sigmas.float()))
+            grid = cast(torch.Tensor, scheduler.sigmas)  # set by set_timesteps
+            sigmas.append(tuple(float(value) for value in grid.float()))
     schedule = Schedule(steps + 1, sigmas[0], sigmas[1])
     if schedule.transformer_evaluations != steps:
         raise ValueError(f"{steps} steps collide on the float32 grid; pick another count")

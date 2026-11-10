@@ -7,7 +7,7 @@ import json
 import sys
 from collections.abc import Mapping, Sequence
 from pathlib import Path
-from typing import Any, cast
+from typing import cast
 
 _SCHEMA = "cozy.runtime.model_construction_contract.v1"
 
@@ -27,7 +27,7 @@ def construction_order(
     for value in sets:
         if not isinstance(value, dict):
             raise TypeError("construction contract contains a malformed DestinationSet")
-        row = cast(dict[str, Any], value)
+        row = cast(dict[str, object], value)
         component = row.get("component")
         keys = row.get("keys")
         if not isinstance(component, str) or not isinstance(keys, list):
