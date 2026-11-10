@@ -11,10 +11,10 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterable, Iterator, Sequence
 from contextlib import contextmanager
 from types import SimpleNamespace
-from typing import Any
+from typing import Final, Protocol, TypedDict, cast
 
 import torch
 from cozy_runtime.accel import moe
@@ -23,13 +23,14 @@ from cozy_runtime.accel.kernels import Plan
 from cozy_runtime.accel.moe import Routing
 from PIL import Image
 from tokenizers import Tokenizer
+from transformers import PreTrainedTokenizerFast
 
 from .tencent.configuration_hunyuan_image_3 import HunyuanImage3Config
 from .tencent.modeling_hunyuan_image_3 import HunyuanImage3ForCausalMM, HunyuanMoE
 from .tencent.system_prompt import get_system_prompt
 from .tencent.tokenization_hunyuan_image_3 import HunyuanImage3TokenizerFast
 
-COMPONENT = "model"
+COMPONENT: Final = "model"
 #: A checkpoint's float dtypes (`Config.tensor_dtype`) as torch builds them.
 _DTYPES = {"bf16": torch.bfloat16, "f16": torch.float16, "f32": torch.float32}
 
@@ -70,13 +71,73 @@ class Graph:
             stored = _DTYPES.get(config.tensor_dtype(f"{COMPONENT}.{name}", default="bf16"))
             if stored is not None and parameter.dtype != stored:
                 parameter.data = parameter.data.to(stored)
-        self.components: dict[str, torch.nn.Module] = {COMPONENT: model}
+        self.components: Components = {COMPONENT: model}
 
 
-def _tokenizer(read: Callable[[str], bytes]) -> HunyuanImage3TokenizerFast:
+class Components(TypedDict):
+    model: torch.nn.Module
+
+
+#: A reference as Tencent's image processor prepares it, handed back to the model as it is.
+type Cond = object
+
+
+class _Size(Protocol):
+    width: int
+    height: int
+
+
+class _ImageProcessor(Protocol):
+    vae_reso_group: Sequence[_Size]
+
+    def build_cond_images(self, *, image_list: list[Image.Image], infer_align_image_size: bool) -> Cond: ...
+
+
+class _Mlp(Protocol):
+    experts: moe.Experts
+
+
+class _Layer(Protocol):
+    mlp: _Mlp
+
+
+class _Body(Protocol):
+    layers: Iterable[_Layer]
+
+
+class Tencent(Protocol):
+    """What the package calls of Tencent's `HunyuanImage3ForCausalMM` (vendored, not type-checked)."""
+
+    image_processor: _ImageProcessor
+    model: _Body
+    _tokenizer: PreTrainedTokenizerFast
+    generation_config: SimpleNamespace
+
+    def generate_cot(
+        self, prompt: str, batch_cond_images: list[Cond] | None, system_prompt: str, bot_task: str, *,
+        seed: int, need_ratio: bool, on_token: Callable[[int], None], cancel: Callable[[], None],
+    ) -> tuple[str, int | None]: ...
+
+    def predict_ratio(
+        self, prompt: str, batch_cond_images: list[Cond] | None, system_prompt: str, *, seed: int
+    ) -> int: ...
+
+    def denoise(
+        self, prompt: str, batch_cond_images: list[Cond] | None, system_prompt: str, cot_text: str | None, *,
+        image_size: str, steps: int, guidance_scale: float, seed: int, on_step: Callable[[int], None],
+        cancel: Callable[[], None],
+    ) -> torch.Tensor: ...
+
+    def decode_latents(self, latents: torch.Tensor) -> Image.Image: ...
+
+
+def _tokenizer(read: Callable[[str], bytes]) -> PreTrainedTokenizerFast:
     config = json.loads(read("tokenizer_config.json"))
     config.pop("tokenizer_class", None)
-    return HunyuanImage3TokenizerFast(tokenizer_object=Tokenizer.from_str(read("tokenizer.json").decode()), **config)
+    tokenizer: PreTrainedTokenizerFast = HunyuanImage3TokenizerFast(
+        tokenizer_object=Tokenizer.from_str(read("tokenizer.json").decode()), **config
+    )
+    return tokenizer
 
 
 def _system(bot_task: str) -> str:
@@ -98,7 +159,7 @@ class HunyuanImage3(Model[Graph]):
 
     def load(self, loader: Loader) -> None:
         self.graph = loader.construct(Graph)
-        model = self.graph.components[COMPONENT]
+        model = self._tencent()
         model._tokenizer = _tokenizer(loader.assets.read)
         model.generation_config = SimpleNamespace(**GENERATION)
 
@@ -106,21 +167,26 @@ class HunyuanImage3(Model[Graph]):
         """The Runtime's grouped expert kernels (`moe.install`): every layer's routing stays on the device."""
         return moe.install(plan, self.graph.components[COMPONENT])
 
-    def _cond(self, references: list[Image.Image]) -> Any:
-        model = self.graph.components[COMPONENT]
+    def _tencent(self) -> Tencent:
+        """The component as Tencent's model, whose methods the stages call (vendored, not type-checked)."""
+        return cast(Tencent, self.graph.components[COMPONENT])
+
+    def _cond(self, references: list[Image.Image]) -> list[Cond] | None:
+        model = self._tencent()
         if not references:
             return None
         return [model.image_processor.build_cond_images(image_list=references, infer_align_image_size=True)]
 
     def _size(self, ratio_index: int) -> tuple[int, int]:
-        size = self.graph.components[COMPONENT].image_processor.vae_reso_group[ratio_index]
+        size = self._tencent().image_processor.vae_reso_group[ratio_index]
         return size.width, size.height
 
     @contextmanager
     def _routing(self) -> Iterator[Routing]:
         routing = Routing()
-        experts = [layer.mlp.experts for layer in self.graph.components[COMPONENT].model.layers
-                   if isinstance(layer.mlp, HunyuanMoE)]
+        experts: list[moe.Experts] = [
+            layer.mlp.experts for layer in self._tencent().model.layers if isinstance(layer.mlp, HunyuanMoE)
+        ]
         for layer in experts:
             layer.trace = routing
         try:
@@ -135,7 +201,7 @@ class HunyuanImage3(Model[Graph]):
               cancel: Callable[[], None]) -> tuple[str, tuple[int, int] | None, dict[str, float]]:
         """Tencent's think-then-recaption stage: the chain of thought and rewritten prompt the image is made from,
         with `pick_size` the size (width, height) the model then picks (`image_size="auto"`), and its routing."""
-        model = self.graph.components[COMPONENT]
+        model = self._tencent()
         with torch.inference_mode(), self._routing() as routing:
             cot, ratio = model.generate_cot(prompt, self._cond(references), _system(UPSAMPLED), UPSAMPLED, seed=seed,
                                             need_ratio=pick_size, on_token=on_token, cancel=cancel)
@@ -144,7 +210,7 @@ class HunyuanImage3(Model[Graph]):
     @uses_components(COMPONENT)
     def pick_size(self, prompt: str, references: list[Image.Image], *, seed: int) -> tuple[int, int]:
         """The size (width, height) the model picks for a prompt it draws directly (`image_size="auto"`)."""
-        model = self.graph.components[COMPONENT]
+        model = self._tencent()
         with torch.inference_mode():
             return self._size(model.predict_ratio(prompt, self._cond(references), _system(DIRECT), seed=seed))
 
@@ -153,7 +219,7 @@ class HunyuanImage3(Model[Graph]):
               steps: int, guidance: float, seed: int, on_step: Callable[[int], None],
               cancel: Callable[[], None]) -> Image.Image:
         """Tencent's image stage at an explicit `size` (width, height), after `think` or without it."""
-        model = self.graph.components[COMPONENT]
+        model = self._tencent()
         width, height = size
         with torch.inference_mode():
             latents = model.denoise(prompt, self._cond(references), _system(UPSAMPLED if cot else DIRECT), cot,
