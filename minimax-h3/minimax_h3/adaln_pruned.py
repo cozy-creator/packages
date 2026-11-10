@@ -234,12 +234,12 @@ class AdaLNPrunedMiniMaxH3Transformer(MiniMaxH3Transformer3DModel):
         },
     }
 
-    def __init__(
+    def __init__(  # type: ignore[explicit-any]  # **config into Diffusers' typed keywords
         self,
         *,
         table_timesteps: Sequence[float],
         table_block_keys: Sequence[tuple[int, int]],
-        **config: Any,  # type: ignore[explicit-any]  # **config into Diffusers' typed keywords
+        **config: Any,
     ) -> None:
         super().__init__(**config)
         self.time_proj = _AdaLNPrunedTimestepLookup(table_timesteps)
@@ -263,7 +263,7 @@ class AdaLNPrunedMiniMaxH3Transformer(MiniMaxH3Transformer3DModel):
         self._lora_hooks_installed = False
 
     @apply_lora_scale("attention_kwargs")  # type: ignore[untyped-decorator]
-    def forward(
+    def forward(  # type: ignore[misc]  # untyped after Diffusers' unannotated `apply_lora_scale`
         self,
         hidden_states: torch.Tensor,
         audio_hidden_states: torch.Tensor,
@@ -275,7 +275,7 @@ class AdaLNPrunedMiniMaxH3Transformer(MiniMaxH3Transformer3DModel):
         video_indices: torch.Tensor,
         audio_indices: torch.Tensor,
         text_indices: torch.Tensor,
-        attention_kwargs: dict[str, Any] | None = None,
+        attention_kwargs: dict[str, object] | None = None,
         return_dict: bool = True,
         rotary: tuple[torch.Tensor, torch.Tensor] | None = None,
         text: torch.Tensor | None = None,
@@ -411,7 +411,7 @@ class AdaLNPrunedMiniMaxH3Transformer(MiniMaxH3Transformer3DModel):
                         f"bank {bank!r} requires an overlay-capable base and that bank's "
                         "prepared overlay component",
                     )
-                step = overlay.schedule.step(timestep) if overlay.heads else 0
+                step = overlay.schedule.step(timestep) if overlay.heads else 0  # type: ignore[union-attr]  # `heads`: it has a schedule
                 self._engage(overlay, step)
                 tables = overlay
             global_rows = self.time_proj.rows(timestep)

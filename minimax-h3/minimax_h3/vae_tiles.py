@@ -23,7 +23,7 @@ h3a-006 owns the lossy decode variants.
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 
 import torch
 from diffusers.models.autoencoders.autoencoder_kl_minimax_h3 import AutoencoderKLMiniMaxH3
@@ -125,8 +125,8 @@ class TileBatchedVideoVAE(AutoencoderKLMiniMaxH3):
     def encode_frames(
         self,
         pixels: torch.Tensor,
-        pixel_mean: tuple[float, float, float],
-        pixel_std: tuple[float, float, float],
+        pixel_mean: Sequence[float],
+        pixel_std: Sequence[float],
     ) -> DiagonalGaussianDistribution:
         """`encode` of uint8 `(1, 3, T, H, W)` pixels normalized as `encode_condition` does,
         each clip normalized on the rank that encodes it: a clip crosses to a follower as
@@ -150,8 +150,8 @@ class TileBatchedVideoVAE(AutoencoderKLMiniMaxH3):
     def _encode_frames_clip(
         self,
         clip: torch.Tensor,
-        pixel_mean: tuple[float, float, float],
-        pixel_std: tuple[float, float, float],
+        pixel_mean: Sequence[float],
+        pixel_std: Sequence[float],
     ) -> torch.Tensor:
         dtype = get_parameter_dtype(self.encoder)  # as `encode` aligns its pixels
         return self._encode_clip(_normalized(clip, pixel_mean, pixel_std).to(dtype))
@@ -215,8 +215,8 @@ class TileBatchedVideoVAE(AutoencoderKLMiniMaxH3):
     def encode_condition(
         self,
         pixels: torch.Tensor,
-        pixel_mean: tuple[float, float, float],
-        pixel_std: tuple[float, float, float],
+        pixel_mean: Sequence[float],
+        pixel_std: Sequence[float],
         seed: int,
     ) -> torch.Tensor:
         """`encode_condition` as this component's method, so `accel.spread` can run it on
@@ -241,8 +241,8 @@ class _BlockRows:
 def encode_condition(
     vae: AutoencoderKLMiniMaxH3,
     pixels: torch.Tensor,
-    pixel_mean: tuple[float, float, float],
-    pixel_std: tuple[float, float, float],
+    pixel_mean: Sequence[float],
+    pixel_std: Sequence[float],
     seed: int,
 ) -> torch.Tensor:
     """Diffusers' `encode_vae_condition` for one reference, up to its `.cpu()`: the sampled
@@ -266,8 +266,8 @@ def encode_condition(
 
 def _normalized(
     pixels: torch.Tensor,
-    pixel_mean: tuple[float, float, float],
-    pixel_std: tuple[float, float, float],
+    pixel_mean: Sequence[float],
+    pixel_std: Sequence[float],
 ) -> torch.Tensor:
     """Diffusers' `encode_vae_condition` pixel convention: uint8 to float32, over 255, minus
     the per-channel mean, over the per-channel std."""

@@ -978,7 +978,7 @@ class FusedMiniMaxH3AttnProcessor(H3AttnProcessor):
         return query, key
 
 
-def seed_key_mean(launch: Launch | None, key: torch.Tensor, heads: slice) -> None:
+def seed_key_mean(launch: Launch | None, key: torch.Tensor, heads: slice[int | None]) -> None:
     """`KEY_MEAN`'s heads from this call's [1, tokens, heads, 128] post-RoPE keys, summed in F32
     without an F32 copy: by each head alone where the glue kernels serve (`key_sums`), so a head
     window seeds the bits the whole call does."""
@@ -1035,10 +1035,10 @@ class _Heads:
     def element_size(self) -> int:
         return int(self.dtype.itemsize)
 
-    def __getitem__(self, index: tuple[slice, ...]) -> slice:
-        return index[2]
+    def __getitem__(self, index: tuple[slice[int | None], ...]) -> slice[int, int, None]:
+        return cast("slice[int, int, None]", index[2])  # `Cut(2)` hands whole head ranges
 
-    def __call__(self, heads: _Heads | slice) -> torch.Tensor:
+    def __call__(self, heads: _Heads | slice[int, int, None]) -> torch.Tensor:
         window = slice(0, self.attn.heads) if heads is self else heads
         assert isinstance(window, slice)
         d = self.attn.head_dim
@@ -1112,10 +1112,10 @@ class _Tail:
     def element_size(self) -> int:
         return int(self.dtype.itemsize)
 
-    def __getitem__(self, index: tuple[slice, ...]) -> slice:
+    def __getitem__(self, index: tuple[slice[int | None], ...]) -> slice[int | None]:
         return index[1]
 
-    def run(self, rows: _Tail | slice, out: torch.Tensor) -> None:
+    def run(self, rows: _Tail | slice[int | None], out: torch.Tensor) -> None:
         """The tail over token `rows`, written into `out` (those rows of the attention output).
         Called on itself (`split` running whole), every row."""
         rows = slice(None) if rows is self else rows

@@ -24,7 +24,7 @@ with the overlay absent from every forward they run.
 from __future__ import annotations
 
 from collections.abc import Iterator, Mapping, Sequence
-from typing import Any, ClassVar
+from typing import Any, ClassVar, Protocol, cast
 
 import torch
 from torch import nn
@@ -237,7 +237,7 @@ class Overlay(nn.Module):
             self.audio_proj_out = TurboHeads(schedule.evaluations, audio_out, hidden_size)
 
     @classmethod
-    def from_official_config(
+    def from_official_config(  # type: ignore[explicit-any]  # the official DiT config, as its constructor reads it
         cls,
         config: Mapping[str, Any],
         *,
@@ -299,9 +299,15 @@ class OverlayArming:
         self.step = step
 
 
-def armed(owner: Any, path: str) -> LoRAFactors | None:
+class Arming(Protocol):
+    """A base DiT that arms an overlay (`AdaLNPrunedMiniMaxH3Transformer`)."""
+
+    _arming: OverlayArming | None
+
+
+def armed(owner: Arming, path: str) -> LoRAFactors | None:
     """The armed overlay's factors at `path`, or None in a base forward."""
     arming = owner._arming
     if arming is None:
         return None
-    return arming.overlay.get_submodule(path)  # type: ignore[no-any-return]
+    return cast(LoRAFactors, arming.overlay.get_submodule(path))  # an overlay path names its factors

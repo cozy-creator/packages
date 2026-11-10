@@ -26,6 +26,8 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from functools import partial
+from types import ModuleType
+from typing import cast
 
 import torch
 import torch.distributed as dist
@@ -100,6 +102,16 @@ class RequestState:
         self.rope = None
 
     close = end_loop
+
+
+def _attn(call: ProducerCall) -> MiniMaxH3Attention:
+    """A call's module: `validate` admits H3's attention alone."""
+    return cast(MiniMaxH3Attention, call.module)
+
+
+def _state(call: ProducerCall) -> RequestState:
+    """A call's request state: this producer's own (`_register`)."""
+    return cast(RequestState, call.state)
 
 
 @dataclass(frozen=True, slots=True)
@@ -221,7 +233,7 @@ def pack(
     copied in from `values` where it holds this call's V (`project_values`). No concatenation."""
     width, q, k, v = out.shape[-1] // 3, *qkv
     chunk = rows(hidden, start, start + out.shape[1])
-    with quantize_once(chunk):
+    with quantize_once(chunk):  # type: ignore[arg-type, unused-ignore]  # a quantized chunk shares as it is
         q(chunk, out[..., :width])
         k(chunk, out[..., width : 2 * width])
         if values is None:
@@ -339,7 +351,7 @@ def produce(
 ) -> torch.Tensor:
     """One H3 attention module call at a site `name` is selected for. An `Owned` input passes
     on to the dense processor as it came, or goes here before the out projection."""
-    attn, layout, state = call.module, call.layout, call.state
+    attn, layout, state = _attn(call), call.layout, _state(call)
     parallel, sharded = call.group is not None, PRODUCERS[name].context_parallel
     if parallel and not sharded:
         raise ValueError("This H3 chunked producer requires one GPU")
@@ -396,7 +408,7 @@ class _Means:
     def __init__(
         self, call: ProducerCall, key: tuple[object, ...], name: str, geometry: tuple[int, ...]
     ) -> None:
-        attn, state = call.module, call.state
+        attn, state = _attn(call), _state(call)
         self.call, self.key, self.geometry, self.carry = call, key, geometry, _CARRY.get()
         self.mean: torch.Tensor | None = None
         if self.carry is None:
@@ -407,13 +419,13 @@ class _Means:
             rolling = self.carry.rolling and id(attn) in state.carried
             self.prior = self.carry.slots[id(attn)] if rolling else None
 
-    def keep(self, window: slice, mean: torch.Tensor) -> None:
+    def keep(self, window: slice[int | None], mean: torch.Tensor) -> None:
         if self.mean is None:
-            self.mean = mean.new_empty((self.call.module.heads, *mean.shape[1:]))
+            self.mean = mean.new_empty((_attn(self.call).heads, *mean.shape[1:]))
         self.mean[window].copy_(mean)
 
     def close(self) -> None:
-        attn, state = self.call.module, self.call.state
+        attn, state = _attn(self.call), _state(self.call)
         if self.carry is None:
             state.statistics[self.key] = (self.call.layout.step, self.geometry, self.mean, None)
         else:
@@ -440,7 +452,7 @@ class _Heads:
     ) -> None:
         self.call, self.means, self.hidden, self.freqs = call, means, hidden, freqs
         self.projections = projections
-        attn = call.module
+        attn = _attn(call)
         self.shape = (1, call.layout.live_tokens, attn.heads, 128)
         self.dtype = torch.bfloat16 if isinstance(hidden, PreQuantized) else hidden.dtype
         self.device = hidden.payload.device if isinstance(hidden, PreQuantized) else hidden.device
@@ -454,7 +466,7 @@ class _Heads:
         freqs: torch.Tensor,
     ) -> _Heads | None:
         """The call cut by heads, or None where a projection does not cut by rows."""
-        attn = call.module
+        attn = _attn(call)
         found = tuple(columns(m) for m in (attn.to_q, attn.to_k, attn.to_v))
         if any(r is None for r in found):
             return None
@@ -466,11 +478,11 @@ class _Heads:
     def element_size(self) -> int:
         return int(self.dtype.itemsize)
 
-    def __getitem__(self, index: tuple[slice, ...]) -> slice:
-        return index[2]
+    def __getitem__(self, index: tuple[slice[int | None], ...]) -> slice[int, int, None]:
+        return cast("slice[int, int, None]", index[2])  # `Cut(2)` hands whole head ranges
 
-    def __call__(self, heads: _Heads | slice) -> torch.Tensor:
-        attn, layout = self.call.module, self.call.layout
+    def __call__(self, heads: _Heads | slice[int, int, None]) -> torch.Tensor:
+        attn, layout = _attn(self.call), self.call.layout
         window = slice(0, attn.heads) if heads is self else heads
         assert isinstance(window, slice)
         start, stop = window.start * 128, window.stop * 128
@@ -498,7 +510,7 @@ def _attend(
 ) -> tuple[torch.Tensor, bool]:
     """A sparse step's attention, before its out projection, and whether last step's statistics
     carried: its input's references end here, at its return."""
-    attn, layout, state = call.module, call.layout, call.state
+    attn, layout, state = _attn(call), call.layout, _state(call)
     parallel = call.group is not None
     if rotary_emb is None or hidden_states.shape[0] != 1:
         raise ValueError("H3 producer requires batch1 and rotary tables")
@@ -552,14 +564,14 @@ def _produce(
     previous step's key mean carries, `values()` gives the call's own V absmax for its value
     scale, and the V it projected for it (or None), which the one pass Kitchen then makes reads
     back; the pass's end drops it."""
-    attn, layout = call.module, call.layout
+    attn, layout = _attn(call), call.layout
     held: list[torch.Tensor | None] = []
     if prior_mean is not None:  # the key mean carries; the values are this call's own
         projected, absmax = values()
         prior_scale = value_scale(absmax)
         held.append(projected)
         del projected
-    return call.kernel.sol_attn_chunked(  # type: ignore[no-any-return]
+    outputs: tuple[torch.Tensor, torch.Tensor, torch.Tensor] = cast(ModuleType, call.kernel).sol_attn_chunked(
         # Kitchen passes once with both statistics, twice (measuring first) without.
         lambda: chunks(held.pop() if held else None),
         layout.live_tokens,
@@ -575,6 +587,7 @@ def _produce(
         sink_q=[0, -(-layout.protected_prefix // 64)],
         token_aug=0,
     )
+    return outputs
 
 
 def _project_qkv(
@@ -604,7 +617,7 @@ def _parallel_produce(
     name: str,
     key: tuple[object, ...],
 ) -> tuple[torch.Tensor, bool]:
-    attn, layout, state = call.module, call.layout, call.state
+    attn, layout, state = _attn(call), call.layout, _state(call)
     degree, rank = dist.get_world_size(call.group), dist.get_rank(call.group)
     tokens = layout.live_tokens
     expected = tokens // degree + int(rank < tokens % degree)
@@ -721,7 +734,8 @@ class _RetainRotary(ModelHook):
         for producer in PRODUCERS.values():  # whichever recipe serves this request's calls
             state = producer.request_state() if producer.context_parallel else None
             if state is not None:
-                state.parallel_rotary[self.key] = output
+                rotary = cast("tuple[torch.Tensor, torch.Tensor]", output)  # the rotary module's (cos, sin)
+                cast(RequestState, state).parallel_rotary[self.key] = rotary  # an H3 producer's state
         return output
 
 

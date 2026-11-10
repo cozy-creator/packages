@@ -10,7 +10,7 @@ step's state and blend their velocities (`plan_windows`).
 from __future__ import annotations
 
 from collections.abc import Callable
-from typing import Any
+from typing import TYPE_CHECKING
 
 import torch
 from cozy_runtime import rng
@@ -32,6 +32,10 @@ from .official import (
     Schedule,
 )
 from .steps import denoise_refine
+
+if TYPE_CHECKING:
+    from .adaln_pruned import AdaLNPrunedMiniMaxH3Transformer
+    from .overlay import Overlay
 
 #: Output size -> (computed height, width, kept rows): 1080p and 2160p compute whole latent
 #: patches (1088, 2176 rows) and keep the centre rows, as `open_h3/pipeline.py` RESOLUTIONS.
@@ -89,7 +93,7 @@ def frames_of(latent_frames: int) -> int:
     return (latent_frames - 2) // LATENTS_PER_CHUNK * FRAMES_PER_CHUNK + 5
 
 
-def blend(spans: list[tuple[int, int]], latent_frames: int, rows_per_frame: int, device: Any) -> list[torch.Tensor]:
+def blend(spans: list[tuple[int, int]], latent_frames: int, rows_per_frame: int, device: torch.device) -> list[torch.Tensor]:
     """Per-row weights of each span: linear ramps across each overlap, summing to one per row."""
     raw = []
     for index, (start, length) in enumerate(spans):
@@ -135,8 +139,8 @@ def plan_windows(shape: tuple[int, ...]) -> Windows:
 
 
 def refine(
-    transformer: Any,
-    overlay: Any,
+    transformer: AdaLNPrunedMiniMaxH3Transformer,
+    overlay: Overlay,
     *,
     latents: torch.Tensor,
     prompt_embeds: torch.Tensor,

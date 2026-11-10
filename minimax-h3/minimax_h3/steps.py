@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from contextlib import AbstractContextManager, nullcontext
-from typing import Any
+from typing import TYPE_CHECKING, Protocol, cast
 
 import torch
 from cozy_runtime.accel import stepcache
@@ -21,11 +21,28 @@ from . import producer
 from .adaln_pruned import checked_loop
 from .overlay import ATTENTION_KWARG, OVERLAY_KWARG, Overlay
 
+if TYPE_CHECKING:
+    from diffusers.models.transformers.transformer_minimax_h3 import MiniMaxH3Attention
+    from diffusers.schedulers.scheduling_minimax_h3 import MiniMaxH3Scheduler
+
+    from .adaln_pruned import AdaLNPrunedMiniMaxH3Transformer
+    from .reference_rows import LoopState
+
+
+class Schedulers(Protocol):
+    """Where the loop finds each modality's scheduler: the request's pipeline view."""
+
+    @property
+    def scheduler(self) -> MiniMaxH3Scheduler: ...
+
+    @property
+    def audio_scheduler(self) -> MiniMaxH3Scheduler: ...
+
 
 def denoise_official(
-    transformer: Any,
-    schedulers: Any,
-    state: Any,
+    transformer: AdaLNPrunedMiniMaxH3Transformer,
+    schedulers: Schedulers,
+    state: LoopState,
     layout_at: Callable[[int], AttentionLayout],
     sol_dense_steps: int,
     on_step: Callable[[int], object],
@@ -59,7 +76,10 @@ def denoise_official(
         if overlay is not None:
             transformer._engage(overlay, heads[steps.start])
         dense, sparse = layout_at(0), layout_at(sol_dense_steps)
-        means = {id(site.module): torch.zeros(site.module.heads, 128, device=video.device) for site in sites}
+        means = {
+            id(site.module): torch.zeros(cast("MiniMaxH3Attention", site.module).heads, 128, device=video.device)
+            for site in sites
+        }  # every producer site is one of the DiT's attention modules
         caching = nullcontext() if cache is None else stepcache.running(cache, len(steps), video.device)
         try:
             # The token refiner's attention is a site too: dense, as a dense step's.
@@ -97,12 +117,12 @@ def denoise_official(
                             attention_kwargs=selector,
                         )
                     video[video_rows:] = schedulers.scheduler.step(
-                        velocity[0, video_rows:].float(), state.timesteps[i], video[video_rows:], return_dict=False
+                        velocity[0, video_rows:].float(), state.timesteps[i], video[video_rows:], return_dict=False  # type: ignore[arg-type]  # Diffusers annotates the legacy FloatTensor
                     )[0]
                     audio[audio_rows:] = schedulers.audio_scheduler.step(
                         audio_velocity[0, audio_rows:].float(),
-                        state.audio_timesteps[i],
-                        audio[audio_rows:],
+                        state.audio_timesteps[i],  # type: ignore[arg-type]  # Diffusers annotates the legacy FloatTensor
+                        audio[audio_rows:],  # type: ignore[arg-type]  # Diffusers annotates the legacy FloatTensor
                         return_dict=False,
                     )[0]
                     del velocity, audio_velocity
@@ -114,8 +134,8 @@ def denoise_official(
 
 
 def denoise_refine(
-    transformer: Any,
-    overlay: Any,
+    transformer: AdaLNPrunedMiniMaxH3Transformer,
+    overlay: Overlay,
     *,
     video: torch.Tensor,
     audio: torch.Tensor,
@@ -152,7 +172,10 @@ def denoise_refine(
         # windows compute their own statistics.
         single = bool(sites) and len(windows) == 1
         dense, sparse = layout_at(0), layout_at(dense_steps)
-        means = {id(site.module): torch.zeros(site.module.heads, 128, device=video.device) for site in sites}
+        means = {
+            id(site.module): torch.zeros(cast("MiniMaxH3Attention", site.module).heads, 128, device=video.device)
+            for site in sites
+        }  # every producer site is one of the DiT's attention modules
         transformer._engage(overlay, 0)
         try:
             with attention_scope(dense):  # under the overlay, as every step reads it
