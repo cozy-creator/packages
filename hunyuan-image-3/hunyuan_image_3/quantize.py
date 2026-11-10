@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Mapping
+from typing import Protocol
 
 import numpy as np
 from cozy_runtime.author import (
@@ -22,14 +23,20 @@ from cozy_runtime.author import (
 )
 from cozy_runtime.derive.safetensors_io import from_f32, to_f32
 from cozy_runtime.weights_store import Derivation
-from tensorfs import TensorMetadata
 
 from .model import COMPONENT, HunyuanImage3
 
 _LAYERS = "model.model.layers.*"
 
 
-def _vae_operands(tensors: Mapping[str, TensorMetadata]) -> list[str]:
+class TensorInfo(Protocol):
+    """What the recipe reads of a stored tensor's metadata."""
+
+    @property
+    def shape(self) -> tuple[int, ...]: ...
+
+
+def _vae_operands(tensors: Mapping[str, TensorInfo]) -> list[str]:
     """The VAE's conv operands: each conv's weight (every rank >= 2 `vae.` weight) and its bias."""
     convs = [key.removesuffix(".weight") for key, info in tensors.items()
              if key.startswith("vae.") and key.endswith(".weight") and len(info.shape) >= 2]
