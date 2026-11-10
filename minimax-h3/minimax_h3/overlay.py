@@ -1,4 +1,4 @@
-"""Overlays over the AdaLN-pruned MiniMax-H3 DiT: PDD-8 turbo and the Regenerate refine.
+"""Overlays over the MiniMax-H3 DiT, FULL or AdaLN-pruned: PDD-8 turbo and the Regenerate refine.
 
 An overlay is LoRA factors on six linear families, AdaLN tables at its plan's exact timesteps and,
 for turbo, a bank of output heads. A forward names the bank it is served under; every other
@@ -6,12 +6,12 @@ forward reads the base.
 
 Parallel Decoding Distillation (arXiv 2607.26004; `alibaba-pai/MiniMax-H3-Acc-LoRAs`) is a
 rank-64 LoRA on seven linear families plus a bank of per-interval output heads, sampled on a
-32-point grid four intervals at a time: eight transformer evaluations. On a pruned lane six of
-the families are ordinary modules and apply here, as `y += (alpha/rank) * up(down(x))` over
-the fp8 base; the seventh, `adaln_proj.linear`, has no module to attach to and is baked into
-the turbo AdaLN tables by the producer. The head bank collapses offline to one head per
-evaluation because the reference's per-step fusion is linear in the weights and its plan
-depends only on the fixed grid.
+32-point grid four intervals at a time: eight transformer evaluations. Six of the families are
+ordinary modules and apply here, as `y += (alpha/rank) * up(down(x))` over the base; the
+seventh, `adaln_proj.linear`, is baked into the turbo AdaLN tables by the producer, and under
+the overlay those tables replace the base's modulation, FULL or pruned. The head bank
+collapses offline to one head per evaluation because the reference's per-step fusion is linear
+in the weights and its plan depends only on the fixed grid.
 
 Open-H3-Regenerate-2K (NVlabs) is one merged rank-576 LoRA on the same six families and LMS
 Sharp's AdaLN curve, which its producer folds into the tables; it keeps the base heads.
