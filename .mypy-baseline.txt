@@ -532,10 +532,6 @@ minimax-h3/minimax_h3/conditioner.py: [no-untyped-call] Call to untyped function
 minimax-h3/minimax_h3/conditioner.py: [no-untyped-call] Call to untyped function "eval" in typed context
 minimax-h3/minimax_h3/continuation.py: [explicit-any] Explicit "Any" is not allowed
 minimax-h3/minimax_h3/continuation.py: [redundant-cast] Redundant cast to "bytes"
-minimax-h3/minimax_h3/continuation.py: [redundant-expr] Left operand of "or" is always false
-minimax-h3/minimax_h3/continuation.py: [redundant-expr] Left operand of "or" is always false
-minimax-h3/minimax_h3/continuation.py: [redundant-expr] Left operand of "or" is always false
-minimax-h3/minimax_h3/continuation.py: [redundant-expr] Left operand of "or" is always false
 minimax-h3/minimax_h3/glue.py: [arg-type] Argument 7 to "rmsnorm_modulate" has incompatible type "float | None"; expected "float"
 minimax-h3/minimax_h3/glue.py: [explicit-any] Explicit "Any" is not allowed
 minimax-h3/minimax_h3/glue.py: [explicit-any] Explicit "Any" is not allowed
@@ -584,8 +580,6 @@ minimax-h3/minimax_h3/glue.py: [explicit-any] Explicit "Any" is not allowed
 minimax-h3/minimax_h3/glue.py: [explicit-any] Explicit "Any" is not allowed
 minimax-h3/minimax_h3/glue.py: [explicit-any] Explicit "Any" is not allowed
 minimax-h3/minimax_h3/glue.py: [explicit-any] Explicit "Any" is not allowed
-minimax-h3/minimax_h3/glue.py: [redundant-expr] Left operand of "and" is always true
-minimax-h3/minimax_h3/glue.py: [redundant-expr] Left operand of "and" is always true
 minimax-h3/minimax_h3/glue.py: [unreachable] Statement is unreachable
 minimax-h3/minimax_h3/guide_rows.py: [explicit-any] Explicit "Any" is not allowed
 minimax-h3/minimax_h3/guide_rows.py: [explicit-any] Explicit "Any" is not allowed
@@ -963,7 +957,6 @@ qwen-image-2/qwen_image_2/model.py: [no-untyped-call] Call to untyped function "
 qwen-image-2/qwen_image_2/model.py: [no-untyped-call] Call to untyped function "from_config" of "FlowMatchEulerDiscreteScheduler" in typed context
 qwen-image-2/qwen_image_2/model.py: [no-untyped-call] Call to untyped function "from_config" of "QwenImage21Transformer2DModel" in typed context
 qwen-image-2/qwen_image_2/model.py: [no-untyped-call] Call to untyped function "from_config" of "_BaseAutoModelClass" in typed context
-qwen-image-2/qwen_image_2/model.py: [redundant-expr] If condition is always true
 qwen-image-2/qwen_image_2/model.py: [unreachable] Statement is unreachable
 qwen-image-2/qwen_image_2/quantize.py: [explicit-any] Explicit "Any" is not allowed
 qwen-image-2/qwen_image_2/quantize.py: [union-attr] Item "DerivationHook" of "QuantizationPlan | SelectionPlan | DerivationHook" has no attribute "components"

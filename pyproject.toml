@@ -77,7 +77,8 @@ disallow_any_explicit = true
 disallow_any_unimported = true
 disallow_any_decorated = true
 implicit_reexport = false
-enable_error_code = ["ignore-without-code", "possibly-undefined", "redundant-expr", "truthy-bool"]
+# Not redundant-expr: a runtime check of a value from other code stays, though its type rules the value out.
+enable_error_code = ["ignore-without-code", "possibly-undefined", "truthy-bool"]
 # torch leaves a few of its own functions unannotated (torch.cuda.Event(), is_initialized()).
 untyped_calls_exclude = ["torch"]
 exclude = ["^birefnet/birefnet/upstream/", "^seedvr2/seedvr2/upstream/", "^hunyuan-image-3/hunyuan_image_3/tencent/"]
