@@ -50,35 +50,6 @@ flux-2/flux_2/turbo.py: [attr-defined] "Flux2Transformer2DModel" has no attribut
 flux-2/flux_2/turbo.py: [explicit-any] Explicit "Any" is not allowed
 flux-2/flux_2/turbo.py: [no-untyped-call] Call to untyped function "Flux2Transformer2DModel" in typed context
 flux-2/flux_2/upsampler.py: [explicit-any] Explicit "Any" is not allowed
-flux-3-klein/flux_3_klein/__init__.py: [assignment] Incompatible types in assignment (expression has type "Prompt[Image]", base class "ImageRequest" defined the type as "str")
-flux-3-klein/flux_3_klein/klein.py: [arg-type] Argument 2 to "_get_qwen3_vl_prompt_embeds" of "Flux3TextEncoderStep" has incompatible type "Qwen3VLProcessor"; expected "AutoProcessor"
-flux-3-klein/flux_3_klein/klein.py: [assignment] Incompatible types in assignment (expression has type "Tensor", base class "tuple" defined the type as "Callable[[Any, SupportsIndex, SupportsIndex], int]")
-flux-3-klein/flux_3_klein/klein.py: [attr-defined] "Transformer" has no attribute "early_stream_modulations"
-flux-3-klein/flux_3_klein/klein.py: [attr-defined] "Transformer" has no attribute "mode_blocks"
-flux-3-klein/flux_3_klein/klein.py: [attr-defined] "Transformer" has no attribute "norm_out"
-flux-3-klein/flux_3_klein/klein.py: [attr-defined] "Transformer" has no attribute "proj_out"
-flux-3-klein/flux_3_klein/klein.py: [attr-defined] "Transformer" has no attribute "single_stream_modulations"
-flux-3-klein/flux_3_klein/klein.py: [attr-defined] "Transformer" has no attribute "single_transformer_blocks"
-flux-3-klein/flux_3_klein/klein.py: [attr-defined] "Transformer" has no attribute "x_embedders"
-flux-3-klein/flux_3_klein/klein.py: [explicit-any] Explicit "Any" is not allowed
-flux-3-klein/flux_3_klein/klein.py: [explicit-any] Explicit "Any" is not allowed
-flux-3-klein/flux_3_klein/klein.py: [explicit-any] Explicit "Any" is not allowed
-flux-3-klein/flux_3_klein/klein.py: [explicit-any] Explicit "Any" is not allowed
-flux-3-klein/flux_3_klein/klein.py: [explicit-any] Explicit "Any" is not allowed
-flux-3-klein/flux_3_klein/klein.py: [explicit-any] Explicit "Any" is not allowed
-flux-3-klein/flux_3_klein/klein.py: [explicit-any] Explicit "Any" is not allowed
-flux-3-klein/flux_3_klein/klein.py: [explicit-any] Explicit "Any" is not allowed
-flux-3-klein/flux_3_klein/klein.py: [explicit-any] Explicit "Any" is not allowed
-flux-3-klein/flux_3_klein/klein.py: [explicit-any] Explicit "Any" is not allowed
-flux-3-klein/flux_3_klein/klein.py: [explicit-any] Explicit "Any" is not allowed
-flux-3-klein/flux_3_klein/klein.py: [no-any-return] Returning Any from function declared to return "Tensor"
-flux-3-klein/flux_3_klein/klein.py: [no-any-return] Returning Any from function declared to return "Tensor"
-flux-3-klein/flux_3_klein/klein.py: [no-any-return] Returning Any from function declared to return "Tensor"
-flux-3-klein/flux_3_klein/klein.py: [no-untyped-call] Call to untyped function "from_config" of "AutoencoderKLFlux2" in typed context
-flux-3-klein/flux_3_klein/klein.py: [no-untyped-call] Call to untyped function "from_config" of "Flux3Transformer2DModel" in typed context
-flux-3-klein/flux_3_klein/klein.py: [no-untyped-call] Call to untyped function "from_config" of "_BaseAutoModelClass" in typed context
-flux-3-klein/flux_3_klein/klein.py: [unused-ignore] Unused "type: ignore" comment
-flux-3-klein/flux_3_klein/quantize.py: [explicit-any] Explicit "Any" is not allowed
 flux-3-klein/flux_3_klein/quantize.py: [union-attr] Item "DerivationHook" of "QuantizationPlan | SelectionPlan | DerivationHook" has no attribute "components"
 flux-3-klein/flux_3_klein/quantize.py: [union-attr] Item "DerivationHook" of "QuantizationPlan | SelectionPlan | DerivationHook" has no attribute "components"
 flux-3-klein/flux_3_klein/quantize.py: [union-attr] Item "DerivationHook" of "QuantizationPlan | SelectionPlan | DerivationHook" has no attribute "components"
@@ -91,14 +62,6 @@ flux-3-klein/flux_3_klein/quantize.py: [union-attr] Item "SelectionPlan" of "Qua
 flux-3-klein/flux_3_klein/quantize.py: [union-attr] Item "SelectionPlan" of "QuantizationPlan | SelectionPlan | DerivationHook" has no attribute "components"
 flux-3-klein/flux_3_klein/quantize.py: [union-attr] Item "SelectionPlan" of "QuantizationPlan | SelectionPlan | DerivationHook" has no attribute "components"
 flux-3-klein/flux_3_klein/quantize.py: [union-attr] Item "SelectionPlan" of "QuantizationPlan | SelectionPlan | DerivationHook" has no attribute "components"
-flux-3-klein/flux_3_klein/upsampler.py: [explicit-any] Explicit "Any" is not allowed
-flux-3-klein/flux_3_klein/upsampler.py: [explicit-any] Explicit "Any" is not allowed
-flux-3-klein/flux_3_klein/upsampler.py: [explicit-any] Explicit "Any" is not allowed
-flux-3-klein/flux_3_klein/upsampler.py: [explicit-any] Explicit "Any" is not allowed
-flux-3-klein/flux_3_klein/upsampler.py: [explicit-any] Explicit "Any" is not allowed
-flux-3-klein/flux_3_klein/upsampler.py: [explicit-any] Explicit "Any" is not allowed
-flux-3-klein/flux_3_klein/upsampler.py: [explicit-any] Explicit "Any" is not allowed
-flux-3-klein/flux_3_klein/upsampler.py: [explicit-any] Explicit "Any" is not allowed
 hidream-o1/hidream_o1/__init__.py: [assignment] Incompatible types in assignment (expression has type "Prompt[Image]", base class "ImageRequest" defined the type as "str")
 hidream-o1/hidream_o1/model.py: [arg-type] Argument 1 to "rectangle" of "ImageDraw" has incompatible type "tuple[int, int, int, int] | None"; expected "Sequence[float] | Sequence[Sequence[float]]"
 hidream-o1/hidream_o1/model.py: [arg-type] Argument 1 to "to" of "TensorBase" has incompatible type "dtype | Tensor | Module"; expected "dtype"
