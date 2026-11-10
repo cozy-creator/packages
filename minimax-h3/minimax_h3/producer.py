@@ -11,13 +11,16 @@ projected once, before Kitchen's pass, for its scale, and that pass reads it bac
 served by the producer's Runtime base backend.
 
 The approved SM120 recipe (`kitchen-sol-producer-fp4-fixed-means-shared-qkv`, dense calls on Sage3
-fixed-means NVFP4) and the consumer cards' (`kitchen-sol-producer-int4qk-shared-qkv`, dense calls
-on int4 Q·Kᵀ) also shard over Ulysses (`_parallel_produce`): the projection runs on the local token
-shard, the exchange gathers whole sequences per head subset, and the rotary tables are the full
-ones a hook keeps before Diffusers splits them (`retain_rotary`). That is exact because every
+fixed-means NVFP4) also shards over Ulysses (`_parallel_produce`): the projection runs on the local
+token shard, the exchange gathers whole sequences per head subset, and the rotary tables are the
+full ones a hook keeps before Diffusers splits them (`retain_rotary`). That is exact because every
 statistic Kitchen keeps is per head (key means and value scales [heads, 128], routing per head,
 sink ranges per token): a GPU's head subset over the whole sequence is a head window of one GPU's
-call (`_Heads`), and each recipe's dense base is head-local.
+call (`_Heads`), and the recipe's dense base is head-local.
+
+The consumer cards' recipe (`kitchen-sol-producer-int4qk-shared-qkv`) serves one GPU only: sharded,
+its first sparse step hung on 2x RTX 4090 (0.22.1 smoke), so under a group the Runtime steps to its
+dense base `kitchen-sol-int4qk` and the sparse steps run dense.
 """
 
 from __future__ import annotations
@@ -689,7 +692,7 @@ PRODUCERS = {
     for producer in (
         _register(FIXED_MEANS, "kitchen-sol-fp4-fixed-means", context_parallel=True),
         _register(FP4_LOWMEM, "kitchen-sol-fp4-lowmem"),
-        _register(INT4QK, "kitchen-sol-int4qk", context_parallel=True),
+        _register(INT4QK, "kitchen-sol-int4qk"),
         _register(FAST, "kitchen-sol"),
     )
 }
