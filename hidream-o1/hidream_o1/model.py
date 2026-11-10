@@ -341,7 +341,8 @@ def sequence(
     pixel_values = grid = None
     if conditions:
         content: list[dict[str, str]] = [{"type": "image"} for _ in conditions] + [{"type": "text", "text": caption}]
-        text = processor.apply_chat_template([{"role": "user", "content": content}], tokenize=False,
+        # Transformers types a message's content as text; Qwen-VL's processor takes these lists.
+        text = processor.apply_chat_template([{"role": "user", "content": content}], tokenize=False,  # type: ignore[arg-type]
                                              add_generation_prompt=True)
         encoded = processor(text=[text], images=conditions, padding="longest", return_tensors="pt")
         ids = torch.cat([encoded.input_ids, tail], dim=-1)
@@ -365,13 +366,19 @@ def sequence(
 # ---------------------------------------------------------------- the transformer
 
 
+class _MRope(TypedDict):
+    rope_theta: float
+    mrope_section: list[int]
+
+
 def _rope(config: Qwen3VLTextConfig, positions: torch.Tensor, like: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     """Qwen3-VL's interleaved M-RoPE in f32 from an f32 inverse frequency (upstream's
     `original_inv_freq`), as (cos, sin) of [1, T, head_dim] in `like`'s dtype."""
     device = like.device
-    dim = config.head_dim
-    theta = config.rope_parameters["rope_theta"]
-    section = config.rope_parameters["mrope_section"]
+    # Qwen3-VL's text config always carries its head width and M-RoPE parameters.
+    dim = cast(int, config.head_dim)
+    rope = cast(_MRope, config.rope_parameters)
+    theta, section = rope["rope_theta"], rope["mrope_section"]
     inv = 1.0 / (theta ** (torch.arange(0, dim, 2, dtype=torch.int64).float() / dim))
     freqs = positions.to(device).float()[:, None, :, None] * inv.to(device)[None, None, None, :]
     mixed = freqs[0].clone()
@@ -403,7 +410,7 @@ def _layer(
     keys, values = (k, v) if past is None else (torch.cat([past[0], k], 2), torch.cat([past[1], v], 2))
     groups = q.shape[1] // keys.shape[1]  # grouped-query heads, repeated so any SDPA backend serves them
     keys, values = keys.repeat_interleave(groups, dim=1), values.repeat_interleave(groups, dim=1)
-    site: Attention = attention.prefix_site if past is None else attention.site  # type: ignore[attr-defined]  # O1Graph installs both
+    site = cast(Attention, attention.prefix_site if past is None else attention.site)  # O1Graph installs both
     out = site(q.transpose(1, 2), keys.transpose(1, 2), values.transpose(1, 2))
     h = h + attention.o_proj(out.reshape(*x.shape[:-1], -1))
     return h + layer.mlp(layer.post_attention_layernorm(h)), k, v
@@ -500,7 +507,7 @@ class HiDreamO1(Model[O1Graph]):
         # Every caption's prefix K/V is read by every step: the Runtime holds it (on the card while
         # there is room, else refilled from pinned host memory) until the loop ends.
         config = body.language_model.config
-        per_token = 2 * config.num_key_value_heads * config.head_dim * torch.bfloat16.itemsize
+        per_token = 2 * config.num_key_value_heads * cast(int, config.head_dim) * torch.bfloat16.itemsize  # always set
         nbytes = sum(seq.prefix for seq in seqs) * per_token * config.num_hidden_layers
         with torch.inference_mode(), retained(nbytes) as held:
             vision = None
