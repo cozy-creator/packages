@@ -1094,49 +1094,9 @@ scripts/qwen3.6-model-proof.py: [no-untyped-call] Call to untyped function "Gene
 scripts/qwen3.6-model-proof.py: [no-untyped-call] Call to untyped function "from_config" of "_BaseAutoModelClass" in typed context
 scripts/qwen3.6-model-proof.py: [operator] "Tensor" not callable
 scripts/qwen3.6-model-proof.py: [var-annotated] Need type annotation for "stored" (hint: "stored: set[<type>] = ...")
-sdxl/sdxl/__init__.py: [arg-type] Argument "merges" to "CLIPTokenizer" has incompatible type "list[tuple[Any, ...]]"; expected "str | list[str] | None"
-sdxl/sdxl/__init__.py: [arg-type] Argument 1 to "__call__" of "_Wrapped" has incompatible type "dtype"; expected "PreTrainedModel"
-sdxl/sdxl/__init__.py: [attr-defined] "HiDiffusionUNet" has no attribute "info"
-sdxl/sdxl/__init__.py: [attr-defined] "HiDiffusionUNet" has no attribute "info"
-sdxl/sdxl/__init__.py: [attr-defined] "HiDiffusionUNet" has no attribute "modules"
-sdxl/sdxl/__init__.py: [explicit-any] Explicit "Any" is not allowed
-sdxl/sdxl/__init__.py: [explicit-any] Explicit "Any" is not allowed
-sdxl/sdxl/__init__.py: [explicit-any] Explicit "Any" is not allowed
-sdxl/sdxl/__init__.py: [explicit-any] Explicit "Any" is not allowed
-sdxl/sdxl/__init__.py: [explicit-any] Explicit "Any" is not allowed
-sdxl/sdxl/__init__.py: [explicit-any] Explicit "Any" is not allowed
-sdxl/sdxl/__init__.py: [explicit-any] Explicit "Any" is not allowed
-sdxl/sdxl/__init__.py: [explicit-any] Explicit "Any" is not allowed
-sdxl/sdxl/__init__.py: [explicit-any] Explicit "Any" is not allowed
-sdxl/sdxl/__init__.py: [explicit-any] Explicit "Any" is not allowed
-sdxl/sdxl/__init__.py: [explicit-any] Explicit "Any" is not allowed
-sdxl/sdxl/__init__.py: [explicit-any] Explicit "Any" is not allowed
-sdxl/sdxl/__init__.py: [explicit-any] Explicit "Any" is not allowed
-sdxl/sdxl/__init__.py: [explicit-any] Explicit "Any" is not allowed
-sdxl/sdxl/__init__.py: [explicit-any] Explicit "Any" is not allowed
-sdxl/sdxl/__init__.py: [explicit-any] Explicit "Any" is not allowed
-sdxl/sdxl/__init__.py: [explicit-any] Explicit "Any" is not allowed
-sdxl/sdxl/__init__.py: [explicit-any] Explicit "Any" is not allowed
-sdxl/sdxl/__init__.py: [explicit-any] Explicit "Any" is not allowed
-sdxl/sdxl/__init__.py: [explicit-any] Explicit "Any" is not allowed
-sdxl/sdxl/__init__.py: [explicit-any] Explicit "Any" is not allowed
-sdxl/sdxl/__init__.py: [misc] Type of decorated function contains type "Any" ("_lru_cache_wrapper[type[Any]]")
-sdxl/sdxl/__init__.py: [misc] Type of decorated function contains type "Any" ("def (SdxlModel, /, tokens: tuple[Any, Any], negative_tokens: tuple[Any, Any] | None, *, width: int, height: int, steps: int, guidance: float, hidiffusion: bool, seed: int, progress: Callable[[int, int], None]) -> tuple[Any, Any, Any, Any]")
-sdxl/sdxl/__init__.py: [possibly-undefined] Name "neg" may be undefined
-sdxl/sdxl/__init__.py: [possibly-undefined] Name "neg_2" may be undefined
 sdxl/sdxl/__init__.py: [union-attr] Item "DerivationHook" of "QuantizationPlan | SelectionPlan | DerivationHook" has no attribute "components"
 sdxl/sdxl/__init__.py: [union-attr] Item "DerivationHook" of "QuantizationPlan | SelectionPlan | DerivationHook" has no attribute "include"
 sdxl/sdxl/__init__.py: [union-attr] Item "SelectionPlan" of "QuantizationPlan | SelectionPlan | DerivationHook" has no attribute "components"
-sdxl/sdxl/__init__.py: [unused-ignore] Unused "type: ignore" comment
-sdxl/sdxl/__init__.py: [unused-ignore] Unused "type: ignore[import-not-found, import-untyped]" comment
-sdxl/sdxl/__init__.py: [unused-ignore] Unused "type: ignore[valid-type]" comment
-sdxl/sdxl/_numerics.py: [explicit-any] Explicit "Any" is not allowed
-sdxl/sdxl/_numerics.py: [explicit-any] Explicit "Any" is not allowed
-sdxl/sdxl/_numerics.py: [explicit-any] Explicit "Any" is not allowed
-sdxl/sdxl/_numerics.py: [explicit-any] Explicit "Any" is not allowed
-sdxl/sdxl/_numerics.py: [explicit-any] Explicit "Any" is not allowed
-sdxl/sdxl/_numerics.py: [explicit-any] Explicit "Any" is not allowed
-sdxl/sdxl/_numerics.py: [no-any-return] Returning Any from function declared to return "dtype"
 seedvr2/seedvr2/__init__.py: [assignment] Incompatible types in assignment (expression has type "int", variable has type "Seed")
 seedvr2/seedvr2/__init__.py: [misc] Incompatible types in "yield" (actual type "DecodedAudioChunk", expected type "DecodedVideoFrame")
 seedvr2/seedvr2/model.py: [explicit-any] Explicit "Any" is not allowed

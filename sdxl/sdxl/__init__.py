@@ -196,11 +196,11 @@ def _windowed(parent: type[BasicTransformerBlock]) -> type[BasicTransformerBlock
         cozy_draw = 0.0
         info: HiDiffusionInfo
 
-        def forward(
+        def forward(  # type: ignore[explicit-any]  # cross_attention_kwargs: Diffusers' attention-processor kwargs
             self, hidden_states: torch.Tensor, attention_mask: torch.Tensor | None = None,
             encoder_hidden_states: torch.Tensor | None = None, encoder_attention_mask: torch.Tensor | None = None,
             timestep: torch.Tensor | None = None,
-            cross_attention_kwargs: dict[str, Any] | None = None,  # Any: Diffusers' attention-processor kwargs
+            cross_attention_kwargs: dict[str, Any] | None = None,
             class_labels: torch.Tensor | None = None, added_cond_kwargs: dict[str, torch.Tensor] | None = None,
         ) -> torch.Tensor:
             kwargs = dict(cross_attention_kwargs or {})
@@ -597,11 +597,10 @@ def generate(
 
     with tel.stage("tokenize", overall_range=(0.00, 0.02)):
         ids, ids_2 = _tokenize(model.tokenizers, prompt)
-        if classifier_free:
-            neg, neg_2 = _tokenize(model.tokenizers, negative_prompt)
+        negative = _tokenize(model.tokenizers, negative_prompt) if classifier_free else None
 
     image = _sample(
-        model, (ids, ids_2), (neg, neg_2) if classifier_free else None,
+        model, (ids, ids_2), negative,
         width=width, height=height, steps=steps, guidance=guidance,
         hidiffusion_applied=hidiffusion_applied, seed=seed, tel=tel, progress=ctx.progress,
     )
