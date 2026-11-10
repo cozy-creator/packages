@@ -52,7 +52,7 @@ Corners = tuple[float, float, float, float]
 class TurboInput(ImageRequest):
     #: Its text, and the pictures it mentions, which it edits or composes in the order it first mentions them.
     #: HiDream-O1 has no words of its own for them, so a `<name>` mention reads as the name.
-    prompt: Prompt[Image] = Prompt()
+    prompt: Prompt[Image] = Prompt()  # type: ignore[assignment]  # a prompt with pictures, in place of the base's text
     #: Where a mentioned picture goes in the output, by its key (upstream's `--layout_bboxes`).
     boxes: dict[str, Box] = msgspec.field(default_factory=dict)
 
