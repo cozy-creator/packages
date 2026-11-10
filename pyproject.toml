@@ -4,7 +4,7 @@
 # no-tests rule bans test suites, not type checking.
 
 [tool.basedpyright]
-# scripts/typecheck.sh runs this against the real Runtime, torch, Diffusers and Transformers.
+# The editor's language server only; the required check is mypy (scripts/typecheck.sh).
 include = [
     "anima",
     "birefnet",
@@ -54,6 +54,10 @@ typeCheckingMode = "standard"
 # `from diffusers import X` is Diffusers' public API; its lazy `__init__` re-exports nothing the checker can see.
 reportPrivateImportUsage = false
 
+# The required type check (scripts/typecheck.sh), against the real Runtime and libraries in
+# scripts/typecheck-requirements.txt. `Any` is an error; one a third-party boundary needs carries
+# `# type: ignore[explicit-any]  # <why>`. Known errors live in .mypy-baseline.txt, which only shrinks.
+# Local stubs for the untyped libraries' parts we call go in typings/.
 [tool.mypy]
 python_version = "3.12"
 files = [
@@ -61,50 +65,31 @@ files = [
     "flux-3-klein", "fibo-2", "hidream-o1", "hunyuan-image-3", "ideogram-4", "moss-image", "qwen3.6", "krea-2",
     "scripts", "examples", "minimax-h3-tools/src",
 ]
+mypy_path = [
+    "typings", "anima", "birefnet", "fibo-2", "flux-2", "flux-3-klein", "hidream-o1", "hunyuan-image-3", "ideogram-4",
+    "krea-2", "minimax-h3", "minimax-h3-tools/src", "moss-image", "qwen3.5", "qwen3.6", "qwen-image", "qwen-image-2",
+    "sdxl", "seedvr2",
+]
 strict = true
 warn_unreachable = true
 disallow_any_generics = true
+disallow_any_explicit = true
+disallow_any_unimported = true
+disallow_any_decorated = true
 implicit_reexport = false
+enable_error_code = ["ignore-without-code", "possibly-undefined", "redundant-expr", "truthy-bool"]
 exclude = ["^birefnet/birefnet/upstream/", "^seedvr2/seedvr2/upstream/", "^hunyuan-image-3/hunyuan_image_3/tencent/"]
 
-# Static checks install the typed Runtime distribution from PyPI. Heavy model libraries remain
-# absent to check the package-facing contracts without their large third-party stub trees.
-# Runtime behavior and imported descriptors use the full locked dependency environment.
+# Untyped libraries (no py.typed) until typings/ covers what we call, and modules only a proof fetches.
 [[tool.mypy.overrides]]
 module = [
-    "torch.*", "torchvision.*", "transformers.*", "tokenizers.*", "numpy.*", "PIL.*",
-    "safetensors.*", "diffusers.*", "tfsbench", "tensorfs", "tensorfs.*", "cozy_eval.*",
-    "av", "av.*", "omegaconf", "omegaconf.*", "triton", "triton.*",
+    "torchvision", "torchvision.*", "triton", "triton.*", "hidiffusion", "hidiffusion.*",
+    "rotary_embedding_torch", "rotary_embedding_torch.*", "accelerate", "accelerate.*",
+    "tfsbench", "cozy_eval", "cozy_eval.*",
     # BFL's reference code, fetched by its model proof at run time.
     "flux3", "flux3.*",
 ]
 ignore_missing_imports = true
-
-# h3_tables decorates with `@torch.inference_mode()`; torch is intentionally absent from
-# the light checking environment, so the decorator is untyped here and fully typed in the
-# package's own locked venv.
-[[tool.mypy.overrides]]
-module = ["h3_tables", "h3_tables.*"]
-disallow_untyped_decorators = false
-
-# These two older packages subclass optional Torch surfaces that are intentionally absent
-# from the light checking environment. H3's Runtime author surface remains fully typed.
-[[tool.mypy.overrides]]
-module = ["anima", "anima.*", "sdxl"]
-disallow_subclassing_any = false
-disallow_untyped_decorators = false
-warn_unused_ignores = false
-
-# Model classes subclass Diffusers' and Torch's own, which this light environment does not carry.
-[[tool.mypy.overrides]]
-module = ["qwen_image_2.model", "qwen_image.model", "flux_3_klein.klein", "seedvr2.model", "flux_2.model", "flux_2.turbo", "fibo_2.model", "fibo_2.upsampler", "hidream_o1.model", "moss_image.model", "krea_2.model"]
-disallow_subclassing_any = false
-warn_unused_ignores = false
-
-# MotionVideo extends Diffusers' reference class, also absent from the light environment.
-[[tool.mypy.overrides]]
-module = ["minimax_h3.official"]
-disallow_subclassing_any = false
 
 # Attributed upstream architecture is exercised by its real constructor and model proof.
 [[tool.mypy.overrides]]
