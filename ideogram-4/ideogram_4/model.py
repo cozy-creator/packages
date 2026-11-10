@@ -135,7 +135,7 @@ class Ideogram4(Model[IdeogramGraph]):
         """Serve the VAE at `VAE_DTYPE` on a GPU from now on, before any VAE scope opens: the Runtime
         casts the stored bfloat16 bytes when it next fills them. A CPU keeps bfloat16."""
         vae = self.graph.components["vae"]
-        if torch.device(str(self.device)).type == "cuda" and next(vae.parameters()).dtype != VAE_DTYPE:
+        if self.device.type == "cuda" and next(vae.parameters()).dtype != VAE_DTYPE:
             hold_dtype(vae, VAE_DTYPE)
             tel.log("vae representation", dtype=str(VAE_DTYPE).removeprefix("torch."))
 
@@ -159,7 +159,7 @@ class Ideogram4(Model[IdeogramGraph]):
         (`_text_rows`); the image rows never carry the zero text features Diffusers pads them with."""
         tf = self.graph.components["transformer"]
         uncond = self.graph.components["unconditional_transformer"]
-        device = torch.device(str(self.device))
+        device = self.device
         steps = len(guidance)
         rows, columns = height // PATCH, width // PATCH
         tokens, texts = rows * columns, features.shape[0]
@@ -191,7 +191,7 @@ class Ideogram4(Model[IdeogramGraph]):
         """The pipeline's decode: the VAE's BatchNorm statistics undone on the packed latents,
         2x2 patches unpacked, then the decoder."""
         vae = self.graph.components["vae"]
-        device = torch.device(str(self.device))
+        device = self.device
         rows, columns = height // PATCH, width // PATCH
         with torch.inference_mode():
             z = latents.to(device)

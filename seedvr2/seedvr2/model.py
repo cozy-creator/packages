@@ -181,7 +181,7 @@ class RestorationModel(Model[Graph]):
         (t, h, w, c) on the device, sampled from `generator`. The VAE moves one slice of frames
         at a time."""
         latent = _vae(self.graph).encode(pixels[None], generator).latent[0]
-        return latent.movedim(0, -1).to(str(self.device)) * SCALE
+        return latent.movedim(0, -1).to(self.device) * SCALE
 
     @uses_components("dit", "conditioning")
     def denoise(
@@ -189,7 +189,7 @@ class RestorationModel(Model[Graph]):
     ) -> torch.Tensor:
         """The one-step restoration of a window's latent, conditioned on itself, from
         `generator`'s noise, in pieces along time from its shape alone."""
-        runner = _runner(self.graph, torch.device(str(self.device)))
+        runner = _runner(self.graph, self.device)
         conditioning = self.graph.components["conditioning"]
 
         def draw() -> torch.Tensor:
@@ -284,7 +284,7 @@ def restore(
         )
     )
     crop = (slice(top, top + height), slice(left, left + width))
-    device = torch.device(str(model.device))
+    device = model.device
     # Every draw is the CPU stream's: a seed restores the same window on any device.
     generator = rng.generator(seed)
     with torch.inference_mode():

@@ -505,7 +505,7 @@ class HiDreamO1(Model[O1Graph]):
         `negative` when it is given, over the first `GUIDED` of the steps if `interval`."""
         body, root = self.body, self.graph.components[COMPONENT]
         image_token = self.processor.tokenizer.convert_tokens_to_ids("<|image_pad|>")
-        device = torch.device(str(self.device))
+        device = self.device
         rows, columns = height // PATCH, width // PATCH
         n = rows * columns
         conditions = [condition_image(r, len(references)) for r in references]

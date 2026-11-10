@@ -92,7 +92,7 @@ class QwenEncoder(Model[EncoderGraph]):
         """`Ideogram4Pipeline.encode_prompt` for one caption, unpadded: the hidden states of
         Ideogram's 13 layers concatenated per token, `[tokens, 53248]` in bf16."""
         model = self.graph.components[COMPONENT]
-        device = torch.device(str(self.device))
+        device = self.device
         messages = [{"role": "user", "content": [{"type": "text", "text": caption}]}]
         text = self.tokenizer.apply_chat_template(messages, add_generation_prompt=True, tokenize=False)
         ids = self.tokenizer(text, return_tensors="pt", add_special_tokens=False)["input_ids"]
@@ -164,7 +164,7 @@ class QwenUpsampler(Model[UpsamplerGraph]):
         ]
         inputs = self.tokenizer.apply_chat_template(
             messages, add_generation_prompt=True, tokenize=True, return_tensors="pt", return_dict=True
-        ).to(torch.device(str(self.device)))
+        ).to(self.device)
         stop = self.tokenizer.eos_token_id
         # Transformers' default top-k (50), which Diffusers' `generate_captions` sampled under.
         out = lm.generate(model, inputs, max_new_tokens=MAX_TOKENS, stop=[stop], pad=stop,  # type: ignore[arg-type]  # Qwen3-VL's PreTrainedModel

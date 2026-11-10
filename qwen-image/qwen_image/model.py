@@ -342,7 +342,7 @@ class QwenImageTransformer(Model[TransformerGraph]):
         """`sample` on this DiT, at `scheduler_config` or its checkpoint's."""
         return sample(
             self.graph.components["transformer"],
-            torch.device(str(self.device)),
+            self.device,
             scheduler_config or self.graph.scheduler_config,
             embeds, mask, negative, references,
             width=width, height=height, steps=steps, guidance=guidance, seed=seed, progress=progress,
@@ -380,7 +380,7 @@ class QwenImage(Model[QwenImageGraph]):
         """Encode and decode in `VAE_DTYPE` on CUDA; the CPU keeps the stored bf16. The Runtime casts
         the stored bytes when it next fills them; called before any VAE scope opens."""
         vae = self.graph.components["vae"]
-        if torch.device(str(self.device)).type != "cuda" or next(vae.parameters()).dtype == VAE_DTYPE:
+        if self.device.type != "cuda" or next(vae.parameters()).dtype == VAE_DTYPE:
             return
         hold_dtype(vae, VAE_DTYPE)
         tel.log("vae representation", dtype="float16")
@@ -404,7 +404,7 @@ class QwenImage(Model[QwenImageGraph]):
         """The prompt as upstream reads it, its embeddings and mask (None when every token is
         valid): with references, the edit template with each at its 384² area; without, the
         text-to-image template, at most 512 tokens."""
-        device = torch.device(str(self.device))
+        device = self.device
         pipeline = self._pipeline(edit=bool(images))
         with torch.inference_mode():
             if images:
@@ -425,7 +425,7 @@ class QwenImage(Model[QwenImageGraph]):
         pipeline's `_encode_vae_image` of one frame without Diffusers' feature cache (each
         convolution's input kept for a next frame an image never has)."""
         vae = self.graph.components["vae"]
-        device = torch.device(str(self.device))
+        device = self.device
         pipeline = self._pipeline(edit=True)
         z = vae.config["z_dim"]
         mean = torch.tensor(vae.config["latents_mean"]).view(1, z, 1, 1, 1)
@@ -465,7 +465,7 @@ class QwenImage(Model[QwenImageGraph]):
         """`sample` on this checkpoint's DiT, at `scheduler_config` or the checkpoint's."""
         return sample(
             self.graph.components["transformer"],
-            torch.device(str(self.device)),
+            self.device,
             scheduler_config or self.graph.scheduler_config,
             embeds, mask, negative, references,
             width=width, height=height, steps=steps, guidance=guidance, seed=seed, progress=progress,
@@ -477,7 +477,7 @@ class QwenImage(Model[QwenImageGraph]):
         `VaeImageProcessor` quantizes them: a 4 MP canvas sends 12 MB of bytes to the host, not
         50 MB of floats for host passes."""
         vae = self.graph.components["vae"]
-        device = torch.device(str(self.device))
+        device = self.device
         with torch.inference_mode():
             latents = QwenImagePipeline._unpack_latents(latents, height, width, PATCH // 2)  # type: ignore[no-untyped-call]  # Diffusers' helper is untyped
             latents = latents.to(device=device, dtype=vae.dtype)

@@ -62,7 +62,7 @@ class Flux2Upsampler(Model[UpsamplerGraph]):
         inputs = processor.apply_chat_template(  # type: ignore[attr-defined]
             format_input([prompt], system, shown), add_generation_prompt=True, tokenize=True,
             return_dict=True, return_tensors="pt",
-        ).to(torch.device(str(self.device)))
+        ).to(self.device)
         if "pixel_values" in inputs:
             inputs["pixel_values"] = inputs["pixel_values"].to(model.dtype)
         tokenizer = processor.tokenizer

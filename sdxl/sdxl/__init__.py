@@ -377,7 +377,7 @@ class SdxlModel(Model[SdxlPipeline]):
         components = self.pipe.components
         first, second = components["text_encoder"], components["text_encoder_2"]
         unet, vae = components["unet"], components["vae"]
-        device = torch.device(str(self.device))
+        device = self.device
         generator = rng.generator(seed)
         scheduler: DDIMScheduler | EulerDiscreteScheduler
         advance: Callable[[torch.Tensor, int, torch.Tensor], BaseOutput | tuple[torch.Tensor, ...]]

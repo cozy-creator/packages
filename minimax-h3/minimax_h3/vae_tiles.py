@@ -250,7 +250,7 @@ def encode_condition(
     the collective. `pixels` are the reference's uint8 pixels as the official step reads
     them, `(H, W, 3)` for an image or `(T, H, W, 3)` for a video, laid out on the device
     exactly as that step lays them out."""
-    device = torch.device(str(placed_device()))
+    device = placed_device()
     pixels = pixels.to(device)
     if pixels.ndim == 4 and isinstance(vae, TileBatchedVideoVAE):
         posterior = vae.encode_frames(pixels.permute(3, 0, 1, 2)[None], pixel_mean, pixel_std)

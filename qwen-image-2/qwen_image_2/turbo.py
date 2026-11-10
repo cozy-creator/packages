@@ -100,7 +100,7 @@ class FunAccLoRA(Model[FunAccGraph]):
     ) -> torch.Tensor:
         """`base.denoise` with this overlay armed on its DiT, on Fun Acc's grid and per-step heads."""
         transformer = base.graph.components["transformer"]
-        heads = cast(torch.Tensor, self.graph.heads.heads).to(device=torch.device(str(base.device))).clone()  # its Parameter
+        heads = cast(torch.Tensor, self.graph.heads.heads).to(device=base.device).clone()  # its Parameter
         transformer._cozy_overlay = self.graph.sites
         try:
             return base.denoise(

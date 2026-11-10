@@ -279,7 +279,7 @@ class Krea2(Model[Krea2Graph]):
     def hold_vae(self) -> None:
         """Decode in `VAE_DTYPE` on CUDA; the CPU keeps the stored F32. The Runtime casts the VAE's
         stored F32 when it next fills it. Called before any VAE scope opens."""
-        if torch.device(str(self.device)).type == "cuda":
+        if self.device.type == "cuda":
             hold_dtype(self.graph.components["vae"], VAE_DTYPE)
 
     @memoize
@@ -293,7 +293,7 @@ class Krea2(Model[Krea2Graph]):
         same tokens get the same positions and every real token the same values, without the padding's
         compute or a mask (which leaves only SDPA among attention kernels)."""
         encoder = self.graph.components["text_encoder"].language_model
-        device = torch.device(str(self.device))
+        device = self.device
         tokens = self.tokenizer(
             PROMPT_PREFIX + prompt, truncation=True,
             max_length=TEXT_TOKENS + PREFIX_TOKENS - SUFFIX_TOKENS,
@@ -328,7 +328,7 @@ class Krea2(Model[Krea2Graph]):
         Each step is one call of the transformer (`Transformer.forward`), with what no step changes built
         once before the loop: each prompt's text-fusion and projection, and its rotary tables."""
         transformer = self.graph.components["transformer"]
-        device = torch.device(str(self.device))
+        device = self.device
         rows, columns = height // PATCH, width // PATCH
         channels: int = transformer.config["in_channels"] // 4
         scheduler = construct(FlowMatchEulerDiscreteScheduler, dict(self.graph.scheduler_config))
@@ -367,7 +367,7 @@ class Krea2(Model[Krea2Graph]):
         `VaeImageProcessor` quantizes them: a 4 MP canvas sends 12 MB of bytes to the host, not 50 MB of
         floats for host passes."""
         vae = self.graph.components["vae"]
-        device = torch.device(str(self.device))
+        device = self.device
         with torch.inference_mode():
             z = unpack(latents, height, width).to(device=device, dtype=vae.dtype)
             mean = z.new_tensor(vae.config["latents_mean"]).view(1, -1, 1, 1, 1)
