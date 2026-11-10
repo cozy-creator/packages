@@ -15,12 +15,17 @@ BASELINE = Path(".mypy-baseline.txt")
 ERROR = re.compile(r"^(?P<path>[^:\n]+):\d+(?::\d+)?: error: (?P<message>.*?)\s+\[(?P<code>[a-z-]+)\]$")
 
 
+def key(m: re.Match[str]) -> str:
+    """An error's identity: its file, code and message, with any line it names dropped."""
+    return f"{m['path']}: [{m['code']}] {re.sub(r'\bline \d+', 'line N', m['message'])}"
+
+
 def keys(lines: list[str]) -> Counter[str]:
     found: Counter[str] = Counter()
     for line in lines:
         m = ERROR.match(line.rstrip("\n"))
         if m:
-            found[f"{m['path']}: [{m['code']}] {m['message']}"] += 1
+            found[key(m)] += 1
         elif ": error: " in line:
             sys.exit(f"typecheck: an error without a code, or unreadable: {line.strip()}")
     return found
@@ -47,7 +52,7 @@ def main() -> None:
         print(f"typecheck: pruned {sum(gone.values())}; baseline {sum((known - gone).values())}")
     for line in output:
         m = ERROR.match(line.rstrip("\n"))
-        if m and new[f"{m['path']}: [{m['code']}] {m['message']}"]:
+        if m and new[key(m)]:
             print(line.rstrip("\n"))
     if new:
         print(f"typecheck: {sum(new.values())} new error(s) above; fix them (the baseline never grows)")
