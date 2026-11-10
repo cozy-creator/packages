@@ -177,11 +177,10 @@ def _modulate(normed: torch.Tensor, rows: torch.Tensor, indices: torch.Tensor) -
 
 
 class _BlockModulation(MiniMaxH3AdaLayerNormModulation):  # type: ignore[misc]
-    """FULL: the official AdaLN projection, or an armed overlay's table."""
+    """FULL: the official AdaLN projection, or an armed overlay's table. Diffusers' module with
+    this class (`H3Transformer.__init__`): its parameters and their paths are the checkpoint's."""
 
-    def __init__(self, time_embed_dim: int, hidden_size: int) -> None:
-        super().__init__(time_embed_dim=time_embed_dim, hidden_size=hidden_size)
-        self._armed: _Armed | None = None
+    _armed: _Armed | None = None
 
     def forward(self, temb: torch.Tensor) -> tuple[torch.Tensor, ...]:
         if self._armed is not None:
@@ -190,11 +189,10 @@ class _BlockModulation(MiniMaxH3AdaLayerNormModulation):  # type: ignore[misc]
 
 
 class _OutputModulation(MiniMaxH3AdaLayerNormOut):  # type: ignore[misc]
-    """FULL: the official final norm and its projection, or an armed overlay's table."""
+    """FULL: the official final norm and its projection, or an armed overlay's table (as
+    `_BlockModulation`, Diffusers' module with this class)."""
 
-    def __init__(self, hidden_size: int, time_embed_dim: int, eps: float) -> None:
-        super().__init__(hidden_size=hidden_size, time_embed_dim=time_embed_dim, eps=eps)
-        self._armed: _Armed | None = None
+    _armed: _Armed | None = None
 
     def forward(
         self,
@@ -266,10 +264,11 @@ class H3Transformer(MiniMaxH3Transformer3DModel):  # type: ignore[misc]
 
     def __init__(self, **config: Any) -> None:
         super().__init__(**config)
-        hidden, time_dim = int(self.config["hidden_size"]), int(self.config["time_embed_dim"])
+        # Armable in place: no module is built or dropped, so the construction (its random draws
+        # included) and the state dict are Diffusers' own.
         for block in self.transformer_blocks:
-            block.adaln_proj = _BlockModulation(time_dim, hidden)
-        self.norm_out = _OutputModulation(hidden, time_dim, float(self.config["final_norm_eps"]))
+            cast(nn.Module, block.adaln_proj).__class__ = _BlockModulation
+        cast(nn.Module, self.norm_out).__class__ = _OutputModulation
         for name in ("proj_out", "audio_proj_out"):
             head = cast(nn.Linear, getattr(self, name))
             setattr(self, name, _SelectableHead(head.in_features, head.out_features))
@@ -456,7 +455,7 @@ class H3Transformer(MiniMaxH3Transformer3DModel):  # type: ignore[misc]
         self._arming = OverlayArming(overlay, step)
         for index, block in enumerate(self.transformer_blocks):
             _modulation(block)._armed = _Armed(_overlay_tables(overlay, index))
-        self.norm_out._armed = _Armed(overlay.norm_out)
+        _output(self)._armed = _Armed(overlay.norm_out)
         for name in ("proj_out", "audio_proj_out") if overlay.heads else ():
             head = _projection_base(getattr(self, name))
             if not isinstance(head, _SelectableHead):
@@ -470,7 +469,7 @@ class H3Transformer(MiniMaxH3Transformer3DModel):  # type: ignore[misc]
         self._arming = None
         for block in self.transformer_blocks:
             _modulation(block)._armed = None
-        self.norm_out._armed = None
+        _output(self)._armed = None
         for name in ("proj_out", "audio_proj_out"):
             head = _projection_base(getattr(self, name))
             if isinstance(head, _SelectableHead):
@@ -480,6 +479,11 @@ class H3Transformer(MiniMaxH3Transformer3DModel):  # type: ignore[misc]
 def _modulation(block: nn.Module) -> _BlockModulation | _AdaLNPrunedBlockTable:
     """A block's modulation as `H3Transformer` installs it: FULL's projection or the table."""
     return cast("_BlockModulation | _AdaLNPrunedBlockTable", block.adaln_proj)
+
+
+def _output(dit: H3Transformer) -> _OutputModulation | _AdaLNPrunedOutputTable:
+    """The final norm as `H3Transformer` installs it: FULL's projection or the table."""
+    return cast("_OutputModulation | _AdaLNPrunedOutputTable", dit.norm_out)
 
 
 def _overlay_tables(overlay: Overlay, block: int) -> OverlayTables:
