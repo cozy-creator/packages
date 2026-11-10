@@ -63,7 +63,7 @@ class UpscaleInput(Tuning, kw_only=True):
     #: `events`: the canvas's height (`output_sizes`).
     resolution: Annotated[Resolution, Shape(pixels=_RESOLUTIONS)] = Resolution.HD
     #: `restore_window`.
-    seed: Seed = Seed(42)
+    seed: Seed = 42  # type: ignore[assignment]  # a literal: the interface is read from source (Seed is an int NewType)
     #: `output_sizes`: the box's shape, a letterboxed 16:9 canvas; unset, the source's shape.
     aspect_ratio: Annotated[AspectRatio, Ratios("16:9")] | None = None
 

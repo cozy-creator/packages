@@ -209,7 +209,7 @@ class RestorationModel(Model[Graph]):
         condition = runner.get_condition(noise, latent_blur=latent, task="sr")
 
         def dit(frames: torch.Tensor) -> torch.Tensor:
-            x, c = frames.split([noise.shape[-1], condition.shape[-1]], dim=-1)
+            x, c = frames.split([noise.shape[-1], condition.shape[-1]], dim=-1)  # type: ignore[no-untyped-call]  # torch's Tensor.split is unannotated
             with torch.autocast(frames.device.type, dtype=torch.bfloat16):
                 return runner.inference([x], [c], [conditioning.positive], [conditioning.negative])[0]
 
