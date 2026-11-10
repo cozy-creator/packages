@@ -138,7 +138,6 @@ fibo-2/fibo_2/upsampler.py: [explicit-any] Explicit "Any" is not allowed
 fibo-2/fibo_2/upsampler.py: [explicit-any] Explicit "Any" is not allowed
 fibo-2/fibo_2/upsampler.py: [no-untyped-call] Call to untyped function "from_config" of "_BaseAutoModelClass" in typed context
 fibo-2/fibo_2/upsampler.py: [union-attr] Item "Tensor" of "Tensor | Module" has no attribute "weight"
-flux-2/flux_2/model.py: [arg-type] Argument 1 to "Hook" has incompatible type "partial[Module | None]"; expected "Callable[[], Factors | None]"
 flux-2/flux_2/quantize.py: [union-attr] Item "DerivationHook" of "QuantizationPlan | SelectionPlan | DerivationHook" has no attribute "components"
 flux-2/flux_2/quantize.py: [union-attr] Item "DerivationHook" of "QuantizationPlan | SelectionPlan | DerivationHook" has no attribute "components"
 flux-2/flux_2/quantize.py: [union-attr] Item "DerivationHook" of "QuantizationPlan | SelectionPlan | DerivationHook" has no attribute "include"

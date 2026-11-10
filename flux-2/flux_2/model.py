@@ -131,7 +131,7 @@ def _conditioning_only(encoder: Any, depth: int) -> None:  # type: ignore[explic
         inner.vision_tower = inner.multi_modal_projector = None
 
 
-def _armed(transformer: nn.Module, path: str) -> nn.Module | None:
+def _armed(transformer: nn.Module, path: str) -> lora.Factors | None:
     """The Turbo overlay's factors at `path` while `turbo.applied` arms it (`_cozy_turbo`)."""
     armed = getattr(transformer, "_cozy_turbo", None)
     return None if armed is None else armed.get(path)
