@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from functools import partial
-from typing import Annotated, Any, Literal
+from typing import Annotated, Literal
 
 import msgspec
 import torch
@@ -36,9 +36,9 @@ MAX_PICTURES = 10
 
 class GenerateInput(ImageRequest):
     #: Its text, and the pictures it mentions, in the order it first mentions them.
-    prompt: Prompt[Image] = Prompt()
+    prompt: Prompt[Image] = Prompt()  # type: ignore[assignment]  # a prompt with pictures, in place of the base's text
     #: Qwen Image 2.1 renders at 1, 2 or 4 MP (its native 2K); 2 by default (Paul, 11-06).
-    megapixels: Literal[1, 2, 4] = DEFAULT_MEGAPIXELS
+    megapixels: Literal[1, 2, 4] = DEFAULT_MEGAPIXELS  # type: ignore[assignment]  # 2, a Literal member
     #: Qwen's prompt enhancer rewrites the request first (`rewriter`): an edit from its pictures, else the words.
     prompt_upsampling: bool = True
     #: How far the rewrite goes beyond the words; `balanced` is Qwen's own.
@@ -57,7 +57,7 @@ def label(n: int, key: str, count: int) -> str:
 _ALPHA_NOISE = 4
 
 
-def decoded_image(decoded: Any) -> PILImage.Image:
+def decoded_image(decoded: torch.Tensor) -> PILImage.Image:
     """The decoder's pixels: RGBA when its alpha has any transparency, else RGB. Quantized on the
     decoder's device, NumPy's arithmetic in Torch: a 4 MP canvas sends 16 MB of bytes to the host,
     not 67 MB of floats for six host passes."""
@@ -163,7 +163,7 @@ def _generate(
         if reference_images is None:
             embeds, mask = text_encoder.encode(prompt)
         else:
-            embeds, mask, image_pad_mask = text_encoder.encode_image_prompt(prompt, conditioning_images)
+            embeds, mask, image_pad_mask = text_encoder.encode_image_prompt(prompt, conditioning_images)  # type: ignore[possibly-undefined]  # read with the pictures
     with tel.stage("generating image", overall_range=(begin + 0.1, 0.9)):
         denoise = model.denoise if turbo is None else partial(turbo.denoise, model)
         latents = denoise(
@@ -248,7 +248,7 @@ class ImageBox(msgspec.Struct, kw_only=True):
     #: `ImageRequest.target`; Qwen's rotary range holds it to 1:16 through 16:1 (`SIZES.fit`).
     aspect_ratio: Annotated[AspectRatio, Ratios(min=1 / 16, max=16)] | None = None
     #: `SIZES.pixels`: Qwen Image 2.1 renders at 1, 2 or 4 MP, by default 2 (Paul, 11-06).
-    megapixels: Literal[1, 2, 4] = DEFAULT_MEGAPIXELS
+    megapixels: Literal[1, 2, 4] = DEFAULT_MEGAPIXELS  # type: ignore[assignment]  # 2, a Literal member
     seed: Seed | None = None
     #: Qwen's prompt enhancer rewrites the request first (`_upsampled`).
     prompt_upsampling: Annotated[bool, Advanced()] = True

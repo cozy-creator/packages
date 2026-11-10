@@ -3,7 +3,11 @@ the encodings and their kernels are Runtime's."""
 
 from __future__ import annotations
 
-from typing import Any
+from collections.abc import Callable, Mapping
+from contextlib import AbstractContextManager
+from typing import cast
+
+from torch import nn
 
 from cozy_runtime.author import Context, EncodingRule, QuantizationPlan, Recipe, Telemetry
 
@@ -66,11 +70,16 @@ CALIBRATION = (
 )
 
 
-def calibrate(ctx: Context, tel: Telemetry, model: QwenImage21Model, record: Any) -> None:
+def calibrate(
+    ctx: Context,
+    tel: Telemetry,
+    model: QwenImage21Model,
+    record: Callable[[Mapping[str, nn.Module]], AbstractContextManager[object]],
+) -> None:
     """Qwen-Image-2.1 at 16 bits generates each of `CALIBRATION` at 1 MP on the checkpoint's
     base schedule while each svdq linear's inputs are recorded."""
     steps = 20
-    with record(model.graph.components), tel.stage("calibrating", overall_range=(0.0, 0.3)):
+    with record(cast("Mapping[str, nn.Module]", model.graph.components)), tel.stage("calibrating", overall_range=(0.0, 0.3)):
         for seed, prompt in enumerate(CALIBRATION):
             embeds, mask = model.encode(prompt)
             span = (0.3 * seed / len(CALIBRATION), 0.3 * (seed + 1) / len(CALIBRATION))

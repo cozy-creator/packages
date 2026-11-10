@@ -882,96 +882,14 @@ moss-image/moss_image/model.py: [union-attr] Item "Tensor" of "Tensor | Module" 
 moss-image/moss_image/model.py: [union-attr] Item "Tensor" of "Tensor | Module" has no attribute "running_mean"
 moss-image/moss_image/model.py: [union-attr] Item "Tensor" of "Tensor | Module" has no attribute "running_var"
 moss-image/moss_image/model.py: [unused-ignore] Unused "type: ignore" comment
-qwen-image-2/qwen_image_2/__init__.py: [assignment] Incompatible types in assignment (expression has type "Prompt[Image]", base class "ImageRequest" defined the type as "str")
-qwen-image-2/qwen_image_2/__init__.py: [assignment] Incompatible types in assignment (expression has type "int", variable has type "Literal[1, 2, 4]")
-qwen-image-2/qwen_image_2/__init__.py: [assignment] Incompatible types in assignment (expression has type "int", variable has type "Literal[1, 2, 4]")
-qwen-image-2/qwen_image_2/__init__.py: [explicit-any] Explicit "Any" is not allowed
-qwen-image-2/qwen_image_2/__init__.py: [possibly-undefined] Name "conditioning_images" may be undefined
-qwen-image-2/qwen_image_2/_prepared.py: [attr-defined] "Transformer" has no attribute "dtype"
-qwen-image-2/qwen_image_2/_prepared.py: [attr-defined] "Transformer" has no attribute "dtype"
-qwen-image-2/qwen_image_2/_prepared.py: [attr-defined] "Transformer" has no attribute "img_in"
-qwen-image-2/qwen_image_2/_prepared.py: [attr-defined] "Transformer" has no attribute "img_in"
-qwen-image-2/qwen_image_2/_prepared.py: [attr-defined] "Transformer" has no attribute "modulation"
-qwen-image-2/qwen_image_2/_prepared.py: [attr-defined] "Transformer" has no attribute "modulation"
-qwen-image-2/qwen_image_2/_prepared.py: [attr-defined] "Transformer" has no attribute "norm_out"
-qwen-image-2/qwen_image_2/_prepared.py: [attr-defined] "Transformer" has no attribute "norm_out"
-qwen-image-2/qwen_image_2/_prepared.py: [attr-defined] "Transformer" has no attribute "proj_out"
-qwen-image-2/qwen_image_2/_prepared.py: [attr-defined] "Transformer" has no attribute "proj_out"
-qwen-image-2/qwen_image_2/_prepared.py: [attr-defined] "Transformer" has no attribute "time_text_embed"
-qwen-image-2/qwen_image_2/_prepared.py: [attr-defined] "Transformer" has no attribute "time_text_embed"
-qwen-image-2/qwen_image_2/_prepared.py: [attr-defined] "Transformer" has no attribute "transformer_blocks"
-qwen-image-2/qwen_image_2/_prepared.py: [attr-defined] "Transformer" has no attribute "transformer_blocks"
-qwen-image-2/qwen_image_2/_prepared.py: [attr-defined] "Transformer" has no attribute "txt_in"
-qwen-image-2/qwen_image_2/_prepared.py: [explicit-any] Explicit "Any" is not allowed
-qwen-image-2/qwen_image_2/_prepared.py: [explicit-any] Explicit "Any" is not allowed
-qwen-image-2/qwen_image_2/_prepared.py: [explicit-any] Explicit "Any" is not allowed
-qwen-image-2/qwen_image_2/_prepared.py: [explicit-any] Explicit "Any" is not allowed
-qwen-image-2/qwen_image_2/_prepared.py: [explicit-any] Explicit "Any" is not allowed
-qwen-image-2/qwen_image_2/_prepared.py: [explicit-any] Explicit "Any" is not allowed
-qwen-image-2/qwen_image_2/_prepared.py: [misc] "_cached" of "Transformer" gets multiple values for keyword argument "projection"
-qwen-image-2/qwen_image_2/_prepared.py: [misc] "_joint" of "Transformer" gets multiple values for keyword argument "projection"
-qwen-image-2/qwen_image_2/_prepared.py: [misc] "forward" undefined in superclass
-qwen-image-2/qwen_image_2/_prepared.py: [no-untyped-call] Call to untyped function "QwenImage21KVLayerCache" in typed context
-qwen-image-2/qwen_image_2/_prepared.py: [unused-ignore] Unused "type: ignore" comment
-qwen-image-2/qwen_image_2/model.py: [arg-type] Argument "sigmas" to "retrieve_timesteps" has incompatible type "ndarray[tuple[Any, ...], dtype[floating[_32Bit]]] | ndarray[tuple[int], dtype[float64]]"; expected "list[float] | None"
-qwen-image-2/qwen_image_2/model.py: [arg-type] Argument 1 to "Hook" has incompatible type "partial[Module | None]"; expected "Callable[[], Factors | None]"
-qwen-image-2/qwen_image_2/model.py: [attr-defined] "_StagedPipeline" has no attribute "_pack_latents"
-qwen-image-2/qwen_image_2/model.py: [attr-defined] "_StagedPipeline" has no attribute "encode_prompt"
-qwen-image-2/qwen_image_2/model.py: [attr-defined] "_StagedPipeline" has no attribute "encode_prompt"
-qwen-image-2/qwen_image_2/model.py: [attr-defined] "_StagedPipeline" has no attribute "image_processor"
-qwen-image-2/qwen_image_2/model.py: [attr-defined] "_StagedPipeline" has no attribute "image_processor"
-qwen-image-2/qwen_image_2/model.py: [attr-defined] "_StagedPipeline" has no attribute "latent_channels"
-qwen-image-2/qwen_image_2/model.py: [attr-defined] "_StagedPipeline" has no attribute "prepare_latents"
-qwen-image-2/qwen_image_2/model.py: [attr-defined] "_StagedPipeline" has no attribute "scheduler"
-qwen-image-2/qwen_image_2/model.py: [attr-defined] "_StagedPipeline" has no attribute "vae_scale_factor"
-qwen-image-2/qwen_image_2/model.py: [attr-defined] "_StagedPipeline" has no attribute "vae_scale_factor"
-qwen-image-2/qwen_image_2/model.py: [explicit-any] Explicit "Any" is not allowed
-qwen-image-2/qwen_image_2/model.py: [explicit-any] Explicit "Any" is not allowed
-qwen-image-2/qwen_image_2/model.py: [explicit-any] Explicit "Any" is not allowed
-qwen-image-2/qwen_image_2/model.py: [explicit-any] Explicit "Any" is not allowed
-qwen-image-2/qwen_image_2/model.py: [explicit-any] Explicit "Any" is not allowed
-qwen-image-2/qwen_image_2/model.py: [explicit-any] Explicit "Any" is not allowed
-qwen-image-2/qwen_image_2/model.py: [explicit-any] Explicit "Any" is not allowed
-qwen-image-2/qwen_image_2/model.py: [explicit-any] Explicit "Any" is not allowed
-qwen-image-2/qwen_image_2/model.py: [explicit-any] Explicit "Any" is not allowed
-qwen-image-2/qwen_image_2/model.py: [explicit-any] Explicit "Any" is not allowed
-qwen-image-2/qwen_image_2/model.py: [explicit-any] Explicit "Any" is not allowed
-qwen-image-2/qwen_image_2/model.py: [explicit-any] Explicit "Any" is not allowed
-qwen-image-2/qwen_image_2/model.py: [explicit-any] Explicit "Any" is not allowed
-qwen-image-2/qwen_image_2/model.py: [explicit-any] Explicit "Any" is not allowed
-qwen-image-2/qwen_image_2/model.py: [explicit-any] Explicit "Any" is not allowed
-qwen-image-2/qwen_image_2/model.py: [explicit-any] Explicit "Any" is not allowed
-qwen-image-2/qwen_image_2/model.py: [misc] Cannot infer type of lambda
-qwen-image-2/qwen_image_2/model.py: [misc] Type of decorated function contains type "Any" ("Callable[[QwenImage21Model, list[Any]], tuple[list[Any], Tensor]]")
-qwen-image-2/qwen_image_2/model.py: [misc] Type of decorated function contains type "Any" ("Callable[[QwenImage21Model, str, list[Any]], tuple[Any, Any, Any]]")
-qwen-image-2/qwen_image_2/model.py: [misc] Type of decorated function contains type "Any" ("Callable[[QwenImage21Model, str], tuple[Any, Any]]")
-qwen-image-2/qwen_image_2/model.py: [misc] Type of decorated function contains type "Any" ("def (QwenImage21Model, /, embeds: Any, mask: Any, *, width: int, height: int, steps: int, seed: int, progress: Callable[[int, int], None], sigmas: Sequence[float] | None = ..., scheduler: Mapping[str, Any] | None = ..., heads: Tensor | None = ..., reference_images: list[Any] | None = ..., reference_latents: Tensor | None = ..., image_pad_mask: Tensor | None = ...) -> Any")
-qwen-image-2/qwen_image_2/model.py: [misc] Type of decorated function contains type "Any" ("def (QwenImage21Model, /, latents: Any, *, width: int, height: int) -> Any")
-qwen-image-2/qwen_image_2/model.py: [no-any-return] Returning Any from function declared to return "Tensor"
-qwen-image-2/qwen_image_2/model.py: [no-untyped-call] Call to untyped function "_StagedPipeline" in typed context
-qwen-image-2/qwen_image_2/model.py: [no-untyped-call] Call to untyped function "__init__" in typed context
-qwen-image-2/qwen_image_2/model.py: [no-untyped-call] Call to untyped function "_patchify" in typed context
-qwen-image-2/qwen_image_2/model.py: [no-untyped-call] Call to untyped function "calculate_dimensions" in typed context
-qwen-image-2/qwen_image_2/model.py: [no-untyped-call] Call to untyped function "calculate_dimensions" in typed context
-qwen-image-2/qwen_image_2/model.py: [no-untyped-call] Call to untyped function "from_config" of "AutoencoderKLQwenImage21" in typed context
-qwen-image-2/qwen_image_2/model.py: [no-untyped-call] Call to untyped function "from_config" of "FlowMatchEulerDiscreteScheduler" in typed context
-qwen-image-2/qwen_image_2/model.py: [no-untyped-call] Call to untyped function "from_config" of "QwenImage21Transformer2DModel" in typed context
-qwen-image-2/qwen_image_2/model.py: [no-untyped-call] Call to untyped function "from_config" of "_BaseAutoModelClass" in typed context
-qwen-image-2/qwen_image_2/model.py: [unreachable] Statement is unreachable
-qwen-image-2/qwen_image_2/quantize.py: [explicit-any] Explicit "Any" is not allowed
 qwen-image-2/qwen_image_2/quantize.py: [union-attr] Item "DerivationHook" of "QuantizationPlan | SelectionPlan | DerivationHook" has no attribute "components"
 qwen-image-2/qwen_image_2/quantize.py: [union-attr] Item "DerivationHook" of "QuantizationPlan | SelectionPlan | DerivationHook" has no attribute "components"
 qwen-image-2/qwen_image_2/quantize.py: [union-attr] Item "DerivationHook" of "QuantizationPlan | SelectionPlan | DerivationHook" has no attribute "include"
 qwen-image-2/qwen_image_2/quantize.py: [union-attr] Item "DerivationHook" of "QuantizationPlan | SelectionPlan | DerivationHook" has no attribute "include"
 qwen-image-2/qwen_image_2/quantize.py: [union-attr] Item "SelectionPlan" of "QuantizationPlan | SelectionPlan | DerivationHook" has no attribute "components"
 qwen-image-2/qwen_image_2/quantize.py: [union-attr] Item "SelectionPlan" of "QuantizationPlan | SelectionPlan | DerivationHook" has no attribute "components"
-qwen-image-2/qwen_image_2/rewriter.py: [index] Value of type "Match[str] | None" is not indexable
 qwen-image-2/qwen_image_2/rewriter.py: [no-any-return] Returning Any from function declared to return "Tensor"
 qwen-image-2/qwen_image_2/rewriter.py: [union-attr] Item "Tensor" of "Tensor | Module" has no attribute "eos_token_id"
-qwen-image-2/qwen_image_2/turbo.py: [assignment] Incompatible types in assignment (expression has type Module | None, variable has type Module)
-qwen-image-2/qwen_image_2/turbo.py: [explicit-any] Explicit "Any" is not allowed
-qwen-image-2/qwen_image_2/turbo.py: [misc] Type of decorated function contains type "Any" ("def (FunAccLoRA, /, base: QwenImage21Model, *args: Any, **kwargs: Any) -> Any")
-qwen-image-2/qwen_image_2/turbo.py: [operator] "Tensor" not callable
 qwen-image/qwen_image/__init__.py: [assignment] Incompatible types in assignment (expression has type "Prompt[Image]", base class "ImageRequest" defined the type as "str")
 qwen-image/qwen_image/model.py: [arg-type] Argument "dtype" to "noise" has incompatible type "Tensor | Module"; expected "dtype"
 qwen-image/qwen_image/model.py: [arg-type] Argument "merges" to "Qwen2Tokenizer" has incompatible type "list[tuple[str, ...]]"; expected "str | list[str] | None"
