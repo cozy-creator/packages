@@ -1209,7 +1209,9 @@ def identity() -> str:
     )
 
 
-def _require_call(function: Callable[..., object], parameters: tuple[str, ...]) -> None:
+def _require_call(  # type: ignore[explicit-any]  # any Diffusers callable: its signature is what is checked
+    function: Callable[..., object], parameters: tuple[str, ...]
+) -> None:
     """Validate the inputs this plan substitutes; annotations are not an ABI.
 
     Positional inputs must keep their names and order. Additional optional inputs are
@@ -1343,8 +1345,8 @@ def _validate_transformer(transformer: MiniMaxH3Transformer3DModel, root: str) -
                 for m in (block.norm1, block.norm2, attn.norm_q, attn.norm_k)
             )
             and block.norm1.weight is not None  # type: ignore[redundant-expr]  # torch types it present; a norm without affine has None
-            and block.norm2.weight is not None
-            and attn.norm_q.weight is not None
+            and block.norm2.weight is not None  # type: ignore[redundant-expr]  # as above
+            and attn.norm_q.weight is not None  # type: ignore[redundant-expr]  # as above
             and attn.norm_k.weight is not None,
             f"{path} is not the MiniMax-H3 block shape the fused plan was matched to ({CONTRACT})",
         )
