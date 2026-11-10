@@ -82,7 +82,7 @@ class TextEncoder(nn.Module):
             config.text_config, dtype=DTYPE
         )
         self.language_model.layers = nn.ModuleList(list(self.language_model.layers)[:depth])
-        self.language_model.norm = nn.Identity()  # type: ignore[assignment]  # the final norm, removed
+        self.language_model.norm = nn.Identity()  # type: ignore[assignment, unused-ignore]  # the final norm, removed
 
 
 class Block(Krea2TransformerBlock):
@@ -99,7 +99,8 @@ class Block(Krea2TransformerBlock):
                              attention_mask=attention_mask, image_rotary_emb=image_rotary_emb)
         hidden_states = hidden_states + pregate * attn_out
         ff_out = self.ff((1.0 + postscale) * self.norm2(hidden_states) + postshift)
-        return hidden_states + postgate * ff_out
+        out: torch.Tensor = hidden_states + postgate * ff_out
+        return out
 
 
 def _modulation(block: nn.Module, arguments: Mapping[str, object]) -> fusion.Modulation:
@@ -165,7 +166,7 @@ def as_stored(config: Config, component: str, root: nn.Module) -> None:
 class Transformer(Krea2Transformer2DModel):
     """`Krea2Transformer2DModel` whose forward is one sampling step for every prompt of a request."""
 
-    def forward(  # type: ignore[override]
+    def forward(
         self, latents: torch.Tensor, timestep: torch.Tensor, texts: list[torch.Tensor],
         rotary: list[tuple[torch.Tensor, torch.Tensor]],
     ) -> list[torch.Tensor]:
@@ -219,7 +220,7 @@ def build_tokenizer(assets: ModelAssets) -> PreTrainedTokenizerFast:
     for key in ("tokenizer_class", "backend", "is_local", "name_or_path", "tokenizer_file",
                 "added_tokens_decoder", "chat_template", "extra_special_tokens", "errors"):
         config.pop(key, None)
-    return PreTrainedTokenizerFast(
+    return PreTrainedTokenizerFast(  # type: ignore[no-untyped-call]  # Transformers' tokenizer __init__ is unannotated
         tokenizer_object=Tokenizer.from_str(assets.read("tokenizer/tokenizer.json").decode()), **config
     )
 
