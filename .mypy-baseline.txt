@@ -972,54 +972,6 @@ qwen-image-2/qwen_image_2/turbo.py: [assignment] Incompatible types in assignmen
 qwen-image-2/qwen_image_2/turbo.py: [explicit-any] Explicit "Any" is not allowed
 qwen-image-2/qwen_image_2/turbo.py: [misc] Type of decorated function contains type "Any" ("def (FunAccLoRA, /, base: QwenImage21Model, *args: Any, **kwargs: Any) -> Any")
 qwen-image-2/qwen_image_2/turbo.py: [operator] "Tensor" not callable
-qwen-image/qwen_image/__init__.py: [assignment] Incompatible types in assignment (expression has type "Prompt[Image]", base class "ImageRequest" defined the type as "str")
-qwen-image/qwen_image/model.py: [arg-type] Argument "dtype" to "noise" has incompatible type "Tensor | Module"; expected "dtype"
-qwen-image/qwen_image/model.py: [arg-type] Argument "merges" to "Qwen2Tokenizer" has incompatible type "list[tuple[str, ...]]"; expected "str | list[str] | None"
-qwen-image/qwen_image/model.py: [arg-type] Argument "sigmas" to "retrieve_timesteps" has incompatible type "ndarray[tuple[int], dtype[float64]]"; expected "list[float] | None"
-qwen-image/qwen_image/model.py: [arg-type] Argument 1 has incompatible type "def denoise(self: QwenImage, *args: Any, scheduler_config: Mapping[str, Any] | None = ..., **kwargs: Any) -> Tensor"; expected "def (QwenImage, /, *args: Any, scheduler_config: Mapping[str, Any] | None = ..., **kwargs: Any) -> Tensor"
-qwen-image/qwen_image/model.py: [arg-type] Argument 1 has incompatible type "def denoise(self: QwenImageTransformer, *args: Any, scheduler_config: Mapping[str, Any] | None = ..., **kwargs: Any) -> Tensor"; expected "def (QwenImageTransformer, /, *args: Any, scheduler_config: Mapping[str, Any] | None = ..., **kwargs: Any) -> Tensor"
-qwen-image/qwen_image/model.py: [arg-type] Argument 1 to "enumerate" has incompatible type "Tensor | Module"; expected "Iterable[Any]"
-qwen-image/qwen_image/model.py: [arg-type] Argument 1 to "float" has incompatible type "Tensor | Module"; expected "str | Buffer | SupportsFloat | SupportsIndex"
-qwen-image/qwen_image/model.py: [arg-type] Argument 1 to "noise" has incompatible type "tuple[int, int, Any | Tensor | int, int, int]"; expected "Sequence[int]"
-qwen-image/qwen_image/model.py: [call-overload] No overload variant of "to" of "TensorBase" matches argument types "device", "Tensor | Module"
-qwen-image/qwen_image/model.py: [call-overload] No overload variant of "to" of "TensorBase" matches argument types "device", "Tensor | Module"
-qwen-image/qwen_image/model.py: [explicit-any] Explicit "Any" is not allowed
-qwen-image/qwen_image/model.py: [explicit-any] Explicit "Any" is not allowed
-qwen-image/qwen_image/model.py: [explicit-any] Explicit "Any" is not allowed
-qwen-image/qwen_image/model.py: [explicit-any] Explicit "Any" is not allowed
-qwen-image/qwen_image/model.py: [explicit-any] Explicit "Any" is not allowed
-qwen-image/qwen_image/model.py: [explicit-any] Explicit "Any" is not allowed
-qwen-image/qwen_image/model.py: [explicit-any] Explicit "Any" is not allowed
-qwen-image/qwen_image/model.py: [explicit-any] Explicit "Any" is not allowed
-qwen-image/qwen_image/model.py: [explicit-any] Explicit "Any" is not allowed
-qwen-image/qwen_image/model.py: [explicit-any] Explicit "Any" is not allowed
-qwen-image/qwen_image/model.py: [explicit-any] Explicit "Any" is not allowed
-qwen-image/qwen_image/model.py: [misc] Type of decorated function contains type "Any" ("def (QwenImage, /, *args: Any, scheduler_config: Mapping[str, Any] | None = ..., **kwargs: Any) -> Tensor")
-qwen-image/qwen_image/model.py: [misc] Type of decorated function contains type "Any" ("def (QwenImageLoRA, /, base: QwenImage | QwenImageTransformer, *args: Any, **kwargs: Any) -> Tensor")
-qwen-image/qwen_image/model.py: [misc] Type of decorated function contains type "Any" ("def (QwenImageTransformer, /, *args: Any, scheduler_config: Mapping[str, Any] | None = ..., **kwargs: Any) -> Tensor")
-qwen-image/qwen_image/model.py: [no-any-return] Returning Any from function declared to return "Tensor"
-qwen-image/qwen_image/model.py: [no-untyped-call] Call to untyped function "Qwen2VLProcessor" in typed context
-qwen-image/qwen_image/model.py: [no-untyped-call] Call to untyped function "QwenImageEditPlusPipeline" in typed context
-qwen-image/qwen_image/model.py: [no-untyped-call] Call to untyped function "QwenImagePipeline" in typed context
-qwen-image/qwen_image/model.py: [no-untyped-call] Call to untyped function "calculate_dimensions" in typed context
-qwen-image/qwen_image/model.py: [no-untyped-call] Call to untyped function "calculate_dimensions" in typed context
-qwen-image/qwen_image/model.py: [no-untyped-call] Call to untyped function "from_config" of "AutoencoderKLQwenImage" in typed context
-qwen-image/qwen_image/model.py: [no-untyped-call] Call to untyped function "from_config" of "FlowMatchEulerDiscreteScheduler" in typed context
-qwen-image/qwen_image/model.py: [no-untyped-call] Call to untyped function "from_config" of "FlowMatchEulerDiscreteScheduler" in typed context
-qwen-image/qwen_image/model.py: [no-untyped-call] Call to untyped function "from_config" of "QwenImageTransformer2DModel" in typed context
-qwen-image/qwen_image/model.py: [no-untyped-call] Call to untyped function "from_config" of "_BaseAutoModelClass" in typed context
-qwen-image/qwen_image/model.py: [operator] Unsupported operand types for // (Module and "int")
-qwen-image/qwen_image/model.py: [union-attr] Item "QwenImageEditPlusPipeline" of "QwenImagePipeline | QwenImageEditPlusPipeline" has no attribute "_pack_latents"
-qwen-image/qwen_image/model.py: [union-attr] Item "QwenImageEditPlusPipeline" of "QwenImagePipeline | QwenImageEditPlusPipeline" has no attribute "encode_prompt"
-qwen-image/qwen_image/model.py: [union-attr] Item "QwenImageEditPlusPipeline" of "QwenImagePipeline | QwenImageEditPlusPipeline" has no attribute "encode_prompt"
-qwen-image/qwen_image/model.py: [union-attr] Item "QwenImageEditPlusPipeline" of "QwenImagePipeline | QwenImageEditPlusPipeline" has no attribute "image_processor"
-qwen-image/qwen_image/model.py: [union-attr] Item "QwenImageEditPlusPipeline" of "QwenImagePipeline | QwenImageEditPlusPipeline" has no attribute "image_processor"
-qwen-image/qwen_image/model.py: [union-attr] Item "QwenImagePipeline" of "QwenImagePipeline | QwenImageEditPlusPipeline" has no attribute "_pack_latents"
-qwen-image/qwen_image/model.py: [union-attr] Item "QwenImagePipeline" of "QwenImagePipeline | QwenImageEditPlusPipeline" has no attribute "encode_prompt"
-qwen-image/qwen_image/model.py: [union-attr] Item "QwenImagePipeline" of "QwenImagePipeline | QwenImageEditPlusPipeline" has no attribute "encode_prompt"
-qwen-image/qwen_image/model.py: [union-attr] Item "QwenImagePipeline" of "QwenImagePipeline | QwenImageEditPlusPipeline" has no attribute "image_processor"
-qwen-image/qwen_image/model.py: [union-attr] Item "QwenImagePipeline" of "QwenImagePipeline | QwenImageEditPlusPipeline" has no attribute "image_processor"
-qwen-image/qwen_image/model.py: [union-attr] Item "Tensor" of "Tensor | Module" has no attribute "in_channels"
 qwen-image/qwen_image/quantize.py: [union-attr] Item "DerivationHook" of "QuantizationPlan | SelectionPlan | DerivationHook" has no attribute "components"
 qwen-image/qwen_image/quantize.py: [union-attr] Item "DerivationHook" of "QuantizationPlan | SelectionPlan | DerivationHook" has no attribute "include"
 qwen-image/qwen_image/quantize.py: [union-attr] Item "SelectionPlan" of "QuantizationPlan | SelectionPlan | DerivationHook" has no attribute "components"
