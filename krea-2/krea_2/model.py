@@ -92,7 +92,7 @@ class Block(Krea2TransformerBlock):
     def forward(self, hidden_states: torch.Tensor, temb: torch.Tensor,
                 image_rotary_emb: tuple[torch.Tensor, torch.Tensor],
                 attention_mask: torch.Tensor | None = None) -> torch.Tensor:
-        rows = temb.unflatten(-1, (6, -1))  # type: ignore[no-untyped-call]  # torch's Tensor.unflatten is unannotated
+        rows = temb.unflatten(-1, (6, -1))
         modulation = (rows + self.scale_shift_table).to(hidden_states.dtype)
         prescale, preshift, pregate, postscale, postshift, postgate = modulation.unbind(-2)
         attn_out = self.attn((1.0 + prescale) * self.norm1(hidden_states) + preshift,
@@ -107,7 +107,7 @@ def _modulation(block: nn.Module, arguments: Mapping[str, object]) -> fusion.Mod
     """`Block.forward`'s six adaLN rows in the activations' dtype; a batch of one reads row 0."""
     # Runtime fuses the `Block`s and binds their forward's tensors.
     hidden, temb = cast(torch.Tensor, arguments["hidden_states"]), cast(torch.Tensor, arguments["temb"])
-    rows6 = temb.unflatten(-1, (6, -1))  # type: ignore[no-untyped-call]  # torch's Tensor.unflatten is unannotated
+    rows6 = temb.unflatten(-1, (6, -1))
     table = (rows6 + cast(Block, block).scale_shift_table).to(hidden.dtype)
     rows = [row.reshape(-1, row.shape[-1]) for row in table.unbind(-2)]
     batch, tokens = hidden.shape[:2]
