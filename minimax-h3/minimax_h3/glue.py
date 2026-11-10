@@ -70,7 +70,7 @@ try:
 except ImportError as _absent:  # pragma: no cover - a CPU-only or non-Linux environment
     if TYPE_CHECKING:
         raise
-    TRITON_ABSENT = f"triton does not import ({_absent})"
+    TRITON_ABSENT = f"triton does not import ({_absent})"  # type: ignore[unreachable]  # checkers import triton
 else:
     TRITON_ABSENT = ""
 
@@ -99,7 +99,7 @@ class Owned[T]:
         self.value: T | None = value
 
 
-def take[T](value: T | Owned[T]) -> T:
+def take(value: Hidden | Owned[Hidden]) -> Hidden:
     """`value`, or the tensor an `Owned` passed, which then holds it no more."""
     if not isinstance(value, Owned):
         return value
@@ -594,6 +594,11 @@ def rmsnorm_modulate(
 @overload
 def rmsnorm_modulate(
     launch: Launch, x: torch.Tensor, weight: torch.Tensor, scale: torch.Tensor, shift: torch.Tensor, index: torch.Tensor, eps: float,
+    *, fp8: Literal[True],
+) -> PreQuantized: ...
+@overload
+def rmsnorm_modulate(
+    launch: Launch, x: torch.Tensor, weight: torch.Tensor, scale: torch.Tensor, shift: torch.Tensor, index: torch.Tensor, eps: float,
     *, fp8: bool,
 ) -> torch.Tensor | PreQuantized: ...
 def rmsnorm_modulate(
@@ -625,6 +630,11 @@ def gate_add_rmsnorm_modulate(
     launch: Launch, residual: torch.Tensor, gate: torch.Tensor, branch: torch.Tensor, index: torch.Tensor, weight: torch.Tensor, scale: torch.Tensor,
     shift: torch.Tensor, eps: float, *, fp8: Literal[False] = False, hidden_out: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]: ...
+@overload
+def gate_add_rmsnorm_modulate(
+    launch: Launch, residual: torch.Tensor, gate: torch.Tensor, branch: torch.Tensor, index: torch.Tensor, weight: torch.Tensor, scale: torch.Tensor,
+    shift: torch.Tensor, eps: float, *, fp8: Literal[True], hidden_out: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, PreQuantized]: ...
 @overload
 def gate_add_rmsnorm_modulate(
     launch: Launch, residual: torch.Tensor, gate: torch.Tensor, branch: torch.Tensor, index: torch.Tensor, weight: torch.Tensor, scale: torch.Tensor,
@@ -687,6 +697,8 @@ def gate_add(
 
 @overload
 def swiglu(launch: Launch, x: torch.Tensor, *, fp8: Literal[False] = False) -> torch.Tensor: ...
+@overload
+def swiglu(launch: Launch, x: torch.Tensor, *, fp8: Literal[True]) -> PreQuantized: ...
 @overload
 def swiglu(launch: Launch, x: torch.Tensor, *, fp8: bool) -> torch.Tensor | PreQuantized: ...
 def swiglu(launch: Launch, x: torch.Tensor, *, fp8: bool = False) -> torch.Tensor | PreQuantized:
@@ -931,8 +943,7 @@ class H3AttnProcessor(MiniMaxH3AttnProcessor):
             query, key = attn.to_q(hidden_states), attn.to_k(hidden_states)
             value = attn.to_v(hidden_states)
         query, key, value = (
-            t.unflatten(-1, (attn.heads, -1))  # type: ignore[no-untyped-call]  # torch's Tensor.unflatten is unannotated
-            for t in (query, key, value)
+            t.unflatten(-1, (attn.heads, -1)) for t in (query, key, value)
         )
         return (*self.rope(attn, query, key, rotary_emb), value)
 
@@ -1076,7 +1087,8 @@ class FusedMiniMaxH3TransformerBlock(MiniMaxH3TransformerBlock):
         )
         tail = _Tail(self, hidden_states, adaln_indices, gate_msa, scale_mlp, shift_mlp, gate_mlp)
         # The tail writes its rows in place: a view that does not flatten would take a copy.
-        return split(tail.run, tail, Cut(1), out=attn_output.contiguous(), holds=_TAIL_HOLDS)
+        out: torch.Tensor = split(tail.run, tail, Cut(1), out=attn_output.contiguous(), holds=_TAIL_HOLDS)
+        return out
 
 
 class _Tail:
@@ -1299,7 +1311,7 @@ def _validate_transformer(transformer: MiniMaxH3Transformer3DModel, root: str) -
         _shape(
             type(block) is MiniMaxH3TransformerBlock
             and plain_forward(block)
-            and type(attn.processor) in (MiniMaxH3AttnProcessor, H3AttnProcessor)
+            and type(_processor(attn)) in (MiniMaxH3AttnProcessor, H3AttnProcessor)
             and not attn.fused_projections
             and type(ff) is FeedForward
             and plain_forward(ff)
@@ -1330,7 +1342,7 @@ def _validate_transformer(transformer: MiniMaxH3Transformer3DModel, root: str) -
                 type(m) is torch.nn.RMSNorm and plain_forward(m)
                 for m in (block.norm1, block.norm2, attn.norm_q, attn.norm_k)
             )
-            and block.norm1.weight is not None
+            and block.norm1.weight is not None  # type: ignore[redundant-expr]  # torch types it present; a norm without affine has None
             and block.norm2.weight is not None
             and attn.norm_q.weight is not None
             and attn.norm_k.weight is not None,
@@ -1347,39 +1359,47 @@ def _install_transformer(
         path = f"{root}.transformer_blocks.{index}"
         attn, ff = block.attn, block.ff
         attn_fp8 = all(_rowwise_leaf(m) for m in (attn.to_q, attn.to_k, attn.to_v))
-        ff_fp8 = _rowwise_leaf(ff.net[0].proj)
+        ff_fp8 = _rowwise_leaf(cast(SwiGLU, ff.net[0]).proj)  # validated: a SwiGLU (`_validate_transformer`)
         out_fp8 = _rowwise_leaf(ff.net[2])
         fp8_sites += attn_fp8 + ff_fp8 + out_fp8
 
+        current = cast(H3AttnProcessor, attn.processor)  # validated, then `_release_qkv`'s
         processor = FusedMiniMaxH3AttnProcessor()
-        processor._attention_backend = attn.processor._attention_backend
-        processor._parallel_config = attn.processor._parallel_config
+        processor._attention_backend = current._attention_backend
+        processor._parallel_config = current._parallel_config
         processor._glue = glue
         substitutions.append(
             (f"{path}.attn.processor", _type_name(attn.processor), _type_name(processor))
         )
-        attn.set_processor(processor)
+        attn.set_processor(processor)  # type: ignore[arg-type]  # Diffusers' union names its own processors
 
         substitutions.append((f"{path}.ff.net.0", _type_name(ff.net[0]), _type_name(FusedSwiGLU)))
         ff.net[0].__class__ = FusedSwiGLU
-        ff.net[0]._fusion_fp8 = out_fp8
-        ff.net[0]._glue = glue
+        swiglu_module = cast(FusedSwiGLU, ff.net[0])  # its class, swapped above
+        swiglu_module._fusion_fp8 = out_fp8
+        swiglu_module._glue = glue
 
         substitutions.append((path, _type_name(block), _type_name(FusedMiniMaxH3TransformerBlock)))
         block.__class__ = FusedMiniMaxH3TransformerBlock
-        block._fusion_attn_fp8 = attn_fp8
-        block._fusion_ff_fp8 = ff_fp8
-        block._glue = glue
+        fused = cast(FusedMiniMaxH3TransformerBlock, block)  # its class, swapped above
+        fused._fusion_attn_fp8 = attn_fp8
+        fused._fusion_ff_fp8 = ff_fp8
+        fused._glue = glue
     return substitutions, fp8_sites
 
 
+def _processor(attn: MiniMaxH3Attention) -> object:
+    """`attn`'s processor, whatever its class: Diffusers' union names only its own."""
+    return attn.processor
+
+
 def _release_qkv(attn: MiniMaxH3Attention) -> None:
-    current = attn.processor
+    current = _processor(attn)
     if type(current) is MiniMaxH3AttnProcessor:
         processor = H3AttnProcessor()
         processor._attention_backend = current._attention_backend
         processor._parallel_config = current._parallel_config
-        attn.set_processor(processor)
+        attn.set_processor(processor)  # type: ignore[arg-type]  # Diffusers' union names its own processors
 
 
 def _transformers(pipe: Pipeline) -> Iterator[tuple[str, MiniMaxH3Transformer3DModel]]:

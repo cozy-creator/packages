@@ -942,7 +942,7 @@ class OfficialH3Pipeline:
         tokenizer = processor.tokenizer
 
         for workflow, task in _WORKFLOW_TASKS.items():
-            pipes[workflow].register_components(
+            pipes[workflow].register_components(  # type: ignore[no-untyped-call]  # Diffusers' register_components is unannotated
                 text_encoder=text_encoder,
                 tokenizer=tokenizer,
                 processor=processor,

@@ -29,7 +29,8 @@ def release_position_cache(conditioner: Qwen3VLForConditionalGeneration) -> Remo
     scope, so it runs wherever the conditioner runs, including a group rank that hosts it,
     and on a failing forward too.
     """
-    return conditioner.model.register_forward_hook(_forget_rope_deltas, always_call=True)
+    handle: RemovableHandle = conditioner.model.register_forward_hook(_forget_rope_deltas, always_call=True)
+    return handle
 
 
 def _forget_rope_deltas(module: torch.nn.Module, _args: tuple[object, ...], _output: object) -> None:
@@ -120,7 +121,7 @@ def build_text_conditioner(config: Mapping[str, object]) -> Qwen3VLForConditiona
         )
     language.layers = torch.nn.ModuleList(list(language.layers[:_RETAINED_LAYERS]))
     language.norm = torch.nn.Identity()  # type: ignore[assignment]  # the final norm, removed
-    model.lm_head = torch.nn.Identity()  # type: ignore[assignment]  # the head, never built
+    model.lm_head = torch.nn.Identity()  # the head, never built
     # Match from_pretrained(dtype=BF16): weights are BF16, while config-derived
     # rotary buffers retain their constructor precision. A whole-model .to(BF16)
     # rounds both text and vision frequencies before their FP32 forward math.

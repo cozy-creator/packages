@@ -177,7 +177,7 @@ class TileBatchedVideoVAE(AutoencoderKLMiniMaxH3):
         decoded = self._decode_tiles(batch).split(z.shape[0], dim=0)
         columns = len(x_indices)
         rows = [decoded[row * columns : (row + 1) * columns] for row in range(len(y_indices))]
-        return self._stitch_tiles(rows, y_overlaps, x_overlaps)
+        return self._stitch_tiles(rows, y_overlaps, x_overlaps)  # type: ignore[arg-type]  # rows of tile tuples: it indexes them
 
     def _decode_tiles(self, batch: torch.Tensor) -> torch.Tensor:
         """Upstream's ViT decoder over a batch of tiles, block by block: every tile passes a

@@ -72,7 +72,8 @@ class TemporalConv(nn.Module):
         h = F.silu(h)
         h = self.dwconv(h)
         h = self.pwconv(h)
-        return identity + h
+        out: torch.Tensor = identity + h
+        return out
 
 
 class LatentResizer3D(nn.Module):

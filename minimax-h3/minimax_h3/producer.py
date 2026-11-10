@@ -333,7 +333,7 @@ def sparse_step(layout: AttentionLayout, path: str) -> bool:
 def produce(
     name: str,
     call: ProducerCall,
-    hidden_states: torch.Tensor | PreQuantized | Owned,
+    hidden_states: torch.Tensor | PreQuantized | Owned[torch.Tensor | PreQuantized],
     rotary_emb: tuple[torch.Tensor, torch.Tensor] | None = None,
     attention_mask: torch.Tensor | None = None,
 ) -> torch.Tensor:
@@ -356,7 +356,7 @@ def produce(
                 seed = KeyMean(carry.slots[id(attn)]) if carry.seeding else None
             elif layout.step == layout.dense_until_step - 1:  # a step loop: the last dense step
                 held = hidden_states.value if isinstance(hidden_states, Owned) else hidden_states
-                device = (held.payload if isinstance(held, PreQuantized) else held).device
+                device = (held.payload if isinstance(held, PreQuantized) else held).device  # type: ignore[union-attr]  # not yet taken: `take` below
                 del held
                 seed = KeyMean(torch.empty(attn.heads, 128, dtype=torch.float32, device=device))
         token = KEY_MEAN.set(seed)

@@ -218,7 +218,7 @@ class AdaLNPrunedMiniMaxH3Transformer(MiniMaxH3Transformer3DModel):
     time_proj: _AdaLNPrunedTimestepLookup  # type: ignore[assignment]
     time_embedder: _AdaLNPrunedTimestepRows  # type: ignore[assignment]
     norm_out: _AdaLNPrunedOutputTable  # type: ignore[assignment]
-    _keep_in_fp32_modules: ClassVar[list[str]] = [
+    _keep_in_fp32_modules: ClassVar[list[str]] = [  # type: ignore[misc]  # Diffusers declares it per instance
         *MiniMaxH3Transformer3DModel._keep_in_fp32_modules,
         "time_proj",
     ]
@@ -226,7 +226,7 @@ class AdaLNPrunedMiniMaxH3Transformer(MiniMaxH3Transformer3DModel):
     #: returns them. A denoise loop computes them once, on the GPU that runs it, and its calls
     #: hand every GPU those tables (`rotary=`): each GPU must take its own rows of the whole
     #: document's, never the rows of the GPU that ran the loop.
-    _cp_plan: ClassVar[dict[str, Any]] = {  # type: ignore[explicit-any]  # Diffusers' context-parallel plan
+    _cp_plan: ClassVar[dict[str, Any]] = {  # type: ignore[explicit-any, misc]  # Diffusers' context-parallel plan, declared per instance
         **{k: plan for k, plan in MiniMaxH3Transformer3DModel._cp_plan.items() if k != "rope"},
         "transformer_blocks.*": {
             **MiniMaxH3Transformer3DModel._cp_plan["transformer_blocks.*"],
@@ -323,7 +323,7 @@ class AdaLNPrunedMiniMaxH3Transformer(MiniMaxH3Transformer3DModel):
             adaln_indices = timestep_indices * MINIMAX_H3_MODALITY_NUM + token_tags
             for block in self.transformer_blocks:
                 if torch.is_grad_enabled() and self.gradient_checkpointing:
-                    rows = self._gradient_checkpointing_func(block, rows, temb, adaln_indices, rotary_emb)
+                    rows = self._gradient_checkpointing_func(block, rows, temb, adaln_indices, rotary_emb)  # type: ignore[misc]  # set by enable_gradient_checkpointing
                 else:
                     rows = block(rows, temb, adaln_indices, rotary_emb)
             dtype = get_parameter_dtype(self.proj_out)
