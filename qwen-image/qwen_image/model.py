@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import json
 import math
-from collections.abc import Callable, Mapping
+from collections.abc import Mapping
 from functools import partial
 from typing import TYPE_CHECKING, Any, TypedDict, cast
 
@@ -73,6 +73,7 @@ from transformers import (
     Qwen2VLVideoProcessor,
 )
 from transformers import initialization as transformer_init
+from tqdm import tqdm
 
 if TYPE_CHECKING:
     from diffusers.configuration_utils import ConfigMixin
@@ -258,7 +259,6 @@ def sample(
     steps: int,
     guidance: float,
     seed: int,
-    progress: Callable[[int, int], None],
 ) -> torch.Tensor:
     """Upstream's sampling loop (`QwenImageEditPlusPipeline.__call__`): seeded noise drawn on the CPU in
     the DiT's dtype, `FlowMatchEulerDiscreteScheduler` on `linspace(1, 1/steps)` shifted by the canvas,
@@ -289,7 +289,7 @@ def sample(
             (text.to(device=device, dtype=dtype), None if text_mask is None else text_mask.to(device))
             for text, text_mask in [(embeds, mask), *([negative] if negative is not None else [])]
         ]
-        for i, t in enumerate(scheduler.timesteps):
+        for t in tqdm(scheduler.timesteps):
             model_input = latents if image is None else torch.cat([latents, image], dim=1)
             timestep = t.expand(latents.shape[0]).to(latents.dtype)
             predictions: list[torch.Tensor] = [
@@ -311,7 +311,6 @@ def sample(
                     torch.norm(prediction, dim=-1, keepdim=True) / torch.norm(combined, dim=-1, keepdim=True)
                 )
             latents = scheduler.step(prediction, t, latents, return_dict=False)[0]
-            progress(i, steps)
     return latents.cpu()
 
 
@@ -336,7 +335,6 @@ class QwenImageTransformer(Model[TransformerGraph]):
         steps: int,
         guidance: float,
         seed: int,
-        progress: Callable[[int, int], None],
         scheduler_config: Mapping[str, object] | None = None,
     ) -> torch.Tensor:
         """`sample` on this DiT, at `scheduler_config` or its checkpoint's."""
@@ -345,7 +343,7 @@ class QwenImageTransformer(Model[TransformerGraph]):
             self.device,
             scheduler_config or self.graph.scheduler_config,
             embeds, mask, negative, references,
-            width=width, height=height, steps=steps, guidance=guidance, seed=seed, progress=progress,
+            width=width, height=height, steps=steps, guidance=guidance, seed=seed,
         )
 
 
@@ -459,7 +457,6 @@ class QwenImage(Model[QwenImageGraph]):
         steps: int,
         guidance: float,
         seed: int,
-        progress: Callable[[int, int], None],
         scheduler_config: Mapping[str, object] | None = None,
     ) -> torch.Tensor:
         """`sample` on this checkpoint's DiT, at `scheduler_config` or the checkpoint's."""
@@ -468,7 +465,7 @@ class QwenImage(Model[QwenImageGraph]):
             self.device,
             scheduler_config or self.graph.scheduler_config,
             embeds, mask, negative, references,
-            width=width, height=height, steps=steps, guidance=guidance, seed=seed, progress=progress,
+            width=width, height=height, steps=steps, guidance=guidance, seed=seed,
         )
 
     @uses_components("vae")
@@ -631,7 +628,6 @@ class QwenImageLoRA(Model[LoRAGraph]):
         steps: int,
         guidance: float,
         seed: int,
-        progress: Callable[[int, int], None],
     ) -> torch.Tensor:
         """`base.denoise` with this LoRA armed on its DiT and this LoRA's sampling."""
         arming = base.graph.arming
@@ -639,7 +635,7 @@ class QwenImageLoRA(Model[LoRAGraph]):
         try:
             return base.denoise(
                 embeds, mask, negative, references, scheduler_config=self.scheduler_config,
-                width=width, height=height, steps=steps, guidance=guidance, seed=seed, progress=progress,
+                width=width, height=height, steps=steps, guidance=guidance, seed=seed,
             )
         finally:
             arming.lora = None

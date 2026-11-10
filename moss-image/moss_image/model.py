@@ -17,7 +17,6 @@ composition.
 from __future__ import annotations
 
 import json
-from collections.abc import Callable
 from typing import TypedDict, cast
 
 import torch
@@ -45,6 +44,7 @@ from tokenizers import Tokenizer
 from transformers import PreTrainedTokenizerFast, Qwen3_5Config
 from transformers.initialization import no_init_weights
 from transformers.models.qwen3_5.modeling_qwen3_5 import Qwen3_5TextModel
+from tqdm import tqdm
 
 #: The DiT's activations and the dtype upstream casts each linear's input to (its weights' in bf16).
 DTYPE = torch.bfloat16
@@ -396,7 +396,6 @@ class MossImage(Model[MossGraph]):
         steps: int,
         guidance: float,
         seed: int,
-        progress: Callable[[int, int], None],
         tel: Telemetry,
     ) -> torch.Tensor:
         """Upstream's sampler: f32 noise from `seed` on the CPU, CFG against `negative` with block 22
@@ -421,13 +420,12 @@ class MossImage(Model[MossGraph]):
                 texts.append(transformer.text(context))
                 ropes.append(transformer.rotations(phase) if fused else transformer.table(phase))
             timesteps = scheduler.timesteps
-            for i, t in enumerate(timesteps):
+            for t in tqdm(timesteps):
                 velocity = transformer(latents, t[None], texts, ropes)
                 prediction = velocity[0]
                 if len(velocity) > 1:
                     prediction = velocity[1] + guidance * (velocity[0] - velocity[1])
                 latents = scheduler.step(prediction, t, latents, return_dict=False)[0]
-                progress(i, len(timesteps))
         tel.log("dit block", rope="fused" if fused else "eager", **cast(Block, transformer.layers[0]).served)  # its blocks
         return latents.cpu()
 

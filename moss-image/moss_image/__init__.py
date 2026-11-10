@@ -91,7 +91,7 @@ def generate(ctx: Context, payload: GenerateInput, model: MossImage, out: Output
     with tel.stage("generating image", overall_range=(0.05, 0.97)):
         latents = model.denoise(
             positive, negative, width=width, height=height, steps=steps,
-            guidance=guidance, seed=seed, tel=tel, progress=ctx.progress,
+            guidance=guidance, seed=seed, tel=tel,
         )
     with tel.stage("decoding image", overall_range=(0.97, 0.99)):
         image = model.decode(latents)

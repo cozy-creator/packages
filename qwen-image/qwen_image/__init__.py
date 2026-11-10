@@ -107,7 +107,7 @@ def _render(
         denoise = dit.denoise if lora is None else partial(lora.denoise, dit)
         latents = denoise(
             embeds, mask, unconditional, references, width=width, height=height, steps=steps,
-            guidance=guidance, seed=seed, progress=ctx.progress,
+            guidance=guidance, seed=seed,
         )
     ctx.raise_if_cancelled()
     with tel.stage("decoding image", overall_range=(0.95, 0.99)):

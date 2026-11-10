@@ -9,7 +9,7 @@ constructs and fills the modules and owns their residency.
 from __future__ import annotations
 
 import json
-from collections.abc import Callable, Mapping
+from collections.abc import Mapping
 from typing import TYPE_CHECKING, TypedDict, cast
 
 import numpy as np
@@ -45,6 +45,7 @@ from torch.nn import functional as F
 from transformers import PreTrainedTokenizerFast, Qwen3VLConfig
 from transformers.initialization import no_init_weights
 from transformers.models.qwen3_vl.modeling_qwen3_vl import Qwen3VLTextModel
+from tqdm import tqdm
 
 if TYPE_CHECKING:
     from diffusers.configuration_utils import ConfigMixin
@@ -318,7 +319,6 @@ class Krea2(Model[Krea2Graph]):
         guidance: float,
         seed: int,
         distilled: bool,
-        progress: Callable[[int, int], None],
     ) -> torch.Tensor:
         """`Krea2Pipeline.__call__`'s loop: bf16 noise from `seed` drawn on the CPU,
         `FlowMatchEulerDiscreteScheduler` on `linspace(1, 1/steps)` time-shifted by mu, and Krea's guidance
@@ -349,7 +349,7 @@ class Krea2(Model[Krea2Graph]):
                 ids = Krea2Pipeline.prepare_position_ids(text.shape[1], rows, columns, device)
                 texts.append(fused_text(transformer, text))
                 rotary.append(transformer.rotary_emb(ids))
-            for i, t in enumerate(scheduler.timesteps):
+            for t in tqdm(scheduler.timesteps):
                 velocity: list[torch.Tensor] = transformer(
                     latents, (t / config["num_train_timesteps"]).expand(1).to(DTYPE), texts, rotary
                 )
@@ -358,7 +358,6 @@ class Krea2(Model[Krea2Graph]):
                     prediction = prediction + guidance * (prediction - velocity[1])
                 # The state stays bf16, as the pipeline's with a bf16 final layer.
                 latents = scheduler.step(prediction, t, latents, return_dict=False)[0].to(DTYPE)
-                progress(i, steps)
         return latents.cpu()
 
     @uses_components("vae")

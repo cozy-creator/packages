@@ -173,7 +173,6 @@ def _generate(
             height=height,
             steps=steps,
             seed=seed,
-            progress=ctx.progress,
             reference_images=reference_images,
             reference_latents=reference_latents,
             image_pad_mask=image_pad_mask,

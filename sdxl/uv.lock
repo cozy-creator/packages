@@ -771,6 +771,7 @@ dependencies = [
     { name = "shellingham" },
     { name = "tensorfs" },
     { name = "tokenizers" },
+    { name = "tqdm" },
     { name = "transformers" },
 ]
 
@@ -796,6 +797,7 @@ requires-dist = [
     { name = "tokenizers", specifier = ">=0.23.1" },
     { name = "torch", marker = "sys_platform != 'win32'", specifier = ">=2.6" },
     { name = "torch", marker = "sys_platform == 'win32'", specifier = ">=2.6", index = "https://download.pytorch.org/whl/cu130" },
+    { name = "tqdm", specifier = ">=4.66" },
     { name = "transformers", specifier = ">=5.16.1" },
 ]
 

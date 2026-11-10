@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import itertools
 import math
-from collections.abc import Callable, Mapping
+from collections.abc import Mapping
 from contextlib import ExitStack
 from typing import NamedTuple, TypedDict, cast
 
@@ -49,6 +49,7 @@ from transformers import (
     Qwen3VLProcessor,
 )
 from transformers import initialization as transformer_init
+from tqdm import tqdm
 
 #: BFL's constant timestep shift, the image RoPE scale and Qwen3-VL's conditioning layers.
 ALPHA = 16.0
@@ -377,7 +378,6 @@ class Klein(Model[KleinGraph]):
         steps: int,
         guidance: float | None,
         seed: int,
-        progress: Callable[[int, int], None],
     ) -> torch.Tensor:
         """BFL's Euler sampler: a flow map jumps to the next timestep; the base model takes CFG.
 
@@ -411,7 +411,7 @@ class Klein(Model[KleinGraph]):
                     store = stack.enter_context(retained(sum(t.nbytes for t in tokens) + cond_rows.nbytes))
                     held = store.put(*tokens, cond_rows)
                     del tokens, cond_rows
-                for i, (now, then) in enumerate(itertools.pairwise(timesteps)):
+                for i, (now, then) in enumerate(tqdm(itertools.pairwise(timesteps), total=steps)):
                     temb = _embed(tf, tf.timestep_embedder, times[i : i + 1])
                     if held is not None:
                         *tokens, cond_rows = held.get()
@@ -433,7 +433,6 @@ class Klein(Model[KleinGraph]):
                         unconditional, conditional = velocities
                         velocity = unconditional + guidance * (conditional - unconditional)
                     x = x + (then - now) * velocity
-                    progress(i, steps)
         return x.cpu()
 
     @uses_components("vae")

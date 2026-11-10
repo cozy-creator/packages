@@ -13,7 +13,7 @@ import json
 from functools import partial
 from itertools import pairwise
 import math
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING, Any, TypedDict, cast
 
 import numpy as np
@@ -49,6 +49,7 @@ from transformers import (
     PreTrainedTokenizerFast,
 )
 from transformers import initialization as transformer_init
+from tqdm import tqdm
 
 if TYPE_CHECKING:
     from diffusers.configuration_utils import ConfigMixin
@@ -289,7 +290,6 @@ class Flux2(Model[Flux2Graph]):
         timesteps: Sequence[float],
         guidance: float | None,
         seed: int,
-        progress: Callable[[int, int], None],
     ) -> torch.Tensor:
         """BFL's Euler sampler in bf16 (`denoise`, `denoise_cfg`): [dev] embeds `guidance`, [klein] Base
         takes CFG against `negative`, [klein] distilled takes neither."""
@@ -314,7 +314,7 @@ class Flux2(Model[Flux2Graph]):
             # BFL's timestep is the bf16 of each time; its Euler adds the bf16 product of the
             # velocity and the f32 of the time delta to the bf16 state.
             times = torch.tensor(timesteps[:-1], dtype=torch.float32).to(device=device, dtype=torch.bfloat16)
-            for i, (now, then) in enumerate(pairwise(timesteps)):
+            for i, (now, then) in enumerate(tqdm(pairwise(timesteps), total=steps)):
                 tokens = x.expand(batch, -1, -1)
                 if reference is not None:
                     tokens = torch.cat([tokens, reference], dim=1)
@@ -326,7 +326,6 @@ class Flux2(Model[Flux2Graph]):
                     unconditional, conditional = pred.chunk(2)
                     pred = unconditional + guidance * (conditional - unconditional)
                 x = x + (pred.float() * (then - now)).to(pred.dtype)
-                progress(i, steps)
         return x.cpu()
 
     @uses_components("vae")

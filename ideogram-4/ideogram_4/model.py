@@ -8,7 +8,7 @@ constructs and fills the modules and owns their residency.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Sequence
 from typing import TypedDict, cast
 
 import torch
@@ -27,6 +27,7 @@ from diffusers.pipelines.ideogram4.pipeline_ideogram4 import (
     _resolution_aware_mu,
 )
 from PIL import Image
+from tqdm import tqdm
 
 #: Pixels per latent token: the VAE's 8x, then 2x2 patches.
 PATCH = 16
@@ -148,7 +149,6 @@ class Ideogram4(Model[IdeogramGraph]):
         height: int,
         guidance: Sequence[float],
         seed: int,
-        progress: Callable[[int, int], None],
     ) -> torch.Tensor:
         """`Ideogram4Pipeline.__call__`'s loop for one caption whose `[tokens, 53248]` text features
         are `features`: `FlowMatchEulerDiscreteScheduler` over the resolution-shifted logit-normal sigmas,
@@ -176,14 +176,13 @@ class Ideogram4(Model[IdeogramGraph]):
             positive_rope = (*_rotary(tf, position_ids), segment_ids)
             negative_rope = (*_rotary(uncond, position_ids[:, texts:]), segment_ids[:, texts:])
             num_train_timesteps = scheduler.config["num_train_timesteps"]
-            for i, t in enumerate(scheduler.timesteps):
+            for i, t in enumerate(tqdm(scheduler.timesteps)):
                 t_model = (1.0 - t.float() / num_train_timesteps).expand(1).to(DTYPE)
                 image = latents.to(DTYPE)
                 positive = tf(image, prefix, t_model, *positive_rope).to(torch.float32)
                 negative = uncond(image, None, t_model, *negative_rope).to(torch.float32)
                 velocity = guidance[i] * positive + (1.0 - guidance[i]) * negative
                 latents = scheduler.step(-velocity, t, latents, return_dict=False)[0]
-                progress(i, steps)
         return latents.cpu()
 
     @uses_components("vae")

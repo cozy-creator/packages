@@ -533,6 +533,7 @@ dependencies = [
     { name = "msgspec" },
     { name = "numpy" },
     { name = "pillow" },
+    { name = "tqdm" },
     { name = "transformers" },
 ]
 
@@ -547,6 +548,7 @@ requires-dist = [
     { name = "torch", marker = "sys_platform == 'win32'", specifier = ">=2.6", index = "https://download.pytorch.org/whl/cu130" },
     { name = "torchvision", marker = "sys_platform != 'win32'", specifier = ">=0.21" },
     { name = "torchvision", marker = "sys_platform == 'win32'", specifier = ">=0.21", index = "https://download.pytorch.org/whl/cu130" },
+    { name = "tqdm", specifier = ">=4.66" },
     { name = "transformers", specifier = ">=5.17" },
 ]
 

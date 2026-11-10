@@ -8,7 +8,6 @@ adapt the DiT through Runtime's PEFT layers (`serving.loras`).
 
 from __future__ import annotations
 
-from collections.abc import Callable
 from importlib.resources import files
 from typing import TypedDict, cast
 
@@ -39,6 +38,7 @@ from transformers import (
     Qwen3VLProcessor,
 )
 from transformers import initialization as transformer_init
+from tqdm import tqdm
 
 #: The fonts Bria's training drew the caption's text images with, after Pillow's built-in font
 #: (`fonts/` of `briaai/Fibo-2.0-dev`).
@@ -210,7 +210,6 @@ class Fibo2(Model[FiboGraph]):
         steps: int,
         guidance: float,
         seed: int,
-        progress: Callable[[int, int], None],
     ) -> torch.Tensor:
         """`BriaFibo2Pipeline.__call__`'s loop: `FlowMatchEulerDiscreteScheduler` from sigma 1 to 1/steps,
         shifted by the image size, the noise drawn on the CPU from `seed` and kept in float32 across
@@ -238,7 +237,7 @@ class Fibo2(Model[FiboGraph]):
                 for role, (embeds, mask) in encoded.items()
             }
             images = [tensor.to(device=device, dtype=transformer.dtype) for tensor in image_latents] or None
-            for i, t in enumerate(timesteps.tolist()):
+            for i, t in enumerate(tqdm(timesteps.tolist())):
                 timestep = timesteps[i].expand(latents.shape[0]) / 1000
                 hidden = latents.to(transformer.dtype)
                 text_images = "base" not in texts or t / 1000 <= pipe.text_images_max_noise_level
@@ -254,7 +253,6 @@ class Fibo2(Model[FiboGraph]):
                 if cfg:
                     noise_pred = predictions[1] + guidance * (noise_pred - predictions[1])
                 latents = scheduler.step(noise_pred, timesteps[i], latents, return_dict=False)[0]  # type: ignore[arg-type]  # Diffusers annotates the legacy FloatTensor
-                progress(i, steps)
         return latents.cpu()
 
     @uses_components("vae")

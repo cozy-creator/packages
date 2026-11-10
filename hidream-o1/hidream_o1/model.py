@@ -12,7 +12,7 @@ everything, every step. Runtime constructs and fills the modules and owns their 
 from __future__ import annotations
 
 import math
-from collections.abc import Callable, Iterable
+from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Final, Protocol, TypedDict, cast
 
@@ -33,6 +33,7 @@ from transformers.models.qwen3_vl.modeling_qwen3_vl import (
     Qwen3VLVisionModel,
 )
 from transformers.models.qwen3_vl.processing_qwen3_vl import Qwen3VLProcessor
+from tqdm import tqdm
 
 from .sampling import Euler, Flash, UniPC
 
@@ -498,7 +499,6 @@ class HiDreamO1(Model[O1Graph]):
         steps: int,
         guidance: float,
         seed: int,
-        progress: Callable[[int, int], None],
         interval: bool,
     ) -> Image.Image:
         """Upstream's `generate_image` from prepared references (each on the 32 px grid): CFG against
@@ -540,7 +540,7 @@ class HiDreamO1(Model[O1Graph]):
             guided_steps = round(GUIDED * count) if interval else count
             z = to_rows(noise[0].to(device, torch.bfloat16))
             times = torch.tensor([float(t) for t in sampler.timesteps], device=device) / 1000.0
-            for i in range(count):
+            for i in tqdm(range(count)):
                 guided = len(prefixes) > 1 and i < guided_steps
                 t = times[i]
                 sigma = t.clamp_min(T_EPS)
@@ -553,7 +553,6 @@ class HiDreamO1(Model[O1Graph]):
                 if guided:
                     velocity = velocities[1] + guidance * (velocities[0] - velocities[1])
                 z = sampler.step(i, -velocity, z.float()).to(torch.bfloat16)
-                progress(i, count)
             image = unpatch((z + 1) / 2, height, width).cpu().float()
         pixels = np.round(np.clip(image.numpy().transpose(1, 2, 0) * 255, 0, 255)).astype(np.uint8)
         return Image.fromarray(pixels)

@@ -11,7 +11,6 @@ The overlay is never merged into a base lane: while `denoise` runs, the base DiT
 
 from __future__ import annotations
 
-from collections.abc import Callable
 from typing import cast
 
 import torch
@@ -93,7 +92,6 @@ class FunAccLoRA(Model[FunAccGraph]):
         height: int,
         steps: int,
         seed: int,
-        progress: Callable[[int, int], None],
         reference_images: list[Image.Image] | None = None,
         reference_latents: torch.Tensor | None = None,
         image_pad_mask: torch.Tensor | None = None,
@@ -104,7 +102,7 @@ class FunAccLoRA(Model[FunAccGraph]):
         transformer._cozy_overlay = self.graph.sites
         try:
             return base.denoise(
-                embeds, mask, width=width, height=height, steps=steps, seed=seed, progress=progress,
+                embeds, mask, width=width, height=height, steps=steps, seed=seed,
                 sigmas=SIGMAS, scheduler=SCHEDULER, heads=heads, reference_images=reference_images,
                 reference_latents=reference_latents, image_pad_mask=image_pad_mask,
             )
