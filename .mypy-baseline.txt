@@ -462,150 +462,25 @@ minimax-h3/h3.py: [possibly-undefined] Name "waveform" may be undefined
 minimax-h3/h3.py: [union-attr] Item "None" of "Any | None" has no attribute "shape"
 minimax-h3/h3.py: [unused-ignore] Unused "type: ignore" comment
 minimax-h3/h3.py: [unused-ignore] Unused "type: ignore" comment
-minimax-h3/minimax_h3/adaln_pruned.py: [attr-defined] "AdaLNPrunedMiniMaxH3Transformer" has no attribute "_gradient_checkpointing_func"
-minimax-h3/minimax_h3/adaln_pruned.py: [attr-defined] "AdaLNPrunedMiniMaxH3Transformer" has no attribute "audio_proj_in"
-minimax-h3/minimax_h3/adaln_pruned.py: [attr-defined] "AdaLNPrunedMiniMaxH3Transformer" has no attribute "audio_proj_out"
-minimax-h3/minimax_h3/adaln_pruned.py: [attr-defined] "AdaLNPrunedMiniMaxH3Transformer" has no attribute "audio_proj_out"
-minimax-h3/minimax_h3/adaln_pruned.py: [attr-defined] "AdaLNPrunedMiniMaxH3Transformer" has no attribute "config"
-minimax-h3/minimax_h3/adaln_pruned.py: [attr-defined] "AdaLNPrunedMiniMaxH3Transformer" has no attribute "config"
-minimax-h3/minimax_h3/adaln_pruned.py: [attr-defined] "AdaLNPrunedMiniMaxH3Transformer" has no attribute "context_embedder"; maybe "time_embedder"?
-minimax-h3/minimax_h3/adaln_pruned.py: [attr-defined] "AdaLNPrunedMiniMaxH3Transformer" has no attribute "context_embedder"; maybe "time_embedder"?
-minimax-h3/minimax_h3/adaln_pruned.py: [attr-defined] "AdaLNPrunedMiniMaxH3Transformer" has no attribute "gradient_checkpointing"
-minimax-h3/minimax_h3/adaln_pruned.py: [attr-defined] "AdaLNPrunedMiniMaxH3Transformer" has no attribute "named_modules"
-minimax-h3/minimax_h3/adaln_pruned.py: [attr-defined] "AdaLNPrunedMiniMaxH3Transformer" has no attribute "proj_in"
-minimax-h3/minimax_h3/adaln_pruned.py: [attr-defined] "AdaLNPrunedMiniMaxH3Transformer" has no attribute "proj_in"
-minimax-h3/minimax_h3/adaln_pruned.py: [attr-defined] "AdaLNPrunedMiniMaxH3Transformer" has no attribute "proj_out"
-minimax-h3/minimax_h3/adaln_pruned.py: [attr-defined] "AdaLNPrunedMiniMaxH3Transformer" has no attribute "proj_out"
-minimax-h3/minimax_h3/adaln_pruned.py: [attr-defined] "AdaLNPrunedMiniMaxH3Transformer" has no attribute "proj_out"
-minimax-h3/minimax_h3/adaln_pruned.py: [attr-defined] "AdaLNPrunedMiniMaxH3Transformer" has no attribute "rope"
-minimax-h3/minimax_h3/adaln_pruned.py: [attr-defined] "AdaLNPrunedMiniMaxH3Transformer" has no attribute "token_refiner"
-minimax-h3/minimax_h3/adaln_pruned.py: [attr-defined] "AdaLNPrunedMiniMaxH3Transformer" has no attribute "transformer_blocks"
-minimax-h3/minimax_h3/adaln_pruned.py: [attr-defined] "AdaLNPrunedMiniMaxH3Transformer" has no attribute "transformer_blocks"
-minimax-h3/minimax_h3/adaln_pruned.py: [attr-defined] "AdaLNPrunedMiniMaxH3Transformer" has no attribute "transformer_blocks"
-minimax-h3/minimax_h3/adaln_pruned.py: [attr-defined] "AdaLNPrunedMiniMaxH3Transformer" has no attribute "transformer_blocks"
-minimax-h3/minimax_h3/adaln_pruned.py: [attr-defined] Module "diffusers.utils" does not explicitly export attribute "apply_lora_scale"
-minimax-h3/minimax_h3/adaln_pruned.py: [explicit-any] Explicit "Any" is not allowed
-minimax-h3/minimax_h3/adaln_pruned.py: [explicit-any] Explicit "Any" is not allowed
-minimax-h3/minimax_h3/adaln_pruned.py: [explicit-any] Explicit "Any" is not allowed
-minimax-h3/minimax_h3/adaln_pruned.py: [explicit-any] Explicit "Any" is not allowed
-minimax-h3/minimax_h3/adaln_pruned.py: [explicit-any] Explicit "Any" is not allowed
-minimax-h3/minimax_h3/adaln_pruned.py: [explicit-any] Explicit "Any" is not allowed
 minimax-h3/minimax_h3/adaln_pruned.py: [explicit-any] Explicit "Any" is not allowed
 minimax-h3/minimax_h3/adaln_pruned.py: [explicit-any] Explicit "Any" is not allowed
 minimax-h3/minimax_h3/adaln_pruned.py: [misc] Function is untyped after decorator transformation
-minimax-h3/minimax_h3/adaln_pruned.py: [no-untyped-call] Call to untyped function "__init__" in typed context
-minimax-h3/minimax_h3/adaln_pruned.py: [operator] "Tensor" not callable
-minimax-h3/minimax_h3/adaln_pruned.py: [operator] "Tensor" not callable
-minimax-h3/minimax_h3/adaln_pruned.py: [operator] "Tensor" not callable
 minimax-h3/minimax_h3/adaln_pruned.py: [union-attr] Item "None" of "TurboSchedule | None" has no attribute "step"
 minimax-h3/minimax_h3/adaln_pruned.py: [unused-ignore] Unused "type: ignore" comment
-minimax-h3/minimax_h3/adaln_pruned.py: [unused-ignore] Unused "type: ignore" comment
-minimax-h3/minimax_h3/adaln_pruned.py: [unused-ignore] Unused "type: ignore" comment
-minimax-h3/minimax_h3/adaln_pruned.py: [unused-ignore] Unused "type: ignore" comment
-minimax-h3/minimax_h3/adaln_pruned.py: [unused-ignore] Unused "type: ignore" comment
-minimax-h3/minimax_h3/adaln_pruned.py: [unused-ignore] Unused "type: ignore" comment
 minimax-h3/minimax_h3/cell_texture.py: [explicit-any] Explicit "Any" is not allowed
 minimax-h3/minimax_h3/cell_texture.py: [explicit-any] Explicit "Any" is not allowed
 minimax-h3/minimax_h3/cell_texture.py: [explicit-any] Explicit "Any" is not allowed
-minimax-h3/minimax_h3/conditioner.py: [arg-type] Argument 1 to "Qwen3VLConfig" has incompatible type "**dict[str, object]"; expected "Literal['regression', 'single_label_classification', 'multi_label_classification'] | None"
-minimax-h3/minimax_h3/conditioner.py: [arg-type] Argument 1 to "Qwen3VLConfig" has incompatible type "**dict[str, object]"; expected "bool | None"
-minimax-h3/minimax_h3/conditioner.py: [arg-type] Argument 1 to "Qwen3VLConfig" has incompatible type "**dict[str, object]"; expected "bool"
-minimax-h3/minimax_h3/conditioner.py: [arg-type] Argument 1 to "Qwen3VLConfig" has incompatible type "**dict[str, object]"; expected "dict[Any, Any] | PreTrainedConfig | None"
-minimax-h3/minimax_h3/conditioner.py: [arg-type] Argument 1 to "Qwen3VLConfig" has incompatible type "**dict[str, object]"; expected "dict[int, str] | dict[str, str] | None"
-minimax-h3/minimax_h3/conditioner.py: [arg-type] Argument 1 to "Qwen3VLConfig" has incompatible type "**dict[str, object]"; expected "dict[str, int] | dict[str, str] | None"
-minimax-h3/minimax_h3/conditioner.py: [arg-type] Argument 1 to "Qwen3VLConfig" has incompatible type "**dict[str, object]"; expected "int"
-minimax-h3/minimax_h3/conditioner.py: [arg-type] Argument 1 to "Qwen3VLConfig" has incompatible type "**dict[str, object]"; expected "list[str] | None"
-minimax-h3/minimax_h3/conditioner.py: [arg-type] Argument 1 to "Qwen3VLConfig" has incompatible type "**dict[str, object]"; expected "str | None"
-minimax-h3/minimax_h3/conditioner.py: [arg-type] Argument 1 to "Qwen3VLConfig" has incompatible type "**dict[str, object]"; expected "str | dtype | None"
-minimax-h3/minimax_h3/conditioner.py: [explicit-any] Explicit "Any" is not allowed
-minimax-h3/minimax_h3/conditioner.py: [explicit-any] Explicit "Any" is not allowed
-minimax-h3/minimax_h3/conditioner.py: [explicit-any] Explicit "Any" is not allowed
-minimax-h3/minimax_h3/conditioner.py: [explicit-any] Explicit "Any" is not allowed
-minimax-h3/minimax_h3/conditioner.py: [explicit-any] Explicit "Any" is not allowed
-minimax-h3/minimax_h3/conditioner.py: [explicit-any] Explicit "Any" is not allowed
-minimax-h3/minimax_h3/conditioner.py: [explicit-any] Explicit "Any" is not allowed
-minimax-h3/minimax_h3/conditioner.py: [explicit-any] Explicit "Any" is not allowed
-minimax-h3/minimax_h3/conditioner.py: [explicit-any] Explicit "Any" is not allowed
-minimax-h3/minimax_h3/conditioner.py: [explicit-any] Explicit "Any" is not allowed
-minimax-h3/minimax_h3/conditioner.py: [explicit-any] Explicit "Any" is not allowed
-minimax-h3/minimax_h3/conditioner.py: [no-untyped-call] Call to untyped function "Qwen3VLForConditionalGeneration" in typed context
-minimax-h3/minimax_h3/conditioner.py: [no-untyped-call] Call to untyped function "eval" in typed context
 minimax-h3/minimax_h3/continuation.py: [explicit-any] Explicit "Any" is not allowed
-minimax-h3/minimax_h3/continuation.py: [redundant-cast] Redundant cast to "bytes"
-minimax-h3/minimax_h3/glue.py: [arg-type] Argument 7 to "rmsnorm_modulate" has incompatible type "float | None"; expected "float"
 minimax-h3/minimax_h3/glue.py: [explicit-any] Explicit "Any" is not allowed
 minimax-h3/minimax_h3/glue.py: [explicit-any] Explicit "Any" is not allowed
 minimax-h3/minimax_h3/glue.py: [explicit-any] Explicit "Any" is not allowed
 minimax-h3/minimax_h3/glue.py: [explicit-any] Explicit "Any" is not allowed
 minimax-h3/minimax_h3/glue.py: [explicit-any] Explicit "Any" is not allowed
-minimax-h3/minimax_h3/glue.py: [explicit-any] Explicit "Any" is not allowed
-minimax-h3/minimax_h3/glue.py: [explicit-any] Explicit "Any" is not allowed
-minimax-h3/minimax_h3/glue.py: [explicit-any] Explicit "Any" is not allowed
-minimax-h3/minimax_h3/glue.py: [explicit-any] Explicit "Any" is not allowed
-minimax-h3/minimax_h3/glue.py: [explicit-any] Explicit "Any" is not allowed
-minimax-h3/minimax_h3/glue.py: [explicit-any] Explicit "Any" is not allowed
-minimax-h3/minimax_h3/glue.py: [explicit-any] Explicit "Any" is not allowed
-minimax-h3/minimax_h3/glue.py: [explicit-any] Explicit "Any" is not allowed
-minimax-h3/minimax_h3/glue.py: [explicit-any] Explicit "Any" is not allowed
-minimax-h3/minimax_h3/glue.py: [explicit-any] Explicit "Any" is not allowed
-minimax-h3/minimax_h3/glue.py: [explicit-any] Explicit "Any" is not allowed
-minimax-h3/minimax_h3/glue.py: [explicit-any] Explicit "Any" is not allowed
-minimax-h3/minimax_h3/glue.py: [explicit-any] Explicit "Any" is not allowed
-minimax-h3/minimax_h3/glue.py: [explicit-any] Explicit "Any" is not allowed
-minimax-h3/minimax_h3/glue.py: [explicit-any] Explicit "Any" is not allowed
-minimax-h3/minimax_h3/glue.py: [explicit-any] Explicit "Any" is not allowed
-minimax-h3/minimax_h3/glue.py: [explicit-any] Explicit "Any" is not allowed
-minimax-h3/minimax_h3/glue.py: [explicit-any] Explicit "Any" is not allowed
-minimax-h3/minimax_h3/glue.py: [explicit-any] Explicit "Any" is not allowed
-minimax-h3/minimax_h3/glue.py: [explicit-any] Explicit "Any" is not allowed
-minimax-h3/minimax_h3/glue.py: [explicit-any] Explicit "Any" is not allowed
-minimax-h3/minimax_h3/glue.py: [explicit-any] Explicit "Any" is not allowed
-minimax-h3/minimax_h3/glue.py: [explicit-any] Explicit "Any" is not allowed
-minimax-h3/minimax_h3/glue.py: [explicit-any] Explicit "Any" is not allowed
-minimax-h3/minimax_h3/glue.py: [explicit-any] Explicit "Any" is not allowed
-minimax-h3/minimax_h3/glue.py: [explicit-any] Explicit "Any" is not allowed
-minimax-h3/minimax_h3/glue.py: [explicit-any] Explicit "Any" is not allowed
-minimax-h3/minimax_h3/glue.py: [explicit-any] Explicit "Any" is not allowed
-minimax-h3/minimax_h3/glue.py: [explicit-any] Explicit "Any" is not allowed
-minimax-h3/minimax_h3/glue.py: [explicit-any] Explicit "Any" is not allowed
-minimax-h3/minimax_h3/glue.py: [explicit-any] Explicit "Any" is not allowed
-minimax-h3/minimax_h3/glue.py: [explicit-any] Explicit "Any" is not allowed
-minimax-h3/minimax_h3/glue.py: [explicit-any] Explicit "Any" is not allowed
-minimax-h3/minimax_h3/glue.py: [explicit-any] Explicit "Any" is not allowed
-minimax-h3/minimax_h3/glue.py: [explicit-any] Explicit "Any" is not allowed
-minimax-h3/minimax_h3/glue.py: [explicit-any] Explicit "Any" is not allowed
-minimax-h3/minimax_h3/glue.py: [explicit-any] Explicit "Any" is not allowed
-minimax-h3/minimax_h3/glue.py: [explicit-any] Explicit "Any" is not allowed
-minimax-h3/minimax_h3/glue.py: [explicit-any] Explicit "Any" is not allowed
-minimax-h3/minimax_h3/glue.py: [explicit-any] Explicit "Any" is not allowed
-minimax-h3/minimax_h3/glue.py: [explicit-any] Explicit "Any" is not allowed
-minimax-h3/minimax_h3/glue.py: [explicit-any] Explicit "Any" is not allowed
-minimax-h3/minimax_h3/glue.py: [unreachable] Statement is unreachable
 minimax-h3/minimax_h3/guide_rows.py: [explicit-any] Explicit "Any" is not allowed
 minimax-h3/minimax_h3/guide_rows.py: [explicit-any] Explicit "Any" is not allowed
 minimax-h3/minimax_h3/guide_rows.py: [explicit-any] Explicit "Any" is not allowed
 minimax-h3/minimax_h3/guide_rows.py: [explicit-any] Explicit "Any" is not allowed
 minimax-h3/minimax_h3/guide_rows.py: [possibly-undefined] Name "width" may be undefined
-minimax-h3/minimax_h3/latent_upscaler/architecture.py: [arg-type] Argument 1 to "zeros_" has incompatible type "Tensor | None"; expected "Tensor"
-minimax-h3/minimax_h3/latent_upscaler/architecture.py: [no-untyped-call] Call to untyped function "ResBlockEmb3D" in typed context
-minimax-h3/minimax_h3/latent_upscaler/architecture.py: [no-untyped-call] Call to untyped function "ResBlockEmb3D" in typed context
-minimax-h3/minimax_h3/latent_upscaler/architecture.py: [no-untyped-call] Call to untyped function "TemporalConv" in typed context
-minimax-h3/minimax_h3/latent_upscaler/architecture.py: [no-untyped-call] Call to untyped function "TemporalConv" in typed context
-minimax-h3/minimax_h3/latent_upscaler/architecture.py: [no-untyped-call] Call to untyped function "_forward_seg" in typed context
-minimax-h3/minimax_h3/latent_upscaler/architecture.py: [no-untyped-call] Call to untyped function "normalization" in typed context
-minimax-h3/minimax_h3/latent_upscaler/architecture.py: [no-untyped-call] Call to untyped function "normalization" in typed context
-minimax-h3/minimax_h3/latent_upscaler/architecture.py: [no-untyped-call] Call to untyped function "normalization" in typed context
-minimax-h3/minimax_h3/latent_upscaler/architecture.py: [no-untyped-call] Call to untyped function "normalization" in typed context
-minimax-h3/minimax_h3/latent_upscaler/architecture.py: [no-untyped-call] Call to untyped function "zero_module" in typed context
-minimax-h3/minimax_h3/latent_upscaler/architecture.py: [no-untyped-def] Function is missing a type annotation
-minimax-h3/minimax_h3/latent_upscaler/architecture.py: [no-untyped-def] Function is missing a type annotation
-minimax-h3/minimax_h3/latent_upscaler/architecture.py: [no-untyped-def] Function is missing a type annotation
-minimax-h3/minimax_h3/latent_upscaler/architecture.py: [no-untyped-def] Function is missing a type annotation
-minimax-h3/minimax_h3/latent_upscaler/architecture.py: [no-untyped-def] Function is missing a type annotation
-minimax-h3/minimax_h3/latent_upscaler/architecture.py: [no-untyped-def] Function is missing a type annotation
-minimax-h3/minimax_h3/latent_upscaler/architecture.py: [no-untyped-def] Function is missing a type annotation
-minimax-h3/minimax_h3/latent_upscaler/architecture.py: [no-untyped-def] Function is missing a type annotation
-minimax-h3/minimax_h3/latent_upscaler/architecture.py: [no-untyped-def] Function is missing a type annotation
 minimax-h3/minimax_h3/model.py: [explicit-any] Explicit "Any" is not allowed
 minimax-h3/minimax_h3/model.py: [explicit-any] Explicit "Any" is not allowed
 minimax-h3/minimax_h3/model.py: [explicit-any] Explicit "Any" is not allowed
@@ -651,9 +526,6 @@ minimax-h3/minimax_h3/official.py: [arg-type] Argument 1 to "of" of "ContextRefe
 minimax-h3/minimax_h3/official.py: [assignment] Incompatible types in assignment (expression has type "_ScopedPipeline", variable has type "MiniMaxH3ModularPipeline")
 minimax-h3/minimax_h3/official.py: [attr-defined] "Image" has no attribute "convert"
 minimax-h3/minimax_h3/official.py: [attr-defined] "Image" has no attribute "mode"
-minimax-h3/minimax_h3/official.py: [attr-defined] "MiniMaxH3Blocks" has no attribute "get_workflow"
-minimax-h3/minimax_h3/official.py: [attr-defined] "MiniMaxH3ModularPipeline" has no attribute "config"
-minimax-h3/minimax_h3/official.py: [attr-defined] "MiniMaxH3ModularPipeline" has no attribute "register_components"
 minimax-h3/minimax_h3/official.py: [attr-defined] Module "diffusers.modular_pipelines.minimax_h3" does not explicitly export attribute "MiniMaxH3AudioReference"
 minimax-h3/minimax_h3/official.py: [attr-defined] Module "diffusers.modular_pipelines.minimax_h3" does not explicitly export attribute "MiniMaxH3ImageReference"
 minimax-h3/minimax_h3/official.py: [attr-defined] Module "diffusers.modular_pipelines.minimax_h3" does not explicitly export attribute "MiniMaxH3VideoReference"
@@ -741,12 +613,6 @@ minimax-h3/minimax_h3/official.py: [explicit-any] Explicit "Any" is not allowed
 minimax-h3/minimax_h3/official.py: [misc] Type of decorated function contains type "Any" ("Callable[[Any], _GeneratorContextManager[None, None, None]]")
 minimax-h3/minimax_h3/official.py: [no-any-return] Returning Any from function declared to return "Tensor"
 minimax-h3/minimax_h3/official.py: [no-untyped-call] Call to untyped function "MiniMaxH3Blocks" in typed context
-minimax-h3/minimax_h3/official.py: [no-untyped-call] Call to untyped function "MiniMaxH3ModularPipeline" in typed context
-minimax-h3/minimax_h3/official.py: [no-untyped-call] Call to untyped function "MiniMaxH3Scheduler" in typed context
-minimax-h3/minimax_h3/official.py: [no-untyped-call] Call to untyped function "MiniMaxH3Scheduler" in typed context
-minimax-h3/minimax_h3/official.py: [no-untyped-call] Call to untyped function "from_config" of "AutoencoderKLMiniMaxH3" in typed context
-minimax-h3/minimax_h3/official.py: [no-untyped-call] Call to untyped function "from_config" of "AutoencoderKLMiniMaxH3Audio" in typed context
-minimax-h3/minimax_h3/official.py: [no-untyped-call] Call to untyped function "from_config" of "MiniMaxH3Transformer3DModel" in typed context
 minimax-h3/minimax_h3/official.py: [possibly-undefined] Name "cut_height" may be undefined
 minimax-h3/minimax_h3/official.py: [possibly-undefined] Name "cut_width" may be undefined
 minimax-h3/minimax_h3/official.py: [possibly-undefined] Name "left" may be undefined
@@ -767,26 +633,9 @@ minimax-h3/minimax_h3/official.py: [union-attr] Item "str" of "Any | str" has no
 minimax-h3/minimax_h3/official.py: [union-attr] Item "str" of "Any | str" has no attribute "shape"
 minimax-h3/minimax_h3/overlay.py: [explicit-any] Explicit "Any" is not allowed
 minimax-h3/minimax_h3/overlay.py: [explicit-any] Explicit "Any" is not allowed
-minimax-h3/minimax_h3/overlay.py: [operator] "Tensor" not callable
-minimax-h3/minimax_h3/overlay.py: [unused-ignore] Unused "type: ignore" comment
-minimax-h3/minimax_h3/overlay.py: [unused-ignore] Unused "type: ignore" comment
-minimax-h3/minimax_h3/overlay.py: [unused-ignore] Unused "type: ignore" comment
-minimax-h3/minimax_h3/overlay.py: [unused-ignore] Unused "type: ignore" comment
-minimax-h3/minimax_h3/overlay.py: [unused-ignore] Unused "type: ignore" comment
-minimax-h3/minimax_h3/producer.py: [arg-type] Argument 1 to "copy_" of "TensorBase" has incompatible type "Tensor | None"; expected "Tensor"
 minimax-h3/minimax_h3/producer.py: [explicit-any] Explicit "Any" is not allowed
 minimax-h3/minimax_h3/producer.py: [explicit-any] Explicit "Any" is not allowed
 minimax-h3/minimax_h3/producer.py: [explicit-any] Explicit "Any" is not allowed
-minimax-h3/minimax_h3/producer.py: [explicit-any] Explicit "Any" is not allowed
-minimax-h3/minimax_h3/producer.py: [explicit-any] Explicit "Any" is not allowed
-minimax-h3/minimax_h3/producer.py: [no-any-return] Returning Any from function declared to return "Tensor"
-minimax-h3/minimax_h3/producer.py: [no-any-return] Returning Any from function declared to return "Tensor"
-minimax-h3/minimax_h3/producer.py: [no-any-return] Returning Any from function declared to return "Tensor"
-minimax-h3/minimax_h3/producer.py: [no-untyped-call] Call to untyped function "__init__" in typed context
-minimax-h3/minimax_h3/producer.py: [union-attr] Item "PreQuantized" of "Tensor | PreQuantized" has no attribute "device"
-minimax-h3/minimax_h3/producer.py: [union-attr] Item "PreQuantized" of "Tensor | PreQuantized" has no attribute "dtype"
-minimax-h3/minimax_h3/producer.py: [union-attr] Item "Tensor" of "Tensor | PreQuantized" has no attribute "payload"
-minimax-h3/minimax_h3/producer.py: [unused-ignore] Unused "type: ignore" comment
 minimax-h3/minimax_h3/reference_rows.py: [explicit-any] Explicit "Any" is not allowed
 minimax-h3/minimax_h3/reference_rows.py: [explicit-any] Explicit "Any" is not allowed
 minimax-h3/minimax_h3/reference_rows.py: [explicit-any] Explicit "Any" is not allowed
@@ -805,47 +654,6 @@ minimax-h3/minimax_h3/shot.py: [type-arg] Missing type arguments for generic typ
 minimax-h3/minimax_h3/shot_latents.py: [explicit-any] Explicit "Any" is not allowed
 minimax-h3/minimax_h3/steps.py: [explicit-any] Explicit "Any" is not allowed
 minimax-h3/minimax_h3/steps.py: [explicit-any] Explicit "Any" is not allowed
-minimax-h3/minimax_h3/vae_tiles.py: [attr-defined] "AutoencoderKLMiniMaxH3" has no attribute "encode"
-minimax-h3/minimax_h3/vae_tiles.py: [attr-defined] "TileBatchedVideoVAE" has no attribute "_blend"
-minimax-h3/minimax_h3/vae_tiles.py: [attr-defined] "TileBatchedVideoVAE" has no attribute "_encode_clip"; maybe "_decode_clip" or "_encode_frames_clip"?
-minimax-h3/minimax_h3/vae_tiles.py: [attr-defined] "TileBatchedVideoVAE" has no attribute "_encode_clip"; maybe "_decode_clip" or "_encode_frames_clip"?
-minimax-h3/minimax_h3/vae_tiles.py: [attr-defined] "TileBatchedVideoVAE" has no attribute "_encode_clip"; maybe "_decode_clip" or "_encode_frames_clip"?
-minimax-h3/minimax_h3/vae_tiles.py: [attr-defined] "TileBatchedVideoVAE" has no attribute "_split_tiles"
-minimax-h3/minimax_h3/vae_tiles.py: [attr-defined] "TileBatchedVideoVAE" has no attribute "_split_tiles"
-minimax-h3/minimax_h3/vae_tiles.py: [attr-defined] "TileBatchedVideoVAE" has no attribute "_stitch_tiles"
-minimax-h3/minimax_h3/vae_tiles.py: [attr-defined] "TileBatchedVideoVAE" has no attribute "config"
-minimax-h3/minimax_h3/vae_tiles.py: [attr-defined] "TileBatchedVideoVAE" has no attribute "config"
-minimax-h3/minimax_h3/vae_tiles.py: [attr-defined] "TileBatchedVideoVAE" has no attribute "config"
-minimax-h3/minimax_h3/vae_tiles.py: [attr-defined] "TileBatchedVideoVAE" has no attribute "config"
-minimax-h3/minimax_h3/vae_tiles.py: [attr-defined] "TileBatchedVideoVAE" has no attribute "config"
-minimax-h3/minimax_h3/vae_tiles.py: [attr-defined] "TileBatchedVideoVAE" has no attribute "config"
-minimax-h3/minimax_h3/vae_tiles.py: [attr-defined] "TileBatchedVideoVAE" has no attribute "config"
-minimax-h3/minimax_h3/vae_tiles.py: [attr-defined] "TileBatchedVideoVAE" has no attribute "decoder"; maybe "_decode"?
-minimax-h3/minimax_h3/vae_tiles.py: [attr-defined] "TileBatchedVideoVAE" has no attribute "decoder"; maybe "_decode"?
-minimax-h3/minimax_h3/vae_tiles.py: [attr-defined] "TileBatchedVideoVAE" has no attribute "decoder"; maybe "_decode"?
-minimax-h3/minimax_h3/vae_tiles.py: [attr-defined] "TileBatchedVideoVAE" has no attribute "encoder"; maybe "_encode"?
-minimax-h3/minimax_h3/vae_tiles.py: [attr-defined] "TileBatchedVideoVAE" has no attribute "frame_overlap"
-minimax-h3/minimax_h3/vae_tiles.py: [attr-defined] "TileBatchedVideoVAE" has no attribute "frame_pre_padding"
-minimax-h3/minimax_h3/vae_tiles.py: [attr-defined] "TileBatchedVideoVAE" has no attribute "post_quant_conv"
-minimax-h3/minimax_h3/vae_tiles.py: [attr-defined] "TileBatchedVideoVAE" has no attribute "post_quant_conv"
-minimax-h3/minimax_h3/vae_tiles.py: [attr-defined] "TileBatchedVideoVAE" has no attribute "spatial_compression_ratio"
-minimax-h3/minimax_h3/vae_tiles.py: [attr-defined] "TileBatchedVideoVAE" has no attribute "temporal_compression_ratio"
-minimax-h3/minimax_h3/vae_tiles.py: [attr-defined] "TileBatchedVideoVAE" has no attribute "temporal_compression_ratio"
-minimax-h3/minimax_h3/vae_tiles.py: [attr-defined] "TileBatchedVideoVAE" has no attribute "tile_sample_min_height"
-minimax-h3/minimax_h3/vae_tiles.py: [attr-defined] "TileBatchedVideoVAE" has no attribute "tile_sample_min_overlap_height"
-minimax-h3/minimax_h3/vae_tiles.py: [attr-defined] "TileBatchedVideoVAE" has no attribute "tile_sample_min_overlap_width"
-minimax-h3/minimax_h3/vae_tiles.py: [attr-defined] "TileBatchedVideoVAE" has no attribute "tile_sample_min_width"
-minimax-h3/minimax_h3/vae_tiles.py: [attr-defined] "TileBatchedVideoVAE" has no attribute "token_overlap"
-minimax-h3/minimax_h3/vae_tiles.py: [attr-defined] "TileBatchedVideoVAE" has no attribute "tokens_chunk_size"
-minimax-h3/minimax_h3/vae_tiles.py: [attr-defined] "TileBatchedVideoVAE" has no attribute "tokens_chunk_size"
-minimax-h3/minimax_h3/vae_tiles.py: [attr-defined] "TileBatchedVideoVAE" has no attribute "use_tiling"
-minimax-h3/minimax_h3/vae_tiles.py: [no-any-return] Returning Any from function declared to return "Tensor"
-minimax-h3/minimax_h3/vae_tiles.py: [no-any-return] Returning Any from function declared to return "Tensor"
-minimax-h3/minimax_h3/vae_tiles.py: [no-any-return] Returning Any from function declared to return "Tensor"
-minimax-h3/minimax_h3/vae_tiles.py: [no-any-return] Returning Any from function declared to return "Tensor"
-minimax-h3/minimax_h3/vae_tiles.py: [no-any-return] Returning Any from function declared to return "Tensor"
-minimax-h3/minimax_h3/vae_tiles.py: [no-any-return] Returning Any from function declared to return "Tensor"
-minimax-h3/minimax_h3/vae_tiles.py: [unused-ignore] Unused "type: ignore" comment
 moss-image/moss_image/model.py: [arg-type] Argument 1 to "noise" has incompatible type "tuple[int, Tensor | Module, int, int]"; expected "Sequence[int]"
 moss-image/moss_image/model.py: [arg-type] Argument 1 to "to" of "TensorBase" has incompatible type "Tensor | Module"; expected "Tensor"
 moss-image/moss_image/model.py: [assignment] Incompatible types in assignment (expression has type "Tensor", variable has type "PreQuantized | None")
