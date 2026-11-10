@@ -30,7 +30,6 @@ from __future__ import annotations
 
 import dataclasses
 import functools
-import json
 import math
 from collections.abc import Callable
 from pathlib import Path
@@ -71,18 +70,15 @@ from cozy_runtime.image import (
     Steps,
     held,
 )
-from diffusers import AutoencoderKL, DDIMScheduler, EulerDiscreteScheduler, UNet2DConditionModel
+from diffusers import DDIMScheduler, EulerDiscreteScheduler, UNet2DConditionModel
+from diffusers.pipelines.stable_diffusion_xl.pipeline_stable_diffusion_xl import (
+    StableDiffusionXLPipeline,
+)
 from hidiffusion import (  # type: ignore[import-not-found,import-untyped]
     apply_hidiffusion,
     remove_hidiffusion,
 )
-from transformers import (
-    CLIPTextConfig,
-    CLIPTextModel,
-    CLIPTextModelWithProjection,
-    CLIPTokenizer,
-)
-from transformers import initialization as transformer_init
+from transformers import CLIPTokenizer
 
 from ._numerics import decode_latents, encode_tokens, guided, hold_decode_dtype
 
@@ -232,49 +228,18 @@ def _unpartition(windows: Any, size: tuple[int, int], shift: tuple[int, int], ro
     return x.view(batch, rows * columns, channels)
 
 
-class SdxlPipeline:
-    """The four constructed component roots, built from the artifact's immutable config.
+#: The standard SDXL CLIP vocabulary, for a checkpoint that ships no tokenizers.
+_CLIP = Path(__file__).parent / "clip"
 
-        text_encoder     196 destinations   0.229 GiB   CLIPTextModel (ViT-L text tower)
-        text_encoder_2   517 destinations   1.294 GiB   CLIPTextModelWithProjection (bigG)
-        unet            1680 destinations   4.782 GiB   UNet2DConditionModel
-        vae              248 destinations   0.156 GiB   AutoencoderKL
-                        ────────────────────────────
-                        2641 destinations   6.461 GiB
 
-    Construction declares fp16 logical destinations. Plain weights fill those
-    destinations; the runtime may replace supported UNet linear leaves with native
-    encoded implementations when the checkpoint carries FP8 weights.
-    """
-
-    def __init__(self, config: Any) -> None:
-        mapping = config.mapping()
-        text_encoder = dict(mapping["text_encoder"])
-        text_encoder_2 = dict(mapping["text_encoder_2"])
-        for clip_config in (text_encoder, text_encoder_2):
-            clip_config["initializer_factor"] = float(clip_config["initializer_factor"])
-        unet_type = _hidiffusion_unet_type()
-        with transformer_init.no_init_weights():
-            self.components: dict[str, Any] = {
-                "text_encoder": CLIPTextModel(CLIPTextConfig(**text_encoder)).to(
-                    torch.float16  # type: ignore[arg-type]
-                ),
-                "text_encoder_2": CLIPTextModelWithProjection(CLIPTextConfig(**text_encoder_2)).to(
-                    torch.float16
-                ),  # type: ignore[arg-type]
-                "unet": unet_type.from_config(mapping["unet"]).to(torch.float16),
-                "vae": AutoencoderKL.from_config(mapping["vae"]).to(  # type: ignore[no-untyped-call]
-                    torch.float16
-                ),
-            }
-        unet = self.components["unet"]
-        # HiDiffusion recognizes this constructed SDXL UNet by its module keys. Keep the
-        # package free of a catalog/model identifier and let that structural check decide.
-        unet.name_or_path = ""
-        unet._cozy_base_num_upsamplers = unet.num_upsamplers
-        unet._cozy_hidiffusion_active = False
-        self.scheduler_config: dict[str, Any] = dict(mapping["scheduler"])
-        self.vae_scale: float = float(mapping["vae"]["scaling_factor"])
+def _tokenizers(model: Path) -> dict[str, CLIPTokenizer]:
+    """This package's standard CLIP pair for each tokenizer the checkpoint does not ship."""
+    pads = {"tokenizer": "<|endoftext|>", "tokenizer_2": "!"}
+    return {
+        name: CLIPTokenizer.from_pretrained(_CLIP, errors="replace", pad_token=pad, model_max_length=77)
+        for name, pad in pads.items()
+        if not (model / name).is_dir()
+    }
 
 
 def warmup() -> None:
@@ -283,11 +248,7 @@ def warmup() -> None:
     _hidiffusion_unet_type()
 
 
-def build_pipeline(config: Any) -> SdxlPipeline:
-    return SdxlPipeline(config)
-
-
-class SdxlModel(Model[SdxlPipeline]):
+class SdxlModel(Model[StableDiffusionXLPipeline]):
     """Admits by pure topology satisfaction: no structural twins, so no stamp keyword.
 
     Runtime may replace supported linear leaves with encoded implementations. The
@@ -306,16 +267,16 @@ class SdxlModel(Model[SdxlPipeline]):
     #: or computes them per step when a request says `lora_mode: per_step`.
     serving = Serving(loras=("unet", "text_encoder", "text_encoder_2"))
 
-    pipe: SdxlPipeline
-    tokenizers: tuple[Any, Any]
+    pipe: StableDiffusionXLPipeline
 
     def load(self, loader: Loader) -> None:
-        self.pipe = loader.construct(build_pipeline)
-        # Checkpoint vocabularies override the standard SDXL CLIP vocabulary. Both
-        # sources are read-only and the parsed tokenizers survive between requests.
-        self.tokenizers = (
-            _tokenizer(loader.assets, "tokenizer"),
-            _tokenizer(loader.assets, "tokenizer_2"),
+        unet = _hidiffusion_unet_type().from_pretrained(loader.path, subfolder="unet", torch_dtype=torch.float16)
+        # HiDiffusion recognizes the SDXL UNet by its module keys, not a model name.
+        unet.name_or_path = ""
+        unet._cozy_base_num_upsamplers = unet.num_upsamplers
+        unet._cozy_hidiffusion_active = False
+        self.pipe = StableDiffusionXLPipeline.from_pretrained(
+            loader.path, unet=unet, torch_dtype=torch.float16, **_tokenizers(loader.path)
         )
 
     @uses_components("text_encoder", "text_encoder_2", "unet", "vae")
@@ -335,14 +296,12 @@ class SdxlModel(Model[SdxlPipeline]):
         """Text encoding, every step and the decode: Diffusers' `EulerDiscreteScheduler`, or with
         HiDiffusion its recipe's `DDIMScheduler` at eta 1. HiDiffusion's blocks choose by step
         (RAU-Net's switch, each window's shift). Returns the image, conditioning and latents."""
-        first, second, unet, vae = (
-            self.pipe.components[name]
-            for name in ("text_encoder", "text_encoder_2", "unet", "vae")
-        )
+        pipe = self.pipe
+        first, second, unet, vae = pipe.text_encoder, pipe.text_encoder_2, pipe.unet, pipe.vae
         device = torch.device(str(self.device))
         generator = rng.generator(seed)
         sampler: Any = DDIMScheduler if hidiffusion else EulerDiscreteScheduler
-        scheduler = sampler.from_config(self.pipe.scheduler_config)
+        scheduler = sampler.from_config(pipe.scheduler.config)
         scheduler.set_timesteps(steps, device=device)
         advance = functools.partial(scheduler.step, return_dict=False)
         if hidiffusion:
@@ -351,7 +310,7 @@ class SdxlModel(Model[SdxlPipeline]):
             scheduler.set_begin_index(0)
         unet.begin_denoise_request(steps, hidiffusion, seed)
         batch = 1 if negative_tokens is None else 2
-        dtype, scale = next(vae.parameters()).dtype, self.pipe.vae_scale
+        dtype, scale = next(vae.parameters()).dtype, vae.config.scaling_factor
         latents = rng.noise((1, 4, height // 8, width // 8), generator, dtype=torch.float16, device=device)
         latents = latents * scheduler.init_noise_sigma
         # SDXL's micro-conditioning: (original_h, original_w, crop_top, crop_left, target_h,
@@ -389,37 +348,8 @@ def _finite(torch: Any, value: Any) -> float:
     return round(float(torch.nan_to_num(value, 0.0, 0.0, 0.0).abs().max()), 4)
 
 
-def _tokenizer(assets: Any, name: str) -> Any:
-    """Use checkpoint overrides, or bundled CLIP data when the whole pair is absent.
-
-    A partial override still fails through ModelAssets; mixing vocabularies and merges
-    from different sources would silently change the model's tokenization. No download
-    or temporary file is needed, including during read-only admission.
-    """
-    pad = {"tokenizer": "<|endoftext|>", "tokenizer_2": "!"}[name]
-    vocab_name, merges_name = f"{name}/vocab.json", f"{name}/merges.txt"
-    names = assets.names()
-    if vocab_name in names or merges_name in names:
-        vocab_bytes = assets.read(vocab_name)
-        merges_bytes = assets.read(merges_name)
-    else:
-        root = Path(__file__).parent
-        vocab_bytes = (root / "clip_vocab.json").read_bytes()
-        merges_bytes = (root / "clip_merges.txt").read_bytes()
-    vocab = json.loads(vocab_bytes)
-    merges = [
-        tuple(line.split(" "))
-        for line in merges_bytes.decode().splitlines()
-        if line and not line.startswith("#version")
-    ]
-    return CLIPTokenizer(
-        vocab=vocab, merges=merges, errors="replace", pad_token=pad, model_max_length=77
-    )
-
-
-def _tokenize(tokenizers: tuple[Any, Any], prompt: str) -> tuple[Any, Any]:
-    first, second = tokenizers
-    return _ids(first, prompt), _ids(second, prompt)
+def _tokenize(pipe: StableDiffusionXLPipeline, prompt: str) -> tuple[Any, Any]:
+    return _ids(pipe.tokenizer, prompt), _ids(pipe.tokenizer_2, prompt)
 
 
 def _ids(tok: Any, prompt: str) -> Any:
@@ -542,7 +472,7 @@ def generate(
     """SDXL 1.0 text to image, as a WebP.
 
     Tokenize, encode, denoise, decode, encode the WebP."""
-    hold_decode_dtype(model.pipe.components["vae"], tel)
+    hold_decode_dtype(model.pipe.vae, tel)
     prompt = payload.prompt
     adj.extend(facts.adjustments)
     seed = payload.drawn_seed()
@@ -554,9 +484,9 @@ def generate(
     classifier_free = guidance > 1.0
 
     with tel.stage("tokenize", overall_range=(0.00, 0.02)):
-        ids, ids_2 = _tokenize(model.tokenizers, prompt)
+        ids, ids_2 = _tokenize(model.pipe, prompt)
         if classifier_free:
-            neg, neg_2 = _tokenize(model.tokenizers, negative_prompt)
+            neg, neg_2 = _tokenize(model.pipe, negative_prompt)
 
     image = _sample(
         model, (ids, ids_2), (neg, neg_2) if classifier_free else None,
