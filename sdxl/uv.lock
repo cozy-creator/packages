@@ -183,7 +183,7 @@ wheels = [
 [[package]]
 name = "cozy-runtime"
 version = "0.43.1"
-source = { git = "https://github.com/cozy-creator/cozy-runtime?rev=8f16b2c455dc91dffcf6dffa9010936fa7d522e2#8f16b2c455dc91dffcf6dffa9010936fa7d522e2" }
+source = { git = "https://github.com/cozy-creator/cozy-runtime?rev=b9d1a9ae3ef8132b4c1771429fd8777f2ab2a892#b9d1a9ae3ef8132b4c1771429fd8777f2ab2a892" }
 dependencies = [
     { name = "msgspec" },
     { name = "numpy" },
@@ -783,7 +783,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "cozy-runtime", extras = ["adapters", "media"], git = "https://github.com/cozy-creator/cozy-runtime?rev=8f16b2c455dc91dffcf6dffa9010936fa7d522e2" },
+    { name = "cozy-runtime", extras = ["adapters", "media"], git = "https://github.com/cozy-creator/cozy-runtime?rev=b9d1a9ae3ef8132b4c1771429fd8777f2ab2a892" },
     { name = "diffusers", specifier = ">=0.40.0,<0.41" },
     { name = "hf-xet", specifier = ">=1.6.0" },
     { name = "hidiffusion", specifier = ">=0.1.10" },
