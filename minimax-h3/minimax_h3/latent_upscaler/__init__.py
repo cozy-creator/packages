@@ -32,7 +32,7 @@ def build_upscaler(config: Config) -> UpscalerGraph:
     return UpscalerGraph(config)
 
 
-@sequence_parallel(degrees=(2,))
+@sequence_parallel(degrees=(2, 4))
 class H3LatentUpscaler(Model[UpscalerGraph]):
     """Replicated beside H3 on every CP rank; it runs whole on each."""
 

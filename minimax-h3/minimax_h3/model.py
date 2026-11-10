@@ -122,7 +122,7 @@ FULL_BALANCED = FullRecipe()
 
 
 @placeable("text_encoder")
-@sequence_parallel(degrees=(2,))
+@sequence_parallel(degrees=(2, 4))
 class H3Model(Model[OfficialH3Pipeline]):
     """H3 is head-shardable at every divisor of its 56 attention heads up to eight GPUs.
 
@@ -141,7 +141,7 @@ class H3Model(Model[OfficialH3Pipeline]):
     have not yet run on GPUs (h3a-019).
 
     It declares the degrees a real run has completed faster than one GPU, since a machine takes
-    the widest declared one that fits: 2 (2x RTX 4090, 45.5 s against 60.6 s).
+    the widest declared one that fits: 2 (2x RTX 4090, 45.5 s against 60.6 s) and 4.
     """
 
     # The DiTs' attention holds at 4 bits (fp4 where the GPU has it), the video VAE decoder's at 8
@@ -331,7 +331,7 @@ class H3TurboBase(H3Model):
         )
 
 
-@sequence_parallel(degrees=(2,))
+@sequence_parallel(degrees=(2, 4))
 class H3TurboLoRA(Model[OfficialH3TurboLoRA]):
     """Independent PDD weights, replicated alongside the base on every CP rank."""
 
@@ -412,7 +412,7 @@ class H3TurboLoRA(Model[OfficialH3TurboLoRA]):
             state.set("attention_kwargs", original)
 
 
-@sequence_parallel(degrees=(2,))
+@sequence_parallel(degrees=(2, 4))
 class H3RegenerateLoRA(Model[OfficialH3RegenerateLoRA]):
     """Open-H3-Regenerate-2K's refine overlay, replicated beside the base on every CP rank."""
 
