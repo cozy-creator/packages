@@ -10,12 +10,16 @@ projected once, before Kitchen's pass, for its scale, and that pass reads it bac
 (`project_values`). Dense steps, dense paths and exact paths call the site's own processor,
 served by the producer's Runtime base backend.
 
-Both recipes serve one GPU only in this release. Their sharded path (`_parallel_produce`: the
-projection on the local token shard, the exchange gathering whole sequences per head subset, the
-full rotary tables a hook keeps before Diffusers splits them, `retain_rotary`) has never completed
-on two cards: the int4 recipe's first sparse step hung on 2x RTX 4090 (0.22.1 smoke). Under a group
-the Runtime steps to each recipe's dense base and the sparse steps run dense, until a GPU run
-proves the sharded path (`context_parallel=True` in `_register`).
+The consumer cards' recipe (`kitchen-sol-producer-int4qk-shared-qkv`, dense calls on int4 Q·Kᵀ)
+also shards over Ulysses (`_parallel_produce`): the projection runs on the local token shard, the
+exchange gathers whole sequences per head subset, and the rotary tables are the whole document's,
+which every GPU's DiT call holds before its blocks split them (`_whole_rotary`). That is exact
+because every statistic Kitchen keeps is per head (key means and value scales [heads, 128],
+routing per head, sink ranges per token): a GPU's head subset over the whole sequence is a head
+window of one GPU's call (`_Heads`), and the recipe's dense base is head-local. The approved SM120
+recipe (`kitchen-sol-producer-fp4-fixed-means-shared-qkv`) shares that path and serves one GPU
+only until a run on several Blackwell cards proves it there: under a group the Runtime steps to
+its dense base.
 """
 
 from __future__ import annotations
@@ -51,6 +55,7 @@ from cozy_runtime.accel.kernels import PreQuantized, quantize_once, ROWWISE_FP8
 from cozy_runtime.accel.rows import Rows
 from cozy_runtime.accel.rows import rows as columns
 
+from .adaln_pruned import ROTARY
 from .glue import (
     HEAD_HOLDS,
     KEY_MEAN,
@@ -81,6 +86,8 @@ class RequestState:
     # One rotary presentation is shared by all blocks of the current step.
     rope: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None
     parallel_rotary: dict[object, tuple[torch.Tensor, torch.Tensor]] = field(default_factory=dict)
+    # The last call's tables already compared with the ones held (`_whole_rotary`).
+    rotary_seen: tuple[torch.Tensor, torch.Tensor] | None = None
     replay_inputs: dict[tuple[object, ...], Statistics] = field(default_factory=dict)
     # The attention modules whose `Carry` slot a call of the current denoise loop has written.
     carried: set[int] = field(default_factory=set)
@@ -91,6 +98,7 @@ class RequestState:
         self.statistics.clear()
         self.carried.clear()
         self.parallel_rotary.clear()
+        self.rotary_seen = None
         self.replay_inputs.clear()
         backend = sys.modules.get("comfy_kitchen.backends.cuda")
         cached = getattr(backend, "_ROPE_FAB_CACHE", {})
@@ -144,9 +152,9 @@ def present(
     for state in states.values():
         state.carried.clear()  # this loop's slots start unwritten
     first, *others = states.values()
-    # Sharded, `rotary` holds this GPU's rows; the calls attend whole sequences, with the tables
-    # `retain_rotary` kept before the split, under the key the DiT's blocks carry (the token
-    # refiner's sites, which come first, read no rotary and carry none).
+    # The calls attend whole sequences: across GPUs the tables are the whole document's, as kept
+    # (`retain_rotary`) under the key the DiT's blocks carry (the token refiner's sites, which come
+    # first, read no rotary and carry none). The stock DiT's `rope` returns this GPU's rows.
     keys = (getattr(site.module, "_cozy_producer_rotary_key", None) for site in sites)
     rotary = first.parallel_rotary.get(next((key for key in keys if key is not None), None), rotary)
     presentation = rope_presentation(rotary, tokens, first)
@@ -611,9 +619,9 @@ def _parallel_produce(
     expected = tokens // degree + int(rank < tokens % degree)
     if hidden.shape[1] != expected or attn.heads % degree:
         raise ValueError("H3 producer requires the actual unequal token shard and divisible heads")
-    rotary = state.parallel_rotary.get(getattr(attn, "_cozy_producer_rotary_key", None))
+    rotary = _whole_rotary(state, attn)
     if rotary is None or rotary[0].shape[0] != tokens:
-        raise ValueError("H3 CP producer requires this component's full pre-split rotary tables")
+        raise ValueError("H3 CP producer requires this component's whole rotary tables")
     freqs = rope_presentation(rotary, tokens, state)
     query, key_tensor, value = _project_qkv(attn, hidden, expected)
     reuse, groups = False, 0
@@ -687,7 +695,7 @@ PRODUCERS = {
     for producer in (
         _register(FIXED_MEANS, "kitchen-sol-fp4-fixed-means"),
         _register(FP4_LOWMEM, "kitchen-sol-fp4-lowmem"),
-        _register(INT4QK, "kitchen-sol-int4qk"),
+        _register(INT4QK, "kitchen-sol-int4qk", context_parallel=True),
         _register(FAST, "kitchen-sol"),
     )
 }
@@ -702,13 +710,33 @@ def end_loop() -> None:
             state.end_loop()
 
 
+def _whole_rotary(
+    state: RequestState, attn: MiniMaxH3Attention
+) -> tuple[torch.Tensor, torch.Tensor] | None:
+    """The whole document's rotary tables for a sharded sparse call: the ones its DiT call holds
+    (`adaln_pruned.ROTARY`), else the ones the stock DiT's `rope` returned (`_RetainRotary`). A
+    GPU that does not run the loop receives the tables anew each call: tables equal to the ones
+    held leave those in place (compared once a call), so it keeps one presentation, and one
+    Kitchen table of it, through a loop."""
+    key = getattr(attn, "_cozy_producer_rotary_key", None)
+    held, given = state.parallel_rotary.get(key), ROTARY.get()
+    if given is None or given is state.rotary_seen:
+        return held
+    state.rotary_seen = given
+    if held is None or not all(
+        a is b or (a.shape == b.shape and torch.equal(a, b))
+        for a, b in zip(held, given, strict=True)
+    ):
+        held = state.parallel_rotary[key] = given
+    return held
+
+
 class _RetainRotary(ModelHook):  # type: ignore[misc]  # untyped Diffusers hook API
-    """Keeps a sharded component's full rotary tables for the CP recipes' sparse calls, before
-    Diffusers' split hook (registered after this one) shards them. Returns them unchanged.
-    Kept whenever the component runs context-parallel, whatever serves now: the transformer
-    computes the rotary once per layout, on a dense step, and the recipe can land after it
-    (a kernel opening during the request), so a step-0 fallback must not leave it without
-    them. The producer checks their length."""
+    """Keeps a sharded component's full rotary tables for the CP recipes' sparse calls, as its
+    rotary module returns them: before Diffusers' split hook (registered after this one) shards
+    the stock DiT's. Returns them unchanged. Kept whenever the component runs context-parallel,
+    whatever serves now: the tables are computed once per loop, on a dense step, and the recipe
+    can land after it (a kernel opening during the request). The producer checks their length."""
 
     def __init__(self, component: Any, key: object) -> None:
         super().__init__()

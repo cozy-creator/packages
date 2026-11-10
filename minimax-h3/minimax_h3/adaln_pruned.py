@@ -53,6 +53,11 @@ _CHUNK = 1 << 15
 
 
 _CHECKED: ContextVar[bool] = ContextVar("minimax_h3_checked_loop", default=False)
+#: The whole document's rotary tables of the DiT call in flight on this GPU. Across GPUs its
+#: blocks receive this GPU's rows of them; the sharded sparse producer attends whole sequences.
+ROTARY: ContextVar[tuple[torch.Tensor, torch.Tensor] | None] = ContextVar(
+    "minimax_h3_rotary", default=None
+)
 
 
 @contextmanager
@@ -282,6 +287,7 @@ class AdaLNPrunedMiniMaxH3Transformer(MiniMaxH3Transformer3DModel):  # type: ign
         if not looped:
             self._arm(timestep, timestep_indices, token_tags, attention_kwargs)
         del attention_kwargs  # `apply_lora_scale` consumed its scale
+        whole = None
         try:
             sequence_length = position_ids.shape[0]
             if position_ids.ndim != 2 or position_ids.shape[-1] != 3:
@@ -294,6 +300,7 @@ class AdaLNPrunedMiniMaxH3Transformer(MiniMaxH3Transformer3DModel):  # type: ign
                 )
 
             rotary_emb = self.rope(position_ids) if rotary is None else rotary
+            whole = ROTARY.set(rotary_emb)
             text = self.text_rows(encoder_hidden_states) if text is None else text
             # The packed rows are this forward's one full-length tensor outside the blocks: the
             # video goes in, and the heads come out, `_CHUNK` rows at a time.
@@ -342,6 +349,8 @@ class AdaLNPrunedMiniMaxH3Transformer(MiniMaxH3Transformer3DModel):  # type: ign
                 return (video_output, audio_output)
             return MiniMaxH3TransformerOutput(sample=video_output, audio_sample=audio_output)
         finally:
+            if whole is not None:
+                ROTARY.reset(whole)
             if not looped:
                 self._release()
 
