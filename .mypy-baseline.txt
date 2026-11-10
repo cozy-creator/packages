@@ -1,0 +1,1151 @@
+anima/anima/model.py: [arg-type] Argument 2 to "set_block_state" of "ModularPipelineBlocks" has incompatible type "dict[Any, Any]"; expected "BlockState"
+anima/anima/model.py: [attr-defined] "AnimaAutoBlocks" has no attribute "get_workflow"
+anima/anima/model.py: [attr-defined] "dict[Any, Any]" has no attribute "dtype"
+anima/anima/model.py: [attr-defined] "dict[Any, Any]" has no attribute "latents"
+anima/anima/model.py: [attr-defined] "dict[Any, Any]" has no attribute "latents"
+anima/anima/model.py: [attr-defined] "dict[Any, Any]" has no attribute "num_inference_steps"
+anima/anima/model.py: [attr-defined] "dict[Any, Any]" has no attribute "padding_mask"
+anima/anima/model.py: [attr-defined] "dict[Any, Any]" has no attribute "prompt_embeds"
+anima/anima/model.py: [attr-defined] "dict[Any, Any]" has no attribute "timesteps"
+anima/anima/model.py: [explicit-any] Explicit "Any" is not allowed
+anima/anima/model.py: [explicit-any] Explicit "Any" is not allowed
+anima/anima/model.py: [explicit-any] Explicit "Any" is not allowed
+anima/anima/model.py: [explicit-any] Explicit "Any" is not allowed
+anima/anima/model.py: [explicit-any] Explicit "Any" is not allowed
+anima/anima/model.py: [explicit-any] Explicit "Any" is not allowed
+anima/anima/model.py: [explicit-any] Explicit "Any" is not allowed
+anima/anima/model.py: [explicit-any] Explicit "Any" is not allowed
+anima/anima/model.py: [explicit-any] Explicit "Any" is not allowed
+anima/anima/model.py: [explicit-any] Explicit "Any" is not allowed
+anima/anima/model.py: [explicit-any] Explicit "Any" is not allowed
+anima/anima/model.py: [explicit-any] Explicit "Any" is not allowed
+anima/anima/model.py: [misc] Type of decorated function contains type "Any" ("Callable[[AnimaModel, str, str, int, int, int, float, tuple[float, float], float, int, _Phases, bool], Any]")
+anima/anima/model.py: [misc] Type of decorated function contains type "Any" ("Callable[[_Denoise, Any, Any], Any]")
+anima/anima/model.py: [no-untyped-call] Call to untyped function "AnimaAutoBlocks" in typed context
+anima/anima/model.py: [no-untyped-call] Call to untyped function "Announce" in typed context
+anima/anima/model.py: [no-untyped-call] Call to untyped function "FusedLatents" in typed context
+anima/anima/model.py: [no-untyped-call] Call to untyped function "RuntimeAnimaPipeline" in typed context
+anima/anima/model.py: [no-untyped-call] Call to untyped function "TokenizersBackend" in typed context
+anima/anima/model.py: [no-untyped-call] Call to untyped function "__init__" in typed context
+anima/anima/model.py: [no-untyped-call] Call to untyped function "from_config" of "AnimaTextConditioner" in typed context
+anima/anima/model.py: [no-untyped-call] Call to untyped function "from_config" of "AutoencoderKLQwenImage" in typed context
+anima/anima/model.py: [no-untyped-call] Call to untyped function "from_config" of "CosmosTransformer3DModel" in typed context
+anima/anima/model.py: [no-untyped-call] Call to untyped function "from_config" of "FlowMatchEulerDiscreteScheduler" in typed context
+anima/anima/model.py: [no-untyped-call] Call to untyped function "from_config" of "_BaseAutoModelClass" in typed context
+anima/anima/optimization.py: [arg-type] Argument 2 to "set_block_state" of "ModularPipelineBlocks" has incompatible type "dict[Any, Any]"; expected "BlockState"
+anima/anima/optimization.py: [assignment] Incompatible types in assignment (expression has type "Tensor", variable has type "PreQuantized | None")
+anima/anima/optimization.py: [attr-defined] "dict[Any, Any]" has no attribute "batch_size"
+anima/anima/optimization.py: [attr-defined] "dict[Any, Any]" has no attribute "dtype"
+anima/anima/optimization.py: [attr-defined] "dict[Any, Any]" has no attribute "generator"
+anima/anima/optimization.py: [attr-defined] "dict[Any, Any]" has no attribute "height"
+anima/anima/optimization.py: [attr-defined] "dict[Any, Any]" has no attribute "height"
+anima/anima/optimization.py: [attr-defined] "dict[Any, Any]" has no attribute "latents"
+anima/anima/optimization.py: [attr-defined] "dict[Any, Any]" has no attribute "latents"
+anima/anima/optimization.py: [attr-defined] "dict[Any, Any]" has no attribute "latents"
+anima/anima/optimization.py: [attr-defined] "dict[Any, Any]" has no attribute "latents"
+anima/anima/optimization.py: [attr-defined] "dict[Any, Any]" has no attribute "num_images_per_prompt"
+anima/anima/optimization.py: [attr-defined] "dict[Any, Any]" has no attribute "padding_mask"
+anima/anima/optimization.py: [attr-defined] "dict[Any, Any]" has no attribute "width"
+anima/anima/optimization.py: [attr-defined] "dict[Any, Any]" has no attribute "width"
+anima/anima/optimization.py: [comparison-overlap] Non-overlapping identity check (left operand type: "type[RMSNorm]", right operand type: "type[CosmosAdaLayerNormZero]")
+anima/anima/optimization.py: [explicit-any] Explicit "Any" is not allowed
+anima/anima/optimization.py: [explicit-any] Explicit "Any" is not allowed
+anima/anima/optimization.py: [explicit-any] Explicit "Any" is not allowed
+anima/anima/optimization.py: [explicit-any] Explicit "Any" is not allowed
+anima/anima/optimization.py: [explicit-any] Explicit "Any" is not allowed
+anima/anima/optimization.py: [explicit-any] Explicit "Any" is not allowed
+anima/anima/optimization.py: [explicit-any] Explicit "Any" is not allowed
+anima/anima/optimization.py: [explicit-any] Explicit "Any" is not allowed
+anima/anima/optimization.py: [explicit-any] Explicit "Any" is not allowed
+anima/anima/optimization.py: [explicit-any] Explicit "Any" is not allowed
+anima/anima/optimization.py: [explicit-any] Explicit "Any" is not allowed
+anima/anima/optimization.py: [explicit-any] Explicit "Any" is not allowed
+anima/anima/optimization.py: [explicit-any] Explicit "Any" is not allowed
+anima/anima/optimization.py: [explicit-any] Explicit "Any" is not allowed
+anima/anima/optimization.py: [explicit-any] Explicit "Any" is not allowed
+anima/anima/optimization.py: [explicit-any] Explicit "Any" is not allowed
+anima/anima/optimization.py: [explicit-any] Explicit "Any" is not allowed
+anima/anima/optimization.py: [explicit-any] Explicit "Any" is not allowed
+anima/anima/optimization.py: [explicit-any] Explicit "Any" is not allowed
+anima/anima/optimization.py: [explicit-any] Explicit "Any" is not allowed
+anima/anima/optimization.py: [explicit-any] Explicit "Any" is not allowed
+anima/anima/optimization.py: [explicit-any] Explicit "Any" is not allowed
+anima/anima/optimization.py: [explicit-any] Explicit "Any" is not allowed
+anima/anima/optimization.py: [explicit-any] Explicit "Any" is not allowed
+anima/anima/optimization.py: [explicit-any] Explicit "Any" is not allowed
+anima/anima/optimization.py: [explicit-any] Explicit "Any" is not allowed
+anima/anima/optimization.py: [explicit-any] Explicit "Any" is not allowed
+anima/anima/optimization.py: [explicit-any] Explicit "Any" is not allowed
+anima/anima/optimization.py: [method-assign] Cannot assign to a method
+anima/anima/optimization.py: [misc] Type of decorated function contains type "Any" ("Callable[[FusedLatents, Any, Any], Any]")
+anima/anima/optimization.py: [union-attr] Item "Tensor" of "Tensor | Module" has no attribute "bias"
+anima/anima/optimization.py: [union-attr] Item "Tensor" of "Tensor | Module" has no attribute "weight"
+examples/client-scripts/h3-memo-bank/adopt_full.py: [explicit-any] Explicit "Any" is not allowed
+examples/client-scripts/h3-memo-bank/adopt_full.py: [misc] Type of decorated function contains type "Any" ("Callable[[Context, Nothing, Weights[Any]], ModelArtifact]")
+examples/client-scripts/h3-te-drift/h3_te_drift.py: [explicit-any] Explicit "Any" is not allowed
+examples/client-scripts/h3-te-drift/h3_te_drift.py: [explicit-any] Explicit "Any" is not allowed
+examples/client-scripts/h3-te-drift/h3_te_drift.py: [explicit-any] Explicit "Any" is not allowed
+examples/client-scripts/h3-te-drift/h3_te_drift.py: [explicit-any] Explicit "Any" is not allowed
+examples/client-scripts/h3-te-drift/h3_te_drift.py: [explicit-any] Explicit "Any" is not allowed
+examples/client-scripts/h3-te-drift/h3_te_drift.py: [explicit-any] Explicit "Any" is not allowed
+examples/client-scripts/h3-te-drift/h3_te_drift.py: [explicit-any] Explicit "Any" is not allowed
+examples/client-scripts/h3-te-drift/h3_te_drift.py: [misc] Type of decorated function contains type "Any" ("Callable[[Context, WeightRequest, Weights[Any], Weights[Any], Telemetry], Result]")
+examples/client-scripts/moe-grouped-gpu.py: [arg-type] Argument 1 to "Int8Leaf" has incompatible type "Any | Tensor | Module"; expected "Tensor"
+examples/client-scripts/moe-grouped-gpu.py: [arg-type] Argument 1 to "Int8Leaf" has incompatible type "Any | Tensor | Module"; expected "Tensor"
+examples/client-scripts/moe-grouped-gpu.py: [no-any-return] Returning Any from function declared to return "Tensor"
+examples/client-scripts/moe-grouped-gpu.py: [operator] "Tensor" not callable
+examples/client-scripts/moe-grouped-gpu.py: [union-attr] Item "Tensor" of "Tensor | Module" has no attribute "weight"
+examples/client-scripts/moe-grouped-gpu.py: [union-attr] Item "Tensor" of "Tensor | Module" has no attribute "weight"
+examples/client-scripts/moe-grouped-gpu.py: [union-attr] Item "Tensor" of "Tensor | Module" has no attribute "weight"
+fibo-2/fibo_2/__init__.py: [assignment] Incompatible types in assignment (expression has type "Prompt[Image]", base class "ImageRequest" defined the type as "str")
+fibo-2/fibo_2/model.py: [arg-type] Argument "sigmas" to "retrieve_timesteps" has incompatible type "ndarray[tuple[int], dtype[float64]]"; expected "list[float] | None"
+fibo-2/fibo_2/model.py: [attr-defined] "_Staged" has no attribute "_patchify_latents"
+fibo-2/fibo_2/model.py: [attr-defined] "_Staged" has no attribute "_unpatchify_latents"
+fibo-2/fibo_2/model.py: [attr-defined] "_Staged" has no attribute "default_sample_size"
+fibo-2/fibo_2/model.py: [attr-defined] "_Staged" has no attribute "image_processor"
+fibo-2/fibo_2/model.py: [attr-defined] "_Staged" has no attribute "image_processor"
+fibo-2/fibo_2/model.py: [attr-defined] "_Staged" has no attribute "prepare_image_latents"; maybe "prepare_latents"?
+fibo-2/fibo_2/model.py: [attr-defined] "_Staged" has no attribute "scheduler"
+fibo-2/fibo_2/model.py: [attr-defined] "_Staged" has no attribute "text_encoder_image_size"
+fibo-2/fibo_2/model.py: [attr-defined] "_Staged" has no attribute "text_images_max_noise_level"
+fibo-2/fibo_2/model.py: [attr-defined] "_Staged" has no attribute "transformer"
+fibo-2/fibo_2/model.py: [attr-defined] "_Staged" has no attribute "vae"
+fibo-2/fibo_2/model.py: [attr-defined] "_Staged" has no attribute "vae_scale_factor"
+fibo-2/fibo_2/model.py: [attr-defined] "_Staged" has no attribute "vae_scale_factor"
+fibo-2/fibo_2/model.py: [explicit-any] Explicit "Any" is not allowed
+fibo-2/fibo_2/model.py: [explicit-any] Explicit "Any" is not allowed
+fibo-2/fibo_2/model.py: [explicit-any] Explicit "Any" is not allowed
+fibo-2/fibo_2/model.py: [explicit-any] Explicit "Any" is not allowed
+fibo-2/fibo_2/model.py: [misc] "encode_prompt" undefined in superclass
+fibo-2/fibo_2/model.py: [no-untyped-call] Call to untyped function "_Staged" in typed context
+fibo-2/fibo_2/model.py: [no-untyped-call] Call to untyped function "from_config" of "AutoencoderKLFlux2" in typed context
+fibo-2/fibo_2/model.py: [no-untyped-call] Call to untyped function "from_config" of "BriaFibo2Transformer2DModel" in typed context
+fibo-2/fibo_2/model.py: [no-untyped-call] Call to untyped function "from_config" of "FlowMatchEulerDiscreteScheduler" in typed context
+fibo-2/fibo_2/model.py: [no-untyped-call] Call to untyped function "from_config" of "_BaseAutoModelClass" in typed context
+fibo-2/fibo_2/model.py: [operator] "_Staged" not callable
+fibo-2/fibo_2/model.py: [unused-ignore] Unused "type: ignore" comment
+fibo-2/fibo_2/model.py: [unused-ignore] Unused "type: ignore" comment
+fibo-2/fibo_2/quantize.py: [union-attr] Item "DerivationHook" of "QuantizationPlan | SelectionPlan | DerivationHook" has no attribute "components"
+fibo-2/fibo_2/quantize.py: [union-attr] Item "DerivationHook" of "QuantizationPlan | SelectionPlan | DerivationHook" has no attribute "components"
+fibo-2/fibo_2/quantize.py: [union-attr] Item "DerivationHook" of "QuantizationPlan | SelectionPlan | DerivationHook" has no attribute "include"
+fibo-2/fibo_2/quantize.py: [union-attr] Item "DerivationHook" of "QuantizationPlan | SelectionPlan | DerivationHook" has no attribute "include"
+fibo-2/fibo_2/quantize.py: [union-attr] Item "SelectionPlan" of "QuantizationPlan | SelectionPlan | DerivationHook" has no attribute "components"
+fibo-2/fibo_2/quantize.py: [union-attr] Item "SelectionPlan" of "QuantizationPlan | SelectionPlan | DerivationHook" has no attribute "components"
+fibo-2/fibo_2/upsampler.py: [arg-type] Argument 1 to "apply_chat_template" of "ProcessorMixin" has incompatible type "list[dict[str, Sequence[Collection[str]]]]"; expected "list[dict[str, str]] | list[list[dict[str, str]]]"
+fibo-2/fibo_2/upsampler.py: [arg-type] Argument 2 to "linear" has incompatible type "Any | Tensor | Module"; expected "Tensor"
+fibo-2/fibo_2/upsampler.py: [explicit-any] Explicit "Any" is not allowed
+fibo-2/fibo_2/upsampler.py: [explicit-any] Explicit "Any" is not allowed
+fibo-2/fibo_2/upsampler.py: [explicit-any] Explicit "Any" is not allowed
+fibo-2/fibo_2/upsampler.py: [no-untyped-call] Call to untyped function "from_config" of "_BaseAutoModelClass" in typed context
+fibo-2/fibo_2/upsampler.py: [union-attr] Item "Tensor" of "Tensor | Module" has no attribute "weight"
+flux-2/flux_2/__init__.py: [assignment] Incompatible types in assignment (expression has type "Prompt[Image]", base class "ImageRequest" defined the type as "str")
+flux-2/flux_2/model.py: [arg-type] Argument 1 to "Hook" has incompatible type "partial[Module | None]"; expected "Callable[[], Factors | None]"
+flux-2/flux_2/model.py: [arg-type] Argument 1 to "noise" has incompatible type "tuple[int, Any | Tensor | Module, int, int]"; expected "Sequence[int]"
+flux-2/flux_2/model.py: [call-overload] No overload variant of "to" of "TensorBase" matches argument types "device", "Tensor | Module"
+flux-2/flux_2/model.py: [explicit-any] Explicit "Any" is not allowed
+flux-2/flux_2/model.py: [explicit-any] Explicit "Any" is not allowed
+flux-2/flux_2/model.py: [explicit-any] Explicit "Any" is not allowed
+flux-2/flux_2/model.py: [explicit-any] Explicit "Any" is not allowed
+flux-2/flux_2/model.py: [no-any-return] Returning Any from function declared to return "Tensor"
+flux-2/flux_2/model.py: [no-any-return] Returning Any from function declared to return Module
+flux-2/flux_2/model.py: [no-untyped-call] Call to untyped function "TokenizersBackend" in typed context
+flux-2/flux_2/model.py: [no-untyped-call] Call to untyped function "from_config" of "AutoencoderKLFlux2" in typed context
+flux-2/flux_2/model.py: [no-untyped-call] Call to untyped function "from_config" of "Flux2Transformer2DModel" in typed context
+flux-2/flux_2/model.py: [no-untyped-call] Call to untyped function "from_config" of "_BaseAutoModelClass" in typed context
+flux-2/flux_2/model.py: [operator] "Tensor" not callable
+flux-2/flux_2/model.py: [operator] "Tensor" not callable
+flux-2/flux_2/model.py: [union-attr] Item "Tensor" of "Tensor | Module" has no attribute "in_channels"
+flux-2/flux_2/quantize.py: [union-attr] Item "DerivationHook" of "QuantizationPlan | SelectionPlan | DerivationHook" has no attribute "components"
+flux-2/flux_2/quantize.py: [union-attr] Item "DerivationHook" of "QuantizationPlan | SelectionPlan | DerivationHook" has no attribute "components"
+flux-2/flux_2/quantize.py: [union-attr] Item "DerivationHook" of "QuantizationPlan | SelectionPlan | DerivationHook" has no attribute "include"
+flux-2/flux_2/quantize.py: [union-attr] Item "DerivationHook" of "QuantizationPlan | SelectionPlan | DerivationHook" has no attribute "include"
+flux-2/flux_2/quantize.py: [union-attr] Item "SelectionPlan" of "QuantizationPlan | SelectionPlan | DerivationHook" has no attribute "components"
+flux-2/flux_2/quantize.py: [union-attr] Item "SelectionPlan" of "QuantizationPlan | SelectionPlan | DerivationHook" has no attribute "components"
+flux-2/flux_2/turbo.py: [assignment] Incompatible types in assignment (expression has type "None", variable has type "Tensor | Module")
+flux-2/flux_2/turbo.py: [assignment] Incompatible types in assignment (expression has type "dict[str, Factors]", variable has type "Tensor | Module")
+flux-2/flux_2/turbo.py: [attr-defined] "Flux2Transformer2DModel" has no attribute "get_submodule"
+flux-2/flux_2/turbo.py: [explicit-any] Explicit "Any" is not allowed
+flux-2/flux_2/turbo.py: [no-untyped-call] Call to untyped function "Flux2Transformer2DModel" in typed context
+flux-2/flux_2/upsampler.py: [explicit-any] Explicit "Any" is not allowed
+flux-3-klein/flux_3_klein/__init__.py: [assignment] Incompatible types in assignment (expression has type "Prompt[Image]", base class "ImageRequest" defined the type as "str")
+flux-3-klein/flux_3_klein/klein.py: [arg-type] Argument 2 to "_get_qwen3_vl_prompt_embeds" of "Flux3TextEncoderStep" has incompatible type "Qwen3VLProcessor"; expected "AutoProcessor"
+flux-3-klein/flux_3_klein/klein.py: [assignment] Incompatible types in assignment (expression has type "Tensor", base class "tuple" defined the type as "Callable[[Any, SupportsIndex, SupportsIndex], int]")
+flux-3-klein/flux_3_klein/klein.py: [attr-defined] "Transformer" has no attribute "early_stream_modulations"
+flux-3-klein/flux_3_klein/klein.py: [attr-defined] "Transformer" has no attribute "mode_blocks"
+flux-3-klein/flux_3_klein/klein.py: [attr-defined] "Transformer" has no attribute "norm_out"
+flux-3-klein/flux_3_klein/klein.py: [attr-defined] "Transformer" has no attribute "proj_out"
+flux-3-klein/flux_3_klein/klein.py: [attr-defined] "Transformer" has no attribute "single_stream_modulations"
+flux-3-klein/flux_3_klein/klein.py: [attr-defined] "Transformer" has no attribute "single_transformer_blocks"
+flux-3-klein/flux_3_klein/klein.py: [attr-defined] "Transformer" has no attribute "x_embedders"
+flux-3-klein/flux_3_klein/klein.py: [explicit-any] Explicit "Any" is not allowed
+flux-3-klein/flux_3_klein/klein.py: [explicit-any] Explicit "Any" is not allowed
+flux-3-klein/flux_3_klein/klein.py: [explicit-any] Explicit "Any" is not allowed
+flux-3-klein/flux_3_klein/klein.py: [explicit-any] Explicit "Any" is not allowed
+flux-3-klein/flux_3_klein/klein.py: [explicit-any] Explicit "Any" is not allowed
+flux-3-klein/flux_3_klein/klein.py: [explicit-any] Explicit "Any" is not allowed
+flux-3-klein/flux_3_klein/klein.py: [explicit-any] Explicit "Any" is not allowed
+flux-3-klein/flux_3_klein/klein.py: [explicit-any] Explicit "Any" is not allowed
+flux-3-klein/flux_3_klein/klein.py: [explicit-any] Explicit "Any" is not allowed
+flux-3-klein/flux_3_klein/klein.py: [explicit-any] Explicit "Any" is not allowed
+flux-3-klein/flux_3_klein/klein.py: [explicit-any] Explicit "Any" is not allowed
+flux-3-klein/flux_3_klein/klein.py: [no-any-return] Returning Any from function declared to return "Tensor"
+flux-3-klein/flux_3_klein/klein.py: [no-any-return] Returning Any from function declared to return "Tensor"
+flux-3-klein/flux_3_klein/klein.py: [no-any-return] Returning Any from function declared to return "Tensor"
+flux-3-klein/flux_3_klein/klein.py: [no-untyped-call] Call to untyped function "from_config" of "AutoencoderKLFlux2" in typed context
+flux-3-klein/flux_3_klein/klein.py: [no-untyped-call] Call to untyped function "from_config" of "Flux3Transformer2DModel" in typed context
+flux-3-klein/flux_3_klein/klein.py: [no-untyped-call] Call to untyped function "from_config" of "_BaseAutoModelClass" in typed context
+flux-3-klein/flux_3_klein/klein.py: [unused-ignore] Unused "type: ignore" comment
+flux-3-klein/flux_3_klein/quantize.py: [explicit-any] Explicit "Any" is not allowed
+flux-3-klein/flux_3_klein/quantize.py: [union-attr] Item "DerivationHook" of "QuantizationPlan | SelectionPlan | DerivationHook" has no attribute "components"
+flux-3-klein/flux_3_klein/quantize.py: [union-attr] Item "DerivationHook" of "QuantizationPlan | SelectionPlan | DerivationHook" has no attribute "components"
+flux-3-klein/flux_3_klein/quantize.py: [union-attr] Item "DerivationHook" of "QuantizationPlan | SelectionPlan | DerivationHook" has no attribute "components"
+flux-3-klein/flux_3_klein/quantize.py: [union-attr] Item "DerivationHook" of "QuantizationPlan | SelectionPlan | DerivationHook" has no attribute "components"
+flux-3-klein/flux_3_klein/quantize.py: [union-attr] Item "DerivationHook" of "QuantizationPlan | SelectionPlan | DerivationHook" has no attribute "include"
+flux-3-klein/flux_3_klein/quantize.py: [union-attr] Item "DerivationHook" of "QuantizationPlan | SelectionPlan | DerivationHook" has no attribute "include"
+flux-3-klein/flux_3_klein/quantize.py: [union-attr] Item "DerivationHook" of "QuantizationPlan | SelectionPlan | DerivationHook" has no attribute "include"
+flux-3-klein/flux_3_klein/quantize.py: [union-attr] Item "DerivationHook" of "QuantizationPlan | SelectionPlan | DerivationHook" has no attribute "include"
+flux-3-klein/flux_3_klein/quantize.py: [union-attr] Item "SelectionPlan" of "QuantizationPlan | SelectionPlan | DerivationHook" has no attribute "components"
+flux-3-klein/flux_3_klein/quantize.py: [union-attr] Item "SelectionPlan" of "QuantizationPlan | SelectionPlan | DerivationHook" has no attribute "components"
+flux-3-klein/flux_3_klein/quantize.py: [union-attr] Item "SelectionPlan" of "QuantizationPlan | SelectionPlan | DerivationHook" has no attribute "components"
+flux-3-klein/flux_3_klein/quantize.py: [union-attr] Item "SelectionPlan" of "QuantizationPlan | SelectionPlan | DerivationHook" has no attribute "components"
+flux-3-klein/flux_3_klein/upsampler.py: [explicit-any] Explicit "Any" is not allowed
+flux-3-klein/flux_3_klein/upsampler.py: [explicit-any] Explicit "Any" is not allowed
+flux-3-klein/flux_3_klein/upsampler.py: [explicit-any] Explicit "Any" is not allowed
+flux-3-klein/flux_3_klein/upsampler.py: [explicit-any] Explicit "Any" is not allowed
+flux-3-klein/flux_3_klein/upsampler.py: [explicit-any] Explicit "Any" is not allowed
+flux-3-klein/flux_3_klein/upsampler.py: [explicit-any] Explicit "Any" is not allowed
+flux-3-klein/flux_3_klein/upsampler.py: [explicit-any] Explicit "Any" is not allowed
+flux-3-klein/flux_3_klein/upsampler.py: [explicit-any] Explicit "Any" is not allowed
+hidream-o1/hidream_o1/__init__.py: [assignment] Incompatible types in assignment (expression has type "Prompt[Image]", base class "ImageRequest" defined the type as "str")
+hidream-o1/hidream_o1/model.py: [arg-type] Argument 1 to "rectangle" of "ImageDraw" has incompatible type "tuple[int, int, int, int] | None"; expected "Sequence[float] | Sequence[Sequence[float]]"
+hidream-o1/hidream_o1/model.py: [arg-type] Argument 1 to "to" of "TensorBase" has incompatible type "dtype | Tensor | Module"; expected "dtype"
+hidream-o1/hidream_o1/model.py: [assignment] Incompatible types in assignment (expression has type "Tensor | Module", variable has type "Body")
+hidream-o1/hidream_o1/model.py: [explicit-any] Explicit "Any" is not allowed
+hidream-o1/hidream_o1/model.py: [explicit-any] Explicit "Any" is not allowed
+hidream-o1/hidream_o1/model.py: [explicit-any] Explicit "Any" is not allowed
+hidream-o1/hidream_o1/model.py: [explicit-any] Explicit "Any" is not allowed
+hidream-o1/hidream_o1/model.py: [explicit-any] Explicit "Any" is not allowed
+hidream-o1/hidream_o1/model.py: [explicit-any] Explicit "Any" is not allowed
+hidream-o1/hidream_o1/model.py: [explicit-any] Explicit "Any" is not allowed
+hidream-o1/hidream_o1/model.py: [explicit-any] Explicit "Any" is not allowed
+hidream-o1/hidream_o1/model.py: [no-any-return] Returning Any from function declared to return "Tensor"
+hidream-o1/hidream_o1/model.py: [no-any-return] Returning Any from function declared to return "Tensor"
+hidream-o1/hidream_o1/model.py: [no-any-return] Returning Any from function declared to return "Tensor"
+hidream-o1/hidream_o1/model.py: [no-untyped-call] Call to untyped function "_from_config" of "PreTrainedModel" in typed context
+hidream-o1/hidream_o1/model.py: [no-untyped-call] Call to untyped function "_from_config" of "PreTrainedModel" in typed context
+hidream-o1/hidream_o1/model.py: [union-attr] Item "None" of "dict[Any, Any] | PreTrainedConfig | None" has no attribute "hidden_size"
+hidream-o1/hidream_o1/model.py: [union-attr] Item "dict[Any, Any]" of "dict[Any, Any] | PreTrainedConfig | None" has no attribute "hidden_size"
+hidream-o1/hidream_o1/sampling.py: [attr-defined] "FlowMatchEulerDiscreteScheduler" has no attribute "set_begin_index"
+hidream-o1/hidream_o1/sampling.py: [attr-defined] "FlowMatchEulerDiscreteScheduler" has no attribute "set_timesteps"
+hidream-o1/hidream_o1/sampling.py: [attr-defined] "FlowMatchEulerDiscreteScheduler" has no attribute "sigmas"
+hidream-o1/hidream_o1/sampling.py: [explicit-any] Explicit "Any" is not allowed
+hidream-o1/hidream_o1/sampling.py: [explicit-any] Explicit "Any" is not allowed
+hidream-o1/hidream_o1/sampling.py: [no-untyped-call] Call to untyped function "FlowMatchEulerDiscreteScheduler" in typed context
+hunyuan-image-3/hunyuan_image_3/__init__.py: [arg-type] Argument 2 to "log" of "Telemetry" has incompatible type "**dict[str, float]"; expected "str"
+hunyuan-image-3/hunyuan_image_3/model.py: [assignment] Incompatible types in assignment (expression has type "SimpleNamespace", variable has type "Tensor | Module")
+hunyuan-image-3/hunyuan_image_3/model.py: [explicit-any] Explicit "Any" is not allowed
+hunyuan-image-3/hunyuan_image_3/model.py: [index] Value of type "Any | Tensor | Module" is not indexable
+hunyuan-image-3/hunyuan_image_3/model.py: [no-any-return] Returning Any from function declared to return "Image"
+hunyuan-image-3/hunyuan_image_3/model.py: [no-any-unimported] Return type becomes "Any" due to an unfollowed import
+hunyuan-image-3/hunyuan_image_3/model.py: [operator] "Tensor" not callable
+hunyuan-image-3/hunyuan_image_3/model.py: [operator] "Tensor" not callable
+hunyuan-image-3/hunyuan_image_3/model.py: [operator] "Tensor" not callable
+hunyuan-image-3/hunyuan_image_3/model.py: [operator] "Tensor" not callable
+hunyuan-image-3/hunyuan_image_3/model.py: [operator] "Tensor" not callable
+hunyuan-image-3/hunyuan_image_3/model.py: [union-attr] Item "Tensor" of "Any | Tensor" has no attribute "height"
+hunyuan-image-3/hunyuan_image_3/model.py: [union-attr] Item "Tensor" of "Any | Tensor" has no attribute "width"
+hunyuan-image-3/hunyuan_image_3/model.py: [union-attr] Item "Tensor" of "Tensor | Module" has no attribute "build_cond_images"
+hunyuan-image-3/hunyuan_image_3/model.py: [union-attr] Item "Tensor" of "Tensor | Module" has no attribute "layers"
+hunyuan-image-3/hunyuan_image_3/model.py: [union-attr] Item "Tensor" of "Tensor | Module" has no attribute "vae_reso_group"
+hunyuan-image-3/hunyuan_image_3/model.py: [union-attr] Item Module of "Any | Tensor | Module" has no attribute "__iter__" (not iterable)
+hunyuan-image-3/hunyuan_image_3/quantize.py: [explicit-any] Explicit "Any" is not allowed
+hunyuan-image-3/hunyuan_image_3/quantize.py: [explicit-any] Explicit "Any" is not allowed
+hunyuan-image-3/hunyuan_image_3/quantize.py: [union-attr] Item "DerivationHook" of "QuantizationPlan | SelectionPlan | DerivationHook" has no attribute "components"
+hunyuan-image-3/hunyuan_image_3/quantize.py: [union-attr] Item "DerivationHook" of "QuantizationPlan | SelectionPlan | DerivationHook" has no attribute "components"
+hunyuan-image-3/hunyuan_image_3/quantize.py: [union-attr] Item "DerivationHook" of "QuantizationPlan | SelectionPlan | DerivationHook" has no attribute "include"
+hunyuan-image-3/hunyuan_image_3/quantize.py: [union-attr] Item "DerivationHook" of "QuantizationPlan | SelectionPlan | DerivationHook" has no attribute "include"
+hunyuan-image-3/hunyuan_image_3/quantize.py: [union-attr] Item "SelectionPlan" of "QuantizationPlan | SelectionPlan | DerivationHook" has no attribute "components"
+hunyuan-image-3/hunyuan_image_3/quantize.py: [union-attr] Item "SelectionPlan" of "QuantizationPlan | SelectionPlan | DerivationHook" has no attribute "components"
+ideogram-4/ideogram_4/__init__.py: [explicit-any] Explicit "Any" is not allowed
+ideogram-4/ideogram_4/__init__.py: [explicit-any] Explicit "Any" is not allowed
+ideogram-4/ideogram_4/__init__.py: [explicit-any] Explicit "Any" is not allowed
+ideogram-4/ideogram_4/__init__.py: [explicit-any] Explicit "Any" is not allowed
+ideogram-4/ideogram_4/model.py: [arg-type] Argument 1 to "noise" has incompatible type "tuple[int, int, Any | Tensor | Module]"; expected "Sequence[int]"
+ideogram-4/ideogram_4/model.py: [arg-type] Argument 1 to "to" of "TensorBase" has incompatible type "Tensor | Module"; expected "Tensor"
+ideogram-4/ideogram_4/model.py: [assignment] Incompatible types in assignment (expression has type "type[Transformer]", variable has type "type[Module]")
+ideogram-4/ideogram_4/model.py: [attr-defined] "Transformer" has no attribute "adaln_proj"
+ideogram-4/ideogram_4/model.py: [attr-defined] "Transformer" has no attribute "embed_image_indicator"
+ideogram-4/ideogram_4/model.py: [attr-defined] "Transformer" has no attribute "final_layer"
+ideogram-4/ideogram_4/model.py: [attr-defined] "Transformer" has no attribute "input_proj"
+ideogram-4/ideogram_4/model.py: [attr-defined] "Transformer" has no attribute "layers"
+ideogram-4/ideogram_4/model.py: [attr-defined] "Transformer" has no attribute "t_embedding"
+ideogram-4/ideogram_4/model.py: [explicit-any] Explicit "Any" is not allowed
+ideogram-4/ideogram_4/model.py: [explicit-any] Explicit "Any" is not allowed
+ideogram-4/ideogram_4/model.py: [explicit-any] Explicit "Any" is not allowed
+ideogram-4/ideogram_4/model.py: [no-any-return] Returning Any from function declared to return "Image"
+ideogram-4/ideogram_4/model.py: [no-any-return] Returning Any from function declared to return "Tensor"
+ideogram-4/ideogram_4/model.py: [no-untyped-call] Call to untyped function "from_config" of "AutoencoderKLFlux2" in typed context
+ideogram-4/ideogram_4/model.py: [no-untyped-call] Call to untyped function "from_config" of "FlowMatchEulerDiscreteScheduler" in typed context
+ideogram-4/ideogram_4/model.py: [no-untyped-call] Call to untyped function "from_config" of "Ideogram4Transformer2DModel" in typed context
+ideogram-4/ideogram_4/model.py: [operator] "Tensor" not callable
+ideogram-4/ideogram_4/model.py: [operator] "Tensor" not callable
+ideogram-4/ideogram_4/model.py: [operator] Unsupported left operand type for + (Module)
+ideogram-4/ideogram_4/model.py: [operator] Unsupported operand types for + ("Tensor" and Module)
+ideogram-4/ideogram_4/model.py: [operator] Unsupported operand types for + (Module and "Tensor")
+ideogram-4/ideogram_4/model.py: [union-attr] Item "Tensor" of "Tensor | Module" has no attribute "batch_norm_eps"
+ideogram-4/ideogram_4/model.py: [union-attr] Item "Tensor" of "Tensor | Module" has no attribute "in_channels"
+ideogram-4/ideogram_4/model.py: [union-attr] Item "Tensor" of "Tensor | Module" has no attribute "running_mean"
+ideogram-4/ideogram_4/model.py: [union-attr] Item "Tensor" of "Tensor | Module" has no attribute "running_var"
+ideogram-4/ideogram_4/model.py: [unused-ignore] Unused "type: ignore" comment
+ideogram-4/ideogram_4/text_encoder.py: [arg-type] Argument 1 to "apply_chat_template" of "PreTrainedTokenizerBase" has incompatible type "list[dict[str, Sequence[Collection[str]]]]"; expected "list[dict[str, str]] | list[list[dict[str, str]]]"
+ideogram-4/ideogram_4/text_encoder.py: [explicit-any] Explicit "Any" is not allowed
+ideogram-4/ideogram_4/text_encoder.py: [explicit-any] Explicit "Any" is not allowed
+ideogram-4/ideogram_4/text_encoder.py: [explicit-any] Explicit "Any" is not allowed
+ideogram-4/ideogram_4/text_encoder.py: [method-assign] Cannot assign to a method
+ideogram-4/ideogram_4/text_encoder.py: [no-any-return] Returning Any from function declared to return Module
+ideogram-4/ideogram_4/text_encoder.py: [no-untyped-call] Call to untyped function "TokenizersBackend" in typed context
+ideogram-4/ideogram_4/text_encoder.py: [no-untyped-call] Call to untyped function "build_caption_logits_processor" in typed context
+ideogram-4/ideogram_4/text_encoder.py: [no-untyped-call] Call to untyped function "from_config" of "_BaseAutoModelClass" in typed context
+ideogram-4/ideogram_4/text_encoder.py: [union-attr] Item "Tensor" of "Tensor | Module" has no attribute "language_model"
+ideogram-4/ideogram_4/text_encoder.py: [union-attr] Item "list[int]" of "str | list[int] | list[str] | list[list[int]] | BatchEncoding[Any]" has no attribute "to"
+ideogram-4/ideogram_4/text_encoder.py: [union-attr] Item "list[list[int]]" of "str | list[int] | list[str] | list[list[int]] | BatchEncoding[Any]" has no attribute "to"
+ideogram-4/ideogram_4/text_encoder.py: [union-attr] Item "list[str]" of "str | list[int] | list[str] | list[list[int]] | BatchEncoding[Any]" has no attribute "to"
+ideogram-4/ideogram_4/text_encoder.py: [union-attr] Item "str" of "str | list[int] | list[str] | list[list[int]] | BatchEncoding[Any]" has no attribute "to"
+krea-2/krea_2/model.py: [arg-type] Argument "sigmas" to "retrieve_timesteps" has incompatible type "ndarray[tuple[int], dtype[float64]]"; expected "list[float] | None"
+krea-2/krea_2/model.py: [arg-type] Argument 1 to "noise" has incompatible type "tuple[int, Any | Tensor | int, int, int]"; expected "Sequence[int]"
+krea-2/krea_2/model.py: [arg-type] Argument 2 to "view" of "TensorBase" has incompatible type "Any | Tensor | int"; expected "int | SymInt"
+krea-2/krea_2/model.py: [arg-type] Argument 3 to "reshape" of "TensorBase" has incompatible type "Any | Tensor | int"; expected "int | SymInt"
+krea-2/krea_2/model.py: [attr-defined] "Transformer" has no attribute "final_layer"
+krea-2/krea_2/model.py: [attr-defined] "Transformer" has no attribute "img_in"
+krea-2/krea_2/model.py: [attr-defined] "Transformer" has no attribute "time_embed"
+krea-2/krea_2/model.py: [attr-defined] "Transformer" has no attribute "time_mod_proj"
+krea-2/krea_2/model.py: [attr-defined] "Transformer" has no attribute "transformer_blocks"
+krea-2/krea_2/model.py: [call-overload] No overload variant of "to" of "TensorBase" matches argument types "device", "Tensor | Module"
+krea-2/krea_2/model.py: [explicit-any] Explicit "Any" is not allowed
+krea-2/krea_2/model.py: [explicit-any] Explicit "Any" is not allowed
+krea-2/krea_2/model.py: [explicit-any] Explicit "Any" is not allowed
+krea-2/krea_2/model.py: [explicit-any] Explicit "Any" is not allowed
+krea-2/krea_2/model.py: [explicit-any] Explicit "Any" is not allowed
+krea-2/krea_2/model.py: [explicit-any] Explicit "Any" is not allowed
+krea-2/krea_2/model.py: [explicit-any] Explicit "Any" is not allowed
+krea-2/krea_2/model.py: [no-any-return] Returning Any from function declared to return "Tensor"
+krea-2/krea_2/model.py: [no-untyped-call] Call to untyped function "TokenizersBackend" in typed context
+krea-2/krea_2/model.py: [no-untyped-call] Call to untyped function "_from_config" of "PreTrainedModel" in typed context
+krea-2/krea_2/model.py: [no-untyped-call] Call to untyped function "from_config" of "AutoencoderKLQwenImage" in typed context
+krea-2/krea_2/model.py: [no-untyped-call] Call to untyped function "from_config" of "FlowMatchEulerDiscreteScheduler" in typed context
+krea-2/krea_2/model.py: [no-untyped-call] Call to untyped function "from_config" of "Krea2Transformer2DModel" in typed context
+krea-2/krea_2/model.py: [operator] "Tensor" not callable
+krea-2/krea_2/model.py: [operator] "Tensor" not callable
+krea-2/krea_2/model.py: [operator] Unsupported operand types for // (Module and "int")
+krea-2/krea_2/model.py: [union-attr] Item "Tensor" of "Tensor | Module" has no attribute "in_channels"
+krea-2/krea_2/model.py: [union-attr] Item "Tensor" of "Tensor | Module" has no attribute "latents_mean"
+krea-2/krea_2/model.py: [union-attr] Item "Tensor" of "Tensor | Module" has no attribute "latents_std"
+krea-2/krea_2/model.py: [unused-ignore] Unused "type: ignore" comment
+minimax-h3-tools/src/h3_tables/adaln_operations.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3-tools/src/h3_tables/adaln_operations.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3-tools/src/h3_tables/adaln_operations.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3-tools/src/h3_tables/adaln_operations.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3-tools/src/h3_tables/adaln_operations.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3-tools/src/h3_tables/adaln_operations.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3-tools/src/h3_tables/adaln_operations.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3-tools/src/h3_tables/adaln_operations.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3-tools/src/h3_tables/adaln_operations.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3-tools/src/h3_tables/adaln_operations.py: [misc] Type of decorated function contains type "Any" ("def (*, source: Weights[Any], fl2va: Weights[Any], ref2va: Weights[Any]) -> PendingCall[ModelArtifact]")
+minimax-h3-tools/src/h3_tables/adaln_operations.py: [misc] Type of decorated function contains type "Any" ("def (*, source: Weights[Any], fl2va: Weights[Any], ref2va: Weights[Any]) -> PendingCall[ModelArtifact]")
+minimax-h3-tools/src/h3_tables/adaln_operations.py: [misc] Type of decorated function contains type "Any" ("def (*, source: Weights[Any], task: Literal['fl2va', 'ref2va']) -> PendingCall[Selection]")
+minimax-h3-tools/src/h3_tables/adaln_operations.py: [misc] Type of decorated function contains type "Any" ("def (*, source: Weights[Any], task: Literal['fl2va', 'ref2va'], plan_digest: str, tel: Telemetry) -> PendingCall[ModelArtifact]")
+minimax-h3-tools/src/h3_tables/job.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3-tools/src/h3_tables/job.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3-tools/src/h3_tables/job.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3-tools/src/h3_tables/job.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3-tools/src/h3_tables/job.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3-tools/src/h3_tables/job.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3-tools/src/h3_tables/job.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3-tools/src/h3_tables/job.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3-tools/src/h3_tables/job.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3-tools/src/h3_tables/job.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3-tools/src/h3_tables/job.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3-tools/src/h3_tables/job.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3-tools/src/h3_tables/job.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3-tools/src/h3_tables/job.py: [misc] Type of decorated function contains type "Any" ("def (*, pruned: Weights[Any], full: Weights[Any], tel: Telemetry) -> PendingCall[RetableResult]")
+minimax-h3-tools/src/h3_tables/job.py: [misc] Type of decorated function contains type "Any" ("def (*, source: Weights[Any], max_relative_frobenius: float | None = ..., tel: Telemetry) -> PendingCall[ModelArtifact]")
+minimax-h3-tools/src/h3_tables/job.py: [misc] Type of decorated function contains type "Any" ("def (*, source: Weights[Any], tel: Telemetry) -> PendingCall[ModelArtifact]")
+minimax-h3-tools/src/h3_tables/job.py: [misc] Type of decorated function contains type "Any" ("def (*, source: Weights[Any], tel: Telemetry) -> PendingCall[ModelArtifact]")
+minimax-h3-tools/src/h3_tables/job.py: [misc] Type of decorated function contains type "Any" ("def (*, source: Weights[Any], tel: Telemetry) -> PendingCall[ModelArtifact]")
+minimax-h3-tools/src/h3_tables/job.py: [misc] Type of decorated function contains type "Any" ("def (*, source: Weights[Any], tel: Telemetry) -> PendingCall[ModelArtifact]")
+minimax-h3-tools/src/h3_tables/kernel.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3-tools/src/h3_tables/lanes.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3-tools/src/h3_tables/model_config.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3-tools/src/h3_tables/model_config.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3-tools/src/h3_tables/model_config.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3-tools/src/h3_tables/model_config.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3-tools/src/h3_tables/model_config.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3-tools/src/h3_tables/model_config.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3-tools/src/h3_tables/model_config.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3-tools/src/h3_tables/operations.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3-tools/src/h3_tables/operations.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3-tools/src/h3_tables/operations.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3-tools/src/h3_tables/operations.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3-tools/src/h3_tables/order.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3-tools/src/h3_tables/plans.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3-tools/src/h3_tables/plans.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3-tools/src/h3_tables/plans.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3-tools/src/h3_tables/plans.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3-tools/src/h3_tables/plans.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3-tools/src/h3_tables/plans.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3-tools/src/h3_tables/plans.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3-tools/src/h3_tables/plans.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3-tools/src/h3_tables/plans.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3-tools/src/h3_tables/plans.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3-tools/src/h3_tables/plans.py: [var-annotated] Need type annotation for "blocks" (hint: "blocks: list[<type>] = ...")
+minimax-h3-tools/src/h3_tables/plans.py: [var-annotated] Need type annotation for "finals" (hint: "finals: list[<type>] = ...")
+minimax-h3-tools/src/h3_tables/regenerate.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3-tools/src/h3_tables/regenerate.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3-tools/src/h3_tables/regenerate.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3-tools/src/h3_tables/regenerate.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3-tools/src/h3_tables/regenerate.py: [misc] Type of decorated function contains type "Any" ("def (*, adapters: Weights[Any], base: Weights[Any], tel: Telemetry) -> PendingCall[ModelArtifact]")
+minimax-h3-tools/src/h3_tables/source.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3-tools/src/h3_tables/source.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3-tools/src/h3_tables/turbo.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3-tools/src/h3_tables/turbo.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3-tools/src/h3_tables/turbo.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3-tools/src/h3_tables/turbo.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3-tools/src/h3_tables/turbo.py: [misc] Type of decorated function contains type "Any" ("def (*, adapters: Weights[Any], base: Weights[Any], tel: Telemetry) -> PendingCall[ModelArtifact]")
+minimax-h3/gates.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/h3.py: [arg-type] Argument "latents" to "ShotResult" has incompatible type "File | None"; expected "Latents | None"
+minimax-h3/h3.py: [arg-type] Argument 1 to "_call_assets" has incompatible type "dict[str, File]"; expected "dict[str, ImageFile | VideoFile | AudioFile]"
+minimax-h3/h3.py: [arg-type] Argument 1 to "image_reference" of "OfficialH3Pipeline" has incompatible type "PIL.Image.Image"; expected "cozy_runtime.author._tool.Image"
+minimax-h3/h3.py: [arg-type] Argument 2 to "alpha_composite" has incompatible type "ImageProbe"; expected "Image"
+minimax-h3/h3.py: [arg-type] Argument 2 to "fit" has incompatible type "tuple[int, ...]"; expected "tuple[int, int]"
+minimax-h3/h3.py: [arg-type] Argument 2 to "fl2va_segment" has incompatible type "**dict[str, ModelChoice]"; expected "H3TurboBase"
+minimax-h3/h3.py: [arg-type] Argument 2 to "fl2va_segment" has incompatible type "**dict[str, ModelChoice]"; expected "H3TurboLoRA"
+minimax-h3/h3.py: [arg-type] Argument 2 to "fl2va_segment" has incompatible type "**dict[str, ModelChoice]"; expected "Outputs"
+minimax-h3/h3.py: [arg-type] Argument 2 to "fl2va_segment" has incompatible type "**dict[str, ModelChoice]"; expected "Telemetry"
+minimax-h3/h3.py: [arg-type] Argument 3 to "ref2va_segment" has incompatible type "**dict[str, ModelChoice]"; expected "H3TurboBase"
+minimax-h3/h3.py: [arg-type] Argument 3 to "ref2va_segment" has incompatible type "**dict[str, ModelChoice]"; expected "H3TurboLoRA"
+minimax-h3/h3.py: [arg-type] Argument 3 to "ref2va_segment" has incompatible type "**dict[str, ModelChoice]"; expected "Outputs"
+minimax-h3/h3.py: [arg-type] Argument 3 to "ref2va_segment" has incompatible type "**dict[str, ModelChoice]"; expected "Telemetry"
+minimax-h3/h3.py: [assignment] Incompatible types in assignment (expression has type "File", variable has type "Latents | None")
+minimax-h3/h3.py: [assignment] Incompatible types in assignment (expression has type "Image", variable has type "ImageProbe")
+minimax-h3/h3.py: [assignment] Incompatible types in assignment (expression has type "float", variable has type "int")
+minimax-h3/h3.py: [assignment] Incompatible types in assignment (expression has type "list[StoryReference]", variable has type "int")
+minimax-h3/h3.py: [attr-defined] "ImageProbe" has no attribute "getchannel"
+minimax-h3/h3.py: [attr-defined] "ImageProbe" has no attribute "size"
+minimax-h3/h3.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/h3.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/h3.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/h3.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/h3.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/h3.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/h3.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/h3.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/h3.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/h3.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/h3.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/h3.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/h3.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/h3.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/h3.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/h3.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/h3.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/h3.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/h3.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/h3.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/h3.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/h3.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/h3.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/h3.py: [index] Value of type "Any | None" is not indexable
+minimax-h3/h3.py: [misc] Expected iterable as variadic argument
+minimax-h3/h3.py: [possibly-undefined] Name "frames" may be undefined
+minimax-h3/h3.py: [possibly-undefined] Name "sample_rate" may be undefined
+minimax-h3/h3.py: [possibly-undefined] Name "waveform" may be undefined
+minimax-h3/h3.py: [union-attr] Item "None" of "Any | None" has no attribute "shape"
+minimax-h3/h3.py: [unused-ignore] Unused "type: ignore" comment
+minimax-h3/h3.py: [unused-ignore] Unused "type: ignore" comment
+minimax-h3/minimax_h3/adaln_pruned.py: [attr-defined] "AdaLNPrunedMiniMaxH3Transformer" has no attribute "_gradient_checkpointing_func"
+minimax-h3/minimax_h3/adaln_pruned.py: [attr-defined] "AdaLNPrunedMiniMaxH3Transformer" has no attribute "audio_proj_in"
+minimax-h3/minimax_h3/adaln_pruned.py: [attr-defined] "AdaLNPrunedMiniMaxH3Transformer" has no attribute "audio_proj_out"
+minimax-h3/minimax_h3/adaln_pruned.py: [attr-defined] "AdaLNPrunedMiniMaxH3Transformer" has no attribute "audio_proj_out"
+minimax-h3/minimax_h3/adaln_pruned.py: [attr-defined] "AdaLNPrunedMiniMaxH3Transformer" has no attribute "config"
+minimax-h3/minimax_h3/adaln_pruned.py: [attr-defined] "AdaLNPrunedMiniMaxH3Transformer" has no attribute "config"
+minimax-h3/minimax_h3/adaln_pruned.py: [attr-defined] "AdaLNPrunedMiniMaxH3Transformer" has no attribute "context_embedder"; maybe "time_embedder"?
+minimax-h3/minimax_h3/adaln_pruned.py: [attr-defined] "AdaLNPrunedMiniMaxH3Transformer" has no attribute "context_embedder"; maybe "time_embedder"?
+minimax-h3/minimax_h3/adaln_pruned.py: [attr-defined] "AdaLNPrunedMiniMaxH3Transformer" has no attribute "gradient_checkpointing"
+minimax-h3/minimax_h3/adaln_pruned.py: [attr-defined] "AdaLNPrunedMiniMaxH3Transformer" has no attribute "named_modules"
+minimax-h3/minimax_h3/adaln_pruned.py: [attr-defined] "AdaLNPrunedMiniMaxH3Transformer" has no attribute "proj_in"
+minimax-h3/minimax_h3/adaln_pruned.py: [attr-defined] "AdaLNPrunedMiniMaxH3Transformer" has no attribute "proj_in"
+minimax-h3/minimax_h3/adaln_pruned.py: [attr-defined] "AdaLNPrunedMiniMaxH3Transformer" has no attribute "proj_out"
+minimax-h3/minimax_h3/adaln_pruned.py: [attr-defined] "AdaLNPrunedMiniMaxH3Transformer" has no attribute "proj_out"
+minimax-h3/minimax_h3/adaln_pruned.py: [attr-defined] "AdaLNPrunedMiniMaxH3Transformer" has no attribute "proj_out"
+minimax-h3/minimax_h3/adaln_pruned.py: [attr-defined] "AdaLNPrunedMiniMaxH3Transformer" has no attribute "rope"
+minimax-h3/minimax_h3/adaln_pruned.py: [attr-defined] "AdaLNPrunedMiniMaxH3Transformer" has no attribute "token_refiner"
+minimax-h3/minimax_h3/adaln_pruned.py: [attr-defined] "AdaLNPrunedMiniMaxH3Transformer" has no attribute "transformer_blocks"
+minimax-h3/minimax_h3/adaln_pruned.py: [attr-defined] "AdaLNPrunedMiniMaxH3Transformer" has no attribute "transformer_blocks"
+minimax-h3/minimax_h3/adaln_pruned.py: [attr-defined] "AdaLNPrunedMiniMaxH3Transformer" has no attribute "transformer_blocks"
+minimax-h3/minimax_h3/adaln_pruned.py: [attr-defined] "AdaLNPrunedMiniMaxH3Transformer" has no attribute "transformer_blocks"
+minimax-h3/minimax_h3/adaln_pruned.py: [attr-defined] Module "diffusers.utils" does not explicitly export attribute "apply_lora_scale"
+minimax-h3/minimax_h3/adaln_pruned.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/minimax_h3/adaln_pruned.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/minimax_h3/adaln_pruned.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/minimax_h3/adaln_pruned.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/minimax_h3/adaln_pruned.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/minimax_h3/adaln_pruned.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/minimax_h3/adaln_pruned.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/minimax_h3/adaln_pruned.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/minimax_h3/adaln_pruned.py: [misc] Function is untyped after decorator transformation
+minimax-h3/minimax_h3/adaln_pruned.py: [no-untyped-call] Call to untyped function "__init__" in typed context
+minimax-h3/minimax_h3/adaln_pruned.py: [operator] "Tensor" not callable
+minimax-h3/minimax_h3/adaln_pruned.py: [operator] "Tensor" not callable
+minimax-h3/minimax_h3/adaln_pruned.py: [operator] "Tensor" not callable
+minimax-h3/minimax_h3/adaln_pruned.py: [union-attr] Item "None" of "TurboSchedule | None" has no attribute "step"
+minimax-h3/minimax_h3/adaln_pruned.py: [unused-ignore] Unused "type: ignore" comment
+minimax-h3/minimax_h3/adaln_pruned.py: [unused-ignore] Unused "type: ignore" comment
+minimax-h3/minimax_h3/adaln_pruned.py: [unused-ignore] Unused "type: ignore" comment
+minimax-h3/minimax_h3/adaln_pruned.py: [unused-ignore] Unused "type: ignore" comment
+minimax-h3/minimax_h3/adaln_pruned.py: [unused-ignore] Unused "type: ignore" comment
+minimax-h3/minimax_h3/adaln_pruned.py: [unused-ignore] Unused "type: ignore" comment
+minimax-h3/minimax_h3/cell_texture.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/minimax_h3/cell_texture.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/minimax_h3/cell_texture.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/minimax_h3/conditioner.py: [arg-type] Argument 1 to "Qwen3VLConfig" has incompatible type "**dict[str, object]"; expected "Literal['regression', 'single_label_classification', 'multi_label_classification'] | None"
+minimax-h3/minimax_h3/conditioner.py: [arg-type] Argument 1 to "Qwen3VLConfig" has incompatible type "**dict[str, object]"; expected "bool | None"
+minimax-h3/minimax_h3/conditioner.py: [arg-type] Argument 1 to "Qwen3VLConfig" has incompatible type "**dict[str, object]"; expected "bool"
+minimax-h3/minimax_h3/conditioner.py: [arg-type] Argument 1 to "Qwen3VLConfig" has incompatible type "**dict[str, object]"; expected "dict[Any, Any] | PreTrainedConfig | None"
+minimax-h3/minimax_h3/conditioner.py: [arg-type] Argument 1 to "Qwen3VLConfig" has incompatible type "**dict[str, object]"; expected "dict[int, str] | dict[str, str] | None"
+minimax-h3/minimax_h3/conditioner.py: [arg-type] Argument 1 to "Qwen3VLConfig" has incompatible type "**dict[str, object]"; expected "dict[str, int] | dict[str, str] | None"
+minimax-h3/minimax_h3/conditioner.py: [arg-type] Argument 1 to "Qwen3VLConfig" has incompatible type "**dict[str, object]"; expected "int"
+minimax-h3/minimax_h3/conditioner.py: [arg-type] Argument 1 to "Qwen3VLConfig" has incompatible type "**dict[str, object]"; expected "list[str] | None"
+minimax-h3/minimax_h3/conditioner.py: [arg-type] Argument 1 to "Qwen3VLConfig" has incompatible type "**dict[str, object]"; expected "str | None"
+minimax-h3/minimax_h3/conditioner.py: [arg-type] Argument 1 to "Qwen3VLConfig" has incompatible type "**dict[str, object]"; expected "str | dtype | None"
+minimax-h3/minimax_h3/conditioner.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/minimax_h3/conditioner.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/minimax_h3/conditioner.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/minimax_h3/conditioner.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/minimax_h3/conditioner.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/minimax_h3/conditioner.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/minimax_h3/conditioner.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/minimax_h3/conditioner.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/minimax_h3/conditioner.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/minimax_h3/conditioner.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/minimax_h3/conditioner.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/minimax_h3/conditioner.py: [no-untyped-call] Call to untyped function "Qwen3VLForConditionalGeneration" in typed context
+minimax-h3/minimax_h3/conditioner.py: [no-untyped-call] Call to untyped function "eval" in typed context
+minimax-h3/minimax_h3/continuation.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/minimax_h3/continuation.py: [redundant-cast] Redundant cast to "bytes"
+minimax-h3/minimax_h3/glue.py: [arg-type] Argument 7 to "rmsnorm_modulate" has incompatible type "float | None"; expected "float"
+minimax-h3/minimax_h3/glue.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/minimax_h3/glue.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/minimax_h3/glue.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/minimax_h3/glue.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/minimax_h3/glue.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/minimax_h3/glue.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/minimax_h3/glue.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/minimax_h3/glue.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/minimax_h3/glue.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/minimax_h3/glue.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/minimax_h3/glue.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/minimax_h3/glue.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/minimax_h3/glue.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/minimax_h3/glue.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/minimax_h3/glue.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/minimax_h3/glue.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/minimax_h3/glue.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/minimax_h3/glue.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/minimax_h3/glue.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/minimax_h3/glue.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/minimax_h3/glue.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/minimax_h3/glue.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/minimax_h3/glue.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/minimax_h3/glue.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/minimax_h3/glue.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/minimax_h3/glue.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/minimax_h3/glue.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/minimax_h3/glue.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/minimax_h3/glue.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/minimax_h3/glue.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/minimax_h3/glue.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/minimax_h3/glue.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/minimax_h3/glue.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/minimax_h3/glue.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/minimax_h3/glue.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/minimax_h3/glue.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/minimax_h3/glue.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/minimax_h3/glue.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/minimax_h3/glue.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/minimax_h3/glue.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/minimax_h3/glue.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/minimax_h3/glue.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/minimax_h3/glue.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/minimax_h3/glue.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/minimax_h3/glue.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/minimax_h3/glue.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/minimax_h3/glue.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/minimax_h3/glue.py: [unreachable] Statement is unreachable
+minimax-h3/minimax_h3/guide_rows.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/minimax_h3/guide_rows.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/minimax_h3/guide_rows.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/minimax_h3/guide_rows.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/minimax_h3/guide_rows.py: [possibly-undefined] Name "width" may be undefined
+minimax-h3/minimax_h3/latent_upscaler/architecture.py: [arg-type] Argument 1 to "zeros_" has incompatible type "Tensor | None"; expected "Tensor"
+minimax-h3/minimax_h3/latent_upscaler/architecture.py: [no-untyped-call] Call to untyped function "ResBlockEmb3D" in typed context
+minimax-h3/minimax_h3/latent_upscaler/architecture.py: [no-untyped-call] Call to untyped function "ResBlockEmb3D" in typed context
+minimax-h3/minimax_h3/latent_upscaler/architecture.py: [no-untyped-call] Call to untyped function "TemporalConv" in typed context
+minimax-h3/minimax_h3/latent_upscaler/architecture.py: [no-untyped-call] Call to untyped function "TemporalConv" in typed context
+minimax-h3/minimax_h3/latent_upscaler/architecture.py: [no-untyped-call] Call to untyped function "_forward_seg" in typed context
+minimax-h3/minimax_h3/latent_upscaler/architecture.py: [no-untyped-call] Call to untyped function "normalization" in typed context
+minimax-h3/minimax_h3/latent_upscaler/architecture.py: [no-untyped-call] Call to untyped function "normalization" in typed context
+minimax-h3/minimax_h3/latent_upscaler/architecture.py: [no-untyped-call] Call to untyped function "normalization" in typed context
+minimax-h3/minimax_h3/latent_upscaler/architecture.py: [no-untyped-call] Call to untyped function "normalization" in typed context
+minimax-h3/minimax_h3/latent_upscaler/architecture.py: [no-untyped-call] Call to untyped function "zero_module" in typed context
+minimax-h3/minimax_h3/latent_upscaler/architecture.py: [no-untyped-def] Function is missing a type annotation
+minimax-h3/minimax_h3/latent_upscaler/architecture.py: [no-untyped-def] Function is missing a type annotation
+minimax-h3/minimax_h3/latent_upscaler/architecture.py: [no-untyped-def] Function is missing a type annotation
+minimax-h3/minimax_h3/latent_upscaler/architecture.py: [no-untyped-def] Function is missing a type annotation
+minimax-h3/minimax_h3/latent_upscaler/architecture.py: [no-untyped-def] Function is missing a type annotation
+minimax-h3/minimax_h3/latent_upscaler/architecture.py: [no-untyped-def] Function is missing a type annotation
+minimax-h3/minimax_h3/latent_upscaler/architecture.py: [no-untyped-def] Function is missing a type annotation
+minimax-h3/minimax_h3/latent_upscaler/architecture.py: [no-untyped-def] Function is missing a type annotation
+minimax-h3/minimax_h3/latent_upscaler/architecture.py: [no-untyped-def] Function is missing a type annotation
+minimax-h3/minimax_h3/model.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/minimax_h3/model.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/minimax_h3/model.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/minimax_h3/model.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/minimax_h3/model.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/minimax_h3/model.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/minimax_h3/model.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/minimax_h3/model.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/minimax_h3/model.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/minimax_h3/model.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/minimax_h3/model.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/minimax_h3/model.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/minimax_h3/model.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/minimax_h3/model.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/minimax_h3/model.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/minimax_h3/model.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/minimax_h3/model.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/minimax_h3/model.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/minimax_h3/model.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/minimax_h3/model.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/minimax_h3/model.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/minimax_h3/model.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/minimax_h3/model.py: [misc] Type of decorated function contains type "Any" ("Callable[[H3Model, Any], Any]")
+minimax-h3/minimax_h3/model.py: [misc] Type of decorated function contains type "Any" ("Callable[[H3Model, Any], Any]")
+minimax-h3/minimax_h3/model.py: [misc] Type of decorated function contains type "Any" ("Callable[[H3Model, Literal['fl2va', 'ref2va', 'fl2va_turbo', 'ref2va_turbo'], Any], None]")
+minimax-h3/minimax_h3/model.py: [misc] Type of decorated function contains type "Any" ("Callable[[H3Model, Literal['fl2va', 'ref2va', 'fl2va_turbo', 'ref2va_turbo'], Any], None]")
+minimax-h3/minimax_h3/model.py: [misc] Type of decorated function contains type "Any" ("Callable[[H3Model, Literal['fl2va', 'ref2va', 'fl2va_turbo', 'ref2va_turbo'], Any], tuple[Any, int]]")
+minimax-h3/minimax_h3/model.py: [misc] Type of decorated function contains type "Any" ("Callable[[H3Model, int], Any]")
+minimax-h3/minimax_h3/model.py: [misc] Type of decorated function contains type "Any" ("Callable[[H3Model, str, int], tuple[Any, Any]]")
+minimax-h3/minimax_h3/model.py: [misc] Type of decorated function contains type "Any" ("def (H3Model, /, latents: Any, *, on_chunk: Callable[[Any], None]) -> int")
+minimax-h3/minimax_h3/model.py: [misc] Type of decorated function contains type "Any" ("def (H3Model, /, state: Any, *, on_step: Any, cancel: Any, recipe: FullRecipe = ...) -> ScheduleFacts")
+minimax-h3/minimax_h3/model.py: [misc] Type of decorated function contains type "Any" ("def (H3Model, /, state: Any, *, on_step: Any, cancel: Any, recipe: FullRecipe = ...) -> ScheduleFacts")
+minimax-h3/minimax_h3/model.py: [misc] Type of decorated function contains type "Any" ("def (H3Model, /, task: Literal['fl2va', 'ref2va', 'fl2va_turbo', 'ref2va_turbo'], state: Any, *, on_chunk: Callable[[Any], None]) -> int")
+minimax-h3/minimax_h3/model.py: [misc] Type of decorated function contains type "Any" ("def (H3Model, /, task: Literal['fl2va', 'ref2va', 'fl2va_turbo', 'ref2va_turbo'], state: Any, *, tel: Telemetry) -> None")
+minimax-h3/minimax_h3/model.py: [misc] Type of decorated function contains type "Any" ("def (H3RegenerateLoRA, /, base: H3Model, latents: Any, *, prompt_embeds: Any, text_tags: Any, layout: Windows, audio: Any, schedule: Schedule, seed: int, quality: str, on_step: Any) -> Any")
+minimax-h3/minimax_h3/model.py: [misc] Type of decorated function contains type "Any" ("def (H3TurboBase, /, latents: Any, *, overlay: H3RegenerateLoRA, prompt_embeds: Any, text_tags: Any, layout: Windows, audio: Any, schedule: Schedule, seed: int, quality: str, on_step: Any) -> Any")
+minimax-h3/minimax_h3/model.py: [misc] Type of decorated function contains type "Any" ("def (H3TurboBase, /, state: Any, *, turbo_lora: H3TurboLoRA, on_step: Any, cancel: Any, sol_dense_steps: int = ...) -> ScheduleFacts")
+minimax-h3/minimax_h3/model.py: [misc] Type of decorated function contains type "Any" ("def (H3TurboBase, /, state: Any, *, turbo_lora: H3TurboLoRA, on_step: Any, cancel: Any, sol_dense_steps: int = ...) -> ScheduleFacts")
+minimax-h3/minimax_h3/model.py: [misc] Type of decorated function contains type "Any" ("def (H3TurboLoRA, /, base: H3Model, state: Any, *, on_step: Any, cancel: Any, sol_dense_steps: int = ...) -> ScheduleFacts")
+minimax-h3/minimax_h3/model.py: [misc] Type of decorated function contains type "Any" ("def (H3TurboLoRA, /, base: H3Model, state: Any, *, on_step: Any, cancel: Any, sol_dense_steps: int = ...) -> ScheduleFacts")
+minimax-h3/minimax_h3/official.py: [arg-type] Argument "image" to "MiniMaxH3ImageReference" has incompatible type "cozy_runtime.author._tool.Image | Any"; expected "PIL.Image.Image | ndarray[tuple[Any, ...], dtype[Any]] | Tensor"
+minimax-h3/minimax_h3/official.py: [arg-type] Argument 1 to "of" of "ContextReferenceLayout" has incompatible type "Any | dict[str, Any]"; expected "AVContext"
+minimax-h3/minimax_h3/official.py: [assignment] Incompatible types in assignment (expression has type "_ScopedPipeline", variable has type "MiniMaxH3ModularPipeline")
+minimax-h3/minimax_h3/official.py: [attr-defined] "Image" has no attribute "convert"
+minimax-h3/minimax_h3/official.py: [attr-defined] "Image" has no attribute "mode"
+minimax-h3/minimax_h3/official.py: [attr-defined] "MiniMaxH3Blocks" has no attribute "get_workflow"
+minimax-h3/minimax_h3/official.py: [attr-defined] "MiniMaxH3ModularPipeline" has no attribute "config"
+minimax-h3/minimax_h3/official.py: [attr-defined] "MiniMaxH3ModularPipeline" has no attribute "register_components"
+minimax-h3/minimax_h3/official.py: [attr-defined] Module "diffusers.modular_pipelines.minimax_h3" does not explicitly export attribute "MiniMaxH3AudioReference"
+minimax-h3/minimax_h3/official.py: [attr-defined] Module "diffusers.modular_pipelines.minimax_h3" does not explicitly export attribute "MiniMaxH3ImageReference"
+minimax-h3/minimax_h3/official.py: [attr-defined] Module "diffusers.modular_pipelines.minimax_h3" does not explicitly export attribute "MiniMaxH3VideoReference"
+minimax-h3/minimax_h3/official.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/minimax_h3/official.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/minimax_h3/official.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/minimax_h3/official.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/minimax_h3/official.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/minimax_h3/official.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/minimax_h3/official.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/minimax_h3/official.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/minimax_h3/official.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/minimax_h3/official.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/minimax_h3/official.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/minimax_h3/official.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/minimax_h3/official.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/minimax_h3/official.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/minimax_h3/official.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/minimax_h3/official.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/minimax_h3/official.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/minimax_h3/official.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/minimax_h3/official.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/minimax_h3/official.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/minimax_h3/official.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/minimax_h3/official.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/minimax_h3/official.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/minimax_h3/official.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/minimax_h3/official.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/minimax_h3/official.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/minimax_h3/official.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/minimax_h3/official.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/minimax_h3/official.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/minimax_h3/official.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/minimax_h3/official.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/minimax_h3/official.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/minimax_h3/official.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/minimax_h3/official.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/minimax_h3/official.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/minimax_h3/official.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/minimax_h3/official.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/minimax_h3/official.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/minimax_h3/official.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/minimax_h3/official.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/minimax_h3/official.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/minimax_h3/official.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/minimax_h3/official.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/minimax_h3/official.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/minimax_h3/official.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/minimax_h3/official.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/minimax_h3/official.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/minimax_h3/official.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/minimax_h3/official.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/minimax_h3/official.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/minimax_h3/official.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/minimax_h3/official.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/minimax_h3/official.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/minimax_h3/official.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/minimax_h3/official.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/minimax_h3/official.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/minimax_h3/official.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/minimax_h3/official.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/minimax_h3/official.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/minimax_h3/official.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/minimax_h3/official.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/minimax_h3/official.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/minimax_h3/official.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/minimax_h3/official.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/minimax_h3/official.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/minimax_h3/official.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/minimax_h3/official.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/minimax_h3/official.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/minimax_h3/official.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/minimax_h3/official.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/minimax_h3/official.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/minimax_h3/official.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/minimax_h3/official.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/minimax_h3/official.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/minimax_h3/official.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/minimax_h3/official.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/minimax_h3/official.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/minimax_h3/official.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/minimax_h3/official.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/minimax_h3/official.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/minimax_h3/official.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/minimax_h3/official.py: [misc] Type of decorated function contains type "Any" ("Callable[[Any], _GeneratorContextManager[None, None, None]]")
+minimax-h3/minimax_h3/official.py: [no-any-return] Returning Any from function declared to return "Tensor"
+minimax-h3/minimax_h3/official.py: [no-untyped-call] Call to untyped function "MiniMaxH3Blocks" in typed context
+minimax-h3/minimax_h3/official.py: [no-untyped-call] Call to untyped function "MiniMaxH3ModularPipeline" in typed context
+minimax-h3/minimax_h3/official.py: [no-untyped-call] Call to untyped function "MiniMaxH3Scheduler" in typed context
+minimax-h3/minimax_h3/official.py: [no-untyped-call] Call to untyped function "MiniMaxH3Scheduler" in typed context
+minimax-h3/minimax_h3/official.py: [no-untyped-call] Call to untyped function "from_config" of "AutoencoderKLMiniMaxH3" in typed context
+minimax-h3/minimax_h3/official.py: [no-untyped-call] Call to untyped function "from_config" of "AutoencoderKLMiniMaxH3Audio" in typed context
+minimax-h3/minimax_h3/official.py: [no-untyped-call] Call to untyped function "from_config" of "MiniMaxH3Transformer3DModel" in typed context
+minimax-h3/minimax_h3/official.py: [possibly-undefined] Name "cut_height" may be undefined
+minimax-h3/minimax_h3/official.py: [possibly-undefined] Name "cut_width" may be undefined
+minimax-h3/minimax_h3/official.py: [possibly-undefined] Name "left" may be undefined
+minimax-h3/minimax_h3/official.py: [possibly-undefined] Name "released" may be undefined
+minimax-h3/minimax_h3/official.py: [possibly-undefined] Name "shown" may be undefined
+minimax-h3/minimax_h3/official.py: [possibly-undefined] Name "top" may be undefined
+minimax-h3/minimax_h3/official.py: [return-value] Incompatible return value type (got "tuple[int, ...]", expected "tuple[int, int]")
+minimax-h3/minimax_h3/official.py: [str-unpack] Unpacking a string is disallowed
+minimax-h3/minimax_h3/official.py: [union-attr] Item "None" of "ReferenceMemo | None" has no attribute "cache"
+minimax-h3/minimax_h3/official.py: [union-attr] Item "None" of "ReferenceMemo | None" has no attribute "cache"
+minimax-h3/minimax_h3/official.py: [union-attr] Item "None" of "ReferenceMemo | None" has no attribute "cache"
+minimax-h3/minimax_h3/official.py: [union-attr] Item "dict[str, Any]" of "Any | dict[str, Any]" has no attribute "audio"
+minimax-h3/minimax_h3/official.py: [union-attr] Item "dict[str, Any]" of "Any | dict[str, Any]" has no attribute "audio"
+minimax-h3/minimax_h3/official.py: [union-attr] Item "dict[str, Any]" of "Any | dict[str, Any]" has no attribute "frames"
+minimax-h3/minimax_h3/official.py: [union-attr] Item "dict[str, Any]" of "Any | dict[str, Any]" has no attribute "numel"
+minimax-h3/minimax_h3/official.py: [union-attr] Item "dict[str, Any]" of "Any | dict[str, Any]" has no attribute "video"
+minimax-h3/minimax_h3/official.py: [union-attr] Item "str" of "Any | str" has no attribute "shape"
+minimax-h3/minimax_h3/official.py: [union-attr] Item "str" of "Any | str" has no attribute "shape"
+minimax-h3/minimax_h3/overlay.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/minimax_h3/overlay.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/minimax_h3/overlay.py: [operator] "Tensor" not callable
+minimax-h3/minimax_h3/overlay.py: [unused-ignore] Unused "type: ignore" comment
+minimax-h3/minimax_h3/overlay.py: [unused-ignore] Unused "type: ignore" comment
+minimax-h3/minimax_h3/overlay.py: [unused-ignore] Unused "type: ignore" comment
+minimax-h3/minimax_h3/overlay.py: [unused-ignore] Unused "type: ignore" comment
+minimax-h3/minimax_h3/overlay.py: [unused-ignore] Unused "type: ignore" comment
+minimax-h3/minimax_h3/producer.py: [arg-type] Argument 1 to "copy_" of "TensorBase" has incompatible type "Tensor | None"; expected "Tensor"
+minimax-h3/minimax_h3/producer.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/minimax_h3/producer.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/minimax_h3/producer.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/minimax_h3/producer.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/minimax_h3/producer.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/minimax_h3/producer.py: [no-any-return] Returning Any from function declared to return "Tensor"
+minimax-h3/minimax_h3/producer.py: [no-any-return] Returning Any from function declared to return "Tensor"
+minimax-h3/minimax_h3/producer.py: [no-any-return] Returning Any from function declared to return "Tensor"
+minimax-h3/minimax_h3/producer.py: [no-untyped-call] Call to untyped function "__init__" in typed context
+minimax-h3/minimax_h3/producer.py: [union-attr] Item "PreQuantized" of "Tensor | PreQuantized" has no attribute "device"
+minimax-h3/minimax_h3/producer.py: [union-attr] Item "PreQuantized" of "Tensor | PreQuantized" has no attribute "dtype"
+minimax-h3/minimax_h3/producer.py: [union-attr] Item "Tensor" of "Tensor | PreQuantized" has no attribute "payload"
+minimax-h3/minimax_h3/producer.py: [unused-ignore] Unused "type: ignore" comment
+minimax-h3/minimax_h3/reference_rows.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/minimax_h3/reference_rows.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/minimax_h3/reference_rows.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/minimax_h3/reference_rows.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/minimax_h3/reference_rows.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/minimax_h3/reference_rows.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/minimax_h3/regenerate.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/minimax_h3/regenerate.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/minimax_h3/shot.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/minimax_h3/shot.py: [misc] Non-frozen dataclass cannot inherit from a frozen dataclass
+minimax-h3/minimax_h3/shot.py: [misc] Non-frozen dataclass cannot inherit from a frozen dataclass
+minimax-h3/minimax_h3/shot.py: [type-arg] Missing type arguments for generic type "Prompt"
+minimax-h3/minimax_h3/shot.py: [type-arg] Missing type arguments for generic type "Prompt"
+minimax-h3/minimax_h3/shot.py: [type-arg] Missing type arguments for generic type "Prompt"
+minimax-h3/minimax_h3/shot.py: [type-arg] Missing type arguments for generic type "Prompt"
+minimax-h3/minimax_h3/shot_latents.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/minimax_h3/steps.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/minimax_h3/steps.py: [explicit-any] Explicit "Any" is not allowed
+minimax-h3/minimax_h3/vae_tiles.py: [attr-defined] "AutoencoderKLMiniMaxH3" has no attribute "encode"
+minimax-h3/minimax_h3/vae_tiles.py: [attr-defined] "TileBatchedVideoVAE" has no attribute "_blend"
+minimax-h3/minimax_h3/vae_tiles.py: [attr-defined] "TileBatchedVideoVAE" has no attribute "_encode_clip"; maybe "_decode_clip" or "_encode_frames_clip"?
+minimax-h3/minimax_h3/vae_tiles.py: [attr-defined] "TileBatchedVideoVAE" has no attribute "_encode_clip"; maybe "_decode_clip" or "_encode_frames_clip"?
+minimax-h3/minimax_h3/vae_tiles.py: [attr-defined] "TileBatchedVideoVAE" has no attribute "_encode_clip"; maybe "_decode_clip" or "_encode_frames_clip"?
+minimax-h3/minimax_h3/vae_tiles.py: [attr-defined] "TileBatchedVideoVAE" has no attribute "_split_tiles"
+minimax-h3/minimax_h3/vae_tiles.py: [attr-defined] "TileBatchedVideoVAE" has no attribute "_split_tiles"
+minimax-h3/minimax_h3/vae_tiles.py: [attr-defined] "TileBatchedVideoVAE" has no attribute "_stitch_tiles"
+minimax-h3/minimax_h3/vae_tiles.py: [attr-defined] "TileBatchedVideoVAE" has no attribute "config"
+minimax-h3/minimax_h3/vae_tiles.py: [attr-defined] "TileBatchedVideoVAE" has no attribute "config"
+minimax-h3/minimax_h3/vae_tiles.py: [attr-defined] "TileBatchedVideoVAE" has no attribute "config"
+minimax-h3/minimax_h3/vae_tiles.py: [attr-defined] "TileBatchedVideoVAE" has no attribute "config"
+minimax-h3/minimax_h3/vae_tiles.py: [attr-defined] "TileBatchedVideoVAE" has no attribute "config"
+minimax-h3/minimax_h3/vae_tiles.py: [attr-defined] "TileBatchedVideoVAE" has no attribute "config"
+minimax-h3/minimax_h3/vae_tiles.py: [attr-defined] "TileBatchedVideoVAE" has no attribute "config"
+minimax-h3/minimax_h3/vae_tiles.py: [attr-defined] "TileBatchedVideoVAE" has no attribute "decoder"; maybe "_decode"?
+minimax-h3/minimax_h3/vae_tiles.py: [attr-defined] "TileBatchedVideoVAE" has no attribute "decoder"; maybe "_decode"?
+minimax-h3/minimax_h3/vae_tiles.py: [attr-defined] "TileBatchedVideoVAE" has no attribute "decoder"; maybe "_decode"?
+minimax-h3/minimax_h3/vae_tiles.py: [attr-defined] "TileBatchedVideoVAE" has no attribute "encoder"; maybe "_encode"?
+minimax-h3/minimax_h3/vae_tiles.py: [attr-defined] "TileBatchedVideoVAE" has no attribute "frame_overlap"
+minimax-h3/minimax_h3/vae_tiles.py: [attr-defined] "TileBatchedVideoVAE" has no attribute "frame_pre_padding"
+minimax-h3/minimax_h3/vae_tiles.py: [attr-defined] "TileBatchedVideoVAE" has no attribute "post_quant_conv"
+minimax-h3/minimax_h3/vae_tiles.py: [attr-defined] "TileBatchedVideoVAE" has no attribute "post_quant_conv"
+minimax-h3/minimax_h3/vae_tiles.py: [attr-defined] "TileBatchedVideoVAE" has no attribute "spatial_compression_ratio"
+minimax-h3/minimax_h3/vae_tiles.py: [attr-defined] "TileBatchedVideoVAE" has no attribute "temporal_compression_ratio"
+minimax-h3/minimax_h3/vae_tiles.py: [attr-defined] "TileBatchedVideoVAE" has no attribute "temporal_compression_ratio"
+minimax-h3/minimax_h3/vae_tiles.py: [attr-defined] "TileBatchedVideoVAE" has no attribute "tile_sample_min_height"
+minimax-h3/minimax_h3/vae_tiles.py: [attr-defined] "TileBatchedVideoVAE" has no attribute "tile_sample_min_overlap_height"
+minimax-h3/minimax_h3/vae_tiles.py: [attr-defined] "TileBatchedVideoVAE" has no attribute "tile_sample_min_overlap_width"
+minimax-h3/minimax_h3/vae_tiles.py: [attr-defined] "TileBatchedVideoVAE" has no attribute "tile_sample_min_width"
+minimax-h3/minimax_h3/vae_tiles.py: [attr-defined] "TileBatchedVideoVAE" has no attribute "token_overlap"
+minimax-h3/minimax_h3/vae_tiles.py: [attr-defined] "TileBatchedVideoVAE" has no attribute "tokens_chunk_size"
+minimax-h3/minimax_h3/vae_tiles.py: [attr-defined] "TileBatchedVideoVAE" has no attribute "tokens_chunk_size"
+minimax-h3/minimax_h3/vae_tiles.py: [attr-defined] "TileBatchedVideoVAE" has no attribute "use_tiling"
+minimax-h3/minimax_h3/vae_tiles.py: [no-any-return] Returning Any from function declared to return "Tensor"
+minimax-h3/minimax_h3/vae_tiles.py: [no-any-return] Returning Any from function declared to return "Tensor"
+minimax-h3/minimax_h3/vae_tiles.py: [no-any-return] Returning Any from function declared to return "Tensor"
+minimax-h3/minimax_h3/vae_tiles.py: [no-any-return] Returning Any from function declared to return "Tensor"
+minimax-h3/minimax_h3/vae_tiles.py: [no-any-return] Returning Any from function declared to return "Tensor"
+minimax-h3/minimax_h3/vae_tiles.py: [no-any-return] Returning Any from function declared to return "Tensor"
+minimax-h3/minimax_h3/vae_tiles.py: [unused-ignore] Unused "type: ignore" comment
+moss-image/moss_image/model.py: [arg-type] Argument 1 to "noise" has incompatible type "tuple[int, Tensor | Module, int, int]"; expected "Sequence[int]"
+moss-image/moss_image/model.py: [arg-type] Argument 1 to "to" of "TensorBase" has incompatible type "Tensor | Module"; expected "Tensor"
+moss-image/moss_image/model.py: [assignment] Incompatible types in assignment (expression has type "Tensor", variable has type "PreQuantized | None")
+moss-image/moss_image/model.py: [assignment] Incompatible types in assignment (expression has type "Tensor", variable has type Module)
+moss-image/moss_image/model.py: [attr-defined] "MossScheduler" has no attribute "config"
+moss-image/moss_image/model.py: [attr-defined] "MossScheduler" has no attribute "config"
+moss-image/moss_image/model.py: [attr-defined] "MossScheduler" has no attribute "config"
+moss-image/moss_image/model.py: [attr-defined] "MossScheduler" has no attribute "register_to_config"
+moss-image/moss_image/model.py: [explicit-any] Explicit "Any" is not allowed
+moss-image/moss_image/model.py: [explicit-any] Explicit "Any" is not allowed
+moss-image/moss_image/model.py: [explicit-any] Explicit "Any" is not allowed
+moss-image/moss_image/model.py: [explicit-any] Explicit "Any" is not allowed
+moss-image/moss_image/model.py: [index] Value of type "Tensor | Module" is not indexable
+moss-image/moss_image/model.py: [misc] "set_timesteps" undefined in superclass
+moss-image/moss_image/model.py: [misc] Function is untyped after decorator transformation
+moss-image/moss_image/model.py: [no-any-return] Returning Any from function declared to return "Tensor"
+moss-image/moss_image/model.py: [no-any-return] Returning Any from function declared to return "Tensor"
+moss-image/moss_image/model.py: [no-any-return] Returning Any from function declared to return "Tensor"
+moss-image/moss_image/model.py: [no-untyped-call] Call to untyped function "TokenizersBackend" in typed context
+moss-image/moss_image/model.py: [no-untyped-call] Call to untyped function "__init__" in typed context
+moss-image/moss_image/model.py: [no-untyped-call] Call to untyped function "_from_config" of "PreTrainedModel" in typed context
+moss-image/moss_image/model.py: [no-untyped-call] Call to untyped function "from_config" of "AutoencoderKLFlux2" in typed context
+moss-image/moss_image/model.py: [operator] "Tensor" not callable
+moss-image/moss_image/model.py: [operator] "Tensor" not callable
+moss-image/moss_image/model.py: [operator] "Tensor" not callable
+moss-image/moss_image/model.py: [operator] "Tensor" not callable
+moss-image/moss_image/model.py: [operator] "Tensor" not callable
+moss-image/moss_image/model.py: [operator] "Tensor" not callable
+moss-image/moss_image/model.py: [operator] Unsupported left operand type for + (Module)
+moss-image/moss_image/model.py: [operator] Unsupported operand types for + ("Tensor" and Module)
+moss-image/moss_image/model.py: [operator] Unsupported operand types for + (Module and "Tensor")
+moss-image/moss_image/model.py: [union-attr] Item "Tensor" of "Tensor | Any" has no attribute "served"
+moss-image/moss_image/model.py: [union-attr] Item "Tensor" of "Tensor | Module" has no attribute "batch_norm_eps"
+moss-image/moss_image/model.py: [union-attr] Item "Tensor" of "Tensor | Module" has no attribute "running_mean"
+moss-image/moss_image/model.py: [union-attr] Item "Tensor" of "Tensor | Module" has no attribute "running_var"
+moss-image/moss_image/model.py: [unused-ignore] Unused "type: ignore" comment
+qwen-image-2/qwen_image_2/__init__.py: [assignment] Incompatible types in assignment (expression has type "Prompt[Image]", base class "ImageRequest" defined the type as "str")
+qwen-image-2/qwen_image_2/__init__.py: [assignment] Incompatible types in assignment (expression has type "int", variable has type "Literal[1, 2, 4]")
+qwen-image-2/qwen_image_2/__init__.py: [assignment] Incompatible types in assignment (expression has type "int", variable has type "Literal[1, 2, 4]")
+qwen-image-2/qwen_image_2/__init__.py: [explicit-any] Explicit "Any" is not allowed
+qwen-image-2/qwen_image_2/__init__.py: [possibly-undefined] Name "conditioning_images" may be undefined
+qwen-image-2/qwen_image_2/_prepared.py: [attr-defined] "Transformer" has no attribute "dtype"
+qwen-image-2/qwen_image_2/_prepared.py: [attr-defined] "Transformer" has no attribute "dtype"
+qwen-image-2/qwen_image_2/_prepared.py: [attr-defined] "Transformer" has no attribute "img_in"
+qwen-image-2/qwen_image_2/_prepared.py: [attr-defined] "Transformer" has no attribute "img_in"
+qwen-image-2/qwen_image_2/_prepared.py: [attr-defined] "Transformer" has no attribute "modulation"
+qwen-image-2/qwen_image_2/_prepared.py: [attr-defined] "Transformer" has no attribute "modulation"
+qwen-image-2/qwen_image_2/_prepared.py: [attr-defined] "Transformer" has no attribute "norm_out"
+qwen-image-2/qwen_image_2/_prepared.py: [attr-defined] "Transformer" has no attribute "norm_out"
+qwen-image-2/qwen_image_2/_prepared.py: [attr-defined] "Transformer" has no attribute "proj_out"
+qwen-image-2/qwen_image_2/_prepared.py: [attr-defined] "Transformer" has no attribute "proj_out"
+qwen-image-2/qwen_image_2/_prepared.py: [attr-defined] "Transformer" has no attribute "time_text_embed"
+qwen-image-2/qwen_image_2/_prepared.py: [attr-defined] "Transformer" has no attribute "time_text_embed"
+qwen-image-2/qwen_image_2/_prepared.py: [attr-defined] "Transformer" has no attribute "transformer_blocks"
+qwen-image-2/qwen_image_2/_prepared.py: [attr-defined] "Transformer" has no attribute "transformer_blocks"
+qwen-image-2/qwen_image_2/_prepared.py: [attr-defined] "Transformer" has no attribute "txt_in"
+qwen-image-2/qwen_image_2/_prepared.py: [explicit-any] Explicit "Any" is not allowed
+qwen-image-2/qwen_image_2/_prepared.py: [explicit-any] Explicit "Any" is not allowed
+qwen-image-2/qwen_image_2/_prepared.py: [explicit-any] Explicit "Any" is not allowed
+qwen-image-2/qwen_image_2/_prepared.py: [explicit-any] Explicit "Any" is not allowed
+qwen-image-2/qwen_image_2/_prepared.py: [explicit-any] Explicit "Any" is not allowed
+qwen-image-2/qwen_image_2/_prepared.py: [explicit-any] Explicit "Any" is not allowed
+qwen-image-2/qwen_image_2/_prepared.py: [misc] "_cached" of "Transformer" gets multiple values for keyword argument "projection"
+qwen-image-2/qwen_image_2/_prepared.py: [misc] "_joint" of "Transformer" gets multiple values for keyword argument "projection"
+qwen-image-2/qwen_image_2/_prepared.py: [misc] "forward" undefined in superclass
+qwen-image-2/qwen_image_2/_prepared.py: [no-untyped-call] Call to untyped function "QwenImage21KVLayerCache" in typed context
+qwen-image-2/qwen_image_2/_prepared.py: [unused-ignore] Unused "type: ignore" comment
+qwen-image-2/qwen_image_2/model.py: [arg-type] Argument "sigmas" to "retrieve_timesteps" has incompatible type "ndarray[tuple[Any, ...], dtype[floating[_32Bit]]] | ndarray[tuple[int], dtype[float64]]"; expected "list[float] | None"
+qwen-image-2/qwen_image_2/model.py: [arg-type] Argument 1 to "Hook" has incompatible type "partial[Module | None]"; expected "Callable[[], Factors | None]"
+qwen-image-2/qwen_image_2/model.py: [attr-defined] "_StagedPipeline" has no attribute "_pack_latents"
+qwen-image-2/qwen_image_2/model.py: [attr-defined] "_StagedPipeline" has no attribute "encode_prompt"
+qwen-image-2/qwen_image_2/model.py: [attr-defined] "_StagedPipeline" has no attribute "encode_prompt"
+qwen-image-2/qwen_image_2/model.py: [attr-defined] "_StagedPipeline" has no attribute "image_processor"
+qwen-image-2/qwen_image_2/model.py: [attr-defined] "_StagedPipeline" has no attribute "image_processor"
+qwen-image-2/qwen_image_2/model.py: [attr-defined] "_StagedPipeline" has no attribute "latent_channels"
+qwen-image-2/qwen_image_2/model.py: [attr-defined] "_StagedPipeline" has no attribute "prepare_latents"
+qwen-image-2/qwen_image_2/model.py: [attr-defined] "_StagedPipeline" has no attribute "scheduler"
+qwen-image-2/qwen_image_2/model.py: [attr-defined] "_StagedPipeline" has no attribute "vae_scale_factor"
+qwen-image-2/qwen_image_2/model.py: [attr-defined] "_StagedPipeline" has no attribute "vae_scale_factor"
+qwen-image-2/qwen_image_2/model.py: [explicit-any] Explicit "Any" is not allowed
+qwen-image-2/qwen_image_2/model.py: [explicit-any] Explicit "Any" is not allowed
+qwen-image-2/qwen_image_2/model.py: [explicit-any] Explicit "Any" is not allowed
+qwen-image-2/qwen_image_2/model.py: [explicit-any] Explicit "Any" is not allowed
+qwen-image-2/qwen_image_2/model.py: [explicit-any] Explicit "Any" is not allowed
+qwen-image-2/qwen_image_2/model.py: [explicit-any] Explicit "Any" is not allowed
+qwen-image-2/qwen_image_2/model.py: [explicit-any] Explicit "Any" is not allowed
+qwen-image-2/qwen_image_2/model.py: [explicit-any] Explicit "Any" is not allowed
+qwen-image-2/qwen_image_2/model.py: [explicit-any] Explicit "Any" is not allowed
+qwen-image-2/qwen_image_2/model.py: [explicit-any] Explicit "Any" is not allowed
+qwen-image-2/qwen_image_2/model.py: [explicit-any] Explicit "Any" is not allowed
+qwen-image-2/qwen_image_2/model.py: [explicit-any] Explicit "Any" is not allowed
+qwen-image-2/qwen_image_2/model.py: [explicit-any] Explicit "Any" is not allowed
+qwen-image-2/qwen_image_2/model.py: [explicit-any] Explicit "Any" is not allowed
+qwen-image-2/qwen_image_2/model.py: [explicit-any] Explicit "Any" is not allowed
+qwen-image-2/qwen_image_2/model.py: [explicit-any] Explicit "Any" is not allowed
+qwen-image-2/qwen_image_2/model.py: [misc] Cannot infer type of lambda
+qwen-image-2/qwen_image_2/model.py: [misc] Type of decorated function contains type "Any" ("Callable[[QwenImage21Model, list[Any]], tuple[list[Any], Tensor]]")
+qwen-image-2/qwen_image_2/model.py: [misc] Type of decorated function contains type "Any" ("Callable[[QwenImage21Model, str, list[Any]], tuple[Any, Any, Any]]")
+qwen-image-2/qwen_image_2/model.py: [misc] Type of decorated function contains type "Any" ("Callable[[QwenImage21Model, str], tuple[Any, Any]]")
+qwen-image-2/qwen_image_2/model.py: [misc] Type of decorated function contains type "Any" ("def (QwenImage21Model, /, embeds: Any, mask: Any, *, width: int, height: int, steps: int, seed: int, progress: Callable[[int, int], None], sigmas: Sequence[float] | None = ..., scheduler: Mapping[str, Any] | None = ..., heads: Tensor | None = ..., reference_images: list[Any] | None = ..., reference_latents: Tensor | None = ..., image_pad_mask: Tensor | None = ...) -> Any")
+qwen-image-2/qwen_image_2/model.py: [misc] Type of decorated function contains type "Any" ("def (QwenImage21Model, /, latents: Any, *, width: int, height: int) -> Any")
+qwen-image-2/qwen_image_2/model.py: [no-any-return] Returning Any from function declared to return "Tensor"
+qwen-image-2/qwen_image_2/model.py: [no-untyped-call] Call to untyped function "_StagedPipeline" in typed context
+qwen-image-2/qwen_image_2/model.py: [no-untyped-call] Call to untyped function "__init__" in typed context
+qwen-image-2/qwen_image_2/model.py: [no-untyped-call] Call to untyped function "_patchify" in typed context
+qwen-image-2/qwen_image_2/model.py: [no-untyped-call] Call to untyped function "calculate_dimensions" in typed context
+qwen-image-2/qwen_image_2/model.py: [no-untyped-call] Call to untyped function "calculate_dimensions" in typed context
+qwen-image-2/qwen_image_2/model.py: [no-untyped-call] Call to untyped function "from_config" of "AutoencoderKLQwenImage21" in typed context
+qwen-image-2/qwen_image_2/model.py: [no-untyped-call] Call to untyped function "from_config" of "FlowMatchEulerDiscreteScheduler" in typed context
+qwen-image-2/qwen_image_2/model.py: [no-untyped-call] Call to untyped function "from_config" of "QwenImage21Transformer2DModel" in typed context
+qwen-image-2/qwen_image_2/model.py: [no-untyped-call] Call to untyped function "from_config" of "_BaseAutoModelClass" in typed context
+qwen-image-2/qwen_image_2/model.py: [unreachable] Statement is unreachable
+qwen-image-2/qwen_image_2/quantize.py: [explicit-any] Explicit "Any" is not allowed
+qwen-image-2/qwen_image_2/quantize.py: [union-attr] Item "DerivationHook" of "QuantizationPlan | SelectionPlan | DerivationHook" has no attribute "components"
+qwen-image-2/qwen_image_2/quantize.py: [union-attr] Item "DerivationHook" of "QuantizationPlan | SelectionPlan | DerivationHook" has no attribute "components"
+qwen-image-2/qwen_image_2/quantize.py: [union-attr] Item "DerivationHook" of "QuantizationPlan | SelectionPlan | DerivationHook" has no attribute "include"
+qwen-image-2/qwen_image_2/quantize.py: [union-attr] Item "DerivationHook" of "QuantizationPlan | SelectionPlan | DerivationHook" has no attribute "include"
+qwen-image-2/qwen_image_2/quantize.py: [union-attr] Item "SelectionPlan" of "QuantizationPlan | SelectionPlan | DerivationHook" has no attribute "components"
+qwen-image-2/qwen_image_2/quantize.py: [union-attr] Item "SelectionPlan" of "QuantizationPlan | SelectionPlan | DerivationHook" has no attribute "components"
+qwen-image-2/qwen_image_2/rewriter.py: [index] Value of type "Match[str] | None" is not indexable
+qwen-image-2/qwen_image_2/rewriter.py: [no-any-return] Returning Any from function declared to return "Tensor"
+qwen-image-2/qwen_image_2/rewriter.py: [union-attr] Item "Tensor" of "Tensor | Module" has no attribute "eos_token_id"
+qwen-image-2/qwen_image_2/turbo.py: [assignment] Incompatible types in assignment (expression has type Module | None, variable has type Module)
+qwen-image-2/qwen_image_2/turbo.py: [explicit-any] Explicit "Any" is not allowed
+qwen-image-2/qwen_image_2/turbo.py: [misc] Type of decorated function contains type "Any" ("def (FunAccLoRA, /, base: QwenImage21Model, *args: Any, **kwargs: Any) -> Any")
+qwen-image-2/qwen_image_2/turbo.py: [operator] "Tensor" not callable
+qwen-image/qwen_image/__init__.py: [assignment] Incompatible types in assignment (expression has type "Prompt[Image]", base class "ImageRequest" defined the type as "str")
+qwen-image/qwen_image/model.py: [arg-type] Argument "dtype" to "noise" has incompatible type "Tensor | Module"; expected "dtype"
+qwen-image/qwen_image/model.py: [arg-type] Argument "merges" to "Qwen2Tokenizer" has incompatible type "list[tuple[str, ...]]"; expected "str | list[str] | None"
+qwen-image/qwen_image/model.py: [arg-type] Argument "sigmas" to "retrieve_timesteps" has incompatible type "ndarray[tuple[int], dtype[float64]]"; expected "list[float] | None"
+qwen-image/qwen_image/model.py: [arg-type] Argument 1 has incompatible type "def denoise(self: QwenImage, *args: Any, scheduler_config: Mapping[str, Any] | None = ..., **kwargs: Any) -> Tensor"; expected "def (QwenImage, /, *args: Any, scheduler_config: Mapping[str, Any] | None = ..., **kwargs: Any) -> Tensor"
+qwen-image/qwen_image/model.py: [arg-type] Argument 1 has incompatible type "def denoise(self: QwenImageTransformer, *args: Any, scheduler_config: Mapping[str, Any] | None = ..., **kwargs: Any) -> Tensor"; expected "def (QwenImageTransformer, /, *args: Any, scheduler_config: Mapping[str, Any] | None = ..., **kwargs: Any) -> Tensor"
+qwen-image/qwen_image/model.py: [arg-type] Argument 1 to "enumerate" has incompatible type "Tensor | Module"; expected "Iterable[Any]"
+qwen-image/qwen_image/model.py: [arg-type] Argument 1 to "float" has incompatible type "Tensor | Module"; expected "str | Buffer | SupportsFloat | SupportsIndex"
+qwen-image/qwen_image/model.py: [arg-type] Argument 1 to "noise" has incompatible type "tuple[int, int, Any | Tensor | int, int, int]"; expected "Sequence[int]"
+qwen-image/qwen_image/model.py: [call-overload] No overload variant of "to" of "TensorBase" matches argument types "device", "Tensor | Module"
+qwen-image/qwen_image/model.py: [call-overload] No overload variant of "to" of "TensorBase" matches argument types "device", "Tensor | Module"
+qwen-image/qwen_image/model.py: [explicit-any] Explicit "Any" is not allowed
+qwen-image/qwen_image/model.py: [explicit-any] Explicit "Any" is not allowed
+qwen-image/qwen_image/model.py: [explicit-any] Explicit "Any" is not allowed
+qwen-image/qwen_image/model.py: [explicit-any] Explicit "Any" is not allowed
+qwen-image/qwen_image/model.py: [explicit-any] Explicit "Any" is not allowed
+qwen-image/qwen_image/model.py: [explicit-any] Explicit "Any" is not allowed
+qwen-image/qwen_image/model.py: [explicit-any] Explicit "Any" is not allowed
+qwen-image/qwen_image/model.py: [explicit-any] Explicit "Any" is not allowed
+qwen-image/qwen_image/model.py: [explicit-any] Explicit "Any" is not allowed
+qwen-image/qwen_image/model.py: [explicit-any] Explicit "Any" is not allowed
+qwen-image/qwen_image/model.py: [explicit-any] Explicit "Any" is not allowed
+qwen-image/qwen_image/model.py: [misc] Type of decorated function contains type "Any" ("def (QwenImage, /, *args: Any, scheduler_config: Mapping[str, Any] | None = ..., **kwargs: Any) -> Tensor")
+qwen-image/qwen_image/model.py: [misc] Type of decorated function contains type "Any" ("def (QwenImageLoRA, /, base: QwenImage | QwenImageTransformer, *args: Any, **kwargs: Any) -> Tensor")
+qwen-image/qwen_image/model.py: [misc] Type of decorated function contains type "Any" ("def (QwenImageTransformer, /, *args: Any, scheduler_config: Mapping[str, Any] | None = ..., **kwargs: Any) -> Tensor")
+qwen-image/qwen_image/model.py: [no-any-return] Returning Any from function declared to return "Tensor"
+qwen-image/qwen_image/model.py: [no-untyped-call] Call to untyped function "Qwen2VLProcessor" in typed context
+qwen-image/qwen_image/model.py: [no-untyped-call] Call to untyped function "QwenImageEditPlusPipeline" in typed context
+qwen-image/qwen_image/model.py: [no-untyped-call] Call to untyped function "QwenImagePipeline" in typed context
+qwen-image/qwen_image/model.py: [no-untyped-call] Call to untyped function "calculate_dimensions" in typed context
+qwen-image/qwen_image/model.py: [no-untyped-call] Call to untyped function "calculate_dimensions" in typed context
+qwen-image/qwen_image/model.py: [no-untyped-call] Call to untyped function "from_config" of "AutoencoderKLQwenImage" in typed context
+qwen-image/qwen_image/model.py: [no-untyped-call] Call to untyped function "from_config" of "FlowMatchEulerDiscreteScheduler" in typed context
+qwen-image/qwen_image/model.py: [no-untyped-call] Call to untyped function "from_config" of "FlowMatchEulerDiscreteScheduler" in typed context
+qwen-image/qwen_image/model.py: [no-untyped-call] Call to untyped function "from_config" of "QwenImageTransformer2DModel" in typed context
+qwen-image/qwen_image/model.py: [no-untyped-call] Call to untyped function "from_config" of "_BaseAutoModelClass" in typed context
+qwen-image/qwen_image/model.py: [operator] Unsupported operand types for // (Module and "int")
+qwen-image/qwen_image/model.py: [union-attr] Item "QwenImageEditPlusPipeline" of "QwenImagePipeline | QwenImageEditPlusPipeline" has no attribute "_pack_latents"
+qwen-image/qwen_image/model.py: [union-attr] Item "QwenImageEditPlusPipeline" of "QwenImagePipeline | QwenImageEditPlusPipeline" has no attribute "encode_prompt"
+qwen-image/qwen_image/model.py: [union-attr] Item "QwenImageEditPlusPipeline" of "QwenImagePipeline | QwenImageEditPlusPipeline" has no attribute "encode_prompt"
+qwen-image/qwen_image/model.py: [union-attr] Item "QwenImageEditPlusPipeline" of "QwenImagePipeline | QwenImageEditPlusPipeline" has no attribute "image_processor"
+qwen-image/qwen_image/model.py: [union-attr] Item "QwenImageEditPlusPipeline" of "QwenImagePipeline | QwenImageEditPlusPipeline" has no attribute "image_processor"
+qwen-image/qwen_image/model.py: [union-attr] Item "QwenImagePipeline" of "QwenImagePipeline | QwenImageEditPlusPipeline" has no attribute "_pack_latents"
+qwen-image/qwen_image/model.py: [union-attr] Item "QwenImagePipeline" of "QwenImagePipeline | QwenImageEditPlusPipeline" has no attribute "encode_prompt"
+qwen-image/qwen_image/model.py: [union-attr] Item "QwenImagePipeline" of "QwenImagePipeline | QwenImageEditPlusPipeline" has no attribute "encode_prompt"
+qwen-image/qwen_image/model.py: [union-attr] Item "QwenImagePipeline" of "QwenImagePipeline | QwenImageEditPlusPipeline" has no attribute "image_processor"
+qwen-image/qwen_image/model.py: [union-attr] Item "QwenImagePipeline" of "QwenImagePipeline | QwenImageEditPlusPipeline" has no attribute "image_processor"
+qwen-image/qwen_image/model.py: [union-attr] Item "Tensor" of "Tensor | Module" has no attribute "in_channels"
+qwen-image/qwen_image/quantize.py: [union-attr] Item "DerivationHook" of "QuantizationPlan | SelectionPlan | DerivationHook" has no attribute "components"
+qwen-image/qwen_image/quantize.py: [union-attr] Item "DerivationHook" of "QuantizationPlan | SelectionPlan | DerivationHook" has no attribute "include"
+qwen-image/qwen_image/quantize.py: [union-attr] Item "SelectionPlan" of "QuantizationPlan | SelectionPlan | DerivationHook" has no attribute "components"
+qwen3.6/qwen3_6/__init__.py: [union-attr] Item "DerivationHook" of "QuantizationPlan | SelectionPlan | DerivationHook" has no attribute "components"
+qwen3.6/qwen3_6/__init__.py: [union-attr] Item "DerivationHook" of "QuantizationPlan | SelectionPlan | DerivationHook" has no attribute "components"
+qwen3.6/qwen3_6/__init__.py: [union-attr] Item "DerivationHook" of "QuantizationPlan | SelectionPlan | DerivationHook" has no attribute "include"
+qwen3.6/qwen3_6/__init__.py: [union-attr] Item "DerivationHook" of "QuantizationPlan | SelectionPlan | DerivationHook" has no attribute "include"
+qwen3.6/qwen3_6/__init__.py: [union-attr] Item "SelectionPlan" of "QuantizationPlan | SelectionPlan | DerivationHook" has no attribute "components"
+qwen3.6/qwen3_6/__init__.py: [union-attr] Item "SelectionPlan" of "QuantizationPlan | SelectionPlan | DerivationHook" has no attribute "components"
+scripts/abliterated_ingest.py: [arg-type] Argument "differ" to "log" of "Telemetry" has incompatible type "list[str]"; expected "str | bool | int | float | None"
+scripts/abliterated_ingest.py: [arg-type] Argument "direction_cosines" to "log" of "Telemetry" has incompatible type "list[float]"; expected "str | bool | int | float | None"
+scripts/abliterated_ingest.py: [arg-type] Argument "head_orders" to "log" of "Telemetry" has incompatible type "list[list[int]]"; expected "str | bool | int | float | None"
+scripts/abliterated_ingest.py: [arg-type] Argument "rank1" to "log" of "Telemetry" has incompatible type "list[Any]"; expected "str | bool | int | float | None"
+scripts/abliterated_ingest.py: [arg-type] Argument "relative" to "log" of "Telemetry" has incompatible type "list[Any]"; expected "str | bool | int | float | None"
+scripts/abliterated_ingest.py: [explicit-any] Explicit "Any" is not allowed
+scripts/abliterated_ingest.py: [explicit-any] Explicit "Any" is not allowed
+scripts/abliterated_ingest.py: [explicit-any] Explicit "Any" is not allowed
+scripts/abliterated_ingest.py: [explicit-any] Explicit "Any" is not allowed
+scripts/abliterated_ingest.py: [misc] Type of decorated function contains type "Any" ("Callable[[Context, Assemble, Weights[Any], Weights[Any], Telemetry], ModelArtifact]")
+scripts/abliterated_ingest.py: [type-arg] Missing type arguments for generic type "Weights"
+scripts/h3-seam-probe.py: [explicit-any] Explicit "Any" is not allowed
+scripts/h3-seam-probe.py: [explicit-any] Explicit "Any" is not allowed
+scripts/h3-seam-probe.py: [explicit-any] Explicit "Any" is not allowed
+scripts/h3-seam-probe.py: [explicit-any] Explicit "Any" is not allowed
+scripts/h3-seam-probe.py: [explicit-any] Explicit "Any" is not allowed
+scripts/h3-seam-probe.py: [explicit-any] Explicit "Any" is not allowed
+scripts/h3-seam-probe.py: [explicit-any] Explicit "Any" is not allowed
+scripts/h3-seam-probe.py: [explicit-any] Explicit "Any" is not allowed
+scripts/h3-seam-probe.py: [explicit-any] Explicit "Any" is not allowed
+scripts/h3-seam-probe.py: [explicit-any] Explicit "Any" is not allowed
+scripts/h3-seam-probe.py: [explicit-any] Explicit "Any" is not allowed
+scripts/h3-seam-probe.py: [explicit-any] Explicit "Any" is not allowed
+scripts/h3-seam-probe.py: [explicit-any] Explicit "Any" is not allowed
+scripts/h3-seam-probe.py: [explicit-any] Explicit "Any" is not allowed
+scripts/h3-seam-probe.py: [explicit-any] Explicit "Any" is not allowed
+scripts/h3-seam-probe.py: [explicit-any] Explicit "Any" is not allowed
+scripts/h3-seam-probe.py: [explicit-any] Explicit "Any" is not allowed
+scripts/h3-seam-probe.py: [explicit-any] Explicit "Any" is not allowed
+scripts/h3_order.py: [explicit-any] Explicit "Any" is not allowed
+scripts/h3_plans.py: [attr-defined] "MiniMaxH3Scheduler" has no attribute "set_timesteps"
+scripts/h3_plans.py: [attr-defined] "MiniMaxH3Scheduler" has no attribute "sigmas"
+scripts/h3_plans.py: [no-untyped-call] Call to untyped function "MiniMaxH3Scheduler" in typed context
+scripts/moe-grouped-experts-proof.py: [no-untyped-call] Call to untyped function "Int8Leaf" in typed context
+scripts/moe-grouped-experts-proof.py: [no-untyped-call] Call to untyped function "Int8Leaf" in typed context
+scripts/moe-grouped-experts-proof.py: [no-untyped-call] Call to untyped function "truncated" in typed context
+scripts/moe-grouped-experts-proof.py: [no-untyped-call] Call to untyped function "truncated" in typed context
+scripts/moe-grouped-experts-proof.py: [no-untyped-def] Function is missing a type annotation
+scripts/moe-grouped-experts-proof.py: [no-untyped-def] Function is missing a type annotation
+scripts/moe-grouped-experts-proof.py: [no-untyped-def] Function is missing a type annotation
+scripts/moe-grouped-experts-proof.py: [no-untyped-def] Function is missing a type annotation
+scripts/moe-grouped-experts-proof.py: [operator] "Tensor" not callable
+scripts/moe-grouped-experts-proof.py: [operator] "Tensor" not callable
+scripts/moe-grouped-experts-proof.py: [possibly-undefined] Name "experts" may be undefined
+scripts/moe-grouped-experts-proof.py: [union-attr] Item "Tensor" of "Tensor | Module" has no attribute "weight"
+scripts/moe-grouped-experts-proof.py: [union-attr] Item "Tensor" of "Tensor | Module" has no attribute "weight"
+scripts/moe-grouped-experts-proof.py: [union-attr] Item "Tensor" of "Tensor | Module" has no attribute "weight"
+scripts/qwen3.6-model-proof.py: [arg-type] Argument 1 to "processor" has incompatible type "Files"; expected "ModelAssets | Path"
+scripts/qwen3.6-model-proof.py: [arg-type] Argument 2 to "construct" has incompatible type "Stored"; expected "Config"
+scripts/qwen3.6-model-proof.py: [arg-type] Argument 2 to "construct" has incompatible type "Stored"; expected "Config"
+scripts/qwen3.6-model-proof.py: [assignment] Incompatible types in assignment (expression has type "GenerationConfig", variable has type "Tensor | Module")
+scripts/qwen3.6-model-proof.py: [attr-defined] "def ask(self, VisionLM, /, questions: list[Question], *, system: str, thinking: bool, stop: list[str], max_new_tokens: int, presence_penalty: float, temperature: float, top_p: float, seed: int, progress: Callable[[int], None] | None = ...) -> list[str]" has no attribute "__wrapped__"
+scripts/qwen3.6-model-proof.py: [explicit-any] Explicit "Any" is not allowed
+scripts/qwen3.6-model-proof.py: [explicit-any] Explicit "Any" is not allowed
+scripts/qwen3.6-model-proof.py: [explicit-any] Explicit "Any" is not allowed
+scripts/qwen3.6-model-proof.py: [explicit-any] Explicit "Any" is not allowed
+scripts/qwen3.6-model-proof.py: [explicit-any] Explicit "Any" is not allowed
+scripts/qwen3.6-model-proof.py: [explicit-any] Explicit "Any" is not allowed
+scripts/qwen3.6-model-proof.py: [no-any-return] Returning Any from function declared to return "dict[str, Any]"
+scripts/qwen3.6-model-proof.py: [no-any-return] Returning Any from function declared to return "list[str]"
+scripts/qwen3.6-model-proof.py: [no-any-return] Returning Any from function declared to return Module
+scripts/qwen3.6-model-proof.py: [no-untyped-call] Call to untyped function "GenerationConfig" in typed context
+scripts/qwen3.6-model-proof.py: [no-untyped-call] Call to untyped function "from_config" of "_BaseAutoModelClass" in typed context
+scripts/qwen3.6-model-proof.py: [operator] "Tensor" not callable
+scripts/qwen3.6-model-proof.py: [var-annotated] Need type annotation for "stored" (hint: "stored: set[<type>] = ...")
+sdxl/sdxl/__init__.py: [arg-type] Argument "merges" to "CLIPTokenizer" has incompatible type "list[tuple[Any, ...]]"; expected "str | list[str] | None"
+sdxl/sdxl/__init__.py: [arg-type] Argument 1 to "__call__" of "_Wrapped" has incompatible type "dtype"; expected "PreTrainedModel"
+sdxl/sdxl/__init__.py: [attr-defined] "HiDiffusionUNet" has no attribute "info"
+sdxl/sdxl/__init__.py: [attr-defined] "HiDiffusionUNet" has no attribute "info"
+sdxl/sdxl/__init__.py: [attr-defined] "HiDiffusionUNet" has no attribute "modules"
+sdxl/sdxl/__init__.py: [explicit-any] Explicit "Any" is not allowed
+sdxl/sdxl/__init__.py: [explicit-any] Explicit "Any" is not allowed
+sdxl/sdxl/__init__.py: [explicit-any] Explicit "Any" is not allowed
+sdxl/sdxl/__init__.py: [explicit-any] Explicit "Any" is not allowed
+sdxl/sdxl/__init__.py: [explicit-any] Explicit "Any" is not allowed
+sdxl/sdxl/__init__.py: [explicit-any] Explicit "Any" is not allowed
+sdxl/sdxl/__init__.py: [explicit-any] Explicit "Any" is not allowed
+sdxl/sdxl/__init__.py: [explicit-any] Explicit "Any" is not allowed
+sdxl/sdxl/__init__.py: [explicit-any] Explicit "Any" is not allowed
+sdxl/sdxl/__init__.py: [explicit-any] Explicit "Any" is not allowed
+sdxl/sdxl/__init__.py: [explicit-any] Explicit "Any" is not allowed
+sdxl/sdxl/__init__.py: [explicit-any] Explicit "Any" is not allowed
+sdxl/sdxl/__init__.py: [explicit-any] Explicit "Any" is not allowed
+sdxl/sdxl/__init__.py: [explicit-any] Explicit "Any" is not allowed
+sdxl/sdxl/__init__.py: [explicit-any] Explicit "Any" is not allowed
+sdxl/sdxl/__init__.py: [explicit-any] Explicit "Any" is not allowed
+sdxl/sdxl/__init__.py: [explicit-any] Explicit "Any" is not allowed
+sdxl/sdxl/__init__.py: [explicit-any] Explicit "Any" is not allowed
+sdxl/sdxl/__init__.py: [explicit-any] Explicit "Any" is not allowed
+sdxl/sdxl/__init__.py: [explicit-any] Explicit "Any" is not allowed
+sdxl/sdxl/__init__.py: [explicit-any] Explicit "Any" is not allowed
+sdxl/sdxl/__init__.py: [misc] Type of decorated function contains type "Any" ("_lru_cache_wrapper[type[Any]]")
+sdxl/sdxl/__init__.py: [misc] Type of decorated function contains type "Any" ("def (SdxlModel, /, tokens: tuple[Any, Any], negative_tokens: tuple[Any, Any] | None, *, width: int, height: int, steps: int, guidance: float, hidiffusion: bool, seed: int, progress: Callable[[int, int], None]) -> tuple[Any, Any, Any, Any]")
+sdxl/sdxl/__init__.py: [possibly-undefined] Name "neg" may be undefined
+sdxl/sdxl/__init__.py: [possibly-undefined] Name "neg_2" may be undefined
+sdxl/sdxl/__init__.py: [union-attr] Item "DerivationHook" of "QuantizationPlan | SelectionPlan | DerivationHook" has no attribute "components"
+sdxl/sdxl/__init__.py: [union-attr] Item "DerivationHook" of "QuantizationPlan | SelectionPlan | DerivationHook" has no attribute "include"
+sdxl/sdxl/__init__.py: [union-attr] Item "SelectionPlan" of "QuantizationPlan | SelectionPlan | DerivationHook" has no attribute "components"
+sdxl/sdxl/__init__.py: [unused-ignore] Unused "type: ignore" comment
+sdxl/sdxl/__init__.py: [unused-ignore] Unused "type: ignore[import-not-found, import-untyped]" comment
+sdxl/sdxl/__init__.py: [unused-ignore] Unused "type: ignore[valid-type]" comment
+sdxl/sdxl/_numerics.py: [explicit-any] Explicit "Any" is not allowed
+sdxl/sdxl/_numerics.py: [explicit-any] Explicit "Any" is not allowed
+sdxl/sdxl/_numerics.py: [explicit-any] Explicit "Any" is not allowed
+sdxl/sdxl/_numerics.py: [explicit-any] Explicit "Any" is not allowed
+sdxl/sdxl/_numerics.py: [explicit-any] Explicit "Any" is not allowed
+sdxl/sdxl/_numerics.py: [explicit-any] Explicit "Any" is not allowed
+sdxl/sdxl/_numerics.py: [no-any-return] Returning Any from function declared to return "dtype"
+seedvr2/seedvr2/__init__.py: [assignment] Incompatible types in assignment (expression has type "int", variable has type "Seed")
+seedvr2/seedvr2/__init__.py: [misc] Incompatible types in "yield" (actual type "DecodedAudioChunk", expected type "DecodedVideoFrame")
+seedvr2/seedvr2/model.py: [explicit-any] Explicit "Any" is not allowed
+seedvr2/seedvr2/model.py: [explicit-any] Explicit "Any" is not allowed
+seedvr2/seedvr2/model.py: [explicit-any] Explicit "Any" is not allowed
+seedvr2/seedvr2/model.py: [explicit-any] Explicit "Any" is not allowed
+seedvr2/seedvr2/model.py: [explicit-any] Explicit "Any" is not allowed
+seedvr2/seedvr2/model.py: [explicit-any] Explicit "Any" is not allowed
+seedvr2/seedvr2/model.py: [no-any-return] Returning Any from function declared to return "Tensor"
+seedvr2/seedvr2/model.py: [no-any-return] Returning Any from function declared to return "Tensor"
+seedvr2/seedvr2/model.py: [no-any-return] Returning Any from function declared to return "Tensor"
+seedvr2/seedvr2/model.py: [no-any-return] Returning Any from function declared to return "Tensor"

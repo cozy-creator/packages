@@ -1,6 +1,6 @@
 name: build
 # The PR check (tracker/design/ci-v2.md §1): errors-only lint, every package source compiles, and the type
-# check (scripts/typecheck.sh).
+# check (scripts/typecheck.sh: mypy --strict).
 # Required for merges into master and rc/*: it runs on the merge queue's group (merge_group), on the final
 # PR + branch state; on a pull request it is skipped, which lets the PR be queued. A docs-only group passes
 # without building.
@@ -44,11 +44,14 @@ jobs:
         run: uvx ruff@0.16.4 check --select E9,F63,F7,F82 --output-format github .
       - if: steps.scope.outputs.run == 'true'
         run: python3 -m compileall -q -x '/\.venv/' .
-      # The type check: new errors fail, .basedpyright/baseline.json holds the known ones.
+      # The type check (mypy --strict): new errors fail, .mypy-baseline.txt holds the known ones.
       - if: steps.scope.outputs.run == 'true'
         uses: actions/cache@v5
         with:
-          path: .venv-typecheck
-          key: typecheck-${{ runner.os }}-${{ hashFiles('scripts/typecheck-requirements.txt') }}
+          path: |
+            .venv-typecheck
+            .mypy_cache
+          key: typecheck-${{ runner.os }}-${{ hashFiles('scripts/typecheck-requirements.txt') }}-${{ github.sha }}
+          restore-keys: typecheck-${{ runner.os }}-${{ hashFiles('scripts/typecheck-requirements.txt') }}-
       - if: steps.scope.outputs.run == 'true'
         run: scripts/typecheck.sh
