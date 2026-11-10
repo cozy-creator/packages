@@ -241,25 +241,6 @@ hidream-o1/hidream_o1/sampling.py: [attr-defined] "FlowMatchEulerDiscreteSchedul
 hidream-o1/hidream_o1/sampling.py: [explicit-any] Explicit "Any" is not allowed
 hidream-o1/hidream_o1/sampling.py: [explicit-any] Explicit "Any" is not allowed
 hidream-o1/hidream_o1/sampling.py: [no-untyped-call] Call to untyped function "FlowMatchEulerDiscreteScheduler" in typed context
-hunyuan-image-3/hunyuan_image_3/__init__.py: [arg-type] Argument 2 to "log" of "Telemetry" has incompatible type "**dict[str, float]"; expected "str"
-hunyuan-image-3/hunyuan_image_3/model.py: [assignment] Incompatible types in assignment (expression has type "SimpleNamespace", variable has type "Tensor | Module")
-hunyuan-image-3/hunyuan_image_3/model.py: [explicit-any] Explicit "Any" is not allowed
-hunyuan-image-3/hunyuan_image_3/model.py: [index] Value of type "Any | Tensor | Module" is not indexable
-hunyuan-image-3/hunyuan_image_3/model.py: [no-any-return] Returning Any from function declared to return "Image"
-hunyuan-image-3/hunyuan_image_3/model.py: [no-any-unimported] Return type becomes "Any" due to an unfollowed import
-hunyuan-image-3/hunyuan_image_3/model.py: [operator] "Tensor" not callable
-hunyuan-image-3/hunyuan_image_3/model.py: [operator] "Tensor" not callable
-hunyuan-image-3/hunyuan_image_3/model.py: [operator] "Tensor" not callable
-hunyuan-image-3/hunyuan_image_3/model.py: [operator] "Tensor" not callable
-hunyuan-image-3/hunyuan_image_3/model.py: [operator] "Tensor" not callable
-hunyuan-image-3/hunyuan_image_3/model.py: [union-attr] Item "Tensor" of "Any | Tensor" has no attribute "height"
-hunyuan-image-3/hunyuan_image_3/model.py: [union-attr] Item "Tensor" of "Any | Tensor" has no attribute "width"
-hunyuan-image-3/hunyuan_image_3/model.py: [union-attr] Item "Tensor" of "Tensor | Module" has no attribute "build_cond_images"
-hunyuan-image-3/hunyuan_image_3/model.py: [union-attr] Item "Tensor" of "Tensor | Module" has no attribute "layers"
-hunyuan-image-3/hunyuan_image_3/model.py: [union-attr] Item "Tensor" of "Tensor | Module" has no attribute "vae_reso_group"
-hunyuan-image-3/hunyuan_image_3/model.py: [union-attr] Item Module of "Any | Tensor | Module" has no attribute "__iter__" (not iterable)
-hunyuan-image-3/hunyuan_image_3/quantize.py: [explicit-any] Explicit "Any" is not allowed
-hunyuan-image-3/hunyuan_image_3/quantize.py: [explicit-any] Explicit "Any" is not allowed
 hunyuan-image-3/hunyuan_image_3/quantize.py: [union-attr] Item "DerivationHook" of "QuantizationPlan | SelectionPlan | DerivationHook" has no attribute "components"
 hunyuan-image-3/hunyuan_image_3/quantize.py: [union-attr] Item "DerivationHook" of "QuantizationPlan | SelectionPlan | DerivationHook" has no attribute "components"
 hunyuan-image-3/hunyuan_image_3/quantize.py: [union-attr] Item "DerivationHook" of "QuantizationPlan | SelectionPlan | DerivationHook" has no attribute "include"
