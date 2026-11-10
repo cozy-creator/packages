@@ -21,7 +21,7 @@ import re
 import struct
 from dataclasses import dataclass
 from fractions import Fraction
-from typing import Any, NoReturn, cast
+from typing import Any, NoReturn
 
 import msgspec
 import torch
