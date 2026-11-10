@@ -141,7 +141,7 @@ def _generate(ctx: Context, payload: TurboInput, model: HiDreamO1, out: Outputs,
     with tel.stage("generating image", overall_range=(0.0, 0.98)):
         image = model.generate(
             prompt, negative, references, width=width, height=height, recipe=recipe, steps=steps,
-            guidance=guidance, seed=seed, interval=interval, progress=ctx.progress,
+            guidance=guidance, seed=seed, interval=interval,
         )
     with tel.stage("saving image", overall_range=(0.98, 1.0)):
         asset = out.save_image(image, format="png")

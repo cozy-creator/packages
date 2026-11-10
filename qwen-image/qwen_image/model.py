@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import json
 import math
-from collections.abc import Callable, Mapping
+from collections.abc import Mapping
 from functools import partial
 from typing import Any
 
@@ -75,6 +75,7 @@ from transformers import (
     Qwen2VLVideoProcessor,
 )
 from transformers import initialization as transformer_init
+from tqdm import tqdm
 
 #: Pixels per latent token: the VAE's 8x, then 2x2 packing.
 PATCH = 16
@@ -231,7 +232,6 @@ def sample(
     steps: int,
     guidance: float,
     seed: int,
-    progress: Callable[[int, int], None],
 ) -> torch.Tensor:
     """Upstream's sampling loop (`QwenImageEditPlusPipeline.__call__`): seeded noise drawn on the CPU in
     the DiT's dtype, `FlowMatchEulerDiscreteScheduler` on `linspace(1, 1/steps)` shifted by the canvas,
@@ -259,7 +259,7 @@ def sample(
             (text.to(device=device, dtype=dtype), None if text_mask is None else text_mask.to(device))
             for text, text_mask in [(embeds, mask), *([negative] if negative is not None else [])]
         ]
-        for i, t in enumerate(scheduler.timesteps):
+        for t in tqdm(scheduler.timesteps):
             model_input = latents if image is None else torch.cat([latents, image], dim=1)
             timestep = t.expand(latents.shape[0]).to(latents.dtype)
             predictions = [
@@ -281,7 +281,6 @@ def sample(
                     torch.norm(prediction, dim=-1, keepdim=True) / torch.norm(combined, dim=-1, keepdim=True)
                 )
             latents = scheduler.step(prediction, t, latents, return_dict=False)[0]
-            progress(i, steps)
     return latents.cpu()
 
 

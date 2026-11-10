@@ -32,7 +32,6 @@ import dataclasses
 import functools
 import json
 import math
-from collections.abc import Callable
 from pathlib import Path
 from typing import Annotated, Any, Literal
 
@@ -83,6 +82,7 @@ from transformers import (
     CLIPTokenizer,
 )
 from transformers import initialization as transformer_init
+from tqdm import tqdm
 
 from ._numerics import decode_latents, encode_tokens, guided, hold_decode_dtype
 
@@ -330,7 +330,6 @@ class SdxlModel(Model[SdxlPipeline]):
         guidance: float,
         hidiffusion: bool,
         seed: int,
-        progress: Callable[[int, int], None],
     ) -> tuple[Any, Any, Any, Any]:
         """Text encoding, every step and the decode: Diffusers' `EulerDiscreteScheduler`, or with
         HiDiffusion its recipe's `DDIMScheduler` at eta 1. HiDiffusion's blocks choose by step
@@ -366,12 +365,11 @@ class SdxlModel(Model[SdxlPipeline]):
                 prompt, pooled = torch.cat([negative, prompt]), torch.cat([negative_pool, pooled])
             prompt, pooled = prompt.to(torch.float16), pooled.to(torch.float16)
             # The schedulers read their own tables by the host timestep; the UNet takes the device one.
-            for i, t in enumerate(scheduler.timesteps.tolist()):
+            for i, t in enumerate(tqdm(scheduler.timesteps.tolist())):
                 unet.cozy_step = i
                 noise = guided(unet, scheduler.scale_model_input(latents, t), scheduler.timesteps[i], prompt,
                                pooled, time_ids, guidance)
                 latents = advance(noise, t, latents)[0]
-                progress(i, steps)
             image = decode_latents(vae, latents.to(dtype=dtype), scale)
         return image, prompt, pooled, latents
 
@@ -480,14 +478,13 @@ def _sample(
     hidiffusion_applied: bool,
     seed: int,
     tel: Telemetry,
-    progress: Callable[[int, int], None],
 ) -> Any:
     """Encode, denoise and decode: Euler, or HiDiffusion's DDIM."""
     with tel.stage("generate", overall_range=(0.02, 0.98)):
         image, prompt, pooled, latents = model.generate(
             tokens, negative_tokens if guidance > 1.0 else None,
             width=width, height=height, steps=steps, guidance=guidance,
-            hidiffusion=hidiffusion_applied, seed=seed, progress=progress,
+            hidiffusion=hidiffusion_applied, seed=seed,
         )
     tel.metric("prompt_absmax", _finite(torch, prompt))
     tel.metric("pooled_absmax", _finite(torch, pooled))
@@ -561,7 +558,7 @@ def generate(
     image = _sample(
         model, (ids, ids_2), (neg, neg_2) if classifier_free else None,
         width=width, height=height, steps=steps, guidance=guidance,
-        hidiffusion_applied=hidiffusion_applied, seed=seed, tel=tel, progress=ctx.progress,
+        hidiffusion_applied=hidiffusion_applied, seed=seed, tel=tel,
     )
     tel.metric("image_absmax", _finite(torch, image))
     # F32 and rounded, as Diffusers' `VaeImageProcessor`: bf16 then truncation darkened every pixel.

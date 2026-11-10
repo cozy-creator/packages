@@ -11,7 +11,7 @@ Turbo overlay (`turbo.FunAccLoRA`) reaches the DiT's linears through permanent h
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from functools import partial
 from typing import Any
 
@@ -66,6 +66,7 @@ from cozy_runtime.author import (
     uses_components,
 )
 from cozy_runtime.accel.kernels import Plan
+from tqdm import tqdm
 
 from ._prepared import KV, Transformer, _Joint, _Layout
 
@@ -365,7 +366,6 @@ class QwenImage21Model(Model[QwenImage21Graph]):
         height: int,
         steps: int,
         seed: int,
-        progress: Callable[[int, int], None],
         sigmas: Sequence[float] | None = None,
         scheduler: Mapping[str, Any] | None = None,
         heads: torch.Tensor | None = None,
@@ -428,16 +428,15 @@ class QwenImage21Model(Model[QwenImage21Graph]):
                 joint = _Joint(transformer, img_shapes, img_mask, mask, device)
                 # Under a parallel decoder the state is F32 from the first step, as `scheduler.step` makes it.
                 latents = latents if heads is None else latents.float()
-                for i, t in enumerate(timesteps):
+                for i, t in enumerate(tqdm(timesteps)):
                     noise = transformer(latents, joint=(times[i : i + 1], embeds, references, *joint.inputs()),
                                         projection=None if heads is None else heads[i])
                     latents = euler.step(noise, t, latents, return_dict=False)[0]
-                    progress(i, steps)
                 return latents
             layout = _Layout(transformer, img_shapes, img_mask, device)
             config = transformer.config
             nbytes = 2 * layout.prefix_len * config.num_attention_heads * config.attention_head_dim
-            with retained(nbytes * transformer.dtype.itemsize * len(blocks)) as held:
+            with retained(nbytes * transformer.dtype.itemsize * len(blocks)) as held, tqdm(total=steps) as bar:
                 # Step 0 prefills each layer's prefix K/V into the store over the full joint sequence.
                 kv_cache = _RetainedKV(len(blocks), held)
                 first = None
@@ -464,12 +463,12 @@ class QwenImage21Model(Model[QwenImage21Graph]):
                 # `native_time_fp32_state`); the DiT reads it in its own dtype.
                 noise = noise if heads is None else noise.float()
                 latents = euler.step(noise, timesteps[0], latents, return_dict=False)[0]
-                progress(0, steps)
+                bar.update()
                 for i in range(1, steps):
                     cached = (times[i : i + 1], layout.rotary_emb, layout.modulation_mask, kv_cache.prefix())
                     noise = transformer(latents, cached=cached, projection=None if heads is None else heads[i])
                     latents = euler.step(noise, timesteps[i], latents, return_dict=False)[0]
-                    progress(i, steps)
+                    bar.update()
         return latents
 
     @uses_components("vae")
