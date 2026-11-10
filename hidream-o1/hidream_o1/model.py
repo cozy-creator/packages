@@ -12,9 +12,9 @@ everything, every step. Runtime constructs and fills the modules and owns their 
 from __future__ import annotations
 
 import math
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Final, TypedDict, cast
 
 import numpy as np
 import torch
@@ -25,12 +25,21 @@ from PIL import Image, ImageDraw
 from transformers import (
     Qwen3VLConfig,
 )
+from transformers.models.qwen3_vl.configuration_qwen3_vl import Qwen3VLTextConfig
 from transformers.initialization import no_init_weights
-from transformers.models.qwen3_vl.modeling_qwen3_vl import Qwen3VLTextModel, Qwen3VLVisionModel
+from transformers.models.qwen3_vl.modeling_qwen3_vl import (
+    Qwen3VLTextDecoderLayer,
+    Qwen3VLTextModel,
+    Qwen3VLVisionModel,
+)
+from transformers.models.qwen3_vl.processing_qwen3_vl import Qwen3VLProcessor
 
 from .sampling import Euler, Flash, UniPC
 
-COMPONENT = "model"
+if TYPE_CHECKING:
+    from cozy_runtime.author._retained import State, Store
+
+COMPONENT: Final = "model"
 PATCH = 32
 #: Upstream's noise scale: the initial noise is this many standard normals, and the Dev sampler
 #: noises each prediction again at its own scale.
@@ -59,7 +68,9 @@ class TimestepEmbedder(torch.nn.Module):
         freqs = torch.exp(-math.log(10000) * torch.arange(half, dtype=torch.float32) / half).to(t.device)
         args = (t * 1000)[:, None].float() * freqs[None]
         embedding = torch.cat([torch.cos(args), torch.sin(args)], dim=-1)
-        return self.mlp(embedding.to(self.mlp[0].weight.dtype))
+        first = cast(torch.nn.Linear, self.mlp[0])  # the Sequential's first layer, built above
+        out: torch.Tensor = self.mlp(embedding.to(first.weight.dtype))
+        return out
 
 
 class PatchEmbed(torch.nn.Module):
@@ -71,7 +82,8 @@ class PatchEmbed(torch.nn.Module):
         self.proj2 = torch.nn.Linear(hidden // 4, hidden)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.proj2(self.proj1(x))
+        out: torch.Tensor = self.proj2(self.proj1(x))
+        return out
 
 
 class PixelHead(torch.nn.Module):
@@ -80,7 +92,8 @@ class PixelHead(torch.nn.Module):
         self.linear = torch.nn.Linear(hidden, PATCH * PATCH * 3)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.linear(x)
+        out: torch.Tensor = self.linear(x)
+        return out
 
 
 class Body(torch.nn.Module):
@@ -89,9 +102,14 @@ class Body(torch.nn.Module):
 
     def __init__(self, config: Qwen3VLConfig) -> None:
         super().__init__()
-        hidden = config.text_config.hidden_size
-        self.visual = Qwen3VLVisionModel._from_config(config.vision_config, dtype=torch.bfloat16)
-        self.language_model = Qwen3VLTextModel._from_config(config.text_config, dtype=torch.bfloat16)
+        # Qwen3VLConfig builds its text config as a Qwen3VLTextConfig.
+        hidden = cast(Qwen3VLTextConfig, config.text_config).hidden_size
+        self.visual: Qwen3VLVisionModel = Qwen3VLVisionModel._from_config(  # type: ignore[no-untyped-call]  # Transformers' _from_config is unannotated
+            config.vision_config, dtype=torch.bfloat16
+        )
+        self.language_model: Qwen3VLTextModel = Qwen3VLTextModel._from_config(  # type: ignore[no-untyped-call]  # Transformers' _from_config is unannotated
+            config.text_config, dtype=torch.bfloat16
+        )
         self.t_embedder1 = TimestepEmbedder(hidden)
         self.x_embedder = PatchEmbed(hidden)
         self.final_layer2 = PixelHead(hidden)
@@ -110,9 +128,19 @@ class Root(torch.nn.Module):
         body = self.model
         text = body.language_model
         h = torch.cat([body.t_embedder1(t.view(1))[:, None], body.x_embedder(inputs)], dim=1)
-        for layer, past in zip(text.layers, prefix, strict=True):
+        for layer, past in zip(_layers(text), prefix, strict=True):
             h = _layer(layer, h, cos, sin, past)[0]
-        return body.final_layer2(text.norm(h[:, 1 : 1 + n]))  # type: ignore[no-any-return]
+        out: torch.Tensor = body.final_layer2(text.norm(h[:, 1 : 1 + n]))
+        return out
+
+
+class Components(TypedDict):
+    model: Root
+
+
+def _layers(text: Qwen3VLTextModel) -> Iterable[Qwen3VLTextDecoderLayer]:
+    """Its decoder layers: Transformers builds `layers` of `Qwen3VLTextDecoderLayer`s."""
+    return cast("Iterable[Qwen3VLTextDecoderLayer]", text.layers)
 
 
 class O1Graph:
@@ -123,11 +151,11 @@ class O1Graph:
         for module in (root.model.t_embedder1, root.model.x_embedder, root.model.final_layer2):
             module.to(torch.bfloat16)
         text = root.model.language_model.config
-        for layer in root.model.language_model.layers:
+        for layer in _layers(root.model.language_model):
             # The prefix's causal attention and the denoising steps', sites whose kernels the Runtime picks.
             layer.self_attn.prefix_site = Attention(text.num_attention_heads, text.head_dim, causal=True)
             layer.self_attn.site = Attention(text.num_attention_heads, text.head_dim)
-        self.components: dict[str, torch.nn.Module] = {COMPONENT: root.eval()}
+        self.components: Components = {COMPONENT: root.eval()}
 
 
 # ---------------------------------------------------------------- references and sizes
@@ -202,14 +230,14 @@ def placed(references: list[Image.Image], boxes: list[tuple[int, int, int, int] 
     """Upstream's `create_layout_reference_images` and `generate_image`'s resize: each reference
     resized to `side`² and framed in its box's colour (a reference without a drawn box takes an
     unused one), then the layout canvas. `boxes` are pixel boxes on the `width` x `height` output."""
-    ranked = sorted((i for i, box in enumerate(boxes) if box), key=lambda i: _area(boxes[i]), reverse=True)
+    ranked = sorted(((i, box) for i, box in enumerate(boxes) if box), key=lambda drawn: _area(drawn[1]), reverse=True)
     line = int(math.sqrt(width * height) * 0.05)
     canvas = Image.new("RGB", (width, height), (0, 0, 0))
     draw = ImageDraw.Draw(canvas)
     colours: dict[int, tuple[int, int, int]] = {}
-    for rank, index in enumerate(ranked[:MAX_BOXES]):
+    for rank, (index, box) in enumerate(ranked[:MAX_BOXES]):
         colours[index] = COLOURS[rank % len(COLOURS)]
-        draw.rectangle(boxes[index], outline=colours[index], width=max(line - rank * max(1, line // MAX_BOXES), 5))
+        draw.rectangle(box, outline=colours[index], width=max(line - rank * max(1, line // MAX_BOXES), 5))
     used = set(colours.values())
     framed = []
     for index, reference in enumerate(references):
@@ -302,7 +330,7 @@ class Sequence:
 
 
 def sequence(
-    processor: Any, caption: str, conditions: list[Image.Image], references: list[tuple[int, int]],
+    processor: Qwen3VLProcessor, caption: str, conditions: list[Image.Image], references: list[tuple[int, int]],
     rows: int, columns: int,
 ) -> Sequence:
     """`references` are the prepared references' patch grids (rows, columns); `conditions` the
@@ -312,7 +340,7 @@ def sequence(
     tail = tokenizer.encode(BOI + TMS, add_special_tokens=False, return_tensors="pt")
     pixel_values = grid = None
     if conditions:
-        content: Any = [{"type": "image"} for _ in conditions] + [{"type": "text", "text": caption}]
+        content: list[dict[str, str]] = [{"type": "image"} for _ in conditions] + [{"type": "text", "text": caption}]
         text = processor.apply_chat_template([{"role": "user", "content": content}], tokenize=False,
                                              add_generation_prompt=True)
         encoded = processor(text=[text], images=conditions, padding="longest", return_tensors="pt")
@@ -337,7 +365,7 @@ def sequence(
 # ---------------------------------------------------------------- the transformer
 
 
-def _rope(config: Any, positions: torch.Tensor, like: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+def _rope(config: Qwen3VLTextConfig, positions: torch.Tensor, like: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     """Qwen3-VL's interleaved M-RoPE in f32 from an f32 inverse frequency (upstream's
     `original_inv_freq`), as (cos, sin) of [1, T, head_dim] in `like`'s dtype."""
     device = like.device
@@ -361,7 +389,7 @@ def _rotate(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tens
 
 
 def _layer(
-    layer: Any, h: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor,
+    layer: Qwen3VLTextDecoderLayer, h: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor,
     past: tuple[torch.Tensor, torch.Tensor] | None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """One decoder layer: causal over the prefix itself (`past` None), else every token attends to
@@ -375,7 +403,7 @@ def _layer(
     keys, values = (k, v) if past is None else (torch.cat([past[0], k], 2), torch.cat([past[1], v], 2))
     groups = q.shape[1] // keys.shape[1]  # grouped-query heads, repeated so any SDPA backend serves them
     keys, values = keys.repeat_interleave(groups, dim=1), values.repeat_interleave(groups, dim=1)
-    site = attention.prefix_site if past is None else attention.site
+    site: Attention = attention.prefix_site if past is None else attention.site  # type: ignore[attr-defined]  # O1Graph installs both
     out = site(q.transpose(1, 2), keys.transpose(1, 2), values.transpose(1, 2))
     h = h + attention.o_proj(out.reshape(*x.shape[:-1], -1))
     return h + layer.mlp(layer.post_attention_layernorm(h)), k, v
@@ -386,17 +414,18 @@ class Prefix:
     """A caption's causal prefix: each layer's keys and values as the Runtime holds them
     (`retained`), and the bf16 RoPE tables of the tokens after it."""
 
-    kv: list[Any]
+    kv: list[State]
     cos: torch.Tensor
     sin: torch.Tensor
 
     def layers(self) -> list[tuple[torch.Tensor, torch.Tensor]]:
         """Each layer's keys and values, as a step reads them."""
-        return [state.get() for state in self.kv]
+        # Each state holds one layer's keys and values (`_prefix`).
+        return [cast(tuple[torch.Tensor, torch.Tensor], state.get()) for state in self.kv]
 
 
 def _prefix(body: Body, seq: Sequence, vision: tuple[torch.Tensor, list[torch.Tensor]] | None,
-            image_token: int, device: torch.device, held: Any) -> Prefix:
+            image_token: int, device: torch.device, held: Store) -> Prefix:
     """The prefix's keys and values, the vision tower's tokens in place of its image pads and its
     deepstack features added after the first layers, as Qwen3-VL's text model adds them. Each
     layer's go to the Runtime's store `held` as they are made, so none outlives its layer as a
@@ -408,7 +437,7 @@ def _prefix(body: Body, seq: Sequence, vision: tuple[torch.Tensor, list[torch.Te
         h[0, pads] = vision[0].to(h.dtype)
     cos, sin = _rope(text.config, seq.positions, h)
     kv = []
-    for index, layer in enumerate(text.layers):
+    for index, layer in enumerate(_layers(text)):
         h, k, v = _layer(layer, h, cos[:, : seq.prefix], sin[:, : seq.prefix], None)
         kv.append(held.put(k, v))
         if vision is not None and index < len(vision[1]):
@@ -430,16 +459,16 @@ class HiDreamO1(Model[O1Graph]):
     """One HiDream-O1-Image checkpoint, full or Dev."""
 
     graph: O1Graph
-    processor: Any
+    processor: Qwen3VLProcessor
 
     def load(self, loader: Loader) -> None:
         self.graph = loader.construct(O1Graph)
-        self.processor = vlm.processor(loader.assets)
+        # The checkpoint's processor files are Qwen3-VL's.
+        self.processor = cast(Qwen3VLProcessor, vlm.processor(loader.assets))
 
     @property
     def body(self) -> Body:
-        body: Body = self.graph.components[COMPONENT].model
-        return body
+        return self.graph.components[COMPONENT].model
 
     @uses_components(COMPONENT)
     def generate(
