@@ -11,20 +11,12 @@ from __future__ import annotations
 import json
 import math
 from collections.abc import Sequence
+from pathlib import Path
 from typing import Any
 
 import torch
 from cozy_runtime import lm
-from cozy_runtime.author import (
-    Config,
-    Loader,
-    Model,
-    ModelAssets,
-    Serving,
-    UnsupportedInput,
-    memoize,
-    uses_components,
-)
+from cozy_runtime.author import Loader, Model, Serving, UnsupportedInput, memoize, uses_components
 from diffusers.pipelines.ideogram4.pipeline_ideogram4 import Ideogram4Pipeline
 from diffusers.pipelines.ideogram4.prompt_enhancer import (
     CAPTION_SYSTEM_MESSAGE,
@@ -32,66 +24,42 @@ from diffusers.pipelines.ideogram4.prompt_enhancer import (
     PROMPT_UPSAMPLE_TEMPERATURE,
     build_caption_logits_processor,
 )
-from tokenizers import Tokenizer
 from torch import nn
-from transformers import AutoConfig, AutoModelForImageTextToText, PreTrainedTokenizerFast
-from transformers import initialization as transformer_init
+from transformers import AutoModelForImageTextToText, AutoTokenizer, PreTrainedTokenizerBase
 
 COMPONENT = "model"
 #: Ideogram 4's text budget (`max_text_tokens`).
 MAX_TOKENS = 2048
 
 
-def tokenizer(assets: ModelAssets) -> PreTrainedTokenizerFast:
-    """Qwen's tokenizer and chat template (the same template Ideogram ships), parsed in memory."""
-    config = json.loads(assets.read("tokenizer_config.json"))
-    for key in ("added_tokens_decoder", "tokenizer_file", "name_or_path", "tokenizer_class", "processor_class",
-                "chat_template", "auto_map"):
-        config.pop(key, None)
-    template = json.loads(assets.read("chat_template.json"))["chat_template"]
-    return PreTrainedTokenizerFast(
-        tokenizer_object=Tokenizer.from_str(assets.read("tokenizer.json").decode()), chat_template=template, **config
-    )
-
-
-def language_model(config: Config) -> nn.Module:
+def language_model(path: Path) -> nn.Module:
     """Qwen3-VL as Qwen stores it (`model.language_model`, `lm_head`), without its vision tower."""
-    with transformer_init.no_init_weights():
-        model = AutoModelForImageTextToText.from_config(AutoConfig.for_model(**config.mapping()), dtype=torch.bfloat16)
+    model: nn.Module = AutoModelForImageTextToText.from_pretrained(path, dtype=torch.bfloat16)
     model.model.visual = None
-    return model.eval()
+    return model
 
 
-def _conditioning_only(model: nn.Module) -> None:
-    """Ideogram reads every decoder layer's output up to the last (layer 35, before the final
-    norm): the norm and the head are never run, so they are not built."""
-    model.model.language_model.norm = nn.Identity()
-    model.lm_head = nn.Identity()
-
-
-class EncoderGraph:
-    def __init__(self, config: Config) -> None:
-        model = language_model(config)
-        _conditioning_only(model)
-        self.components: dict[str, nn.Module] = {COMPONENT: model}
-
-
-class QwenEncoder(Model[EncoderGraph]):
+class QwenEncoder(Model[nn.Module]):
     """Qwen3-VL-8B-Instruct as Ideogram 4's text encoder."""
 
-    graph: EncoderGraph
-    tokenizer: PreTrainedTokenizerFast
+    model: nn.Module
+    tokenizer: PreTrainedTokenizerBase
 
     def load(self, loader: Loader) -> None:
-        self.graph = loader.construct(EncoderGraph)
-        self.tokenizer = tokenizer(loader.assets)
+        model = language_model(loader.path)
+        # Ideogram reads every decoder layer's output up to the last (layer 35, before the final
+        # norm): the norm and the head never run, so they are not loaded.
+        model.model.language_model.norm = nn.Identity()
+        model.lm_head = nn.Identity()
+        self.model = model
+        self.tokenizer = AutoTokenizer.from_pretrained(loader.path)
 
     @memoize
     @uses_components(COMPONENT)
     def encode(self, caption: str) -> torch.Tensor:
         """`Ideogram4Pipeline.encode_prompt` for one caption, unpadded: the hidden states of
         Ideogram's 13 layers concatenated per token, `[tokens, 53248]` in bf16."""
-        model = self.graph.components[COMPONENT]
+        model = self.model
         device = torch.device(str(self.device))
         messages = [{"role": "user", "content": [{"type": "text", "text": caption}]}]
         text = self.tokenizer.apply_chat_template(messages, add_generation_prompt=True, tokenize=False)
@@ -107,11 +75,6 @@ class QwenEncoder(Model[EncoderGraph]):
                 model.model, ids.to(device), torch.ones_like(ids, device=device), torch.arange(count, device=device)[None]
             )
         return torch.stack(states).permute(1, 2, 3, 0).reshape(count, -1).cpu()
-
-
-class UpsamplerGraph:
-    def __init__(self, config: Config) -> None:
-        self.components: dict[str, nn.Module] = {COMPONENT: language_model(config)}
 
 
 class Schema:
@@ -134,20 +97,20 @@ class Schema:
         return self.index.get_allowed_tokens(state)  # type: ignore[no-any-return]
 
 
-class QwenUpsampler(Model[UpsamplerGraph]):
+class QwenUpsampler(Model[nn.Module]):
     """Qwen3-VL-8B-Instruct writing Ideogram 4's structured caption from a plain prompt."""
 
     serving = Serving(min_bits=4, phase="decode")
 
-    graph: UpsamplerGraph
-    tokenizer: PreTrainedTokenizerFast
+    model: nn.Module
+    tokenizer: PreTrainedTokenizerBase
     index: Any = None
 
     def load(self, loader: Loader) -> None:
-        self.graph = loader.construct(UpsamplerGraph)
-        self.tokenizer = tokenizer(loader.assets)
+        self.model = language_model(loader.path)
+        self.tokenizer = AutoTokenizer.from_pretrained(loader.path)
         # The caption schema's index over the vocabulary, compiled once (Diffusers' schema, outlines-core).
-        self.index = build_caption_logits_processor(self.graph.components[COMPONENT], self.tokenizer).index
+        self.index = build_caption_logits_processor(self.model, self.tokenizer).index
 
     @memoize
     @uses_components(COMPONENT)
@@ -155,7 +118,7 @@ class QwenUpsampler(Model[UpsamplerGraph]):
         """Diffusers' `upsample_prompt` for one prompt: Ideogram's caption system message and the
         target aspect ratio, sampled at temperature 1 from `seed`, constrained to the caption's JSON
         schema; returned as compact JSON."""
-        model = self.graph.components[COMPONENT]
+        model = self.model
         divisor = math.gcd(width, height) or 1
         messages = [
             {"role": "system", "content": CAPTION_SYSTEM_MESSAGE},
