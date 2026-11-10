@@ -43,6 +43,7 @@ from .overlay import (
     OVERLAY_KWARG,
     Overlay,
     OverlayArming,
+    OverlayTables,
     armed,
 )
 
@@ -123,6 +124,8 @@ class _AdaLNPrunedTimestepRows(nn.Module):  # type: ignore[misc]
 
 class _AdaLNPrunedBlockTable(nn.Module):  # type: ignore[misc]
     """Sparse exact table with the dense local shape Diffusers blocks already consume."""
+
+    table_index: torch.Tensor
 
     def __init__(
         self,
@@ -263,10 +266,10 @@ class H3Transformer(MiniMaxH3Transformer3DModel):  # type: ignore[misc]
 
     def __init__(self, **config: Any) -> None:
         super().__init__(**config)
-        hidden, time_dim = int(self.config.hidden_size), int(self.config.time_embed_dim)
+        hidden, time_dim = int(self.config["hidden_size"]), int(self.config["time_embed_dim"])
         for block in self.transformer_blocks:
             block.adaln_proj = _BlockModulation(time_dim, hidden)
-        self.norm_out = _OutputModulation(hidden, time_dim, float(self.config.final_norm_eps))
+        self.norm_out = _OutputModulation(hidden, time_dim, float(self.config["final_norm_eps"]))
         for name in ("proj_out", "audio_proj_out"):
             head = cast(nn.Linear, getattr(self, name))
             setattr(self, name, _SelectableHead(head.in_features, head.out_features))
@@ -413,6 +416,7 @@ class H3Transformer(MiniMaxH3Transformer3DModel):  # type: ignore[misc]
             raise ValueError(
                 "packed rows contain a modality tag outside the canonical 0/1/2 set",
             )
+        covered: tuple[torch.Tensor, torch.Tensor] | None
         try:
             if bank is not None:
                 overlay = selector.get(OVERLAY_KWARG) if isinstance(selector, Mapping) else None
@@ -427,8 +431,7 @@ class H3Transformer(MiniMaxH3Transformer3DModel):  # type: ignore[misc]
                     )
                 step = overlay.schedule.step(timestep) if overlay.heads else 0
                 self._engage(overlay, step)
-                index = overlay.transformer_blocks[0].adaln_proj.table_index
-                covered = overlay.rows(timestep), index
+                covered = overlay.rows(timestep), _overlay_tables(overlay, 0).table_index
             else:
                 covered = self._tables(timestep)
             if covered is None:
@@ -451,8 +454,8 @@ class H3Transformer(MiniMaxH3Transformer3DModel):  # type: ignore[misc]
 
     def _engage(self, overlay: Overlay, step: int) -> None:
         self._arming = OverlayArming(overlay, step)
-        for block, source in zip(self.transformer_blocks, overlay.transformer_blocks, strict=True):
-            block.adaln_proj._armed = _Armed(source.adaln_proj)
+        for index, block in enumerate(self.transformer_blocks):
+            _modulation(block)._armed = _Armed(_overlay_tables(overlay, index))
         self.norm_out._armed = _Armed(overlay.norm_out)
         for name in ("proj_out", "audio_proj_out") if overlay.heads else ():
             head = _projection_base(getattr(self, name))
@@ -466,12 +469,22 @@ class H3Transformer(MiniMaxH3Transformer3DModel):  # type: ignore[misc]
         """Every forward starts disarmed, whatever the previous one left behind."""
         self._arming = None
         for block in self.transformer_blocks:
-            block.adaln_proj._armed = None
+            _modulation(block)._armed = None
         self.norm_out._armed = None
         for name in ("proj_out", "audio_proj_out"):
             head = _projection_base(getattr(self, name))
             if isinstance(head, _SelectableHead):
                 head._armed = None
+
+
+def _modulation(block: nn.Module) -> _BlockModulation | _AdaLNPrunedBlockTable:
+    """A block's modulation as `H3Transformer` installs it: FULL's projection or the table."""
+    return cast("_BlockModulation | _AdaLNPrunedBlockTable", block.adaln_proj)
+
+
+def _overlay_tables(overlay: Overlay, block: int) -> OverlayTables:
+    """An overlay's block table (`Overlay.__init__` places one in every block)."""
+    return cast(OverlayTables, overlay.transformer_blocks[block].adaln_proj)
 
 
 class AdaLNPrunedMiniMaxH3Transformer(H3Transformer):  # type: ignore[misc]
@@ -494,18 +507,19 @@ class AdaLNPrunedMiniMaxH3Transformer(H3Transformer):  # type: ignore[misc]
         self.time_embedder = _AdaLNPrunedTimestepRows()
         for block in self.transformer_blocks:
             block.adaln_proj = _AdaLNPrunedBlockTable(
-                hidden_size=int(self.config.hidden_size),
+                hidden_size=int(self.config["hidden_size"]),
                 timestep_count=len(table_timesteps),
                 keys=table_block_keys,
             )
         self.norm_out = _AdaLNPrunedOutputTable(
             self.norm_out.norm,
-            hidden_size=int(self.config.hidden_size),
+            hidden_size=int(self.config["hidden_size"]),
             timestep_count=len(table_timesteps),
         )
 
     def _tables(self, timestep: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        return self.time_proj.rows(timestep), self.transformer_blocks[0].adaln_proj.table_index
+        first = cast(_AdaLNPrunedBlockTable, self.transformer_blocks[0].adaln_proj)
+        return self.time_proj.rows(timestep), first.table_index
 
 
 def build_transformer(
