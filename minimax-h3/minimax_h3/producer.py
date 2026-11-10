@@ -10,17 +10,12 @@ projected once, before Kitchen's pass, for its scale, and that pass reads it bac
 (`project_values`). Dense steps, dense paths and exact paths call the site's own processor,
 served by the producer's Runtime base backend.
 
-The approved SM120 recipe (`kitchen-sol-producer-fp4-fixed-means-shared-qkv`, dense calls on Sage3
-fixed-means NVFP4) also shards over Ulysses (`_parallel_produce`): the projection runs on the local
-token shard, the exchange gathers whole sequences per head subset, and the rotary tables are the
-full ones a hook keeps before Diffusers splits them (`retain_rotary`). That is exact because every
-statistic Kitchen keeps is per head (key means and value scales [heads, 128], routing per head,
-sink ranges per token): a GPU's head subset over the whole sequence is a head window of one GPU's
-call (`_Heads`), and the recipe's dense base is head-local.
-
-The consumer cards' recipe (`kitchen-sol-producer-int4qk-shared-qkv`) serves one GPU only: sharded,
-its first sparse step hung on 2x RTX 4090 (0.22.1 smoke), so under a group the Runtime steps to its
-dense base `kitchen-sol-int4qk` and the sparse steps run dense.
+Both recipes serve one GPU only in this release. Their sharded path (`_parallel_produce`: the
+projection on the local token shard, the exchange gathering whole sequences per head subset, the
+full rotary tables a hook keeps before Diffusers splits them, `retain_rotary`) has never completed
+on two cards: the int4 recipe's first sparse step hung on 2x RTX 4090 (0.22.1 smoke). Under a group
+the Runtime steps to each recipe's dense base and the sparse steps run dense, until a GPU run
+proves the sharded path (`context_parallel=True` in `_register`).
 """
 
 from __future__ import annotations
@@ -690,7 +685,7 @@ def _register(name: str, base: str, *, context_parallel: bool = False) -> Attent
 PRODUCERS = {
     producer.name: producer
     for producer in (
-        _register(FIXED_MEANS, "kitchen-sol-fp4-fixed-means", context_parallel=True),
+        _register(FIXED_MEANS, "kitchen-sol-fp4-fixed-means"),
         _register(FP4_LOWMEM, "kitchen-sol-fp4-lowmem"),
         _register(INT4QK, "kitchen-sol-int4qk"),
         _register(FAST, "kitchen-sol"),
