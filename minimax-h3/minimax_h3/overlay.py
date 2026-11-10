@@ -79,6 +79,8 @@ class _Site(nn.Module):  # type: ignore[misc]
 class OverlayTables(nn.Module):  # type: ignore[misc]
     """An overlay's exact rows for one family of tables: the same shape the base tables have."""
 
+    table_index: torch.Tensor
+
     def __init__(self, table: torch.Tensor, index: torch.Tensor | None = None) -> None:
         super().__init__()
         self.table = nn.Parameter(table)
