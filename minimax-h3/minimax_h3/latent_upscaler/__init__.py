@@ -25,7 +25,7 @@ class UpscalerGraph:
         # One component, so the construction config is the TensorFS table's own document.
         if config.mapping().get("architecture") != ARCHITECTURE:
             raise ValueError("the latent upscaler requires LBH-123-AI's 3D-conv v1 checkpoint")
-        self.components = {"upscaler": LatentResizer3D().eval().bfloat16()}  # type: ignore[no-untyped-call]
+        self.components = {"upscaler": LatentResizer3D().eval().bfloat16()}
 
 
 def build_upscaler(config: Config) -> UpscalerGraph:

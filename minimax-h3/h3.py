@@ -13,7 +13,7 @@ import hashlib
 import math
 import queue
 import re
-from collections.abc import Awaitable, Callable, Iterator, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from concurrent.futures import Future
 from contextlib import suppress
 from dataclasses import dataclass
@@ -21,10 +21,12 @@ from enum import Enum
 from fractions import Fraction
 from functools import partial
 from itertools import accumulate
-from typing import Annotated, Any, Literal, NamedTuple, cast
+from types import ModuleType
+from typing import TYPE_CHECKING, Annotated, Literal, NamedTuple, Protocol, cast
 
 import msgspec
 import numpy as np
+import numpy.typing as npt
 import torch
 from cozy_runtime.accel import stepcache
 from cozy_runtime.author import (
@@ -74,6 +76,7 @@ from PIL import Image as PILImage
 from PIL import ImageOps
 from safetensors.torch import load as load_tensors
 from safetensors.torch import save as save_tensors
+from torch import Tensor
 
 from gates import MediaFacts, refuse_before_encode
 from minimax_h3 import regenerate as refine_math
@@ -175,6 +178,10 @@ from story import (
     own_retention,
     segment_call,
 )
+
+if TYPE_CHECKING:
+    from diffusers.modular_pipelines.minimax_h3.references import MiniMaxH3Reference
+    from diffusers.modular_pipelines.modular_pipeline import PipelineState
 
 app = App()
 
@@ -369,7 +376,7 @@ def assets_to_h3_refs(
     videos: Sequence[VideoUse] = (),
     edges: Sequence[int] = (),
     characters: Sequence[str] = (),
-) -> tuple[list[Any], ReferenceSizing, GuideClip | None, list[str]]:
+) -> tuple[list[MiniMaxH3Reference], ReferenceSizing, GuideClip | None, list[str]]:
     """Check every reference from its header and size the vision budget, then read each.
 
     A video is read over its window: from its `videos` entry's `start` to its `stop` (per video in
@@ -418,7 +425,7 @@ def assets_to_h3_refs(
     sizing = resolve_reference_sizing(
         images, default=DEFAULT_REFERENCE_IMAGE_SHORT_EDGE, video_tokens=video_tokens
     )
-    prepared = []
+    prepared: list[MiniMaxH3Reference] = []
     guide = None
     notes: list[str] = []
     share = min(Fraction(1), _MAX_AUDIO_SECONDS / audio_duration) if audio_duration else Fraction(1)
@@ -428,13 +435,13 @@ def assets_to_h3_refs(
     names = iter(characters)
     for index, reference in enumerate(references):
         if isinstance(reference, ImageFile):
-            image = reference.read(mode="RGBA")
-            alpha = np.asarray(image.getchannel("A"))
+            picture = reference.read(mode="RGBA")
+            alpha = np.asarray(picture.getchannel("A"))
             if (name := next(names, "")) and np.count_nonzero(alpha < 128) < _TRANSPARENT * alpha.size:
                 notes.append(f"<{name}>'s picture is opaque, so its background goes into the shot: draw it on a blank "
                              "background, or take its background off with a tool")  # fmt: skip
-            white = PILImage.new("RGBA", image.size, (255, 255, 255, 255))
-            prepared.append(pipe.image_reference(PILImage.alpha_composite(white, image).convert("RGB")))
+            white = PILImage.new("RGBA", picture.size, (255, 255, 255, 255))
+            prepared.append(pipe.image_reference(PILImage.alpha_composite(white, picture).convert("RGB")))
         elif isinstance(reference, VideoFile):
             start, stop = uses[index].start, uses[index].stop
             with reference.stream(start=Fraction(start, FPS), end=Fraction(min(start + frames, stop), FPS),
@@ -452,17 +459,17 @@ def assets_to_h3_refs(
 def _finish(
     model: H3Model,
     task: Task,
-    state: Any,
+    state: PipelineState,
     schedule: ScheduleFacts,
     *,
     duration_s: int,
     out: Outputs,
     tel: Telemetry,
-    cancel: Any,
-    completed: Callable[[Any], None] | None = None,
+    cancel: Callable[[], None],
+    completed: Callable[[PipelineState], None] | None = None,
     delivered_frames: int | None = None,
     sampled_frames: int | None = None,
-    ended: Callable[[Any], None] | None = None,
+    ended: Callable[[Tensor], None] | None = None,
     earlier: _Earlier | None = None,
 ) -> H3VideoOutput:
     """Decode and encode the render, with `earlier` segments before it as one video."""
@@ -503,9 +510,10 @@ def _finish(
     except BaseException:
         stream.abandon()
         raise
-    _, height, width, _ = (int(value) for value in stream.pixels.shape)
+    pixels = cast(Tensor, stream.pixels)  # `finish` saw every frame land
+    _, height, width, _ = (int(value) for value in pixels.shape)
     if ended is not None:
-        ended(stream.pixels)
+        ended(pixels)
 
     tel.log(
         "h3 output geometry",
@@ -552,8 +560,8 @@ def _finish(
 
 
 def _soundtrack(
-    model: H3Model, task: Task, state: Any, *, frames: int, tel: Telemetry, cancel: Any
-) -> tuple[Any, int]:
+    model: H3Model, task: Task, state: PipelineState, *, frames: int, tel: Telemetry, cancel: Callable[[], None]
+) -> tuple[Tensor, int]:
     """The render's decoded `(channels, samples)` soundtrack, checked against its clock."""
     with tel.stage("decode_audio", overall_range=(0.85, 0.90)):
         audio, sample_rate = model.decode_audio(task, state)
@@ -581,7 +589,7 @@ def _soundtrack(
 _RGB8_CHUNK_FRAMES = 8
 
 
-def _land(torch: Any, chunk: Any, landed: Any) -> None:
+def _land(torch: ModuleType, chunk: Tensor, landed: Tensor) -> None:
     """Quantize one `(t, 3, H, W)` float slice on its device, straight into `landed`, its
     `(t, H, W, 3)` slice of the host buffer — no per-slice host temporary."""
     chunk.clamp_(0, 1).mul_(255).round_()
@@ -600,13 +608,13 @@ class _VideoStream:
 
     def __init__(
         self,
-        torch: Any,
+        torch: ModuleType,
         out: Outputs,
         *,
         frames: int,
-        waveform: Any | None,
+        waveform: Tensor | None,
         sample_rate: int,
-        cancel: Any,
+        cancel: Callable[[], None],
         progress: Callable[[int], None],
     ) -> None:
         """`waveform` is the `(channels, samples)` soundtrack, or None for a silent video."""
@@ -623,10 +631,10 @@ class _VideoStream:
         self._pool = ThreadPoolExecutor(max_workers=1)
         self._encode: Future[SavedVideo] | None = None
         self._abandoned = False
-        self.pixels: Any = None
+        self.pixels: Tensor | None = None
         self.landed = 0
 
-    def push(self, chunk: Any) -> None:
+    def push(self, chunk: Tensor) -> None:
         """One `(t, 3, H, W)` float chunk on its device, in decode order."""
         self._cancel()
         if self._encode is not None and self._encode.done():
@@ -700,7 +708,8 @@ class _VideoStream:
         self._pool.shutdown(wait=False)
 
     def _events(self) -> Iterator[DecodedMediaHeader | DecodedVideoFrame | DecodedAudioChunk]:
-        _, height, width, _ = (int(value) for value in self.pixels.shape)
+        pixels = cast(Tensor, self.pixels)  # the push that began this stream made them
+        _, height, width, _ = (int(value) for value in pixels.shape)
         channels, samples = (0, 0) if self._waveform is None else (int(v) for v in self._waveform.shape)
         yield DecodedMediaHeader(
             video=DecodedVideoFormat(
@@ -724,7 +733,7 @@ class _VideoStream:
         submitted = 0
         while (item := self._slices.get()) is not None:
             start, stop = item
-            landed = self.pixels[start:stop]
+            landed = pixels[start:stop]
             for index in range(start, stop):
                 self._check_encoding()
                 yield DecodedVideoFrame(
@@ -752,7 +761,8 @@ class _VideoStream:
     def _audio(self, start: int, stop: int) -> Iterator[DecodedAudioChunk]:
         if stop <= start:
             return
-        channels = int(self._waveform.shape[0])
+        waveform = cast(Tensor, self._waveform)  # samples to send: there is a soundtrack
+        channels = int(waveform.shape[0])
         yield DecodedAudioChunk(
             channels=channels,
             sample_count=stop - start,
@@ -760,14 +770,14 @@ class _VideoStream:
             channel_layout=AUDIO_LAYOUTS[channels][0],
             channel_names=AUDIO_LAYOUTS[channels][1],
             pcm_f32le=tuple(
-                self._waveform[channel, start:stop].numpy().tobytes() for channel in range(channels)
+                waveform[channel, start:stop].numpy().tobytes() for channel in range(channels)
             ),
             pts=start,
             time_base=Fraction(1, self._sample_rate),
         )
 
 
-def _nonfinite_fraction(torch: Any, value: Any) -> float:
+def _nonfinite_fraction(torch: ModuleType, value: Tensor) -> float:
     """Count non-finite values with at most roughly 32 MiB of temporary mask."""
     if value.ndim < 2:
         chunks = (value,)
@@ -844,14 +854,14 @@ _DRAFT_SIZE = (768, 1344)
 _DRAFT_LATENT = (_DRAFT_SIZE[0] // VAE_SPATIAL_RATIO, _DRAFT_SIZE[1] // VAE_SPATIAL_RATIO)
 
 
-def _read_draft(video: VideoFile) -> tuple[Any, Any | None, int, int, list[str]]:
+def _read_draft(video: VideoFile) -> tuple[Tensor, Tensor | None, int, int, list[str]]:
     """A video of any length as `(frames on the VAE grid, 768, 1344, 3)` uint8, each frame
     cover-scaled and centre-cropped as it decodes into one buffer sized from the header, its
     last frame held up to the grid; its `(channels, samples)` soundtrack or None, the sample
     rate, and how many frames it delivers."""
     probe = video.probe()
     pixels = torch.empty((round(probe.duration * FPS) + 17, *_DRAFT_SIZE, 3), dtype=torch.uint8)
-    pcm: list[list[Any]] = []
+    pcm: list[list[npt.NDArray[np.float32]]] = []
     count = width = height = rate = 0
     origin: Fraction | None = None
     with video.stream() as stream:
@@ -891,14 +901,14 @@ def _read_draft(video: VideoFile) -> tuple[Any, Any | None, int, int, list[str]]
     return pixels, waveform, rate, count, warnings
 
 
-def _read_soundtrack(video: VideoFile, frames: int) -> tuple[Any | None, int]:
+def _read_soundtrack(video: VideoFile, frames: int) -> tuple[Tensor | None, int]:
     """The `(channels, samples)` soundtrack of a video its latents stand for (`frames` frames at
     24 fps), and its sample rate; its pictures are not decoded."""
     probe = video.probe()
     if abs(round(probe.duration * FPS) - frames) > 1:
         raise InvalidRequest(f"the latents are {frames} frames and the video {round(probe.duration * FPS)}: "
                              "they are not the same shot", fields=["latents"])  # fmt: skip
-    pcm: list[list[Any]] = []
+    pcm: list[list[npt.NDArray[np.float32]]] = []
     rate = 0
     with video.stream(pictures=False) as stream:
         for event in stream:
@@ -911,7 +921,7 @@ def _read_soundtrack(video: VideoFile, frames: int) -> tuple[Any | None, int]:
     return waveform, rate
 
 
-def _cover(frame: Any) -> Any:
+def _cover(frame: Tensor) -> Tensor:
     """One `(h, w, 3)` uint8 frame cover-scaled (bilinear) and centre-cropped to 1344x768."""
     height, width = (int(value) for value in frame.shape[:2])
     if (height, width) == _DRAFT_SIZE:
@@ -947,8 +957,8 @@ def _render_keyframes(
     turbo_lora: H3TurboLoRA | None = None,
     quality: Quality = "standard",
     delivery: ContinuationPlan | None = None,
-    completed: Callable[[Any], None] | None = None,
-    ended: Callable[[Any], None] | None = None,
+    completed: Callable[[PipelineState], None] | None = None,
+    ended: Callable[[Tensor], None] | None = None,
 ) -> H3VideoOutput:
     """An FL2VA render: text, and a first and/or last keyframe. `delivery` and `completed`
     hand a successor its carry, and `ended` its last frame (`fl2va_segment`)."""
@@ -1008,11 +1018,11 @@ def _references_to_video(
     context: AVContext | None,
     delivery: ContinuationPlan,
     expected_context_provenance: str,
-    completed: Callable[[Any], None] | None,
+    completed: Callable[[PipelineState], None] | None,
     anchors: Sequence[tuple[PILImage.Image, Literal["first", "last"]]],
-    ended: Callable[[Any], None],
+    ended: Callable[[Tensor], None],
     earlier: _Earlier | None = None,
-    sound: tuple[Any, Fraction] | None = None,
+    sound: tuple[Tensor, Fraction] | None = None,
 ) -> H3VideoOutput:
     plan = _plan(model, turbo_lora, "ref2va")
     steps = plan.schedule(payload.steps).transformer_evaluations
@@ -1097,7 +1107,7 @@ def _references_to_video(
     return H3VideoOutput(result.video, notes + result.warnings)
 
 
-def _keep_frames(out: Outputs, last: list[ImageFile], pixels: Any) -> None:
+def _keep_frames(out: Outputs, last: list[ImageFile], pixels: Tensor) -> None:
     """A call's delivered `(frames, H, W, 3)` RGB8: its last frame."""
     last.append(out.save_image(PILImage.fromarray(pixels[-1].numpy())))
 
@@ -1192,8 +1202,8 @@ class _Earlier:
     latents, first), and their frames; and the last segment's head to leave out, whole VAE cycles,
     so its latents follow in phase."""
 
-    latents: Any
-    waveform: Any
+    latents: Tensor
+    waveform: Tensor
     frames: int
     head: int
 
@@ -1219,7 +1229,7 @@ class _Segments:
         self.saved: dict[str, File] = {}
         self.warnings: list[str] = []
 
-    def __call__(self, state: Any) -> None:
+    def __call__(self, state: PipelineState) -> None:
         if self.plan.successor:
             # What's denoised is worth more than what comes after it: a video stands without its carry, which only a later take reads.
             try:
@@ -1339,10 +1349,20 @@ def _frame(asset: ImageFile | None, shape: tuple[int, ...]) -> PILImage.Image | 
     """A keyframe as a segment reads it: its middle, scaled to fill the shot's canvas (`shape`)."""
     if asset is None:
         return None
-    return ImageOps.fit(asset.read(), shape, method=PILImage.Resampling.BICUBIC)
+    return ImageOps.fit(asset.read(), shape, method=PILImage.Resampling.BICUBIC)  # type: ignore[arg-type]  # the canvas: (width, height)
 
 
-def _retargeted(adapters: Sequence[Any], dit: str) -> list[str]:
+class _Applied(Protocol):
+    """An applied LoRA, as a request's view lists it."""
+
+    @property
+    def ref(self) -> str: ...
+
+    @property
+    def source_component(self) -> str: ...
+
+
+def _retargeted(adapters: Sequence[_Applied], dit: str) -> list[str]:
     """A line for each caller LoRA trained on the other transformer: Runtime applies it to this
     one (as ComfyUI would load it), and says so once per LoRA (`shot` keeps one)."""
     other = {"transformer": "FL2VA", "transformer_ref": "Ref2VA"}
@@ -1456,12 +1476,12 @@ async def regenerate_shot(
     top = (height - keep) // 2
     with tel.stage("decode_video", overall_range=(0.85, 0.97)):
         stream = _VideoStream(
-            torch, out, frames=frames, waveform=waveform, sample_rate=sample_rate, cancel=cancel,
+            torch, out, frames=frames, waveform=waveform, sample_rate=sample_rate, cancel=cancel,  # type: ignore[possibly-undefined]  # read with the latents or the draft
             progress=tel.step_callback(frames, stage="decode_video", overall_range=(0.85, 0.97)),
         )  # fmt: skip
         delivered = 0
 
-        def push(chunk: Any) -> None:
+        def push(chunk: Tensor) -> None:
             nonlocal delivered
             take = min(int(chunk.shape[0]), frames - delivered)
             if take > 0:
@@ -1532,7 +1552,7 @@ async def _render(ctx: Context, shot: Shot, out: Outputs, tel: Telemetry, *, pla
         warnings.append(f"{'the plate' if plate is not None else 'the take picked up'} sets the opening; first_frame is ignored")
         opening = None
     take = pickup.take if pickup is not None else None
-    latents = take.latents if take is not None else None
+    latents: File | None = take.latents if take is not None else None
     if take is not None and latents is not None and (why := unusable(take)):
         warnings.append(f"this take's latents can't be used ({why}), so the new part opens on its frame and the join may show")
         latents = None
@@ -1546,10 +1566,10 @@ async def _render(ctx: Context, shot: Shot, out: Outputs, tel: Telemetry, *, pla
             done = min(pickup.out_frame, end)
         if latents is not None and done < end:
             latents, trimmed = cut_latents(take, done, out, carry), True
-        elif latents is not None and (own := decode_context(shot_latents.context(latents.read_bytes())).carry.frames) not in (0, carry.frames):
+        elif latents is not None and (own_frames := decode_context(shot_latents.context(latents.read_bytes())).carry.frames) not in (0, carry.frames):
             # Going on from a take's end takes the carry that take kept.
-            warnings.append(f"the take carries {own} frames, so this does too, not {carry.frames}")
-            carry = Carry(own, True)
+            warnings.append(f"the take carries {own_frames} frames, so this does too, not {carry.frames}")
+            carry = Carry(own_frames, True)
         if latents is None:
             warnings.append("this take has no latents here, so the new part is a new video opening on its frame, joined "
                             "after its kept start; the join may show")  # fmt: skip
@@ -1600,10 +1620,10 @@ async def _render(ctx: Context, shot: Shot, out: Outputs, tel: Telemetry, *, pla
     warnings += notes
     opened = [begun + at for at in opens]
     texts = segment_texts(script.prompt, opened, continued=take is not None, carried=carried, duration_s=duration_s, carry=carry)
-    files: dict[str, File] = {}
+    files: dict[str, ImageFile | VideoFile | AudioFile] = {}
     calls: list[SegmentCall] = []
-    for index, (text, start, end) in enumerate(zip(texts, opened, [*opened[1:], math.inf], strict=True)):
-        own = [ref for ref in here(script, start, end) if ref.kind not in CLIPS or ref.name in windows[index]]
+    for index, (text, start, until) in enumerate(zip(texts, opened, [*opened[1:], math.inf], strict=True)):
+        own = [ref for ref in here(script, start, until) if ref.kind not in CLIPS or ref.name in windows[index]]
         # A later segment starts from the previous segment's last frame as a world state, after the shot's own pictures
         # so their <Picture N> keep their numbers: who and what is where now (se-087: 9 of 9 seams joined cleanly).
         anchor = [_anchor(f"Segment {index} end", script.people)] if index else []
@@ -1653,7 +1673,7 @@ async def _render(ctx: Context, shot: Shot, out: Outputs, tel: Telemetry, *, pla
                 if call.references:
                     uses = video_uses(call.references, windows[index])
                     pictures = [ref for ref in call.references if FILE[ref.kind] == "image"]
-                    result = await ref2va_segment(  # type: ignore[call-arg]
+                    result = await ref2va_segment(
                         payload=Ref2VAInput(
                             prompt=call.prompt, seed=seeds[index], duration_s=segments[index], steps=steps,
                             turbo=turbo, quality=shot.quality, frames=held_frames(plan, uses), videos=uses,
@@ -1667,16 +1687,16 @@ async def _render(ctx: Context, shot: Shot, out: Outputs, tel: Telemetry, *, pla
                             earlier_videos=(*before[1], *(r.video for r in returned)) if end_segment else (),
                             picture_edges=tuple(_LOOSE_EDGE if ref.kind == "world_state" else 0 for ref in pictures),
                             characters=tuple(ref.name if ref.kind == "character" else "" for ref in pictures),
-                        ), assets=_call_assets(files, call.references), **models,
+                        ), assets=_call_assets(files, call.references), **models,  # type: ignore[arg-type]  # the call resolves models, adds out and tel
                     )  # fmt: skip
                 else:
-                    result = await fl2va_segment(  # type: ignore[call-arg]
+                    result = await fl2va_segment(
                         payload=FL2VAInput(
                             prompt=call.prompt, seed=seeds[index], duration_s=segments[index], steps=steps,
                             turbo=turbo, quality=shot.quality, first_frame=first, last_frame=last, canvas=shape,
                             next_context_frames=cast(ContextFrames, plan.successor.frames),
                             next_context_audio=plan.successor.audio, latents=True,
-                        ), **models,
+                        ), **models,  # type: ignore[arg-type]  # the call resolves models, adds out and tel
                     )  # fmt: skip
         except ChildCallError:
             # Concurrent caller cancellation must not become a successful partial result.
@@ -1698,7 +1718,7 @@ async def _render(ctx: Context, shot: Shot, out: Outputs, tel: Telemetry, *, pla
         kept = shot_latents_file(out, [*before[0], *(r.latents for r in returned)], total, returned[-1].context, upscale_prompt(script))
     ctx.release_gpus()
     tel.log("h3 shot", segments=count, delivered_frames=total, turbo=turbo, quality=shot.quality)
-    return ShotResult(video=video, warnings=list(dict.fromkeys(warnings)), latents=kept,
+    return ShotResult(video=video, warnings=list(dict.fromkeys(warnings)), latents=cast("Latents | None", kept),  # a saved file fills a Latents field
                       kept_s=begun if take is not None else None)  # fmt: skip
 
 
@@ -1805,7 +1825,7 @@ async def upscale(ctx: Context, payload: Upscale, out: Outputs, tel: Telemetry) 
     call = RegenerateInput(video=video.file, latents=video.latents, prompt=prompt, resolution=Resolution(payload.to),
                            strength=strength, seed=seed)  # fmt: skip
     with tel.scope(f"Regenerate at {payload.to}"):
-        result = await cast(Callable[..., Awaitable[RegenerateOutput]], regenerate_shot)(payload=call)
+        result = await regenerate_shot(payload=call)  # type: ignore[call-arg]  # the call resolves models, adds out and tel
     warnings += result.warnings
     tel.log("h3 upscale", to=payload.to, strength=strength, warnings="; ".join(warnings))
     return UpscaleOutput(result.video, warnings)

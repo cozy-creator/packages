@@ -15,14 +15,18 @@ context) keeps its order.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING
 
 import numpy as np
+import numpy.typing as npt
 import torch
 from diffusers.modular_pipelines.minimax_h3.before_denoise import (
     _ROPE_FRAME_RESCALE,
     _ROPE_FRAMES_PER_LATENT,
 )
+
+if TYPE_CHECKING:
+    from diffusers.modular_pipelines.modular_pipeline import PipelineState
 
 #: The `PipelineState` keys of a call's guide: its clip, then its encoded rows.
 GUIDE = "exact_guide"
@@ -34,11 +38,11 @@ class GuideClip:
     """`(T, H, W, 3)` uint8 frames at the render's canvas, and a stereo soundtrack at the audio
     VAE's rate, if kept."""
 
-    frames: Any
+    frames: npt.NDArray[np.uint8]
     audio: torch.Tensor | None = None
 
 
-def guide_rows(state: Any, video: torch.Tensor, audio: torch.Tensor | None) -> None:
+def guide_rows(state: PipelineState, video: torch.Tensor, audio: torch.Tensor | None) -> None:
     """Pack the guide's rows in front of every other condition row of `state`'s layout.
 
     `video` is the noised, patchified guide (rows of whole target latent frames), `audio` its
@@ -81,7 +85,7 @@ def guide_rows(state: Any, video: torch.Tensor, audio: torch.Tensor | None) -> N
     state.set("num_condition_video_rows", state.num_condition_video_rows + count_video)
     state.set("latents", torch.cat([video.to(state.latents), state.latents]))
     if audio is not None:
-        packed = audio.reshape(count_audio, width).to(state.audio_latents)
+        packed = audio.reshape(count_audio, width).to(state.audio_latents)  # type: ignore[possibly-undefined]  # read with `audio`
         state.set("audio_latents", torch.cat([packed, state.audio_latents]))
         state.set("num_condition_audio_rows", state.num_condition_audio_rows + count_audio)
 
@@ -93,7 +97,7 @@ ANCHORS = "cozy_ref2va_keyframes"
 ANCHOR_LATENTS = "cozy_ref2va_keyframe_latents"
 
 
-def anchor_rows(state: Any, video: torch.Tensor, *, last: bool) -> None:
+def anchor_rows(state: PipelineState, video: torch.Tensor, *, last: bool) -> None:
     """One keyframe's rows (one latent frame, noised and patchified) in front of every other
     condition row, held on every step, as `guide_rows` packs a guide: Ref2VA's first and last
     frames (`StoryReference` `frame`). They take the target's frame grid at the rotary time

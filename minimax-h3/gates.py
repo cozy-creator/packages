@@ -4,9 +4,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from fractions import Fraction
-from typing import Any
+from typing import TYPE_CHECKING
 
 from cozy_runtime.author import OutputError, Telemetry
+
+if TYPE_CHECKING:
+    import torch
 
 
 @dataclass(frozen=True, slots=True)
@@ -31,7 +34,7 @@ class MediaFacts:
 
 def refuse_before_encode(
     *,
-    waveform: Any,
+    waveform: torch.Tensor,
     audio_nonfinite_fraction: float,
     requested: MediaFacts,
     tel: Telemetry,

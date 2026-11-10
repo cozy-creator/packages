@@ -30,17 +30,17 @@ import hashlib
 import inspect
 import json
 import time
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from contextvars import ContextVar
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Literal, Protocol, cast, overload
 
 import torch
 from diffusers.models.activations import SwiGLU
 from diffusers.models.attention import FeedForward
 from diffusers.models.attention_dispatch import dispatch_attention_fn
 from diffusers.models.transformers.transformer_minimax_h3 import (
-    MiniMaxH3AttnProcessor,
+    MiniMaxH3Attention, MiniMaxH3AttnProcessor,
     MiniMaxH3Transformer3DModel,
     MiniMaxH3TransformerBlock,
     _apply_rotary_emb,
@@ -70,7 +70,7 @@ try:
 except ImportError as _absent:  # pragma: no cover - a CPU-only or non-Linux environment
     if TYPE_CHECKING:
         raise
-    TRITON_ABSENT = f"triton does not import ({_absent})"
+    TRITON_ABSENT = f"triton does not import ({_absent})"  # type: ignore[unreachable]  # checkers import triton
 else:
     TRITON_ABSENT = ""
 
@@ -88,23 +88,23 @@ class KeyMean:
 KEY_MEAN: ContextVar[KeyMean | None] = ContextVar("minimax_h3_key_mean", default=None)
 
 
-class Owned:
+class Owned[T]:
     """An argument whose only reference the callee takes (`take`): a caller's frame keeps
     every argument it passes until the call returns, so a tensor it passes plainly outlives its
     last use inside."""
 
     __slots__ = ("value",)
 
-    def __init__(self, value: Any) -> None:
-        self.value = value
+    def __init__(self, value: T) -> None:
+        self.value: T | None = value
 
 
-def take(value: Any) -> Any:
+def take(value: Hidden | Owned[Hidden]) -> Hidden:
     """`value`, or the tensor an `Owned` passed, which then holds it no more."""
     if not isinstance(value, Owned):
         return value
     taken, value.value = value.value, None
-    return taken
+    return taken  # type: ignore[return-value]  # an Owned is taken once: its one callee empties it
 #: The widths compiled: a transformer with others is not installable.
 HIDDEN, FFN, HEAD_DIM, ROTARY = 5376, 14336, 128, 96
 #: A tail window's peak, in its rows of hidden (`_Tail`): its normed rows, the FFN's [value | gate]
@@ -345,6 +345,27 @@ if not TRITON_ABSENT:
         tl.store(out_ptr + head * HEAD_DIM + chan, acc)
 
 
+#: An activation, or a rowwise leaf's quantized operand standing for it (the fp8 epilogue).
+type Hidden = torch.Tensor | PreQuantized
+
+
+class Pipeline(Protocol):
+    """What `install` reads of a pipeline: its components by name."""
+
+    @property
+    def components(self) -> Mapping[str, object]: ...
+
+
+def _eps(norm: torch.nn.RMSNorm) -> float:
+    """`norm`'s epsilon: Diffusers builds every H3 norm with its config's."""
+    return cast(float, norm.eps)
+
+
+def _blocks(transformer: MiniMaxH3Transformer3DModel) -> Iterable[MiniMaxH3TransformerBlock]:
+    """Its `transformer_blocks`, which Diffusers builds of `MiniMaxH3TransformerBlock`s."""
+    return cast("Iterable[MiniMaxH3TransformerBlock]", transformer.transformer_blocks)
+
+
 def _next_pow2(n: int) -> int:
     return 1 << (n - 1).bit_length()
 
@@ -483,7 +504,7 @@ GLUE_FP8 = TritonKernels("minimax-h3-glue-fp8", () if TRITON_ABSENT else _entrie
 CONTRACT = "h3-glue-call-and-topology/2"
 
 
-def kernels(device: Any) -> TritonKernels:
+def kernels(device: torch.device) -> TritonKernels:
     """The set `device` builds."""
     return GLUE_FP8 if torch.cuda.get_device_capability(device) >= (8, 9) else GLUE
 
@@ -491,18 +512,18 @@ def kernels(device: Any) -> TritonKernels:
 # ---------------------------------------------------------------------- wrappers
 
 
-def _rows(x: Any, width: int) -> Any:
+def _rows(x: torch.Tensor, width: int) -> torch.Tensor:
     flat = x.reshape(-1, width)
     return flat if flat.stride(-1) == 1 else flat.contiguous()
 
 
-def _table(t: Any) -> Any:
+def _table(t: torch.Tensor) -> torch.Tensor:
     # `chunk(6, dim=-1)` views have a 6*hidden row stride and a unit column stride; that is
     # addressable as `row * stride(0) + col`, so no copy — anything else is made contiguous.
     return t if t.stride(-1) == 1 else t.contiguous()
 
 
-def _require(x: Any) -> None:
+def _require(x: torch.Tensor) -> None:
     if x.dtype is not torch.bfloat16 or not x.is_cuda:
         raise GlueRefusal(
             "fusion_block_shape",
@@ -512,17 +533,17 @@ def _require(x: Any) -> None:
 
 def _launch_norm_mod(
     launch: Launch,
-    x: Any,
-    branch: Any,
-    gate: Any,
-    weight: Any,
-    scale: Any,
-    shift: Any,
-    index: Any,
+    x: torch.Tensor,
+    branch: torch.Tensor | None,
+    gate: torch.Tensor | None,
+    weight: torch.Tensor,
+    scale: torch.Tensor,
+    shift: torch.Tensor,
+    index: torch.Tensor,
     eps: float,
     fp8: bool,
-    hidden_out: Any | None = None,
-) -> tuple[Any, Any, Any]:
+    hidden_out: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     _require(x)
     width = int(x.shape[-1])
     rows = _rows(x, width)
@@ -565,17 +586,32 @@ def _launch_norm_mod(
     return hidden, out, row_scale
 
 
+@overload
+def rmsnorm_modulate(
+    launch: Launch, x: torch.Tensor, weight: torch.Tensor, scale: torch.Tensor, shift: torch.Tensor, index: torch.Tensor, eps: float,
+    *, fp8: Literal[False] = False,
+) -> torch.Tensor: ...
+@overload
+def rmsnorm_modulate(
+    launch: Launch, x: torch.Tensor, weight: torch.Tensor, scale: torch.Tensor, shift: torch.Tensor, index: torch.Tensor, eps: float,
+    *, fp8: Literal[True],
+) -> PreQuantized: ...
+@overload
+def rmsnorm_modulate(
+    launch: Launch, x: torch.Tensor, weight: torch.Tensor, scale: torch.Tensor, shift: torch.Tensor, index: torch.Tensor, eps: float,
+    *, fp8: bool,
+) -> torch.Tensor | PreQuantized: ...
 def rmsnorm_modulate(
     launch: Launch,
-    x: Any,
-    weight: Any,
-    scale: Any,
-    shift: Any,
-    index: Any,
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    scale: torch.Tensor,
+    shift: torch.Tensor,
+    index: torch.Tensor,
     eps: float,
     *,
     fp8: bool = False,
-) -> Any:
+) -> torch.Tensor | PreQuantized:
     """`rmsnorm(x) * (1 + scale[index]) + shift[index]`, one read and one write.
 
     With `fp8`, the write is the rowwise leaf's operand (E4M3 payload + per-row scale)
@@ -589,20 +625,35 @@ def rmsnorm_modulate(
     return out.view_as(x)
 
 
+@overload
+def gate_add_rmsnorm_modulate(
+    launch: Launch, residual: torch.Tensor, gate: torch.Tensor, branch: torch.Tensor, index: torch.Tensor, weight: torch.Tensor, scale: torch.Tensor,
+    shift: torch.Tensor, eps: float, *, fp8: Literal[False] = False, hidden_out: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]: ...
+@overload
+def gate_add_rmsnorm_modulate(
+    launch: Launch, residual: torch.Tensor, gate: torch.Tensor, branch: torch.Tensor, index: torch.Tensor, weight: torch.Tensor, scale: torch.Tensor,
+    shift: torch.Tensor, eps: float, *, fp8: Literal[True], hidden_out: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, PreQuantized]: ...
+@overload
+def gate_add_rmsnorm_modulate(
+    launch: Launch, residual: torch.Tensor, gate: torch.Tensor, branch: torch.Tensor, index: torch.Tensor, weight: torch.Tensor, scale: torch.Tensor,
+    shift: torch.Tensor, eps: float, *, fp8: bool, hidden_out: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor | PreQuantized]: ...
 def gate_add_rmsnorm_modulate(
     launch: Launch,
-    residual: Any,
-    gate: Any,
-    branch: Any,
-    index: Any,
-    weight: Any,
-    scale: Any,
-    shift: Any,
+    residual: torch.Tensor,
+    gate: torch.Tensor,
+    branch: torch.Tensor,
+    index: torch.Tensor,
+    weight: torch.Tensor,
+    scale: torch.Tensor,
+    shift: torch.Tensor,
     eps: float,
     *,
     fp8: bool = False,
-    hidden_out: Any | None = None,
-) -> tuple[Any, Any]:
+    hidden_out: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor | PreQuantized]:
     """`hidden = residual + gate[index] * branch`, then `rmsnorm_modulate(hidden)`.
 
     Returns `(hidden, normed)`: the new residual stream and the next GEMM's input, from
@@ -617,8 +668,8 @@ def gate_add_rmsnorm_modulate(
 
 
 def gate_add(
-    launch: Launch, residual: Any, gate: Any, branch: Any, index: Any, out: Any | None = None
-) -> Any:
+    launch: Launch, residual: torch.Tensor, gate: torch.Tensor, branch: torch.Tensor, index: torch.Tensor, out: torch.Tensor | None = None
+) -> torch.Tensor:
     """`residual + gate[index] * branch`, one pass (eager: a gather, a mul and an add), into
     `out` where given (`residual` itself may be it: a row is read whole before it is written)."""
     _require(residual)
@@ -644,7 +695,13 @@ def gate_add(
     return out.view_as(residual)
 
 
-def swiglu(launch: Launch, x: Any, *, fp8: bool = False) -> Any:
+@overload
+def swiglu(launch: Launch, x: torch.Tensor, *, fp8: Literal[False] = False) -> torch.Tensor: ...
+@overload
+def swiglu(launch: Launch, x: torch.Tensor, *, fp8: Literal[True]) -> PreQuantized: ...
+@overload
+def swiglu(launch: Launch, x: torch.Tensor, *, fp8: bool) -> torch.Tensor | PreQuantized: ...
+def swiglu(launch: Launch, x: torch.Tensor, *, fp8: bool = False) -> torch.Tensor | PreQuantized:
     """`value * silu(gate)` over a `[..., 2F]` projection: one read of 2F, one write of F."""
     _require(x)
     width = int(x.shape[-1])
@@ -674,7 +731,9 @@ def swiglu(launch: Launch, x: Any, *, fp8: bool = False) -> Any:
     return out.view(*x.shape[:-1], half)
 
 
-def rmsnorm_rope(launch: Launch, x: Any, weight: Any, cos: Any, sin: Any, eps: float) -> Any:
+def rmsnorm_rope(
+    launch: Launch, x: torch.Tensor, weight: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor, eps: float
+) -> torch.Tensor:
     """Per-head RMSNorm then partial rotary on `(batch, seq, heads, head_dim)`, in place: each
     program reads its heads' rows whole before it writes them, so `x` (a projection's own
     output) never exists twice (2.3 GB of Q and K at 15 s).
@@ -704,7 +763,7 @@ def rmsnorm_rope(launch: Launch, x: Any, weight: Any, cos: Any, sin: Any, eps: f
     return flat.view(batch, seq, heads, head_dim)
 
 
-def key_sums(launch: Launch, key: Any) -> Any:
+def key_sums(launch: Launch, key: torch.Tensor) -> torch.Tensor:
     """F32 [heads, head_dim] sums over tokens of `key`'s [1, tokens, heads, head_dim]."""
     _require(key)
     _, tokens, heads, head_dim = (int(d) for d in key.shape)
@@ -715,7 +774,7 @@ def key_sums(launch: Launch, key: Any) -> Any:
     return out
 
 
-def warm(launch: Launch, device: Any, *, heads: int, fp8: bool) -> float:
+def warm(launch: Launch, device: torch.device, *, heads: int, fp8: bool) -> float:
     """Launch every entry the served widths need, on two rows; nothing compiles. Returns the
     milliseconds the first launches took to enqueue."""
     started = time.perf_counter()
@@ -740,7 +799,7 @@ def warm(launch: Launch, device: Any, *, heads: int, fp8: bool) -> float:
     return (time.perf_counter() - started) * 1000
 
 
-def _off(got: Any, want: Any) -> float:
+def _off(got: torch.Tensor, want: torch.Tensor) -> float:
     """`got`'s relative L2 error against the exact `want`, inf where it is not finite."""
     got = got.double()
     if not bool(torch.isfinite(got).all()):
@@ -748,12 +807,12 @@ def _off(got: Any, want: Any) -> float:
     return float((got - want).norm() / want.norm().clamp(min=1e-30))
 
 
-def checked(launch: Launch, device: Any, *, heads: int, fp8: bool) -> str:
+def checked(launch: Launch, device: torch.device, *, heads: int, fp8: bool) -> str:
     """Each entry against its arithmetic in float64 on this card: what disagrees, or "". Rounding to
     bf16 loses 1e-3 and an e4m3 row 5e-2; a misaddressed tile or a wrong dtype loses O(1)."""
     generator = rng.generator(20261104)
 
-    def random(*shape: int, by: float = 1.0) -> Any:
+    def random(*shape: int, by: float = 1.0) -> torch.Tensor:
         return (rng.noise(shape, generator, device=device) * by).to(torch.bfloat16)
 
     rows, table, eps = 3, 5, 1e-5
@@ -764,7 +823,7 @@ def checked(launch: Launch, device: Any, *, heads: int, fp8: bool) -> str:
     wide = {"gate": gate[index].double(), "scale": scale[index].double(), "shift": shift[index].double()}
     added = x.double() + wide["gate"] * branch.double()
 
-    def norm(value: Any) -> Any:
+    def norm(value: torch.Tensor) -> torch.Tensor:
         rms = value * torch.rsqrt(value.pow(2).mean(-1, keepdim=True) + eps) * weight.double()
         return rms * (1 + wide["scale"]) + wide["shift"]
 
@@ -812,15 +871,16 @@ def checked(launch: Launch, device: Any, *, heads: int, fp8: bool) -> str:
 # ------------------------------------------------------------------ fused modules
 
 
-class FusedSwiGLU(SwiGLU):  # type: ignore[misc]
+class FusedSwiGLU(SwiGLU):
     _fusion_fp8: bool = False
     _glue: Launch
 
-    def forward(self, hidden_states: Any) -> Any:
+    # An fp8 down projection takes the quantized operand in place of the bf16 rows.
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor | PreQuantized:  # type: ignore[override]
         return swiglu(self._glue, self.proj(hidden_states), fp8=self._fusion_fp8)
 
 
-class H3AttnProcessor(MiniMaxH3AttnProcessor):  # type: ignore[misc]
+class H3AttnProcessor(MiniMaxH3AttnProcessor):
     """Diffusers' H3 attention, declared as an exact split by query heads: each window computes
     its own rows of the projections (`cozy_runtime.rows`), per-head norms and RoPE, and the out
     projection runs by tokens. The Runtime sizes the windows against the memory the DiT's
@@ -830,34 +890,37 @@ class H3AttnProcessor(MiniMaxH3AttnProcessor):  # type: ignore[misc]
 
     def __call__(
         self,
-        attn: Any,
-        hidden_states: Any,
-        rotary_emb: tuple[Any, Any] | None = None,
-        attention_mask: Any | None = None,
-    ) -> Any:
+        attn: MiniMaxH3Attention,
+        hidden_states: Hidden | Owned[Hidden],
+        rotary_emb: tuple[torch.Tensor, torch.Tensor] | None = None,
+        attention_mask: torch.Tensor | None = None,
+    ) -> torch.Tensor:
         hidden_states = take(hidden_states)
         heads = _Heads.of(self, attn, hidden_states, rotary_emb, attention_mask)
         if heads is None:
-            hidden_states = self.whole(attn, hidden_states, rotary_emb, attention_mask)
-            return attn.to_out[1](attn.to_out[0](hidden_states.flatten(2, 3)))
+            attended: torch.Tensor = self.whole(attn, hidden_states, rotary_emb, attention_mask)
+            whole_out: torch.Tensor = attn.to_out[1](attn.to_out[0](attended.flatten(2, 3)))
+            return whole_out
         attended = split(heads, heads, Cut(2), holds=HEAD_HOLDS)
         del heads, hidden_states  # an owned input goes before the out projection's output comes
-        out = attn.to_out[1](split(attn.to_out[0], attended.flatten(2, 3), Cut(1), holds=2))
+        out: torch.Tensor = attn.to_out[1](split(attn.to_out[0], attended.flatten(2, 3), Cut(1), holds=2))
         del attended
         return out
 
     def whole(
         self,
-        attn: Any,
-        hidden_states: Any,
-        rotary_emb: tuple[Any, Any] | None,
-        attention_mask: Any | None,
-    ) -> Any:
+        attn: MiniMaxH3Attention,
+        hidden_states: Hidden,
+        rotary_emb: tuple[torch.Tensor, torch.Tensor] | None,
+        attention_mask: torch.Tensor | None,
+    ) -> torch.Tensor:
         query, key, value = self.qkv(attn, hidden_states, rotary_emb)
         seed_key_mean(getattr(self, "_glue", None), key, slice(None))
         return self.attend(query, key, value, attention_mask)
 
-    def attend(self, query: Any, key: Any, value: Any, attention_mask: Any | None = None) -> Any:
+    def attend(
+        self, query: torch.Tensor, key: torch.Tensor, value: torch.Tensor, attention_mask: torch.Tensor | None = None
+    ) -> torch.Tensor:
         """The attention of `query`'s heads, in its dtype."""
         dtype = query.dtype
         return dispatch_attention_fn(
@@ -871,16 +934,22 @@ class H3AttnProcessor(MiniMaxH3AttnProcessor):  # type: ignore[misc]
             parallel_config=self._parallel_config,
         ).to(dtype)
 
-    def qkv(self, attn: Any, hidden_states: Any, rotary_emb: tuple[Any, Any] | None) -> Any:
+    def qkv(
+        self, attn: MiniMaxH3Attention, hidden_states: Hidden, rotary_emb: tuple[torch.Tensor, torch.Tensor] | None
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         if attn.fused_projections:
             query, key, value = attn.to_qkv(hidden_states).chunk(3, dim=-1)
         else:
             query, key = attn.to_q(hidden_states), attn.to_k(hidden_states)
             value = attn.to_v(hidden_states)
-        query, key, value = (t.unflatten(-1, (attn.heads, -1)) for t in (query, key, value))
+        query, key, value = (
+            t.unflatten(-1, (attn.heads, -1)) for t in (query, key, value)
+        )
         return (*self.rope(attn, query, key, rotary_emb), value)
 
-    def rope(self, attn: Any, query: Any, key: Any, rotary_emb: tuple[Any, Any] | None) -> Any:
+    def rope(
+        self, attn: MiniMaxH3Attention, query: torch.Tensor, key: torch.Tensor, rotary_emb: tuple[torch.Tensor, torch.Tensor] | None
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         query, key = attn.norm_q(query), attn.norm_k(key)
         if rotary_emb is not None:
             query, key = _apply_rotary_emb(query, *rotary_emb), _apply_rotary_emb(key, *rotary_emb)
@@ -890,22 +959,26 @@ class H3AttnProcessor(MiniMaxH3AttnProcessor):  # type: ignore[misc]
 class FusedMiniMaxH3AttnProcessor(H3AttnProcessor):
     _glue: Launch
 
-    def qkv(self, attn: Any, hidden_states: Any, rotary_emb: tuple[Any, Any] | None) -> Any:
-        query = attn.to_q(hidden_states).unflatten(-1, (attn.heads, -1))
-        key = attn.to_k(hidden_states).unflatten(-1, (attn.heads, -1))
-        value = attn.to_v(hidden_states).unflatten(-1, (attn.heads, -1))
+    def qkv(
+        self, attn: MiniMaxH3Attention, hidden_states: Hidden, rotary_emb: tuple[torch.Tensor, torch.Tensor] | None
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        query: torch.Tensor = attn.to_q(hidden_states).unflatten(-1, (attn.heads, -1))
+        key: torch.Tensor = attn.to_k(hidden_states).unflatten(-1, (attn.heads, -1))
+        value: torch.Tensor = attn.to_v(hidden_states).unflatten(-1, (attn.heads, -1))
         return (*self.rope(attn, query, key, rotary_emb), value)
 
-    def rope(self, attn: Any, query: Any, key: Any, rotary_emb: tuple[Any, Any] | None) -> Any:
+    def rope(
+        self, attn: MiniMaxH3Attention, query: torch.Tensor, key: torch.Tensor, rotary_emb: tuple[torch.Tensor, torch.Tensor] | None
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         if rotary_emb is None:
             return attn.norm_q(query), attn.norm_k(key)
         cos, sin = rotary_emb
-        query = rmsnorm_rope(self._glue, query, attn.norm_q.weight, cos, sin, attn.norm_q.eps)
-        key = rmsnorm_rope(self._glue, key, attn.norm_k.weight, cos, sin, attn.norm_k.eps)
+        query = rmsnorm_rope(self._glue, query, attn.norm_q.weight, cos, sin, _eps(attn.norm_q))
+        key = rmsnorm_rope(self._glue, key, attn.norm_k.weight, cos, sin, _eps(attn.norm_k))
         return query, key
 
 
-def seed_key_mean(launch: Launch | None, key: Any, heads: slice) -> None:
+def seed_key_mean(launch: Launch | None, key: torch.Tensor, heads: slice[int | None]) -> None:
     """`KEY_MEAN`'s heads from this call's [1, tokens, heads, 128] post-RoPE keys, summed in F32
     without an F32 copy: by each head alone where the glue kernels serve (`key_sums`), so a head
     window seeds the bits the whole call does."""
@@ -927,35 +1000,34 @@ class _Heads:
     def __init__(
         self,
         processor: H3AttnProcessor,
-        attn: Any,
-        hidden: Any,
-        rotary: tuple[Any, Any] | None,
+        attn: MiniMaxH3Attention,
+        hidden: Hidden,
+        rotary: tuple[torch.Tensor, torch.Tensor] | None,
         projections: tuple[Rows, Rows, Rows],
     ) -> None:
         self.processor, self.attn, self.hidden, self.rotary = processor, attn, hidden, rotary
         self.projections = projections
         self.shape = (*hidden.shape[:-1], attn.heads, attn.head_dim)
         # A row-quantized input (the fused norm's fp8 epilogue) stands for its bf16 rows.
-        quantized = isinstance(hidden, PreQuantized)
-        self.dtype = torch.bfloat16 if quantized else hidden.dtype
-        self.device = hidden.payload.device if quantized else hidden.device
+        self.dtype = torch.bfloat16 if isinstance(hidden, PreQuantized) else hidden.dtype
+        self.device = hidden.payload.device if isinstance(hidden, PreQuantized) else hidden.device
 
     @classmethod
     def of(
         cls,
         processor: H3AttnProcessor,
-        attn: Any,
-        hidden: Any,
-        rotary: tuple[Any, Any] | None,
-        mask: Any | None,
+        attn: MiniMaxH3Attention,
+        hidden: Hidden,
+        rotary: tuple[torch.Tensor, torch.Tensor] | None,
+        mask: torch.Tensor | None,
     ) -> _Heads | None:
         """The call cut by heads, or None where it runs them whole."""
         if attn.fused_projections or mask is not None or processor._parallel_config is not None:
             return None
-        found = tuple(rows(m) for m in (attn.to_q, attn.to_k, attn.to_v))
-        if any(r is None for r in found):
+        q, k, v = (rows(m) for m in (attn.to_q, attn.to_k, attn.to_v))
+        if q is None or k is None or v is None:
             return None
-        return cls(processor, attn, hidden, rotary, found)  # type: ignore[arg-type]
+        return cls(processor, attn, hidden, rotary, (q, k, v))
 
     def dim(self) -> int:
         return len(self.shape)
@@ -963,40 +1035,41 @@ class _Heads:
     def element_size(self) -> int:
         return int(self.dtype.itemsize)
 
-    def __getitem__(self, index: tuple[slice, ...]) -> slice:
-        return index[2]
+    def __getitem__(self, index: tuple[slice[int | None], ...]) -> slice[int, int, None]:
+        return cast("slice[int, int, None]", index[2])  # `Cut(2)` hands whole head ranges
 
-    def __call__(self, heads: _Heads | slice) -> Any:
+    def __call__(self, heads: _Heads | slice[int, int, None]) -> torch.Tensor:
         window = slice(0, self.attn.heads) if heads is self else heads
         assert isinstance(window, slice)
         d = self.attn.head_dim
         start, stop = window.start * d, window.stop * d
         query, key, value = (
-            project(self.hidden, start, stop).unflatten(-1, (-1, d)) for project in self.projections
+            project(self.hidden, start, stop).unflatten(-1, (-1, d))
+            for project in self.projections
         )
         query, key = self.processor.rope(self.attn, query, key, self.rotary)
         seed_key_mean(getattr(self.processor, "_glue", None), key, window)
         return self.processor.attend(query, key, value)
 
 
-class FusedMiniMaxH3TransformerBlock(MiniMaxH3TransformerBlock):  # type: ignore[misc]
+class FusedMiniMaxH3TransformerBlock(MiniMaxH3TransformerBlock):
     _fusion_attn_fp8: bool = False
     _fusion_ff_fp8: bool = False
     _glue: Launch
 
     def forward(
         self,
-        hidden_states: Any,
-        temb: Any,
-        adaln_indices: Any,
-        rotary_emb: tuple[Any, Any],
-        attention_mask: Any | None = None,
-    ) -> Any:
+        hidden_states: torch.Tensor,
+        temb: torch.Tensor,
+        adaln_indices: torch.Tensor,
+        rotary_emb: tuple[torch.Tensor, torch.Tensor],
+        attention_mask: torch.Tensor | None = None,
+    ) -> torch.Tensor:
         shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = self.adaln_proj(temb)
         # The attention owns its normed input (no name here holds it), so it goes at its last
         # use, before the out projection's output (1.2 GB each at 15 s); the caller holds this
         # block's input throughout.
-        attn_output = self.attn(
+        attn_output: torch.Tensor = self.attn(
             Owned(
                 rmsnorm_modulate(
                     self._glue,
@@ -1005,7 +1078,7 @@ class FusedMiniMaxH3TransformerBlock(MiniMaxH3TransformerBlock):  # type: ignore
                     scale_msa,
                     shift_msa,
                     adaln_indices,
-                    self.norm1.eps,
+                    _eps(self.norm1),
                     fp8=self._fusion_attn_fp8,
                 )
             ),
@@ -1014,7 +1087,8 @@ class FusedMiniMaxH3TransformerBlock(MiniMaxH3TransformerBlock):  # type: ignore
         )
         tail = _Tail(self, hidden_states, adaln_indices, gate_msa, scale_mlp, shift_mlp, gate_mlp)
         # The tail writes its rows in place: a view that does not flatten would take a copy.
-        return split(tail.run, tail, Cut(1), out=attn_output.contiguous(), holds=_TAIL_HOLDS)
+        out: torch.Tensor = split(tail.run, tail, Cut(1), out=attn_output.contiguous(), holds=_TAIL_HOLDS)
+        return out
 
 
 class _Tail:
@@ -1026,7 +1100,9 @@ class _Tail:
 
     __slots__ = ("block", "device", "dtype", "gates", "index", "residual", "shape")
 
-    def __init__(self, block: Any, residual: Any, index: Any, *gates: Any) -> None:
+    def __init__(
+        self, block: FusedMiniMaxH3TransformerBlock, residual: torch.Tensor, index: torch.Tensor, *gates: torch.Tensor
+    ) -> None:
         self.block, self.residual, self.index, self.gates = block, residual, index, gates
         self.shape, self.dtype, self.device = residual.shape, residual.dtype, residual.device
 
@@ -1036,10 +1112,10 @@ class _Tail:
     def element_size(self) -> int:
         return int(self.dtype.itemsize)
 
-    def __getitem__(self, index: tuple[slice, ...]) -> slice:
+    def __getitem__(self, index: tuple[slice[int | None], ...]) -> slice[int | None]:
         return index[1]
 
-    def run(self, rows: _Tail | slice, out: Any) -> None:
+    def run(self, rows: _Tail | slice[int | None], out: torch.Tensor) -> None:
         """The tail over token `rows`, written into `out` (those rows of the attention output).
         Called on itself (`split` running whole), every row."""
         rows = slice(None) if rows is self else rows
@@ -1055,7 +1131,7 @@ class _Tail:
             block.norm2.weight,
             scale,
             shift,
-            block.norm2.eps,
+            _eps(block.norm2),
             fp8=block._fusion_ff_fp8,
             hidden_out=out,
         )
@@ -1069,18 +1145,20 @@ class _FFN:
 
     __slots__ = ("ff",)
 
-    def __init__(self, ff: Any) -> None:
+    def __init__(self, ff: FeedForward) -> None:
         self.ff = ff
 
-    def __call__(self, normed: Any) -> Any:
+    def __call__(self, normed: Hidden) -> torch.Tensor:
         act, down = self.ff.net[0], self.ff.net[2]
         if not isinstance(act, FusedSwiGLU) or act._fusion_fp8:
-            return down(act(normed))
+            out: torch.Tensor = down(act(normed))
+            return out
         # An int8 down projection quantizes `value * silu(gate)` from the projection's
         # [value | gate] halves itself (the same law as `swiglu`): the product is never written.
-        both = act.proj(normed)
+        both: torch.Tensor = act.proj(normed)
         rows = int8_rows(both, (down,), activation="swiglu")
-        return down(swiglu(act._glue, both) if rows is None else rows)
+        product: torch.Tensor = down(swiglu(act._glue, both) if rows is None else rows)
+        return product
 
 
 # ------------------------------------------------------------------------ install
@@ -1131,7 +1209,9 @@ def identity() -> str:
     )
 
 
-def _require_call(function: Callable[..., object], parameters: tuple[str, ...]) -> None:
+def _require_call(  # type: ignore[explicit-any]  # any Diffusers callable: its signature is what is checked
+    function: Callable[..., object], parameters: tuple[str, ...]
+) -> None:
     """Validate the inputs this plan substitutes; annotations are not an ABI.
 
     Positional inputs must keep their names and order. Additional optional inputs are
@@ -1176,23 +1256,23 @@ def _record(model: object, plan: Plan, result: Applied) -> Applied:
     return result
 
 
-def _rowwise_leaf(module: Any) -> bool:
+def _rowwise_leaf(module: torch.nn.Module) -> bool:
     # Semantic hooks must receive the original Tensor, not a quantized carrier.
-    return (
+    return bool(
         getattr(module, "provider", None) == ROWWISE_FP8
         and not module._forward_pre_hooks
         and not module._forward_hooks
     )
 
 
-def _pointer(value: Any) -> int:
+def _pointer(value: torch.Tensor) -> int:
     try:
         return int(value.data_ptr())
     except RuntimeError:  # the memory's stand-in for an unbound weight has no storage
         return 0
 
 
-def _tensor_census(module: Any) -> tuple[object, ...]:
+def _tensor_census(module: torch.nn.Module) -> tuple[object, ...]:
     return tuple(
         (name, tuple(value.shape), str(value.dtype), id(value), _pointer(value))
         for name, value in (
@@ -1207,13 +1287,13 @@ def _shape(condition: bool, detail: str) -> None:
         raise GlueRefusal("fusion_block_shape", detail)
 
 
-def _widths(transformer: Any, root: str) -> None:
+def _widths(transformer: MiniMaxH3Transformer3DModel, root: str) -> None:
     config = transformer.config
     widths = (
-        int(config.hidden_size),
-        int(config.ffn_dim),
-        int(config.attention_head_dim),
-        6 * int(config.rope_freq_dim),
+        int(config["hidden_size"]),
+        int(config["ffn_dim"]),
+        int(config["attention_head_dim"]),
+        6 * int(config["rope_freq_dim"]),
     )
     _shape(
         widths == (HIDDEN, FFN, HEAD_DIM, ROTARY),
@@ -1221,19 +1301,19 @@ def _widths(transformer: Any, root: str) -> None:
     )
 
 
-def _validate_transformer(transformer: Any, root: str) -> None:
+def _validate_transformer(transformer: MiniMaxH3Transformer3DModel, root: str) -> None:
     forwards = (MiniMaxH3Transformer3DModel.forward, AdaLNPrunedMiniMaxH3Transformer.forward)
     _shape(
         type(transformer).forward in forwards and plain_forward(transformer),
         f"{root}: {_type_name(transformer)} overrides the Diffusers MiniMax-H3 forward",
     )
-    for index, block in enumerate(transformer.transformer_blocks):
+    for index, block in enumerate(_blocks(transformer)):
         path = f"{root}.transformer_blocks.{index}"
         attn, ff = block.attn, block.ff
         _shape(
             type(block) is MiniMaxH3TransformerBlock
             and plain_forward(block)
-            and type(attn.processor) in (MiniMaxH3AttnProcessor, H3AttnProcessor)
+            and type(_processor(attn)) in (MiniMaxH3AttnProcessor, H3AttnProcessor)
             and not attn.fused_projections
             and type(ff) is FeedForward
             and plain_forward(ff)
@@ -1273,50 +1353,58 @@ def _validate_transformer(transformer: Any, root: str) -> None:
 
 
 def _install_transformer(
-    transformer: Any, root: str, glue: Launch
+    transformer: MiniMaxH3Transformer3DModel, root: str, glue: Launch
 ) -> tuple[list[tuple[str, str, str]], int]:
     substitutions: list[tuple[str, str, str]] = []
     fp8_sites = 0
-    for index, block in enumerate(transformer.transformer_blocks):
+    for index, block in enumerate(_blocks(transformer)):
         path = f"{root}.transformer_blocks.{index}"
         attn, ff = block.attn, block.ff
         attn_fp8 = all(_rowwise_leaf(m) for m in (attn.to_q, attn.to_k, attn.to_v))
-        ff_fp8 = _rowwise_leaf(ff.net[0].proj)
+        ff_fp8 = _rowwise_leaf(cast(SwiGLU, ff.net[0]).proj)  # validated: a SwiGLU (`_validate_transformer`)
         out_fp8 = _rowwise_leaf(ff.net[2])
         fp8_sites += attn_fp8 + ff_fp8 + out_fp8
 
+        current = cast(H3AttnProcessor, attn.processor)  # validated, then `_release_qkv`'s
         processor = FusedMiniMaxH3AttnProcessor()
-        processor._attention_backend = attn.processor._attention_backend
-        processor._parallel_config = attn.processor._parallel_config
+        processor._attention_backend = current._attention_backend
+        processor._parallel_config = current._parallel_config
         processor._glue = glue
         substitutions.append(
             (f"{path}.attn.processor", _type_name(attn.processor), _type_name(processor))
         )
-        attn.set_processor(processor)
+        attn.set_processor(processor)  # type: ignore[arg-type]  # Diffusers' union names its own processors
 
         substitutions.append((f"{path}.ff.net.0", _type_name(ff.net[0]), _type_name(FusedSwiGLU)))
         ff.net[0].__class__ = FusedSwiGLU
-        ff.net[0]._fusion_fp8 = out_fp8
-        ff.net[0]._glue = glue
+        swiglu_module = cast(FusedSwiGLU, ff.net[0])  # its class, swapped above
+        swiglu_module._fusion_fp8 = out_fp8
+        swiglu_module._glue = glue
 
         substitutions.append((path, _type_name(block), _type_name(FusedMiniMaxH3TransformerBlock)))
         block.__class__ = FusedMiniMaxH3TransformerBlock
-        block._fusion_attn_fp8 = attn_fp8
-        block._fusion_ff_fp8 = ff_fp8
-        block._glue = glue
+        fused = cast(FusedMiniMaxH3TransformerBlock, block)  # its class, swapped above
+        fused._fusion_attn_fp8 = attn_fp8
+        fused._fusion_ff_fp8 = ff_fp8
+        fused._glue = glue
     return substitutions, fp8_sites
 
 
-def _release_qkv(attn: Any) -> None:
-    current = attn.processor
+def _processor(attn: MiniMaxH3Attention) -> object:
+    """`attn`'s processor, whatever its class: Diffusers' union names only its own."""
+    return attn.processor
+
+
+def _release_qkv(attn: MiniMaxH3Attention) -> None:
+    current = _processor(attn)
     if type(current) is MiniMaxH3AttnProcessor:
         processor = H3AttnProcessor()
         processor._attention_backend = current._attention_backend
         processor._parallel_config = current._parallel_config
-        attn.set_processor(processor)
+        attn.set_processor(processor)  # type: ignore[arg-type]  # Diffusers' union names its own processors
 
 
-def _transformers(pipe: Any) -> Iterator[tuple[str, Any]]:
+def _transformers(pipe: Pipeline) -> Iterator[tuple[str, MiniMaxH3Transformer3DModel]]:
     """Every MiniMax-H3 transformer the pipeline holds, by component name."""
     seen: set[int] = set()
     for name, member in pipe.components.items():
@@ -1330,12 +1418,12 @@ def _eager(model: object, plan: Plan, code: str, reason: str) -> str:
     return ""
 
 
-def install(model: object, pipe: Any, plan: Plan) -> str:
+def install(model: object, pipe: Pipeline, plan: Plan) -> str:
     """Install the fused glue on every H3 transformer `pipe` holds; the plan's identity, or ""
     when eager serves (a `NOT_INSTALLABLE` code, reported). Waits for the kernels' build.
     Fused or eager, every block's attention runs `H3AttnProcessor`."""
     for _, transformer in _transformers(pipe):
-        for block in transformer.transformer_blocks:
+        for block in _blocks(transformer):
             _release_qkv(block.attn)
     device = torch.device(plan.device)
     if device.type != "cuda":
@@ -1361,7 +1449,7 @@ def install(model: object, pipe: Any, plan: Plan) -> str:
         if not transformers:
             return _eager(model, plan, "fusion_no_transformer", "no MiniMax-H3 transformer to fuse")
         glue = plan.load(kernels(device))
-        heads = int(transformers[0][1].config.num_attention_heads)
+        heads = int(transformers[0][1].config["num_attention_heads"])
         wrong = checked(glue, device, heads=heads, fp8=kernels(device) is GLUE_FP8)
         if wrong:  # no fused block has served yet: the eager model does, and the run says why
             return _eager(model, plan, "fusion_numeric", wrong)
@@ -1386,7 +1474,7 @@ def install(model: object, pipe: Any, plan: Plan) -> str:
         substitutions += installed
         fp8_sites += sites
         # PAST THE POINT OF NO RETURN: the forwards are substituted, so a failure refuses.
-        heads = int(transformer.config.num_attention_heads)
+        heads = int(transformer.config["num_attention_heads"])
         warm_ms += warm(glue, device, heads=heads, fp8=sites > 0)
     _record(model, plan, Applied(True, "", tuple(substitutions), fp8_sites, warm_ms))
     return identity()

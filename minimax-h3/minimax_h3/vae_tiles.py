@@ -23,10 +23,10 @@ h3a-006 owns the lossy decode variants.
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 
 import torch
-from diffusers import AutoencoderKLMiniMaxH3
+from diffusers.models.autoencoders.autoencoder_kl_minimax_h3 import AutoencoderKLMiniMaxH3
 from diffusers.models.autoencoders.vae import DiagonalGaussianDistribution
 from diffusers.models.modeling_utils import get_parameter_dtype
 
@@ -36,7 +36,7 @@ from cozy_runtime.author import Cut, split
 from cozy_runtime.author import device as placed_device
 
 
-class TileBatchedVideoVAE(AutoencoderKLMiniMaxH3):  # type: ignore[misc]
+class TileBatchedVideoVAE(AutoencoderKLMiniMaxH3):
     """`AutoencoderKLMiniMaxH3` whose tiled clip decode batches the tiles and whose temporal
     decode hands out each finished chunk as it lands (h3a-017)."""
 
@@ -50,9 +50,9 @@ class TileBatchedVideoVAE(AutoencoderKLMiniMaxH3):  # type: ignore[misc]
         z = z.to(next(self.decoder.parameters()).dtype)
         tokens_chunk_size = self.tokens_chunk_size
         temporal_ratio = self.temporal_compression_ratio
-        num_tokens = z.shape[2] + self.config.token_drop
+        num_tokens = z.shape[2] + self.config["token_drop"]
         pad_tokens = (-num_tokens) % tokens_chunk_size
-        intra_tail = self.config.clip_length % temporal_ratio
+        intra_tail = self.config["clip_length"] % temporal_ratio
         pad_frames = sum(
             intra_tail
             if intra_tail and (z.shape[2] + k) % tokens_chunk_size == 0
@@ -76,7 +76,7 @@ class TileBatchedVideoVAE(AutoencoderKLMiniMaxH3):  # type: ignore[misc]
 
     def _decode_pieces(self, z: torch.Tensor, pad_tokens: int) -> Iterator[torch.Tensor]:
         tokens_chunk_size = self.tokens_chunk_size
-        token_drop = self.config.token_drop
+        token_drop = self.config["token_drop"]
         chunk_num_frames = tokens_chunk_size * self.temporal_compression_ratio
         num_tokens = z.shape[2] + token_drop + pad_tokens
         num_chunks = num_tokens // tokens_chunk_size - int(token_drop > 0)
@@ -111,7 +111,7 @@ class TileBatchedVideoVAE(AutoencoderKLMiniMaxH3):  # type: ignore[misc]
         """Upstream's temporal encode with its clips spread over the group: each
         `clip_length` clip encodes from its own frames alone, so a round runs on the ranks
         at once and the moments join here in order, as one rank computes them."""
-        clip_length = self.config.clip_length
+        clip_length = self.config["clip_length"]
         if x.shape[2] == 1:
             return self._encode_clip(x)
         if x.shape[2] % clip_length:
@@ -119,21 +119,21 @@ class TileBatchedVideoVAE(AutoencoderKLMiniMaxH3):  # type: ignore[misc]
             x = torch.cat([x, pad], dim=2)
         clips = ((x[:, :, i : i + clip_length],) for i in range(0, x.shape[2], clip_length))
         moments = torch.cat(list(spread(self._encode_clip, clips)), dim=2)
-        token_drop = self.config.token_drop
+        token_drop = self.config["token_drop"]
         return moments[:, :, :-token_drop] if token_drop > 0 else moments
 
     def encode_frames(
         self,
         pixels: torch.Tensor,
-        pixel_mean: tuple[float, float, float],
-        pixel_std: tuple[float, float, float],
+        pixel_mean: Sequence[float],
+        pixel_std: Sequence[float],
     ) -> DiagonalGaussianDistribution:
         """`encode` of uint8 `(1, 3, T, H, W)` pixels normalized as `encode_condition` does,
         each clip normalized on the rank that encodes it: a clip crosses to a follower as
         uint8, a quarter of its float32 bytes (run 1516: 3.5-3.9 s per continuation export).
         Normalization is elementwise and padding repeats the last frame, so every clip's
         floats are the ones `_encode` would slice from the normalized video."""
-        clip_length = self.config.clip_length
+        clip_length = self.config["clip_length"]
         if pixels.shape[2] % clip_length:
             pad = pixels[:, :, -1:].repeat(1, 1, (-pixels.shape[2]) % clip_length, 1, 1)
             pixels = torch.cat([pixels, pad], dim=2)
@@ -142,7 +142,7 @@ class TileBatchedVideoVAE(AutoencoderKLMiniMaxH3):  # type: ignore[misc]
             for i in range(0, pixels.shape[2], clip_length)
         )
         moments = torch.cat(list(spread(self._encode_frames_clip, clips)), dim=2)
-        token_drop = self.config.token_drop
+        token_drop = self.config["token_drop"]
         if token_drop > 0:
             moments = moments[:, :, :-token_drop]
         return DiagonalGaussianDistribution(moments)
@@ -150,15 +150,16 @@ class TileBatchedVideoVAE(AutoencoderKLMiniMaxH3):  # type: ignore[misc]
     def _encode_frames_clip(
         self,
         clip: torch.Tensor,
-        pixel_mean: tuple[float, float, float],
-        pixel_std: tuple[float, float, float],
+        pixel_mean: Sequence[float],
+        pixel_std: Sequence[float],
     ) -> torch.Tensor:
         dtype = get_parameter_dtype(self.encoder)  # as `encode` aligns its pixels
         return self._encode_clip(_normalized(clip, pixel_mean, pixel_std).to(dtype))
 
     def _decode_clip(self, z: torch.Tensor) -> torch.Tensor:
         if not self.use_tiling:
-            return self.decoder(self.post_quant_conv(z))
+            decoded: torch.Tensor = self.decoder(self.post_quant_conv(z))
+            return decoded
 
         ratio = self.spatial_compression_ratio
         y_indices, y_lengths, y_overlaps = self._split_tiles(
@@ -176,7 +177,7 @@ class TileBatchedVideoVAE(AutoencoderKLMiniMaxH3):  # type: ignore[misc]
         decoded = self._decode_tiles(batch).split(z.shape[0], dim=0)
         columns = len(x_indices)
         rows = [decoded[row * columns : (row + 1) * columns] for row in range(len(y_indices))]
-        return self._stitch_tiles(rows, y_overlaps, x_overlaps)
+        return self._stitch_tiles(rows, y_overlaps, x_overlaps)  # type: ignore[arg-type]  # rows of tile tuples: it indexes them
 
     def _decode_tiles(self, batch: torch.Tensor) -> torch.Tensor:
         """Upstream's ViT decoder over a batch of tiles, block by block: every tile passes a
@@ -189,7 +190,7 @@ class TileBatchedVideoVAE(AutoencoderKLMiniMaxH3):  # type: ignore[misc]
         decoder = self.decoder
         x = self.post_quant_conv(batch)
         tiles, channels, frames, height, width = x.shape
-        hidden = decoder.proj_in(
+        hidden: torch.Tensor = decoder.proj_in(
             x.permute(0, 2, 3, 4, 1).reshape(tiles, frames * height * width, channels)
         )
         patches = hidden.shape[1]
@@ -214,8 +215,8 @@ class TileBatchedVideoVAE(AutoencoderKLMiniMaxH3):  # type: ignore[misc]
     def encode_condition(
         self,
         pixels: torch.Tensor,
-        pixel_mean: tuple[float, float, float],
-        pixel_std: tuple[float, float, float],
+        pixel_mean: Sequence[float],
+        pixel_std: Sequence[float],
         seed: int,
     ) -> torch.Tensor:
         """`encode_condition` as this component's method, so `accel.spread` can run it on
@@ -233,14 +234,15 @@ class _BlockRows:
         self.rotary = rotary
 
     def __call__(self, hidden: torch.Tensor) -> torch.Tensor:
-        return self.block(hidden, self.rotary)
+        out: torch.Tensor = self.block(hidden, self.rotary)
+        return out
 
 
 def encode_condition(
     vae: AutoencoderKLMiniMaxH3,
     pixels: torch.Tensor,
-    pixel_mean: tuple[float, float, float],
-    pixel_std: tuple[float, float, float],
+    pixel_mean: Sequence[float],
+    pixel_std: Sequence[float],
     seed: int,
 ) -> torch.Tensor:
     """Diffusers' `encode_vae_condition` for one reference, up to its `.cpu()`: the sampled
@@ -258,14 +260,14 @@ def encode_condition(
         else:
             pixels = pixels.permute(3, 0, 1, 2)[None]
         posterior = vae.encode(_normalized(pixels, pixel_mean, pixel_std), return_dict=False)[0]
-    latents = posterior.sample(generator=rng.generator(seed))
+    latents: torch.Tensor = posterior.sample(generator=rng.generator(seed))
     return latents.to(torch.float16).float()
 
 
 def _normalized(
     pixels: torch.Tensor,
-    pixel_mean: tuple[float, float, float],
-    pixel_std: tuple[float, float, float],
+    pixel_mean: Sequence[float],
+    pixel_std: Sequence[float],
 ) -> torch.Tensor:
     """Diffusers' `encode_vae_condition` pixel convention: uint8 to float32, over 255, minus
     the per-channel mean, over the per-channel std."""
