@@ -1532,7 +1532,7 @@ class OfficialH3Pipeline:
         cancel()
         loop_over = partial(
             denoise_official,
-            scoped.transformer,
+            self.components[_DIT_COMPONENT[_TRUNK[task]]],  # this task's DiT: a Ref2VA pipe has no `transformer`
             scoped,
             block_state,
             lambda step: _attention_layout(block_state, step, sol_dense_steps=sol_dense_steps, tau=tau),
