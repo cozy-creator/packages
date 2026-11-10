@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable
-from typing import Any
+from typing import TypedDict, cast
 
 import torch
 from cozy_runtime import rng
@@ -36,9 +36,10 @@ from cozy_runtime.author import (
     uses_components,
 )
 from cozy_runtime.accel.kernels import PreQuantized, int8_rows, native, quantize_once, rms_rope_split_half
-from diffusers import AutoencoderKLFlux2, FlowMatchEulerDiscreteScheduler
-from diffusers.configuration_utils import register_to_config
+from diffusers.configuration_utils import ConfigMixin, register_to_config
 from diffusers.image_processor import VaeImageProcessor
+from diffusers.models.autoencoders.autoencoder_kl_flux2 import AutoencoderKLFlux2
+from diffusers.schedulers.scheduling_flow_match_euler_discrete import FlowMatchEulerDiscreteScheduler
 from PIL import Image
 from tokenizers import Tokenizer
 from transformers import PreTrainedTokenizerFast, Qwen3_5Config
@@ -85,15 +86,16 @@ def attention(
     site: Attention, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, rope: torch.Tensor
 ) -> torch.Tensor:
     shape = (*q.shape[:2], site.heads, site.head_dim)
-    return site(rotate(q.reshape(shape), rope), rotate(k.reshape(shape), rope), v.reshape(shape)).flatten(2)
+    out: torch.Tensor = site(rotate(q.reshape(shape), rope), rotate(k.reshape(shape), rope), v.reshape(shape))
+    return out.flatten(2)
 
 
-def path(rows: Any) -> str:
+def path(rows: torch.Tensor | PreQuantized | None) -> str:
     return "int8 prologue" if isinstance(rows, PreQuantized) else "eager"
 
 
 def modulated(x: torch.Tensor, norm: RMSNorm, scale: torch.Tensor, shift: torch.Tensor,
-              consumers: tuple[Any, ...]) -> Any:
+              consumers: tuple[torch.nn.Module, ...]) -> torch.Tensor | PreQuantized:
     """`norm(x) * (1 + scale) + shift` for `consumers`: quantized for them in the norm's one pass when
     they are int8 leaves (the norm weight folded into the scale, as ComfyUI's `rms_adaln`), else as
     upstream computes it."""
@@ -121,7 +123,8 @@ class TextBlock(torch.nn.Module):
         k = self.k_norm(k.unflatten(-1, (self.heads, -1))).flatten(2)
         x = x + self.proj(attention(self.attn, q, k, v, rope))
         y = self.norm2(x)
-        return x + self.ffn_down(situ(self.ffn_up(y), self.ffn_gate(y)))
+        out: torch.Tensor = x + self.ffn_down(situ(self.ffn_up(y), self.ffn_gate(y)))
+        return out
 
 
 class TextProjection(torch.nn.Module):
@@ -157,17 +160,17 @@ class Block(torch.nn.Module):
     def forward(self, x: torch.Tensor, rope: torch.Tensor, modulation: torch.Tensor) -> torch.Tensor:
         shift_a, scale_a, gate_a, shift_f, scale_f, gate_f = modulation.unbind(1)
         proj = self.proj
-        q, k, v = proj["q"], proj["k"], proj["v"]
-        rows = modulated(x, self.norm1, scale_a, shift_a, (q, k, v))
-        with quantize_once(rows):
-            q, k, v = (p(rows).unflatten(-1, (self.heads, -1)) for p in (q, k, v))
+        qkv = proj["q"], proj["k"], proj["v"]
+        rows = modulated(x, self.norm1, scale_a, shift_a, qkv)
+        with quantize_once(rows):  # type: ignore[arg-type, unused-ignore]  # quantized rows share as they are
+            q, k, v = (p(rows).unflatten(-1, (self.heads, -1)) for p in qkv)
         if rope.dim() == 6:
             q, k = rms_rope_split_half(q, k, rope, self.q_norm.weight, self.k_norm.weight, self.q_norm.eps)
         else:
             q, k = rotate(self.q_norm(q), rope), rotate(self.k_norm(k), rope)
         x.addcmul_(proj["o"](self.attn(q, k, v).flatten(2)), gate_a[:, None])
         hidden = proj["ffn_up_gate"](modulated(x, self.norm2, scale_f, shift_f, (proj["ffn_up_gate"],)))
-        activated = int8_rows(hidden, (proj["ffn_down"],), activation="situ")
+        activated: torch.Tensor | PreQuantized | None = int8_rows(hidden, (proj["ffn_down"],), activation="situ")
         self.served = {"norms": path(rows), "situ": path(activated)}
         if activated is None:
             activated = situ(*hidden.chunk(2, -1))
@@ -226,7 +229,8 @@ class MossTransformer(torch.nn.Module):
     def rotations(phase: torch.Tensor) -> torch.Tensor:
         """The fused kernel's f32 rotation matrices [1, N, 1, D/2, 2, 2]."""
         cos, sin = phase.cos(), phase.sin()
-        return torch.stack((cos, -sin, sin, cos), -1).unflatten(-1, (2, 2)).unsqueeze(0).unsqueeze(2)
+        out: torch.Tensor = torch.stack((cos, -sin, sin, cos), -1).unflatten(-1, (2, 2))
+        return out.unsqueeze(0).unsqueeze(2)
 
     def text(self, context: torch.Tensor) -> torch.Tensor:
         """The step-invariant text stream [1, S, dim] of `context` [1, S, text_dim]."""
@@ -247,7 +251,8 @@ class MossTransformer(torch.nn.Module):
         """The f32 velocity [1, C, H, W] from the stream's image tokens."""
         x = self.final_norm_video(x[:, : height * width].to(DTYPE))
         x = self.final_linear_video((x * (1 + head[:, 1, None]) + head[:, 0, None]).to(DTYPE))
-        return x.transpose(1, 2).reshape(1, -1, height, width).float()
+        out: torch.Tensor = x.transpose(1, 2).reshape(1, -1, height, width)
+        return out.float()
 
     def forward(self, latents: torch.Tensor, timestep: torch.Tensor, texts: list[torch.Tensor],
                 ropes: list[torch.Tensor]) -> list[torch.Tensor]:
@@ -268,27 +273,27 @@ class MossScheduler(FlowMatchEulerDiscreteScheduler):
     nearest of the 1000 training sigmas."""
 
     @register_to_config  # type: ignore[untyped-decorator]
-    def __init__(self, num_train_timesteps: int = 1000, shift: float = 5.0, training_shift: float = 1.0) -> None:
+    def __init__(self, num_train_timesteps: int = 1000, shift: float = 5.0, training_shift: float = 1.0) -> None:  # type: ignore[misc]  # untyped after Diffusers' register_to_config
         super().__init__(num_train_timesteps=num_train_timesteps, shift=1.0)
-        self.register_to_config(shift=shift, training_shift=training_shift)
+        self.register_to_config(shift=shift, training_shift=training_shift)  # type: ignore[no-untyped-call]  # Diffusers' register_to_config is unannotated
 
-    def set_timesteps(self, num_inference_steps: int = 50, device: Any = None) -> None:  # type: ignore[override]
-        total = self.config.num_train_timesteps
+    def set_timesteps(self, num_inference_steps: int = 50, device: str | torch.device | None = None) -> None:  # type: ignore[override]
+        total: int = self.config["num_train_timesteps"]
 
         def grid(count: int, shift: float) -> torch.Tensor:
             lower = shift / (total + shift - 1)
             values = torch.linspace(1, lower, count, device="cpu")
             return shift * values / (1 + (shift - 1) * values)
 
-        sigmas = grid(num_inference_steps, self.config.shift)
-        training = grid(total, self.config.training_shift).flip(0)
+        sigmas = grid(num_inference_steps, self.config["shift"])
+        training = grid(total, self.config["training_shift"]).flip(0)
         upper = torch.searchsorted(training, sigmas).clamp(max=total - 1)
         lower = (upper - 1).clamp(min=0)
         nearest = torch.where((sigmas - training[lower]).abs() <= (training[upper] - sigmas).abs(), lower, upper)
         sigmas = torch.unique_consecutive(training[nearest])
         # Already shifted and snapped: no second shift.
         self._shift = 1.0
-        super().set_timesteps(device=device, sigmas=sigmas.tolist())
+        super().set_timesteps(device=device, sigmas=sigmas.tolist())  # type: ignore[arg-type]  # Diffusers' own default is None
 
 
 class TextEncoder(torch.nn.Module):
@@ -297,18 +302,34 @@ class TextEncoder(torch.nn.Module):
 
     def __init__(self, config: Qwen3_5Config) -> None:
         super().__init__()
-        self.language_model = Qwen3_5TextModel._from_config(config.text_config, dtype=DTYPE)
+        self.language_model: Qwen3_5TextModel = Qwen3_5TextModel._from_config(config.text_config, dtype=DTYPE)  # type: ignore[no-untyped-call]  # Transformers' _from_config is unannotated
 
 
 class MossGraph:
     def __init__(self, config: Config) -> None:
         with no_init_weights():
-            self.components: dict[str, torch.nn.Module] = {
+            self.components: Components = {
                 "transformer": MossTransformer(**config.section("transformer").mapping()).to(DTYPE).eval(),
                 "text_encoder": TextEncoder(Qwen3_5Config(**config.section("text_encoder").mapping())).eval(),
-                "vae": AutoencoderKLFlux2.from_config(config.section("vae").mapping()).to(torch.float32).eval(),
+                "vae": _to(construct(AutoencoderKLFlux2, config.section("vae").mapping()), torch.float32).eval(),
             }
-        self.scheduler_config = config.section("scheduler").mapping()
+        self.scheduler_config: dict[str, object] = config.section("scheduler").mapping()
+
+
+class Components(TypedDict):
+    transformer: MossTransformer
+    text_encoder: TextEncoder
+    vae: AutoencoderKLFlux2
+
+
+def construct[M: ConfigMixin](cls: type[M], config: dict[str, object]) -> M:
+    """`cls.from_config(config)`, typed: it returns a tuple only with `return_unused_kwargs=True`."""
+    return cast(M, cls.from_config(config))
+
+
+def _to[M: torch.nn.Module](module: M, dtype: torch.dtype) -> M:
+    """`module.to(dtype)`, typed: Diffusers' `to` is `functools.wraps`'d, which the checkers bind without `self`."""
+    return module.to(dtype)
 
 
 def build_tokenizer(assets: ModelAssets) -> PreTrainedTokenizerFast:
@@ -317,7 +338,7 @@ def build_tokenizer(assets: ModelAssets) -> PreTrainedTokenizerFast:
     for key in ("tokenizer_file", "name_or_path", "added_tokens_decoder", "tokenizer_class", "processor_class",
                 "backend", "is_local", "local_files_only", "chat_template", "model_specific_special_tokens"):
         config.pop(key, None)
-    return PreTrainedTokenizerFast(
+    return PreTrainedTokenizerFast(  # type: ignore[no-untyped-call]  # Transformers' tokenizer __init__ is unannotated
         tokenizer_object=Tokenizer.from_str(assets.read("tokenizer/tokenizer.json").decode()),
         chat_template=assets.read("tokenizer/chat_template.jinja").decode(),
         **config,
@@ -389,7 +410,7 @@ class MossImage(Model[MossGraph]):
         device = torch.device(str(self.device))
         rows, columns = height // PATCH, width // PATCH
         fused = device.type == "cuda" and not native()
-        scheduler: Any = MossScheduler.from_config(self.graph.scheduler_config)
+        scheduler = construct(MossScheduler, self.graph.scheduler_config)
         scheduler.set_timesteps(steps, device=device)
         with torch.no_grad():
             latents = rng.noise((1, transformer.latent_channels, rows, columns), seed, device=device)
@@ -407,7 +428,7 @@ class MossImage(Model[MossGraph]):
                     prediction = velocity[1] + guidance * (velocity[0] - velocity[1])
                 latents = scheduler.step(prediction, t, latents, return_dict=False)[0]
                 progress(i, len(timesteps))
-        tel.log("dit block", rope="fused" if fused else "eager", **transformer.layers[0].served)
+        tel.log("dit block", rope="fused" if fused else "eager", **cast(Block, transformer.layers[0]).served)  # its blocks
         return latents.cpu()
 
     @uses_components("vae")
@@ -417,9 +438,9 @@ class MossImage(Model[MossGraph]):
         vae = self.graph.components["vae"]
         with torch.inference_mode():
             z = latents.to(str(self.device), torch.float32)
-            bn, eps = vae.bn, vae.config.batch_norm_eps
-            std = (bn.running_var.float() + eps).sqrt().view(1, -1, 1, 1)
-            z = z * std.to(z.device) + bn.running_mean.float().to(z.device).view(1, -1, 1, 1)
+            bn, eps = vae.bn, vae.config["batch_norm_eps"]
+            std = (bn.running_var.float() + eps).sqrt().view(1, -1, 1, 1)  # type: ignore[union-attr]  # tracked: it keeps its statistics
+            z = z * std.to(z.device) + bn.running_mean.float().to(z.device).view(1, -1, 1, 1)  # type: ignore[union-attr]  # tracked
             b, c, h, w = z.shape
             z = z.reshape(b, c // 4, 2, 2, h, w).permute(0, 1, 4, 2, 5, 3).reshape(b, c // 4, 2 * h, 2 * w)
             image = vae.decode(z.to(vae.dtype), return_dict=False)[0].clamp(-1, 1)
