@@ -1137,15 +1137,4 @@ sdxl/sdxl/_numerics.py: [explicit-any] Explicit "Any" is not allowed
 sdxl/sdxl/_numerics.py: [explicit-any] Explicit "Any" is not allowed
 sdxl/sdxl/_numerics.py: [explicit-any] Explicit "Any" is not allowed
 sdxl/sdxl/_numerics.py: [no-any-return] Returning Any from function declared to return "dtype"
-seedvr2/seedvr2/__init__.py: [assignment] Incompatible types in assignment (expression has type "int", variable has type "Seed")
-seedvr2/seedvr2/__init__.py: [misc] Incompatible types in "yield" (actual type "DecodedAudioChunk", expected type "DecodedVideoFrame")
-seedvr2/seedvr2/model.py: [explicit-any] Explicit "Any" is not allowed
-seedvr2/seedvr2/model.py: [explicit-any] Explicit "Any" is not allowed
-seedvr2/seedvr2/model.py: [explicit-any] Explicit "Any" is not allowed
-seedvr2/seedvr2/model.py: [explicit-any] Explicit "Any" is not allowed
-seedvr2/seedvr2/model.py: [explicit-any] Explicit "Any" is not allowed
-seedvr2/seedvr2/model.py: [explicit-any] Explicit "Any" is not allowed
-seedvr2/seedvr2/model.py: [no-any-return] Returning Any from function declared to return "Tensor"
-seedvr2/seedvr2/model.py: [no-any-return] Returning Any from function declared to return "Tensor"
-seedvr2/seedvr2/model.py: [no-any-return] Returning Any from function declared to return "Tensor"
 seedvr2/seedvr2/model.py: [no-any-return] Returning Any from function declared to return "Tensor"
