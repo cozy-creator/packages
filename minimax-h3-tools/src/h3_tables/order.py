@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import json
 from collections import Counter
+from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any
 
 from cozy_runtime.author import canonical_json
 
@@ -91,7 +91,7 @@ def current_order(raw: bytes) -> ConstructionOrder:
 
 
 def full_order(
-    sections: dict[str, dict[str, Any]], current: tuple[tuple[str, str], ...]
+    sections: Mapping[str, Mapping[str, object]], current: tuple[tuple[str, str], ...]
 ) -> tuple[tuple[str, str], ...]:
     fl, ref = (
         tuple((component, key) for key in official_full_specs(sections[component]))

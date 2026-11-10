@@ -4,7 +4,8 @@ package's copy holds the supported constructor only; a DiT's table rows come fro
 
 from __future__ import annotations
 
-from typing import Any, cast
+from collections.abc import Mapping
+from typing import cast
 
 from cozy_runtime.author import canonical_json
 
@@ -22,14 +23,14 @@ _TEXT_CONDITIONER_CONFIG = {
 }
 
 
-def validate_text_conditioner(config: dict[str, Any]) -> None:
+def validate_text_conditioner(config: Mapping[str, object]) -> None:
     if config.get("cozy_h3") != _TEXT_CONDITIONER_CONFIG:
         raise ValueError(
             "text_encoder config does not declare the exact 50-layer pre-norm conditioner"
         )
 
 
-def _sections(raw: bytes, label: str) -> dict[str, dict[str, Any]]:
+def _sections(raw: bytes, label: str) -> dict[str, dict[str, object]]:
     try:
         value = canonical_json.decode(raw)
     except ValueError as exc:
@@ -39,10 +40,10 @@ def _sections(raw: bytes, label: str) -> dict[str, dict[str, Any]]:
         raise ValueError(f"{label} sections are {actual}, expected {sorted(COMPONENTS)}")
     if not all(isinstance(section, dict) for section in value.values()):
         raise TypeError(f"{label} has a section that is not a mapping")
-    return cast(dict[str, dict[str, Any]], value)
+    return cast(dict[str, dict[str, object]], value)
 
 
-def parse_full_config(raw: bytes) -> dict[str, dict[str, Any]]:
+def parse_full_config(raw: bytes) -> dict[str, dict[str, object]]:
     """The official constructor sections: both DiTs one architecture, the 50-layer conditioner."""
     sections = _sections(raw, "official H3 model config")
     fl, ref = (
@@ -56,14 +57,16 @@ def parse_full_config(raw: bytes) -> dict[str, dict[str, Any]]:
     return sections
 
 
-def dual_full_config(sections: dict[str, dict[str, Any]]) -> bytes:
+def dual_full_config(sections: Mapping[str, Mapping[str, object]]) -> bytes:
     document = dict(sections)
     for task, component in DIT_COMPONENT.items():
         document[component] = {**sections[component], "cozy_h3": {"task": task, "modulation": "full"}}
     return canonical_json.encode(document)
 
 
-def task_config(sections: dict[str, dict[str, Any]], plan: TimestepPlan) -> dict[str, Any]:
+def task_config(
+    sections: Mapping[str, Mapping[str, object]], plan: TimestepPlan
+) -> dict[str, dict[str, object]]:
     component = DIT_COMPONENT[plan.task]
     config = dict(sections[component])
     config["cozy_h3"] = {
@@ -75,7 +78,7 @@ def task_config(sections: dict[str, dict[str, Any]], plan: TimestepPlan) -> dict
 
 
 def dual_adaln_pruned_config(
-    sections: dict[str, dict[str, Any]], fl2va: TimestepPlan, ref2va: TimestepPlan
+    sections: Mapping[str, Mapping[str, object]], fl2va: TimestepPlan, ref2va: TimestepPlan
 ) -> bytes:
     if fl2va.task != "fl2va" or ref2va.task != "ref2va":
         raise ValueError("dual AdaLN-pruned config requires each task's own table layout")

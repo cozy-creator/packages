@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable
 from importlib.resources import files
-from typing import cast
+from typing import Protocol, cast
 
 from cozy_runtime.author import (
     ModelArtifact,
@@ -24,7 +24,32 @@ from .adaln_operations import (
 from .lanes import Encoding
 from .model_config import DIT_COMPONENT, parse_full_config
 from .order import current_order, full_order
+from .plans import Task
 from .quantization import dit_plan
+
+# The call proxies' caller interfaces: services injected, each bound Model a ModelArtifact.
+
+
+class _Quantize(Protocol):
+    def __call__(
+        self, *, source: ModelArtifact, plan: QuantizationPlan, max_relative_frobenius: float | None
+    ) -> Awaitable[ModelArtifact]: ...
+
+
+class _Select(Protocol):
+    def __call__(self, *, source: ModelArtifact, task: Task) -> Awaitable[Selection]: ...
+
+
+class _Compute(Protocol):
+    def __call__(
+        self, *, source: ModelArtifact, task: Task, plan_digest: str
+    ) -> Awaitable[ModelArtifact]: ...
+
+
+class _Attach(Protocol):
+    def __call__(
+        self, *, source: ModelArtifact, fl2va: ModelArtifact, ref2va: ModelArtifact
+    ) -> Awaitable[ModelArtifact]: ...
 
 
 def quantization_plan(encoding: Encoding) -> QuantizationPlan:
@@ -62,7 +87,7 @@ async def quantize(
     The exact assembled full/pruned source order is required. Unselected tensors and
     configs retain their source precision; an encoded or malformed source refuses.
     """
-    call = cast(Callable[..., Awaitable[ModelArtifact]], runtime_quantize)
+    call = cast(_Quantize, runtime_quantize)
     return await call(
         source=source,
         plan=quantization_plan(encoding),
@@ -84,12 +109,9 @@ async def precompute_adaln(
     """
     # The generated interfaces remove injected services and replace bound Model
     # parameters with ModelArtifact. These remain the same admitted call proxies.
-    select = cast(Callable[..., Awaitable[Selection]], select_adaln_weights)
-    compute = cast(Callable[..., Awaitable[ModelArtifact]], compute_adaln_tables)
-    attach = cast(
-        Callable[..., Awaitable[ModelArtifact]],
-        retable_adaln if generating_model is not None else apply_adaln,
-    )
+    select = cast(_Select, select_adaln_weights)
+    compute = cast(_Compute, compute_adaln_tables)
+    attach = cast(_Attach, retable_adaln if generating_model is not None else apply_adaln)
 
     # Managed proxies carry exact ModelArtifact values; the owner injects the bound
     # model only into each child implementation. Generated caller interfaces express this.

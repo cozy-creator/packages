@@ -56,6 +56,7 @@ from .source import (
     DTYPE,
     TIMESTEP_PLAN,
     copy_assets,
+    Row,
     Rows,
     dtype,
     official_full_specs,
@@ -254,7 +255,7 @@ def _log_treatment(tel: Telemetry, slot: str, selection: Selection, stats: Treat
     )
 
 
-def _widened(row: Any, expected: str, shape: tuple[int, ...]) -> bool:
+def _widened(row: Row, expected: str, shape: tuple[int, ...]) -> bool:
     """A plain 16-bit row where the spec stores float32: cast up exactly."""
     return (
         row.encoding is None
@@ -264,7 +265,7 @@ def _widened(row: Any, expected: str, shape: tuple[int, ...]) -> bool:
     )
 
 
-def _check_curve(component: str, held: Mapping[str, Any], topology: H3Topology) -> None:
+def _check_curve(component: str, held: Mapping[str, Row], topology: H3Topology) -> None:
     """`held` carries a curve-form DiT's modulation rows (TensorFS `h3.curve`), plain floats."""
     curve = held.get("adaln_t_table")
     if curve is None or len(curve.shape) != 2 or curve.shape[0] < 2:
@@ -291,7 +292,7 @@ def lane_rows(
     name: str, present: Rows, plans: Mapping[Task, TimestepPlan], curve: bool = False
 ) -> tuple[
     tuple[tuple[str, str], ...],
-    dict[str, dict[str, Any]],
+    dict[str, dict[str, Row]],
     frozenset[tuple[str, str]],
     frozenset[tuple[str, str]],
 ]:
@@ -332,7 +333,7 @@ def lane_rows(
         for task, component in DIT_COMPONENT.items()
         for key in table_shapes(H3Topology.from_config(sections[component]), plans[task])
     ) if pruned else frozenset()  # fmt: skip
-    carried: dict[str, dict[str, Any]] = {component: {} for component in COMPONENTS}
+    carried: dict[str, dict[str, Row]] = {component: {} for component in COMPONENTS}
     for component, key in order:
         if (component, key) in computed:
             continue
@@ -346,7 +347,7 @@ def lane_rows(
 def _produce_lane(
     ctx: Context,
     tel: Telemetry,
-    weights: Weights[Any],
+    weights: Weights[Model[object]],
     name: LaneName,
     max_relative_frobenius: float | None = None,
     curve: bool = False,
@@ -412,19 +413,19 @@ def _produce_lane(
 
 # One function per lane: Runtime requires a receipt for EVERY declared weights output.
 @invocable
-async def bf16_full(ctx: Context, *, source: Weights[Any], tel: Telemetry) -> ModelArtifact:
+async def bf16_full(ctx: Context, *, source: Weights[Any], tel: Telemetry) -> ModelArtifact:  # type: ignore[explicit-any, misc]  # static describe's any-layout spelling
     """The reviewed full-precision lane: source-only rows dropped, video VAE normalised."""
     return _produce_lane(ctx, tel, source, "bf16-full")
 
 
 @invocable
-async def bf16_pruned(ctx: Context, *, source: Weights[Any], tel: Telemetry) -> ModelArtifact:
+async def bf16_pruned(ctx: Context, *, source: Weights[Any], tel: Telemetry) -> ModelArtifact:  # type: ignore[explicit-any, misc]  # static describe's any-layout spelling
     """AdaLN-pruned BF16: 106 modulation rows per DiT replaced by timestep tables."""
     return _produce_lane(ctx, tel, source, "bf16")
 
 
 @invocable
-async def curve_pruned(ctx: Context, *, source: Weights[Any], tel: Telemetry) -> ModelArtifact:
+async def curve_pruned(ctx: Context, *, source: Weights[Any], tel: Telemetry) -> ModelArtifact:  # type: ignore[explicit-any, misc]  # static describe's any-layout spelling
     """AdaLN-pruned BF16 from ComfyUI's curve-form DiTs (TensorFS `h3.curve`).
 
     PinkCherry and Eros Max ship this form; each table row is the modulation ComfyUI computes at that timestep."""
@@ -432,7 +433,7 @@ async def curve_pruned(ctx: Context, *, source: Weights[Any], tel: Telemetry) ->
 
 
 @invocable
-async def fp8_pruned(
+async def fp8_pruned(  # type: ignore[explicit-any, misc]  # static describe's any-layout spelling
     ctx: Context,
     *,
     source: Weights[Any],
@@ -450,7 +451,7 @@ app.entrypoint(
     accelerator=False,
 )
 @invocable
-async def vae(ctx: Context, *, source: Weights[Any], tel: Telemetry) -> ModelArtifact:
+async def vae(ctx: Context, *, source: Weights[Any], tel: Telemetry) -> ModelArtifact:  # type: ignore[explicit-any, misc]  # static describe's any-layout spelling
     """A lane's video VAE alone, normalised.
 
     `NORMALISED_COMPONENTS`: one component and no base, so writing it fetches that component
@@ -608,7 +609,7 @@ def quantizer_selections(
 def _quantize_lane(
     ctx: Context,
     tel: Telemetry,
-    weights: Weights[Any],
+    weights: Weights[Model[object]],
     lane: str,
     encoding: _lanes.Encoding | None,
     max_relative_frobenius: float | None,
@@ -646,7 +647,9 @@ QUANTIZER_ENCODINGS: Mapping[str, _lanes.Encoding | None] = {
 }
 
 
-def quantize_lane(ctx: Context, tel: Telemetry, source: Weights[Any], output: str) -> ModelArtifact:
+def quantize_lane(
+    ctx: Context, tel: Telemetry, source: Weights[Model[object]], output: str
+) -> ModelArtifact:
     """H3's recipe for lane `output` (`QUANTIZER_RECIPES`): fp8 row-wise, int8 W8A8 on the int8
     tensor cores, nvfp4 W4A4 on Blackwell's FP4 tensor cores, w4a8 W4A8 on the int8 tensor cores
     (Ampere, Ada, Hopper); bf16 and bf16-full re-apply the normalisations to such a lane."""
@@ -713,7 +716,7 @@ def retable_rows(
 
 
 @invocable
-async def retable(
+async def retable(  # type: ignore[explicit-any, misc]  # static describe's any-layout spelling
     ctx: Context,
     *,
     pruned: Weights[Any],

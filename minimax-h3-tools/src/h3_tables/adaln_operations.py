@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from importlib.resources import files
-from typing import Any
+from typing import Any, cast
 
 import msgspec
 import torch
 from cozy_runtime.author import (
     Context,
+    Model,
     ModelArtifact,
     Telemetry,
     UnsupportedInput,
@@ -56,7 +58,7 @@ def _plan(source: Checkpoint, task: Task) -> TimestepPlan:
     return timestep_plan(source, task)
 
 
-def _sections() -> dict[str, dict[str, Any]]:
+def _sections() -> dict[str, dict[str, object]]:
     return parse_full_config(_asset("model-config.json"))
 
 
@@ -99,7 +101,7 @@ def _body_kind(present: Rows) -> bool:
     )
 
 
-def _bindings(document: dict[str, Any]) -> dict[Task, str]:
+def _bindings(document: Mapping[str, object]) -> dict[Task, str]:
     result: dict[Task, str] = {}
     for task, component in DIT_COMPONENT.items():
         row = document.get(component)
@@ -120,7 +122,7 @@ def _bindings(document: dict[str, Any]) -> dict[Task, str]:
     return result
 
 
-def _validate_body_config(raw: bytes, pruned: bool) -> dict[str, Any]:
+def _validate_body_config(raw: bytes, pruned: bool) -> dict[str, dict[str, object]]:
     """The body's `{component: config}` document, checked against its supported constructor."""
     if not pruned:
         if raw != dual_full_config(_sections()):
@@ -136,7 +138,7 @@ def _validate_body_config(raw: bytes, pruned: bool) -> dict[str, Any]:
         raise UnsupportedInput(
             "H3 pruned config has an unexpected component set", code="adaln_config"
         )
-    document: dict[str, Any] = canonical_json.decode(raw)
+    document: dict[str, dict[str, object]] = canonical_json.decode(raw)
     for task, component in DIT_COMPONENT.items():
         row = value.get(component)
         stamp = row.get("cozy_h3") if isinstance(row, dict) else None
@@ -195,7 +197,7 @@ def _project(ctx: Context, source: Checkpoint, task: Task, output: str) -> Model
 
 
 @invocable
-async def select_adaln_weights(ctx: Context, *, source: Weights[Any], task: Task) -> Selection:
+async def select_adaln_weights(ctx: Context, *, source: Weights[Any], task: Task) -> Selection:  # type: ignore[explicit-any, misc]  # static describe's any-layout spelling
     """One DiT's AdaLN generating weights, selected from a full or pruned checkpoint."""
     ctx.raise_if_cancelled()
     opened = open_source(ctx, source)
@@ -206,7 +208,7 @@ async def select_adaln_weights(ctx: Context, *, source: Weights[Any], task: Task
     if not pruned:
         return Selection(_project(ctx, opened, task, "model"), False, plan.digest, list(plan.steps))
     _bindings(document)
-    layout = document[DIT_COMPONENT[task]]["cozy_h3"]["table_keys"]
+    layout = cast(dict[str, object], document[DIT_COMPONENT[task]]["cozy_h3"])["table_keys"]  # checked by _validate_body_config
     if layout != plan.table_keys:
         raise UnsupportedInput(
             "retabling a previous schedule requires the full generating_model",
@@ -232,7 +234,7 @@ def _bank_config(task: Task, projection: str, plan: TimestepPlan) -> bytes:
 
 
 @invocable
-async def compute_adaln_tables(
+async def compute_adaln_tables(  # type: ignore[explicit-any, misc]  # static describe's any-layout spelling
     ctx: Context,
     *,
     source: Weights[Any],
@@ -311,9 +313,9 @@ def _bank_projection(bank: Checkpoint, task: Task, plan: TimestepPlan) -> str:
 def _apply_adaln(
     ctx: Context,
     *,
-    source: Weights[Any],
-    fl2va: Weights[Any],
-    ref2va: Weights[Any],
+    source: Weights[Model[object]],
+    fl2va: Weights[Model[object]],
+    ref2va: Weights[Model[object]],
     require_pruned: bool,
 ) -> ModelArtifact:
     ctx.raise_if_cancelled()
@@ -372,7 +374,7 @@ def _apply_adaln(
 
 
 @invocable
-async def apply_adaln(
+async def apply_adaln(  # type: ignore[explicit-any, misc]  # static describe's any-layout spelling
     ctx: Context,
     *,
     source: Weights[Any],
@@ -384,7 +386,7 @@ async def apply_adaln(
 
 
 @invocable
-async def retable_adaln(
+async def retable_adaln(  # type: ignore[explicit-any, misc]  # static describe's any-layout spelling
     ctx: Context,
     *,
     source: Weights[Any],
