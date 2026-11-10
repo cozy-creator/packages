@@ -138,35 +138,13 @@ fibo-2/fibo_2/upsampler.py: [explicit-any] Explicit "Any" is not allowed
 fibo-2/fibo_2/upsampler.py: [explicit-any] Explicit "Any" is not allowed
 fibo-2/fibo_2/upsampler.py: [no-untyped-call] Call to untyped function "from_config" of "_BaseAutoModelClass" in typed context
 fibo-2/fibo_2/upsampler.py: [union-attr] Item "Tensor" of "Tensor | Module" has no attribute "weight"
-flux-2/flux_2/__init__.py: [assignment] Incompatible types in assignment (expression has type "Prompt[Image]", base class "ImageRequest" defined the type as "str")
 flux-2/flux_2/model.py: [arg-type] Argument 1 to "Hook" has incompatible type "partial[Module | None]"; expected "Callable[[], Factors | None]"
-flux-2/flux_2/model.py: [arg-type] Argument 1 to "noise" has incompatible type "tuple[int, Any | Tensor | Module, int, int]"; expected "Sequence[int]"
-flux-2/flux_2/model.py: [call-overload] No overload variant of "to" of "TensorBase" matches argument types "device", "Tensor | Module"
-flux-2/flux_2/model.py: [explicit-any] Explicit "Any" is not allowed
-flux-2/flux_2/model.py: [explicit-any] Explicit "Any" is not allowed
-flux-2/flux_2/model.py: [explicit-any] Explicit "Any" is not allowed
-flux-2/flux_2/model.py: [explicit-any] Explicit "Any" is not allowed
-flux-2/flux_2/model.py: [no-any-return] Returning Any from function declared to return "Tensor"
-flux-2/flux_2/model.py: [no-any-return] Returning Any from function declared to return Module
-flux-2/flux_2/model.py: [no-untyped-call] Call to untyped function "TokenizersBackend" in typed context
-flux-2/flux_2/model.py: [no-untyped-call] Call to untyped function "from_config" of "AutoencoderKLFlux2" in typed context
-flux-2/flux_2/model.py: [no-untyped-call] Call to untyped function "from_config" of "Flux2Transformer2DModel" in typed context
-flux-2/flux_2/model.py: [no-untyped-call] Call to untyped function "from_config" of "_BaseAutoModelClass" in typed context
-flux-2/flux_2/model.py: [operator] "Tensor" not callable
-flux-2/flux_2/model.py: [operator] "Tensor" not callable
-flux-2/flux_2/model.py: [union-attr] Item "Tensor" of "Tensor | Module" has no attribute "in_channels"
 flux-2/flux_2/quantize.py: [union-attr] Item "DerivationHook" of "QuantizationPlan | SelectionPlan | DerivationHook" has no attribute "components"
 flux-2/flux_2/quantize.py: [union-attr] Item "DerivationHook" of "QuantizationPlan | SelectionPlan | DerivationHook" has no attribute "components"
 flux-2/flux_2/quantize.py: [union-attr] Item "DerivationHook" of "QuantizationPlan | SelectionPlan | DerivationHook" has no attribute "include"
 flux-2/flux_2/quantize.py: [union-attr] Item "DerivationHook" of "QuantizationPlan | SelectionPlan | DerivationHook" has no attribute "include"
 flux-2/flux_2/quantize.py: [union-attr] Item "SelectionPlan" of "QuantizationPlan | SelectionPlan | DerivationHook" has no attribute "components"
 flux-2/flux_2/quantize.py: [union-attr] Item "SelectionPlan" of "QuantizationPlan | SelectionPlan | DerivationHook" has no attribute "components"
-flux-2/flux_2/turbo.py: [assignment] Incompatible types in assignment (expression has type "None", variable has type "Tensor | Module")
-flux-2/flux_2/turbo.py: [assignment] Incompatible types in assignment (expression has type "dict[str, Factors]", variable has type "Tensor | Module")
-flux-2/flux_2/turbo.py: [attr-defined] "Flux2Transformer2DModel" has no attribute "get_submodule"
-flux-2/flux_2/turbo.py: [explicit-any] Explicit "Any" is not allowed
-flux-2/flux_2/turbo.py: [no-untyped-call] Call to untyped function "Flux2Transformer2DModel" in typed context
-flux-2/flux_2/upsampler.py: [explicit-any] Explicit "Any" is not allowed
 flux-3-klein/flux_3_klein/__init__.py: [assignment] Incompatible types in assignment (expression has type "Prompt[Image]", base class "ImageRequest" defined the type as "str")
 flux-3-klein/flux_3_klein/klein.py: [arg-type] Argument 2 to "_get_qwen3_vl_prompt_embeds" of "Flux3TextEncoderStep" has incompatible type "Qwen3VLProcessor"; expected "AutoProcessor"
 flux-3-klein/flux_3_klein/klein.py: [assignment] Incompatible types in assignment (expression has type "Tensor", base class "tuple" defined the type as "Callable[[Any, SupportsIndex, SupportsIndex], int]")
