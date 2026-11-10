@@ -675,7 +675,8 @@ class _VideoStream:
                 code="output_integrity",
             )
         self._slices.put(None)
-        self._encode.add_done_callback(lambda _: self._taken.put(None))
+        taken = self._taken  # the callback holds the queue, not the stream: no cycle keeps its frames
+        self._encode.add_done_callback(lambda _: taken.put(None))
         try:
             while (index := self._taken.get()) is not None:
                 if self._taken.empty():  # the newest only
