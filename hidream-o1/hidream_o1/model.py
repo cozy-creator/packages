@@ -384,9 +384,8 @@ def _rope(config: Qwen3VLTextConfig, positions: torch.Tensor, like: torch.Tensor
     """Qwen3-VL's interleaved M-RoPE in f32 from an f32 inverse frequency (upstream's
     `original_inv_freq`), as (cos, sin) of [1, T, head_dim] in `like`'s dtype."""
     device = like.device
-    # Qwen3-VL's text config always carries its head width and M-RoPE parameters.
-    dim = cast(int, config.head_dim)
-    rope = cast(_MRope, config.rope_parameters)
+    dim = config.head_dim
+    rope = cast(_MRope, config.rope_parameters)  # Qwen3-VL's text config always carries them
     theta, section = rope["rope_theta"], rope["mrope_section"]
     inv = 1.0 / (theta ** (torch.arange(0, dim, 2, dtype=torch.int64).float() / dim))
     freqs = positions.to(device).float()[:, None, :, None] * inv.to(device)[None, None, None, :]
@@ -516,7 +515,7 @@ class HiDreamO1(Model[O1Graph]):
         # Every caption's prefix K/V is read by every step: the Runtime holds it (on the card while
         # there is room, else refilled from pinned host memory) until the loop ends.
         config = body.language_model.config
-        per_token = 2 * config.num_key_value_heads * cast(int, config.head_dim) * torch.bfloat16.itemsize  # always set
+        per_token = 2 * cast(int, config.num_key_value_heads) * config.head_dim * torch.bfloat16.itemsize  # always set
         nbytes = sum(seq.prefix for seq in seqs) * per_token * config.num_hidden_layers
         with torch.inference_mode(), retained(nbytes) as held:
             vision = None
