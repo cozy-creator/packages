@@ -82,7 +82,7 @@ def tokenizer(assets: ModelAssets) -> PreTrainedTokenizerFast:
     for key in ("added_tokens_decoder", "tokenizer_file", "name_or_path", "tokenizer_class", "processor_class",
                 "chat_template", "auto_map"):
         config.pop(key, None)
-    return PreTrainedTokenizerFast(
+    return PreTrainedTokenizerFast(  # type: ignore[no-untyped-call]  # Transformers' tokenizer __init__ is unannotated
         tokenizer_object=Tokenizer.from_str(_read(assets, "tokenizer.json").decode()),
         chat_template=_read(assets, "chat_template.jinja").decode(), **config,
     )
@@ -207,8 +207,9 @@ def text_ids(length: int) -> torch.Tensor:
 
 
 def _bn(vae: AutoencoderKLFlux2, like: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-    mean = vae.bn.running_mean.view(1, -1, 1, 1).to(like)
-    std = torch.sqrt(vae.bn.running_var.view(1, -1, 1, 1) + vae.config["batch_norm_eps"]).to(like)
+    # FLUX.2's VAE batch norm tracks its running statistics.
+    mean = vae.bn.running_mean.view(1, -1, 1, 1).to(like)  # type: ignore[union-attr]
+    std = torch.sqrt(vae.bn.running_var.view(1, -1, 1, 1) + vae.config["batch_norm_eps"]).to(like)  # type: ignore[union-attr]
     return mean, std
 
 
@@ -236,15 +237,17 @@ class Flux2(Model[Flux2Graph]):
         device = torch.device(str(self.device))
         layers = TEXT_LAYERS[self.graph.family]
         with torch.inference_mode():
+            # Diffusers types these by its own loaders' classes; the family picks the encoder.
+            embeds: torch.Tensor
             if self.dev:
                 embeds = Flux2Pipeline._get_mistral_3_small_prompt_embeds(
-                    encoder, self.tokenizer, prompt, dtype=torch.bfloat16, device=device,
-                    max_sequence_length=MAX_TOKENS, system_message=SYSTEM_MESSAGE, hidden_states_layers=layers,
+                    encoder, self.tokenizer, prompt, dtype=torch.bfloat16, device=device,  # type: ignore[arg-type]
+                    max_sequence_length=MAX_TOKENS, system_message=SYSTEM_MESSAGE, hidden_states_layers=layers,  # type: ignore[arg-type]
                 )
             else:
                 embeds = Flux2KleinPipeline._get_qwen3_prompt_embeds(
-                    encoder, self.tokenizer, prompt, dtype=torch.bfloat16, device=device,
-                    max_sequence_length=MAX_TOKENS, hidden_states_layers=layers,
+                    encoder, self.tokenizer, prompt, dtype=torch.bfloat16, device=device,  # type: ignore[arg-type]
+                    max_sequence_length=MAX_TOKENS, hidden_states_layers=layers,  # type: ignore[arg-type]
                 )
         return embeds.cpu()
 
@@ -267,7 +270,7 @@ class Flux2(Model[Flux2Graph]):
             for index, reference in enumerate(references):
                 pixels = torch.from_numpy(np.array(reference)).permute(2, 0, 1).float() / 127.5 - 1.0
                 latents = vae.encode(pixels[None].to(device=device, dtype=vae.dtype)).latent_dist.mode()
-                latents = Flux2Pipeline._patchify_latents(latents.float())
+                latents = Flux2Pipeline._patchify_latents(latents.float())  # type: ignore[no-untyped-call]  # Diffusers' helper is unannotated
                 mean, std = _bn(vae, latents)
                 latents = (latents - mean) / std
                 tokens.append(latents.flatten(2).transpose(1, 2).to(torch.bfloat16).cpu())
@@ -334,7 +337,7 @@ class Flux2(Model[Flux2Graph]):
         with torch.inference_mode():
             latents = tokens.to(device=device, dtype=torch.float32).view(1, rows, columns, -1).permute(0, 3, 1, 2)
             mean, std = _bn(vae, latents)
-            latents = Flux2Pipeline._unpatchify_latents(latents * std + mean)
+            latents = Flux2Pipeline._unpatchify_latents(latents * std + mean)  # type: ignore[no-untyped-call]  # Diffusers' helper is unannotated
             image = vae.decode(latents.to(vae.dtype), return_dict=False)[0][0]
             if not torch.isfinite(image).all():
                 raise OutputError(

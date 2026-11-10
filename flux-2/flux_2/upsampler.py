@@ -6,6 +6,8 @@ pixels and 512 new tokens are BFL's; decoding is greedy where BFL samples at tem
 
 from __future__ import annotations
 
+from typing import cast
+
 
 import torch
 from cozy_runtime import lm
@@ -20,7 +22,7 @@ from diffusers.pipelines.flux2.system_messages import SYSTEM_MESSAGE_UPSAMPLING_
 from PIL import Image, ImageOps
 from transformers import initialization as transformer_init
 
-from transformers import PixtralProcessor
+from transformers import PixtralProcessor, PreTrainedModel
 
 from .model import processor, text_encoder
 
@@ -56,13 +58,15 @@ class Flux2Upsampler(Model[UpsamplerGraph]):
         if images:
             upright = [ImageOps.exif_transpose(image).convert("RGB") for image in images]
             shown = _validate_and_process_images([upright], Flux2ImageProcessor(), UPSAMPLING_MAX_IMAGE_SIZE)
-        inputs = processor.apply_chat_template(
+        # Tokenized with return_dict, the template is a BatchFeature (Transformers types it as text).
+        inputs = processor.apply_chat_template(  # type: ignore[attr-defined]
             format_input([prompt], system, shown), add_generation_prompt=True, tokenize=True,
             return_dict=True, return_tensors="pt",
         ).to(torch.device(str(self.device)))
         if "pixel_values" in inputs:
             inputs["pixel_values"] = inputs["pixel_values"].to(model.dtype)
         tokenizer = processor.tokenizer
-        out = lm.generate(model, inputs, max_new_tokens=MAX_NEW_TOKENS, stop=[tokenizer.eos_token_id],
+        # `model` is a causal LM (`text_encoder`).
+        out = lm.generate(cast(PreTrainedModel, model), inputs, max_new_tokens=MAX_NEW_TOKENS, stop=[tokenizer.eos_token_id],
                           pad=tokenizer.pad_token_id)
         return str(tokenizer.decode(out[0], skip_special_tokens=True)).strip()
