@@ -16,6 +16,7 @@ from typing import Literal
 
 import msgspec
 import numpy as np
+from numpy.typing import NDArray
 from cozy_runtime.author import Context, Telemetry, UnsupportedInput
 from cozy_runtime.derive import safetensors_io as st
 from cozy_runtime.derive.quantization import (
@@ -449,7 +450,7 @@ def write_cast(
 
 def _read_f32(
     source: Checkpoint, component: str, key: str, shape: tuple[int, ...]
-) -> tuple[np.ndarray, int]:
+) -> tuple[NDArray[np.float32], int]:
     length = math.prod(shape) * 4
     if length > MAX_CAST_TENSOR_BYTES:
         raise UnsupportedInput(

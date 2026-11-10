@@ -3,9 +3,8 @@
 from __future__ import annotations
 
 import math
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from typing import Any
 
 import torch
 from torch.nn import functional as F
@@ -47,6 +46,14 @@ class CurveAdapter:
     points: int = 1025
 
 
+def config_int(config: Mapping[str, object], name: str) -> int:
+    """`int(config[name])` of a JSON config's number."""
+    value = config[name]
+    if not isinstance(value, int | float | str):
+        raise TypeError(f"config {name} is {type(value).__name__}, not a number")
+    return int(value)
+
+
 @dataclass(frozen=True, slots=True)
 class H3Topology:
     hidden_size: int
@@ -56,7 +63,7 @@ class H3Topology:
     time_embed_dim: int
 
     @classmethod
-    def from_config(cls, config: dict[str, Any]) -> H3Topology:
+    def from_config(cls, config: Mapping[str, object]) -> H3Topology:
         names = (
             "hidden_size",
             "num_layers",
@@ -65,7 +72,7 @@ class H3Topology:
             "time_embed_dim",
         )
         try:
-            values = tuple(int(config[name]) for name in names)
+            values = tuple(config_int(config, name) for name in names)
         except (KeyError, TypeError, ValueError) as exc:
             raise ValueError(
                 "MiniMax-H3 config is missing its exact timestep/AdaLN dimensions"

@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import math
-from typing import Any
+from collections.abc import Mapping
+from typing import Any, cast
 
 import torch
 from cozy_runtime.author import (
@@ -18,7 +19,7 @@ from cozy_runtime.author import (
 from cozy_runtime.weights_store import Checkpoint, Derivation
 
 from .adaln_operations import _sections, _validate_generators
-from .kernel import H3Topology, LowRankAdapter, adapter_shapes, table_shapes
+from .kernel import H3Topology, LowRankAdapter, adapter_shapes, config_int, table_shapes
 from .model_config import DIT_COMPONENT
 from .plans import Task, TimestepPlan
 from .source import (
@@ -80,13 +81,13 @@ def collapse_head_bank(
 
 
 def overlay_shapes(
-    config: dict[str, Any], plan: TimestepPlan
+    config: Mapping[str, object], plan: TimestepPlan
 ) -> dict[str, tuple[str, tuple[int, ...]]]:
     """Constructor order of the overlay, with all six inference LoRA families."""
     hidden, inner, ffn = (
-        int(config["hidden_size"]),
-        int(config["num_attention_heads"]) * int(config["attention_head_dim"]),
-        int(config["ffn_dim"]),
+        config_int(config, "hidden_size"),
+        config_int(config, "num_attention_heads") * config_int(config, "attention_head_dim"),
+        config_int(config, "ffn_dim"),
     )
     shapes: dict[str, tuple[str, tuple[int, ...]]] = {}
     families = {
@@ -98,8 +99,8 @@ def overlay_shapes(
         "ff.net.2": (ffn, hidden),
     }
     for prefix, count in (
-        ("token_refiner.refiner_blocks", int(config["num_refiner_layers"])),
-        ("transformer_blocks", int(config["num_layers"])),
+        ("token_refiner.refiner_blocks", config_int(config, "num_refiner_layers")),
+        ("transformer_blocks", config_int(config, "num_layers")),
     ):
         for index in range(count):
             for family, (inputs, outputs) in families.items():
@@ -113,8 +114,8 @@ def overlay_shapes(
                 )
     shapes["norm_out.table"] = ("bf16", (len(plan.timesteps), 2, hidden))
     for prefix, outputs in (
-        ("proj_out", int(config["in_channels"]) * math.prod(config["patch_size"])),
-        ("audio_proj_out", int(config["audio_in_channels"])),
+        ("proj_out", config_int(config, "in_channels") * math.prod(cast(list[int], config["patch_size"]))),  # [t, h, w]
+        ("audio_proj_out", config_int(config, "audio_in_channels")),
     ):
         shapes[f"{prefix}.weight"] = ("f32", (NUM_STEPS // BLOCK_SIZE, outputs, hidden))
         shapes[f"{prefix}.bias"] = ("f32", (NUM_STEPS // BLOCK_SIZE, outputs))
@@ -122,7 +123,7 @@ def overlay_shapes(
 
 
 def _adapter_component(
-    present: Rows, component: str, config: dict[str, Any], plan: TimestepPlan, topology: H3Topology
+    present: Rows, component: str, config: Mapping[str, object], plan: TimestepPlan, topology: H3Topology
 ) -> None:
     expected = {
         key: ("bf16", ((NUM_STEPS, *shape[1:]) if dtype == "f32" else shape))
@@ -155,14 +156,14 @@ def adapter_components(present: Rows) -> dict[Task, str]:
     return {task: names[0] for task, names in found.items()}
 
 
-def _topologies() -> tuple[dict[Task, dict[str, Any]], dict[Task, H3Topology]]:
+def _topologies() -> tuple[dict[Task, dict[str, object]], dict[Task, H3Topology]]:
     sections = _sections()
     configs = {task: sections[DIT_COMPONENT[task]] for task in TASKS}
     return configs, {task: H3Topology.from_config(configs[task]) for task in TASKS}
 
 
 @invocable
-async def turbo_lora(
+async def turbo_lora(  # type: ignore[explicit-any, misc]  # static describe's any-layout spelling
     ctx: Context,
     *,
     adapters: Weights[Any],
