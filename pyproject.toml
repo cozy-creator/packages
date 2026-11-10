@@ -78,6 +78,8 @@ disallow_any_unimported = true
 disallow_any_decorated = true
 implicit_reexport = false
 enable_error_code = ["ignore-without-code", "possibly-undefined", "redundant-expr", "truthy-bool"]
+# torch leaves a few of its own functions unannotated (torch.cuda.Event(), is_initialized()).
+untyped_calls_exclude = ["torch"]
 exclude = ["^birefnet/birefnet/upstream/", "^seedvr2/seedvr2/upstream/", "^hunyuan-image-3/hunyuan_image_3/tencent/"]
 
 # Untyped libraries (no py.typed) until typings/ covers what we call, and modules only a proof fetches.
@@ -90,6 +92,16 @@ module = [
     "flux3", "flux3.*",
 ]
 ignore_missing_imports = true
+
+# A @triton.jit kernel's `def` line and body are its Triton cache key (the Runtime's `TritonKernels.identity`):
+# annotating one misses every prebuilt kernel. So the codes an untyped kernel def raises are off in the modules
+# holding kernels, for the whole module (mypy has no per-function setting); every other check applies there.
+[[tool.mypy.overrides]]
+module = ["minimax_h3.glue"]
+disable_error_code = ["no-untyped-def", "no-any-unimported", "untyped-decorator"]
+disallow_any_decorated = false
+# A def line's own `# type: ignore` is part of its cache key too, so one these settings make unused stays.
+warn_unused_ignores = false
 
 # Attributed upstream architecture is exercised by its real constructor and model proof.
 [[tool.mypy.overrides]]

@@ -334,7 +334,6 @@ krea-2/krea_2/model.py: [no-untyped-call] Call to untyped function "_from_config
 krea-2/krea_2/model.py: [no-untyped-call] Call to untyped function "from_config" of "AutoencoderKLQwenImage" in typed context
 krea-2/krea_2/model.py: [no-untyped-call] Call to untyped function "from_config" of "FlowMatchEulerDiscreteScheduler" in typed context
 krea-2/krea_2/model.py: [no-untyped-call] Call to untyped function "from_config" of "Krea2Transformer2DModel" in typed context
-krea-2/krea_2/model.py: [no-untyped-call] Call to untyped function "unflatten" in typed context
 krea-2/krea_2/model.py: [operator] "Tensor" not callable
 krea-2/krea_2/model.py: [operator] "Tensor" not callable
 krea-2/krea_2/model.py: [operator] Unsupported operand types for // (Module and "int")
@@ -495,7 +494,6 @@ minimax-h3/minimax_h3/adaln_pruned.py: [explicit-any] Explicit "Any" is not allo
 minimax-h3/minimax_h3/adaln_pruned.py: [explicit-any] Explicit "Any" is not allowed
 minimax-h3/minimax_h3/adaln_pruned.py: [misc] Function is untyped after decorator transformation
 minimax-h3/minimax_h3/adaln_pruned.py: [no-untyped-call] Call to untyped function "__init__" in typed context
-minimax-h3/minimax_h3/adaln_pruned.py: [no-untyped-call] Call to untyped function "split" in typed context
 minimax-h3/minimax_h3/adaln_pruned.py: [operator] "Tensor" not callable
 minimax-h3/minimax_h3/adaln_pruned.py: [operator] "Tensor" not callable
 minimax-h3/minimax_h3/adaln_pruned.py: [operator] "Tensor" not callable
@@ -586,32 +584,9 @@ minimax-h3/minimax_h3/glue.py: [explicit-any] Explicit "Any" is not allowed
 minimax-h3/minimax_h3/glue.py: [explicit-any] Explicit "Any" is not allowed
 minimax-h3/minimax_h3/glue.py: [explicit-any] Explicit "Any" is not allowed
 minimax-h3/minimax_h3/glue.py: [explicit-any] Explicit "Any" is not allowed
-minimax-h3/minimax_h3/glue.py: [misc] Function is untyped after decorator transformation
-minimax-h3/minimax_h3/glue.py: [misc] Function is untyped after decorator transformation
-minimax-h3/minimax_h3/glue.py: [misc] Function is untyped after decorator transformation
-minimax-h3/minimax_h3/glue.py: [misc] Function is untyped after decorator transformation
-minimax-h3/minimax_h3/glue.py: [misc] Function is untyped after decorator transformation
-minimax-h3/minimax_h3/glue.py: [misc] Function is untyped after decorator transformation
-minimax-h3/minimax_h3/glue.py: [misc] Function is untyped after decorator transformation
-minimax-h3/minimax_h3/glue.py: [misc] Function is untyped after decorator transformation
-minimax-h3/minimax_h3/glue.py: [no-any-unimported] Argument 10 to "_gate_add_kernel" becomes "Any" due to an unfollowed import
-minimax-h3/minimax_h3/glue.py: [no-any-unimported] Argument 10 to "_rope_norm_kernel" becomes "Any" due to an unfollowed import
-minimax-h3/minimax_h3/glue.py: [no-any-unimported] Argument 11 to "_rope_norm_kernel" becomes "Any" due to an unfollowed import
-minimax-h3/minimax_h3/glue.py: [no-any-unimported] Argument 16 to "_norm_mod_kernel" becomes "Any" due to an unfollowed import
-minimax-h3/minimax_h3/glue.py: [no-any-unimported] Argument 17 to "_norm_mod_kernel" becomes "Any" due to an unfollowed import
-minimax-h3/minimax_h3/glue.py: [no-any-unimported] Argument 18 to "_norm_mod_kernel" becomes "Any" due to an unfollowed import
-minimax-h3/minimax_h3/glue.py: [no-any-unimported] Argument 5 to "_key_sum_kernel" becomes "Any" due to an unfollowed import
-minimax-h3/minimax_h3/glue.py: [no-any-unimported] Argument 6 to "_key_sum_kernel" becomes "Any" due to an unfollowed import
-minimax-h3/minimax_h3/glue.py: [no-any-unimported] Argument 7 to "_swiglu_kernel" becomes "Any" due to an unfollowed import
-minimax-h3/minimax_h3/glue.py: [no-any-unimported] Argument 8 to "_swiglu_kernel" becomes "Any" due to an unfollowed import
-minimax-h3/minimax_h3/glue.py: [no-any-unimported] Argument 9 to "_rope_norm_kernel" becomes "Any" due to an unfollowed import
-minimax-h3/minimax_h3/glue.py: [no-untyped-call] Call to untyped function "unflatten" in typed context
 minimax-h3/minimax_h3/glue.py: [redundant-expr] Left operand of "and" is always true
 minimax-h3/minimax_h3/glue.py: [redundant-expr] Left operand of "and" is always true
 minimax-h3/minimax_h3/glue.py: [unreachable] Statement is unreachable
-minimax-h3/minimax_h3/glue.py: [unused-ignore] Unused "type: ignore" comment
-minimax-h3/minimax_h3/glue.py: [unused-ignore] Unused "type: ignore" comment
-minimax-h3/minimax_h3/glue.py: [unused-ignore] Unused "type: ignore" comment
 minimax-h3/minimax_h3/guide_rows.py: [explicit-any] Explicit "Any" is not allowed
 minimax-h3/minimax_h3/guide_rows.py: [explicit-any] Explicit "Any" is not allowed
 minimax-h3/minimax_h3/guide_rows.py: [explicit-any] Explicit "Any" is not allowed
@@ -876,7 +851,6 @@ minimax-h3/minimax_h3/vae_tiles.py: [no-any-return] Returning Any from function 
 minimax-h3/minimax_h3/vae_tiles.py: [no-any-return] Returning Any from function declared to return "Tensor"
 minimax-h3/minimax_h3/vae_tiles.py: [no-any-return] Returning Any from function declared to return "Tensor"
 minimax-h3/minimax_h3/vae_tiles.py: [no-any-return] Returning Any from function declared to return "Tensor"
-minimax-h3/minimax_h3/vae_tiles.py: [no-untyped-call] Call to untyped function "split" in typed context
 minimax-h3/minimax_h3/vae_tiles.py: [unused-ignore] Unused "type: ignore" comment
 moss-image/moss_image/model.py: [arg-type] Argument 1 to "noise" has incompatible type "tuple[int, Tensor | Module, int, int]"; expected "Sequence[int]"
 moss-image/moss_image/model.py: [arg-type] Argument 1 to "to" of "TensorBase" has incompatible type "Tensor | Module"; expected "Tensor"
@@ -900,7 +874,6 @@ moss-image/moss_image/model.py: [no-untyped-call] Call to untyped function "Toke
 moss-image/moss_image/model.py: [no-untyped-call] Call to untyped function "__init__" in typed context
 moss-image/moss_image/model.py: [no-untyped-call] Call to untyped function "_from_config" of "PreTrainedModel" in typed context
 moss-image/moss_image/model.py: [no-untyped-call] Call to untyped function "from_config" of "AutoencoderKLFlux2" in typed context
-moss-image/moss_image/model.py: [no-untyped-call] Call to untyped function "unflatten" in typed context
 moss-image/moss_image/model.py: [operator] "Tensor" not callable
 moss-image/moss_image/model.py: [operator] "Tensor" not callable
 moss-image/moss_image/model.py: [operator] "Tensor" not callable
@@ -1183,4 +1156,3 @@ seedvr2/seedvr2/model.py: [no-any-return] Returning Any from function declared t
 seedvr2/seedvr2/model.py: [no-any-return] Returning Any from function declared to return "Tensor"
 seedvr2/seedvr2/model.py: [no-any-return] Returning Any from function declared to return "Tensor"
 seedvr2/seedvr2/model.py: [no-any-return] Returning Any from function declared to return "Tensor"
-seedvr2/seedvr2/model.py: [no-untyped-call] Call to untyped function "split" in typed context
