@@ -61,7 +61,7 @@ from cozy_runtime.accel.kernels import (
 )
 from cozy_runtime.accel.rows import Rows, rows
 
-from .adaln_pruned import AdaLNPrunedMiniMaxH3Transformer
+from .adaln_pruned import H3Transformer
 
 try:
     import triton
@@ -1222,7 +1222,7 @@ def _widths(transformer: Any, root: str) -> None:
 
 
 def _validate_transformer(transformer: Any, root: str) -> None:
-    forwards = (MiniMaxH3Transformer3DModel.forward, AdaLNPrunedMiniMaxH3Transformer.forward)
+    forwards = (MiniMaxH3Transformer3DModel.forward, H3Transformer.forward)
     _shape(
         type(transformer).forward in forwards and plain_forward(transformer),
         f"{root}: {_type_name(transformer)} overrides the Diffusers MiniMax-H3 forward",

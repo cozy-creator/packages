@@ -35,7 +35,6 @@ from diffusers import (
     MiniMaxH3Blocks,
     MiniMaxH3ModularPipeline,
     MiniMaxH3Scheduler,
-    MiniMaxH3Transformer3DModel,
 )
 from diffusers.modular_pipelines.minimax_h3 import (
     MiniMaxH3AudioReference,
@@ -70,7 +69,7 @@ from cozy_runtime.fields import Image
 from cozy_runtime.media import DecodedAudio, DecodedAudioChunk, DecodedVideoFrame
 from h3_tables.table_layout import TableLayout
 
-from .adaln_pruned import AdaLNPrunedMiniMaxH3Transformer
+from .adaln_pruned import H3Transformer, build_transformer
 from .cell_texture import CellEqualizer
 from .conditioner import FinalHiddenState, PresentationLength, build_text_conditioner
 from .continuation import (
@@ -920,17 +919,14 @@ class OfficialH3Pipeline:
 
     def __init__(self, config: Config, plans: Mapping[Trunk, TimestepPlan]) -> None:
         dit_specs = _dit_specs(_artifact_sections(config))
-        for trunk, (_upstream, _structure, layout) in dit_specs.items():
+        for trunk, (_upstream, layout) in dit_specs.items():
             _validate_plan(plans[trunk], trunk, layout)
         blocks = {
             name: MiniMaxH3Blocks().get_workflow(_diffusers_workflow(name))
             for name in _WORKFLOW_TASKS
         }
         pipes = {name: MiniMaxH3ModularPipeline(blocks=block) for name, block in blocks.items()}
-        dits = {
-            trunk: _build_dit(upstream, structure, layout)
-            for trunk, (upstream, structure, layout) in dit_specs.items()
-        }
+        dits = {trunk: _build_dit(upstream, layout) for trunk, (upstream, layout) in dit_specs.items()}
         _validate_dual_topology(dits, _DIT_COMPONENT)
         text_encoder = build_text_conditioner(config.section("text_encoder").mapping())
         video_vae = _apply_video_vae_dtype(
@@ -1517,7 +1513,7 @@ class OfficialH3Pipeline:
         plan = state.get(_PLAN)
         schedule = plan.executed(_float_tuple(state.timesteps), _float_tuple(state.audio_timesteps))
         if _BANK[task] is None:
-            layout = self._dit_specs[_TRUNK[task]][2]
+            layout = self._dit_specs[_TRUNK[task]][1]
             if layout is not None:
                 layout.require(schedule.video_timesteps, schedule.audio_timesteps)
         facts = ScheduleFacts.of(plan, schedule)
@@ -1754,19 +1750,17 @@ class OfficialH3TurboLoRA:
         self.components = {_OVERLAY_COMPONENT[trunk]: value for trunk, value in overlays.items()}
 
     def overlay(self, base: OfficialH3Pipeline, trunk: Trunk) -> Overlay:
-        config, structure, _layout = base._dit_specs[trunk]
-        if structure != "adaln-pruned" or config != self.specs[trunk][0]:
+        """The trunk's overlay over `base`: its tables replace the base's modulation, FULL or
+        tabled, so any base of the same DiT configuration serves it."""
+        if base._dit_specs[trunk][0] != self.specs[trunk][0]:
             raise ValueError(
-                "turbo LoRA and AdaLN-pruned base must have the same DiT configuration",
+                "turbo LoRA and base must have the same DiT configuration",
             )
         return self.components[_OVERLAY_COMPONENT[trunk]]
 
 
 def build_h3_turbo_base(config: Config, plans: Mapping[Trunk, TimestepPlan]) -> OfficialH3Pipeline:
     """The ordinary five-root artifact, with its turbo consumers installed before fill."""
-    specs = _dit_specs(_artifact_sections(config))
-    if any(structure != "adaln-pruned" for _config, structure, _layout in specs.values()):
-        raise ValueError("turbo requires an AdaLN-pruned base")
     pipe = OfficialH3Pipeline(config, plans)
     for name in _DIT_COMPONENT.values():
         pipe.components[name].install_lora_consumers()
@@ -1820,10 +1814,9 @@ class OfficialH3RegenerateLoRA:
         self.components = {REGENERATE_COMPONENT: overlay.eval()}
 
     def overlay(self, base: OfficialH3Pipeline) -> Overlay:
-        config, structure, _layout = base._dit_specs["fl2va"]
-        if structure != "adaln-pruned" or config != self.spec:
+        if base._dit_specs["fl2va"][0] != self.spec:
             raise ValueError(
-                "the Regenerate overlay and the AdaLN-pruned base must have the same DiT configuration",
+                "the Regenerate overlay and the base must have the same DiT configuration",
             )
         return self.components[REGENERATE_COMPONENT]
 
@@ -1846,7 +1839,8 @@ def _artifact_sections(config: Config) -> Config:
     return config
 
 
-def _dit_spec(config: Config, task: Trunk) -> tuple[dict[str, Any], str, TableLayout | None]:
+def _dit_spec(config: Config, task: Trunk) -> tuple[dict[str, Any], TableLayout | None]:
+    """A DiT's upstream config and, AdaLN-pruned, its table layout; FULL has none."""
     component = _DIT_COMPONENT[task]
     upstream = config.section(component).mapping()
     extension = upstream.pop("cozy_h3", None)
@@ -1892,12 +1886,12 @@ def _dit_spec(config: Config, task: Trunk) -> tuple[dict[str, Any], str, TableLa
                 f"artifact config {component!r} {name!r} is {extension[name]!r}, expected {want!r}",
             )
     layout = TableLayout.parse(extension["table_keys"]) if structure == "adaln-pruned" else None
-    return upstream, str(structure), layout
+    return upstream, layout
 
 
-def _dit_specs(config: Config) -> dict[Trunk, tuple[dict[str, Any], str, TableLayout | None]]:
+def _dit_specs(config: Config) -> dict[Trunk, tuple[dict[str, Any], TableLayout | None]]:
     specs = {trunk: _dit_spec(config, trunk) for trunk in _TRUNKS}
-    if len({spec[1] for spec in specs.values()}) != 1:
+    if len({spec[1] is None for spec in specs.values()}) != 1:
         raise ValueError(
             "FL2VA and Ref2VA DiTs use different modulation structures",
         )
@@ -1908,20 +1902,12 @@ def _dit_specs(config: Config) -> dict[Trunk, tuple[dict[str, Any], str, TableLa
     return specs
 
 
-def _build_dit(config: Mapping[str, Any], structure: str, layout: TableLayout | None) -> Any:
-    if structure == "full":
-        transformer = MiniMaxH3Transformer3DModel.from_config(dict(config))
-    else:
-        if layout is None:
-            raise ValueError(
-                "pruned model is missing its table row labels"
-            )
-        transformer = AdaLNPrunedMiniMaxH3Transformer.from_official_config(
-            config,
-            table_timesteps=layout.timesteps,
-            table_block_keys=layout.block_keys,
-        )
-    return _apply_transformer_dtype(transformer)
+def _build_dit(config: Mapping[str, Any], layout: TableLayout | None) -> H3Transformer:
+    """FULL without a layout, else AdaLN-pruned over its tables."""
+    tables = None if layout is None else (layout.timesteps, layout.block_keys)
+    transformer = build_transformer(config, tables)
+    _apply_transformer_dtype(transformer)
+    return transformer
 
 
 def _overlay_spec(
