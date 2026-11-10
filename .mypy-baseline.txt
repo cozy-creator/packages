@@ -107,36 +107,6 @@ ideogram-4/ideogram_4/text_encoder.py: [union-attr] Item "list[int]" of "str | l
 ideogram-4/ideogram_4/text_encoder.py: [union-attr] Item "list[list[int]]" of "str | list[int] | list[str] | list[list[int]] | BatchEncoding[Any]" has no attribute "to"
 ideogram-4/ideogram_4/text_encoder.py: [union-attr] Item "list[str]" of "str | list[int] | list[str] | list[list[int]] | BatchEncoding[Any]" has no attribute "to"
 ideogram-4/ideogram_4/text_encoder.py: [union-attr] Item "str" of "str | list[int] | list[str] | list[list[int]] | BatchEncoding[Any]" has no attribute "to"
-krea-2/krea_2/model.py: [arg-type] Argument "sigmas" to "retrieve_timesteps" has incompatible type "ndarray[tuple[int], dtype[float64]]"; expected "list[float] | None"
-krea-2/krea_2/model.py: [arg-type] Argument 1 to "noise" has incompatible type "tuple[int, Any | Tensor | int, int, int]"; expected "Sequence[int]"
-krea-2/krea_2/model.py: [arg-type] Argument 2 to "view" of "TensorBase" has incompatible type "Any | Tensor | int"; expected "int | SymInt"
-krea-2/krea_2/model.py: [arg-type] Argument 3 to "reshape" of "TensorBase" has incompatible type "Any | Tensor | int"; expected "int | SymInt"
-krea-2/krea_2/model.py: [attr-defined] "Transformer" has no attribute "final_layer"
-krea-2/krea_2/model.py: [attr-defined] "Transformer" has no attribute "img_in"
-krea-2/krea_2/model.py: [attr-defined] "Transformer" has no attribute "time_embed"
-krea-2/krea_2/model.py: [attr-defined] "Transformer" has no attribute "time_mod_proj"
-krea-2/krea_2/model.py: [attr-defined] "Transformer" has no attribute "transformer_blocks"
-krea-2/krea_2/model.py: [call-overload] No overload variant of "to" of "TensorBase" matches argument types "device", "Tensor | Module"
-krea-2/krea_2/model.py: [explicit-any] Explicit "Any" is not allowed
-krea-2/krea_2/model.py: [explicit-any] Explicit "Any" is not allowed
-krea-2/krea_2/model.py: [explicit-any] Explicit "Any" is not allowed
-krea-2/krea_2/model.py: [explicit-any] Explicit "Any" is not allowed
-krea-2/krea_2/model.py: [explicit-any] Explicit "Any" is not allowed
-krea-2/krea_2/model.py: [explicit-any] Explicit "Any" is not allowed
-krea-2/krea_2/model.py: [explicit-any] Explicit "Any" is not allowed
-krea-2/krea_2/model.py: [no-any-return] Returning Any from function declared to return "Tensor"
-krea-2/krea_2/model.py: [no-untyped-call] Call to untyped function "TokenizersBackend" in typed context
-krea-2/krea_2/model.py: [no-untyped-call] Call to untyped function "_from_config" of "PreTrainedModel" in typed context
-krea-2/krea_2/model.py: [no-untyped-call] Call to untyped function "from_config" of "AutoencoderKLQwenImage" in typed context
-krea-2/krea_2/model.py: [no-untyped-call] Call to untyped function "from_config" of "FlowMatchEulerDiscreteScheduler" in typed context
-krea-2/krea_2/model.py: [no-untyped-call] Call to untyped function "from_config" of "Krea2Transformer2DModel" in typed context
-krea-2/krea_2/model.py: [operator] "Tensor" not callable
-krea-2/krea_2/model.py: [operator] "Tensor" not callable
-krea-2/krea_2/model.py: [operator] Unsupported operand types for // (Module and "int")
-krea-2/krea_2/model.py: [union-attr] Item "Tensor" of "Tensor | Module" has no attribute "in_channels"
-krea-2/krea_2/model.py: [union-attr] Item "Tensor" of "Tensor | Module" has no attribute "latents_mean"
-krea-2/krea_2/model.py: [union-attr] Item "Tensor" of "Tensor | Module" has no attribute "latents_std"
-krea-2/krea_2/model.py: [unused-ignore] Unused "type: ignore" comment
 minimax-h3-tools/src/h3_tables/adaln_operations.py: [explicit-any] Explicit "Any" is not allowed
 minimax-h3-tools/src/h3_tables/adaln_operations.py: [explicit-any] Explicit "Any" is not allowed
 minimax-h3-tools/src/h3_tables/adaln_operations.py: [explicit-any] Explicit "Any" is not allowed

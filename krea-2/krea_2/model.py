@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable, Mapping
-from typing import Any
+from typing import TYPE_CHECKING, TypedDict, cast
 
 import numpy as np
 import torch
@@ -27,15 +27,16 @@ from cozy_runtime.author import (
     uses_components,
 )
 from cozy_runtime.accel.kernels import Plan
-from diffusers import AutoencoderKLQwenImage, FlowMatchEulerDiscreteScheduler, Krea2Transformer2DModel
 from diffusers.models.autoencoders.autoencoder_kl_qwenimage import (
+    AutoencoderKLQwenImage,
     QwenImageCausalConv3d,
     QwenImageDecoder3d,
     QwenImageResidualBlock,
     QwenImageRMS_norm,
     QwenImageUpsample,
 )
-from diffusers.models.transformers.transformer_krea2 import Krea2TransformerBlock
+from diffusers.models.transformers.transformer_krea2 import Krea2Transformer2DModel, Krea2TransformerBlock
+from diffusers.schedulers.scheduling_flow_match_euler_discrete import FlowMatchEulerDiscreteScheduler
 from diffusers.pipelines.krea2.pipeline_krea2 import Krea2Pipeline, calculate_shift, retrieve_timesteps
 from PIL import Image
 from tokenizers import Tokenizer
@@ -44,6 +45,10 @@ from torch.nn import functional as F
 from transformers import PreTrainedTokenizerFast, Qwen3VLConfig
 from transformers.initialization import no_init_weights
 from transformers.models.qwen3_vl.modeling_qwen3_vl import Qwen3VLTextModel
+
+if TYPE_CHECKING:
+    from diffusers.configuration_utils import ConfigMixin
+    from diffusers.models.autoencoders.autoencoder_kl_qwenimage import QwenImageUpBlock
 
 #: Pixels per DiT token: the VAE's 8x, then 2x2 patches.
 PATCH = 16
@@ -73,30 +78,37 @@ class TextEncoder(nn.Module):
 
     def __init__(self, config: Qwen3VLConfig, depth: int) -> None:
         super().__init__()
-        self.language_model = Qwen3VLTextModel._from_config(config.text_config, dtype=DTYPE)
+        self.language_model: Qwen3VLTextModel = Qwen3VLTextModel._from_config(  # type: ignore[no-untyped-call]  # Transformers' _from_config is unannotated
+            config.text_config, dtype=DTYPE
+        )
         self.language_model.layers = nn.ModuleList(list(self.language_model.layers)[:depth])
-        self.language_model.norm = nn.Identity()
+        self.language_model.norm = nn.Identity()  # type: ignore[assignment, unused-ignore]  # the final norm, removed
 
 
 class Block(Krea2TransformerBlock):
     """Diffusers' block with its modulation in the activations' dtype: the checkpoint stores the
     block's `scale_shift_table` in F32, which Diffusers' bf16 load would cast."""
 
-    def forward(self, hidden_states: torch.Tensor, temb: torch.Tensor, image_rotary_emb: Any,
+    def forward(self, hidden_states: torch.Tensor, temb: torch.Tensor,
+                image_rotary_emb: tuple[torch.Tensor, torch.Tensor],
                 attention_mask: torch.Tensor | None = None) -> torch.Tensor:
-        modulation = (temb.unflatten(-1, (6, -1)) + self.scale_shift_table).to(hidden_states.dtype)
+        rows = temb.unflatten(-1, (6, -1))
+        modulation = (rows + self.scale_shift_table).to(hidden_states.dtype)
         prescale, preshift, pregate, postscale, postshift, postgate = modulation.unbind(-2)
         attn_out = self.attn((1.0 + prescale) * self.norm1(hidden_states) + preshift,
                              attention_mask=attention_mask, image_rotary_emb=image_rotary_emb)
         hidden_states = hidden_states + pregate * attn_out
         ff_out = self.ff((1.0 + postscale) * self.norm2(hidden_states) + postshift)
-        return hidden_states + postgate * ff_out
+        out: torch.Tensor = hidden_states + postgate * ff_out
+        return out
 
 
-def _modulation(block: Any, arguments: Mapping[str, Any]) -> fusion.Modulation:
+def _modulation(block: nn.Module, arguments: Mapping[str, object]) -> fusion.Modulation:
     """`Block.forward`'s six adaLN rows in the activations' dtype; a batch of one reads row 0."""
-    hidden = arguments["hidden_states"]
-    table = (arguments["temb"].unflatten(-1, (6, -1)) + block.scale_shift_table).to(hidden.dtype)
+    # Runtime fuses the `Block`s and binds their forward's tensors.
+    hidden, temb = cast(torch.Tensor, arguments["hidden_states"]), cast(torch.Tensor, arguments["temb"])
+    rows6 = temb.unflatten(-1, (6, -1))
+    table = (rows6 + cast(Block, block).scale_shift_table).to(hidden.dtype)
     rows = [row.reshape(-1, row.shape[-1]) for row in table.unbind(-2)]
     batch, tokens = hidden.shape[:2]
     index = torch.arange(batch, device=hidden.device).repeat_interleave(tokens)
@@ -154,7 +166,7 @@ def as_stored(config: Config, component: str, root: nn.Module) -> None:
 class Transformer(Krea2Transformer2DModel):
     """`Krea2Transformer2DModel` whose forward is one sampling step for every prompt of a request."""
 
-    def forward(  # type: ignore[override]
+    def forward(
         self, latents: torch.Tensor, timestep: torch.Tensor, texts: list[torch.Tensor],
         rotary: list[tuple[torch.Tensor, torch.Tensor]],
     ) -> list[torch.Tensor]:
@@ -175,20 +187,31 @@ class Transformer(Krea2Transformer2DModel):
 class Krea2Graph:
     def __init__(self, config: Config) -> None:
         with no_init_weights():
-            transformer: Any = Krea2Transformer2DModel.from_config(config.section("transformer").mapping())
+            transformer = construct(Krea2Transformer2DModel, config.section("transformer").mapping())
             encoder = TextEncoder(Qwen3VLConfig(**config.section("text_encoder").mapping()), max(TAPS))
-            vae = AutoencoderKLQwenImage.from_config(config.section("vae").mapping())
+            vae = construct(AutoencoderKLQwenImage, config.section("vae").mapping())
         transformer.__class__ = Transformer
         for block in transformer.transformer_blocks:
             block.__class__ = Block
         as_stored(config, "transformer", transformer)
         as_stored(config, "vae", vae)
-        self.components: dict[str, nn.Module] = {
-            "transformer": transformer.eval(),
+        self.components: Components = {
+            "transformer": cast(Transformer, transformer).eval(),  # its class, set above
             "text_encoder": encoder.eval(),
             "vae": vae.eval(),
         }
-        self.scheduler_config: Mapping[str, Any] = config.section("scheduler").mapping()
+        self.scheduler_config: Mapping[str, object] = config.section("scheduler").mapping()
+
+
+class Components(TypedDict):
+    transformer: Transformer
+    text_encoder: TextEncoder
+    vae: AutoencoderKLQwenImage
+
+
+def construct[M: ConfigMixin](cls: type[M], config: dict[str, object]) -> M:
+    """`cls.from_config(config)`, typed: it returns a tuple only with `return_unused_kwargs=True`."""
+    return cast(M, cls.from_config(config))
 
 
 def build_tokenizer(assets: ModelAssets) -> PreTrainedTokenizerFast:
@@ -197,7 +220,7 @@ def build_tokenizer(assets: ModelAssets) -> PreTrainedTokenizerFast:
     for key in ("tokenizer_class", "backend", "is_local", "name_or_path", "tokenizer_file",
                 "added_tokens_decoder", "chat_template", "extra_special_tokens", "errors"):
         config.pop(key, None)
-    return PreTrainedTokenizerFast(
+    return PreTrainedTokenizerFast(  # type: ignore[no-untyped-call]  # Transformers' tokenizer __init__ is unannotated
         tokenizer_object=Tokenizer.from_str(assets.read("tokenizer/tokenizer.json").decode()), **config
     )
 
@@ -214,7 +237,7 @@ def _dtype(module: nn.Module) -> torch.dtype:
     return next(module.parameters()).dtype
 
 
-def fused_text(transformer: Any, text: torch.Tensor) -> torch.Tensor:
+def fused_text(transformer: Krea2Transformer2DModel, text: torch.Tensor) -> torch.Tensor:
     """`Krea2TextFusion` then `txt_in` over one prompt's tapped states, each module in its stored dtype:
     the step-invariant text stream of the DiT's forward."""
     fusion = transformer.text_fusion
@@ -226,7 +249,8 @@ def fused_text(transformer: Any, text: torch.Tensor) -> torch.Tensor:
     hidden = fusion.projector(hidden.to(_dtype(fusion.projector))).squeeze(-1).to(text.dtype)
     for block in fusion.refiner_blocks:
         hidden = block(hidden)
-    return transformer.txt_in(hidden.to(_dtype(transformer.txt_in))).to(text.dtype)  # type: ignore[no-any-return]
+    out: torch.Tensor = transformer.txt_in(hidden.to(_dtype(transformer.txt_in)))
+    return out.to(text.dtype)
 
 
 class Krea2(Model[Krea2Graph]):
@@ -306,14 +330,15 @@ class Krea2(Model[Krea2Graph]):
         transformer = self.graph.components["transformer"]
         device = torch.device(str(self.device))
         rows, columns = height // PATCH, width // PATCH
-        channels = transformer.config.in_channels // 4
-        scheduler: Any = FlowMatchEulerDiscreteScheduler.from_config(dict(self.graph.scheduler_config))
+        channels: int = transformer.config["in_channels"] // 4
+        scheduler = construct(FlowMatchEulerDiscreteScheduler, dict(self.graph.scheduler_config))
         config = scheduler.config
         mu = DISTILLED_MU if distilled else calculate_shift(
             rows * columns, config.get("base_image_seq_len", 256), config.get("max_image_seq_len", 6400),
             config.get("base_shift", 0.5), config.get("max_shift", 1.15),
         )
-        retrieve_timesteps(scheduler, steps, device, sigmas=np.linspace(1.0, 1 / steps, steps), mu=mu)
+        # Diffusers types sigmas as a list; the scheduler takes the array as it is.
+        retrieve_timesteps(scheduler, steps, device, sigmas=np.linspace(1.0, 1 / steps, steps), mu=mu)  # type: ignore[arg-type]
         with torch.no_grad():
             noise = rng.noise((1, channels, rows * 2, columns * 2), seed, dtype=DTYPE)
             latents = noise.view(1, channels, rows, 2, columns, 2).permute(0, 2, 4, 1, 3, 5)
@@ -325,7 +350,9 @@ class Krea2(Model[Krea2Graph]):
                 texts.append(fused_text(transformer, text))
                 rotary.append(transformer.rotary_emb(ids))
             for i, t in enumerate(scheduler.timesteps):
-                velocity = transformer(latents, (t / config.num_train_timesteps).expand(1).to(DTYPE), texts, rotary)
+                velocity: list[torch.Tensor] = transformer(
+                    latents, (t / config["num_train_timesteps"]).expand(1).to(DTYPE), texts, rotary
+                )
                 prediction = velocity[0]
                 if len(velocity) > 1:
                     prediction = prediction + guidance * (prediction - velocity[1])
@@ -343,8 +370,8 @@ class Krea2(Model[Krea2Graph]):
         device = torch.device(str(self.device))
         with torch.inference_mode():
             z = unpack(latents, height, width).to(device=device, dtype=vae.dtype)
-            mean = z.new_tensor(vae.config.latents_mean).view(1, -1, 1, 1, 1)
-            inverse = 1.0 / z.new_tensor(vae.config.latents_std).view(1, -1, 1, 1, 1)
+            mean = z.new_tensor(vae.config["latents_mean"]).view(1, -1, 1, 1, 1)
+            inverse = 1.0 / z.new_tensor(vae.config["latents_std"]).view(1, -1, 1, 1, 1)
             image = _decoded(vae, z / inverse + mean)[0, :, 0].float()
             if not torch.isfinite(image).all():
                 raise OutputError(
@@ -356,7 +383,7 @@ class Krea2(Model[Krea2Graph]):
             return Image.fromarray(pixels.permute(1, 2, 0).contiguous().cpu().numpy())
 
 
-def _decoded(vae: Any, z: torch.Tensor) -> torch.Tensor:
+def _decoded(vae: AutoencoderKLQwenImage, z: torch.Tensor) -> torch.Tensor:
     """The pipeline's decode of one frame, the whole canvas: Diffusers' `decode` without its feature cache
     (each convolution's input kept for a next frame an image never has), every residual and resample block
     over the canvas in strips of rows (`tiles.rows`: exact, a strip's working set)."""
@@ -366,7 +393,7 @@ def _decoded(vae: Any, z: torch.Tensor) -> torch.Tensor:
     x = tiles.rows(mid.resnets[0], x, halo=2)
     for attention, resnet in zip(mid.attentions, mid.resnets[1:], strict=True):
         x = tiles.rows(resnet, attention(x), halo=2)
-    for block in decoder.up_blocks:
+    for block in cast("list[QwenImageUpBlock]", decoder.up_blocks):  # a ModuleList of these
         for resnet in block.resnets:
             x = tiles.rows(resnet, x, halo=2)
         if block.upsamplers is not None:
