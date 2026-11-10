@@ -25,7 +25,7 @@ if TYPE_CHECKING:
     from diffusers.models.transformers.transformer_minimax_h3 import MiniMaxH3Attention
     from diffusers.schedulers.scheduling_minimax_h3 import MiniMaxH3Scheduler
 
-    from .adaln_pruned import AdaLNPrunedMiniMaxH3Transformer
+    from .adaln_pruned import H3Transformer
     from .reference_rows import LoopState
 
 
@@ -40,7 +40,7 @@ class Schedulers(Protocol):
 
 
 def denoise_official(
-    transformer: AdaLNPrunedMiniMaxH3Transformer,
+    transformer: H3Transformer,
     schedulers: Schedulers,
     state: LoopState,
     layout_at: Callable[[int], AttentionLayout],
@@ -61,8 +61,6 @@ def denoise_official(
     position_ids, tags = fields["position_ids"], fields["token_tags"]
     video, audio = state.latents, state.audio_latents
     video_rows, audio_rows = state.num_condition_video_rows, state.num_condition_audio_rows
-    # Every call names the overlay: this GPU keeps the one armed before the loop (`checked_loop`),
-    # and a group's other GPUs, which see only the call, arm it from there.
     selector = None if overlay is None else {ATTENTION_KWARG: overlay.bank, OVERLAY_KWARG: overlay}
     schedule = None if overlay is None else overlay.schedule  # a turbo bank's evaluations select its heads
     heads = [0 if schedule is None else schedule.step(times) for times, _ in plan]
@@ -114,7 +112,6 @@ def denoise_official(
                             return_dict=False,
                             rotary=rotary,
                             text=text,
-                            attention_kwargs=selector,
                         )
                     video[video_rows:] = schedulers.scheduler.step(
                         velocity[0, video_rows:].float(), state.timesteps[i], video[video_rows:], return_dict=False  # type: ignore[arg-type]  # Diffusers annotates the legacy FloatTensor
@@ -134,7 +131,7 @@ def denoise_official(
 
 
 def denoise_refine(
-    transformer: AdaLNPrunedMiniMaxH3Transformer,
+    transformer: H3Transformer,
     overlay: Overlay,
     *,
     video: torch.Tensor,
@@ -204,7 +201,6 @@ def denoise_refine(
                             return_dict=False,
                             rotary=rotary,
                             text=text,
-                            attention_kwargs=selector,
                         )
                     velocity[start : start + count].addcmul_(predicted[0].float(), weight[:, None])
                     del predicted

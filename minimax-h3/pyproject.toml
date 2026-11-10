@@ -1,10 +1,10 @@
 [project]
 name = "minimax-h3"
-version = "0.9.0"
+version = "0.9.2"
 description = "MiniMax H3 video with sound: a shot of any length, an edit of a plate, and its upscale"
 requires-python = ">=3.12"
 dependencies = [
-    "cozy-runtime[adapters,media]>=0.44.0,<0.45",
+    "cozy-runtime[adapters,media]>=0.44.1,<0.45",
     "diffusers>=0.41,<0.42",
     "hf-xet>=1.6.0",
     # The AdaLN table producer owns the row-label reader the pruned DiT is built from.
@@ -61,6 +61,3 @@ explicit = true
 torch = { index = "pytorch-cu130", marker = "sys_platform == 'win32'" }
 torchvision = { index = "pytorch-cu130", marker = "sys_platform == 'win32'" }
 minimax-h3-tools = { index = "tensorhub" }
-# 0.23.1's Runtime and the TensorFS it pins, by git rev until both publish: the release relocks to PyPI.
-cozy-runtime = { git = "https://github.com/cozy-creator/cozy-runtime", rev = "ae8431178db9c455ca328322fe1285ea7c582a86" }
-tensorfs = { git = "https://github.com/cozy-creator/cozy-creator", rev = "56fa475889897709c2f198e37295e352223cd8d0", subdirectory = "crates/tensorfs-py" }
