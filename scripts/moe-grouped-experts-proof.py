@@ -10,6 +10,7 @@ Hunyuan's; an expert without an address (unbound, not contiguous) takes the sort
 
 import inspect
 from types import SimpleNamespace
+from typing import Any
 
 import triton.runtime.interpreter as interpreter
 
@@ -32,11 +33,11 @@ torch.manual_seed(0)
 H, INNER, E, K, T = 512, 256, 16, 4, 5
 
 
-def launch(kernel, grid, *args):
+def launch(kernel: Any, grid: tuple[int, ...], *args: object) -> None:  # type: ignore[explicit-any]  # a Triton JIT kernel: Triton ships no types
     kernel[grid[:2]](*args)
 
 
-def truncated(t32):
+def truncated(t32: torch.Tensor) -> torch.Tensor:
     return (t32.contiguous().view(torch.int32) & ~0xFFFF).view(torch.float32).to(torch.bfloat16)
 
 
@@ -44,8 +45,10 @@ class Int8Leaf(nn.Module):
     """An int8.convrot leaf's operands and eager law (`int8_linear.eager`)."""
 
     provider = INT8_CONVROT
+    data: torch.Tensor
+    scale: torch.Tensor
 
-    def __init__(self, weight):
+    def __init__(self, weight: torch.Tensor) -> None:
         super().__init__()
         rotated = hadamard256(torch, weight.float()) / 16
         scale = (rotated.abs().amax(-1) / 127).clamp(min=1e-12)
@@ -56,8 +59,9 @@ class Int8Leaf(nn.Module):
         self.bias = None
         self.out_features, self.in_features = weight.shape
 
-    def forward(self, x):
-        return int8_linear.eager(torch, x, self.data, self.scale, torch.bfloat16)
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        out: torch.Tensor = int8_linear.eager(torch, x, self.data, self.scale, torch.bfloat16)
+        return out
 
 
 for gate_first in (True, False):
@@ -66,6 +70,7 @@ for gate_first in (True, False):
         layer=0,
     )
     for e in experts:
+        assert isinstance(e, moe.RoutedExpert)
         for lin in (e.gate_and_up_proj, e.down_proj):
             lin.weight.data.normal_(0, 0.05)
     hidden = torch.randn(T, H, dtype=torch.bfloat16)
@@ -74,8 +79,9 @@ for gate_first in (True, False):
     for kind in ("bf16", "int8"):
         if kind == "int8":
             for e in experts:
-                e.gate_and_up_proj = Int8Leaf(e.gate_and_up_proj.weight.data)
-                e.down_proj = Int8Leaf(e.down_proj.weight.data)
+                assert isinstance(e, moe.RoutedExpert)
+                e.gate_and_up_proj = Int8Leaf(e.gate_and_up_proj.weight.data)  # type: ignore[assignment, unused-ignore]  # the leaf stands in for the Linear
+                e.down_proj = Int8Leaf(e.down_proj.weight.data)  # type: ignore[assignment, unused-ignore]  # the leaf stands in for the Linear
         found = experts._operands(torch.device("cpu"))
         assert isinstance(found, tuple) and found[0] == kind, found
         table = found[1]
@@ -83,8 +89,10 @@ for gate_first in (True, False):
         for p, e in enumerate(flat.tolist()):
             linear, x = experts[e].gate_and_up_proj, hidden[p // K : p // K + 1]
             if kind == "bf16":
+                assert isinstance(linear, nn.Linear)
                 want = truncated(x.float() @ linear.weight.float().T)[0]
             else:
+                assert isinstance(linear, Int8Leaf)
                 q, s = int8_linear.quantize_rows(torch, x)
                 acc = (q.to(torch.int32) @ linear.data.to(torch.int32).T).float()
                 want = truncated(acc.mul_(s).mul_(linear.scale.reshape(1, -1)))[0]
@@ -102,6 +110,8 @@ for gate_first in (True, False):
             f"{kind} gate_first={gate_first}: gate-and-up per pair as its reference; whole path rel |Δ| {rel:.1e}"
         )
         assert rel < 3e-2, rel
-experts[3].down_proj.data = experts[3].down_proj.data.t()  # not contiguous: no address
+leaf = experts[3].down_proj  # type: ignore[possibly-undefined]  # the loop above ran
+assert isinstance(leaf, Int8Leaf)
+leaf.data = leaf.data.t()  # not contiguous: no address
 assert isinstance(experts._operands(torch.device("cpu")), str)
 print("ok")

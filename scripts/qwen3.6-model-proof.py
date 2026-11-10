@@ -17,15 +17,16 @@ import json
 import sys
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 import torch
 from PIL import Image
-from transformers import AutoConfig, AutoModelForImageTextToText, GenerationConfig
+from transformers import AutoConfig, AutoModelForImageTextToText, GenerationConfig, PreTrainedModel
 
 from cozy_runtime import vlm
 from cozy_runtime.accel import moe
+from cozy_runtime.author import Config, ModelAssets
 
 FILES = Path(sys.argv[1])
 
@@ -41,18 +42,18 @@ class Files:
 class Stored:
     """The checkpoint's dtypes, as Runtime's construction config reports them: all float32 here."""
 
-    def __init__(self, mapping: dict[str, Any]) -> None:
+    def __init__(self, mapping: dict[str, object]) -> None:
         self._mapping = mapping
 
-    def mapping(self) -> dict[str, Any]:
+    def mapping(self) -> dict[str, object]:
         return self._mapping
 
     def tensor_dtype(self, key: str, default: str = "") -> str:
         return "f32"
 
 
-def shrunk(moe_layout: bool) -> dict[str, Any]:
-    config = json.loads((FILES / "config.json").read_text())
+def shrunk(moe_layout: bool) -> dict[str, object]:
+    config: dict[str, Any] = json.loads((FILES / "config.json").read_text())  # type: ignore[explicit-any]  # free JSON, edited in place
     text = config["text_config"]
     text.update(
         hidden_size=64, num_hidden_layers=4, layer_types=["linear_attention"] * 3 + ["full_attention"],
@@ -73,18 +74,18 @@ def shrunk(moe_layout: bool) -> dict[str, Any]:
     return config
 
 
-def reference(config: dict[str, Any]) -> torch.nn.Module:
+def reference(config: dict[str, object]) -> PreTrainedModel:
     torch.manual_seed(0)
-    model = AutoModelForImageTextToText.from_config(AutoConfig.for_model(**config), dtype=torch.float32)
+    model: PreTrainedModel = AutoModelForImageTextToText.from_config(AutoConfig.for_model(**config), dtype=torch.float32)  # type: ignore[arg-type, no-untyped-call]  # the config's keys are for_model's keywords; from_config is unannotated
     for parameter in model.parameters():  # Transformers' init leaves the norms at zero
         parameter.data.normal_(0, 0.05)
-    return model.eval()
+    return model.eval()  # type: ignore[no-untyped-call, no-any-return]  # Transformers leaves eval unannotated: it returns the model
 
 
-def package(config: dict[str, Any], ref: torch.nn.Module) -> torch.nn.Module:
+def package(config: dict[str, object], ref: PreTrainedModel) -> PreTrainedModel:
     """Runtime's construction, filled with the reference's weights the way the per-expert checkpoint
     stores them."""
-    model = vlm.construct(config, Stored(config))
+    model = vlm.construct(config, cast(Config, Stored(config)))  # Stored: the reads construct makes
     ours = dict(model.named_parameters())
     filled = set()
     for name, tensor in ref.state_dict().items():
@@ -99,15 +100,15 @@ def package(config: dict[str, Any], ref: torch.nn.Module) -> torch.nn.Module:
             ours[name].data.copy_(tensor)
             filled.add(name)
     assert set(ours) == filled, sorted(set(ours) - filled)[:5]
-    return model
+    return model  # type: ignore[return-value, unused-ignore]  # Runtime 0.43.1's construct says nn.Module
 
 
-def asker(model: torch.nn.Module) -> vlm.VisionLM:
+def asker(model: PreTrainedModel) -> vlm.VisionLM:
     asking = vlm.VisionLM.__new__(vlm.VisionLM)
     asking.pipe = vlm.Pipeline.__new__(vlm.Pipeline)
     asking.pipe.components = {vlm.COMPONENT: model}
-    asking.processor = vlm.processor(Files())
-    model.generation_config = GenerationConfig(**json.loads((FILES / "generation_config.json").read_text()))
+    asking.processor = vlm.processor(cast(ModelAssets, Files()))  # Files: the names and reads processor makes
+    model.generation_config = GenerationConfig(**json.loads((FILES / "generation_config.json").read_text()))  # type: ignore[no-untyped-call]  # Transformers leaves its __init__ unannotated
     return asking
 
 
@@ -129,7 +130,7 @@ def case(name: str, moe_layout: bool) -> None:
     q = question()
     text = asking._chat(q, "Answer briefly.", False)
     expected = asking.processor.apply_chat_template(
-        [{"role": "system", "content": "Answer briefly."},
+        [{"role": "system", "content": "Answer briefly."},  # type: ignore[arg-type, unused-ignore]  # Transformers annotates text-only content
          {"role": "user", "content": [{"type": "image"}, {"type": "video"}, {"type": "text", "text": q.text}]}],
         add_generation_prompt=True, tokenize=False, enable_thinking=False,
     )
@@ -144,12 +145,13 @@ def case(name: str, moe_layout: bool) -> None:
     worst = float((mine - theirs).abs().max())
     assert worst < 1e-4, f"{name}: logits differ by {worst}"
     with torch.inference_mode():
-        out = ref.generate(**inputs, max_new_tokens=12, do_sample=False, eos_token_id=[248046, 248044], pad_token_id=248044)
-    want = asking.processor.batch_decode(out[:, inputs["input_ids"].shape[1]:], skip_special_tokens=True)[0].strip()
-    def answer(**decoding: Any) -> list[str]:
+        out = ref.generate(**inputs, max_new_tokens=12, do_sample=False, eos_token_id=[248046, 248044], pad_token_id=248044)  # type: ignore[operator]  # the auto class's model mixes in generate
+    want = asking.processor.batch_decode(out[:, inputs["input_ids"].shape[1]:], skip_special_tokens=True)[0].strip()  # type: ignore[no-untyped-call, unused-ignore]  # Transformers leaves it unannotated
+    def answer(**decoding: float) -> list[str]:
         sampling = {"temperature": 0.0, "top_p": 1.0, "seed": 0} | decoding
-        return vlm.VisionLM.ask.__wrapped__(asking, [q], system="Answer briefly.", thinking=False, stop=[],
-                                            max_new_tokens=12, presence_penalty=0.0, **sampling)
+        answered: list[str] = vlm.VisionLM.ask.__wrapped__(asking, [q], system="Answer briefly.", thinking=False, stop=[],  # type: ignore[attr-defined]  # uses_components keeps the method
+                                                           max_new_tokens=12, presence_penalty=0.0, **sampling)
+        return answered
 
     plain = answer()
     assert plain == [want], (plain, want)
@@ -163,10 +165,10 @@ def census() -> None:
     its multi-token-prediction head (`mtp.*`, not built)."""
     config = json.loads((FILES / "config.json").read_text())
     with torch.device("meta"):
-        model = vlm.construct(config, Stored(config))
+        model = vlm.construct(config, cast(Config, Stored(config)))
     names = set(model.state_dict())
     index = json.loads((FILES / "model.safetensors.index.json").read_text())["weight_map"]
-    stored = set()
+    stored: set[str] = set()
     for key in index:
         if key.startswith("mtp."):
             continue
