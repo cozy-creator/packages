@@ -6,7 +6,7 @@ import math
 from typing import Annotated
 
 import msgspec
-from cozy_runtime.author import Adjustments, App, Context, Memoize, Outputs, Seed, Telemetry
+from cozy_runtime.author import Adjustments, App, Context, Outputs, Seed, Telemetry
 from cozy_runtime.fields import AspectRatio, Image, Prompt, Ratios, name_key
 from cozy_runtime.image import (
     Box,
@@ -138,12 +138,12 @@ def _generate(ctx: Context, payload: TurboInput, model: HiDreamO1, out: Outputs,
     images = [payload.prompt.references[key].file.read() for key in boxed]
     (width, height), references = layout(adj, payload, images, boxed)
     ctx.raise_if_cancelled()
-    with tel.stage("generating image", overall_range=(0.0, 0.98)):
+    with tel.stage("generating image"):
         image = model.generate(
             prompt, negative, references, width=width, height=height, recipe=recipe, steps=steps,
             guidance=guidance, seed=seed, interval=interval, progress=ctx.progress,
         )
-    with tel.stage("saving image", overall_range=(0.98, 1.0)):
+    with tel.stage("saving image"):
         asset = out.save_image(image, format="png")
     return ImageResult(asset, width, height, seed, prompt)
 
@@ -153,7 +153,7 @@ _DEV = "hidream-ai/hidream-o1-dev@0.1.0"
 _COMPONENTS = {"model": ("model",)}
 
 
-@app.entrypoint(defaults={"model": _FULL}, components=_COMPONENTS, memoize=Memoize(requires=["seed"]))
+@app.entrypoint(defaults={"model": _FULL}, components=_COMPONENTS, memoize=True)
 def generate(ctx: Context, payload: GenerateInput, model: HiDreamO1, out: Outputs,
              tel: Telemetry, adj: Adjustments) -> ImageResult:
     """HiDream-O1-Image: 50 UniPC steps with CFG 5.0 over the first 40. The model HiDream recommends
@@ -161,7 +161,7 @@ def generate(ctx: Context, payload: GenerateInput, model: HiDreamO1, out: Output
     return _generate(ctx, payload, model, out, tel, adj)
 
 
-@app.entrypoint(defaults={"model": _DEV}, components=_COMPONENTS, memoize=Memoize(requires=["seed"]))
+@app.entrypoint(defaults={"model": _DEV}, components=_COMPONENTS, memoize=True)
 def generate_turbo(ctx: Context, payload: TurboInput, model: HiDreamO1, out: Outputs,
                    tel: Telemetry, adj: Adjustments) -> ImageResult:
     """HiDream-O1-Image-Dev: 28 distilled steps, no CFG. A one-picture edit samples flow-match Euler."""
@@ -182,7 +182,7 @@ class ImageBox(msgspec.Struct, kw_only=True):
 # Each checkpoint is built, and its weights fetched, only when a box asks for it.
 @app.tool(label="Image", named="image", defaults={"full": _FULL, "model": _DEV},
           components={"full": ("model",), "model": ("model",)}, on_demand=("full", "model"),
-          memoize=Memoize(requires=["seed"]))  # fmt: skip
+          memoize=True)  # fmt: skip
 def image(ctx: Context, payload: ImageBox, full: HiDreamO1, model: HiDreamO1, out: Outputs, tel: Telemetry,
           adj: Adjustments) -> ImageResult:
     """HiDream-O1-Image on a canvas: Dev, or the full model, which loads only when asked for."""

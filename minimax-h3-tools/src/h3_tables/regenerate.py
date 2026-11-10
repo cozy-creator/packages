@@ -21,7 +21,6 @@ from cozy_runtime.author import (
     UnsupportedInput,
     Weights,
     canonical_json,
-    invocable,
 )
 from cozy_runtime.weights_store import Derivation
 
@@ -135,7 +134,6 @@ def _source(present: Rows, config: dict[str, Any]) -> str:
     return name
 
 
-@invocable
 async def regenerate_lora(
     ctx: Context,
     *,
@@ -175,33 +173,35 @@ async def regenerate_lora(
         if out.done is None:
             out.component(COMPONENT).asset(TIMESTEP_PLAN, refine.canonical_bytes)
         sites = _sites(config)
-        for done, (site, (inputs, outputs)) in enumerate(sites.items()):
-            ctx.raise_if_cancelled()
-            tel.progress(done / len(sites), stage="regenerate-factors")
-            for suffix, key, shape in (
-                ("lora_down", f"{site}.lora_A.weight", (RANK, inputs)),
-                ("lora_up", f"{site}.lora_B.weight", (outputs, RANK)),
-            ):
-                if out.has(COMPONENT, f"{site}.{suffix}"):
-                    reused += 1
-                    continue
-                put(out, COMPONENT, f"{site}.{suffix}", read(source, name, key, torch.float32, shape).bfloat16())
-                computed += 1
+        with tel.stage("regenerate-factors"):
+            for done, (site, (inputs, outputs)) in enumerate(sites.items()):
+                ctx.raise_if_cancelled()
+                for suffix, key, shape in (
+                    ("lora_down", f"{site}.lora_A.weight", (RANK, inputs)),
+                    ("lora_up", f"{site}.lora_B.weight", (outputs, RANK)),
+                ):
+                    if out.has(COMPONENT, f"{site}.{suffix}"):
+                        reused += 1
+                        continue
+                    put(out, COMPONENT, f"{site}.{suffix}", read(source, name, key, torch.float32, shape).bfloat16())
+                    computed += 1
+                ctx.progress(done, len(sites))
 
         def reader(key: str, dtype: torch.dtype, shape: tuple[int, ...]) -> torch.Tensor:
             return read(source, name, key, dtype, shape)
 
-        _, _, kept = write_tables(
-            ctx,
-            plan=refine,
-            topology=topology,
-            source=full,
-            component=DIT_COMPONENT["fl2va"],
-            target=COMPONENT,
-            outputs=(out,),
-            progress=lambda done, total: tel.progress(done / total, stage="regenerate-tables"),
-            curve=CurveAdapter(CURVE_RANK, reader),
-        )
+        with tel.stage("regenerate-tables"):
+            _, _, kept = write_tables(
+                ctx,
+                plan=refine,
+                topology=topology,
+                source=full,
+                component=DIT_COMPONENT["fl2va"],
+                target=COMPONENT,
+                outputs=(out,),
+                progress=lambda done, total: ctx.progress(done - 1, total),
+                curve=CurveAdapter(CURVE_RANK, reader),
+            )
         tables = len(table_shapes(topology, refine))
         reused, computed = reused + kept, computed + tables - kept
         artifact = ctx.adopt_model(out)
