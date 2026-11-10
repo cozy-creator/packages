@@ -14,7 +14,7 @@ from functools import partial
 from itertools import pairwise
 import math
 from collections.abc import Callable, Mapping, Sequence
-from typing import Any
+from typing import TYPE_CHECKING, Any, TypedDict, cast
 
 import numpy as np
 import torch
@@ -30,7 +30,10 @@ from cozy_runtime.author import (
     memoize,
     uses_components,
 )
-from diffusers import AutoencoderKLFlux2, Flux2KleinPipeline, Flux2Pipeline, Flux2Transformer2DModel
+from diffusers.models.autoencoders.autoencoder_kl_flux2 import AutoencoderKLFlux2
+from diffusers.models.transformers.transformer_flux2 import Flux2Transformer2DModel
+from diffusers.pipelines.flux2.pipeline_flux2 import Flux2Pipeline
+from diffusers.pipelines.flux2.pipeline_flux2_klein import Flux2KleinPipeline
 from diffusers.pipelines.flux2.image_processor import Flux2ImageProcessor
 from diffusers.pipelines.flux2.pipeline_flux2 import compute_empirical_mu
 from diffusers.pipelines.flux2.system_messages import SYSTEM_MESSAGE
@@ -46,6 +49,9 @@ from transformers import (
     PreTrainedTokenizerFast,
 )
 from transformers import initialization as transformer_init
+
+if TYPE_CHECKING:
+    from diffusers.configuration_utils import ConfigMixin
 
 #: Pixels per latent token: the VAE's 8x, then 2x2 packing.
 PATCH = 16
@@ -93,13 +99,25 @@ def processor(assets: ModelAssets) -> PixtralProcessor:
                             chat_template=_read(assets, "chat_template.jinja").decode(), **folder)
 
 
-def text_encoder(config: Mapping[str, Any]) -> nn.Module:
+def construct[M: ConfigMixin](cls: type[M], config: dict[str, object]) -> M:
+    """`cls.from_config(config)`, typed: it returns a tuple only with `return_unused_kwargs=True`."""
+    return cast(M, cls.from_config(config))
+
+
+def _to[M: nn.Module](module: M, dtype: torch.dtype) -> M:
+    """`module.to(dtype=dtype)`, typed: Diffusers' `to` is `functools.wraps`'d, which the checkers
+    bind without `self`."""
+    return module.to(dtype=dtype)
+
+
+def text_encoder(config: Mapping[str, Any]) -> nn.Module:  # type: ignore[explicit-any]  # the checkpoint's JSON config
     """A FLUX.2 text encoder, as the whole model: Mistral-Small-3.2 for [dev], Qwen3 for [klein]."""
     built = AutoModelForImageTextToText if config["model_type"] == "mistral3" else AutoModelForCausalLM
-    return built.from_config(AutoConfig.for_model(**config), dtype=torch.bfloat16)
+    model: nn.Module = built.from_config(AutoConfig.for_model(**config), dtype=torch.bfloat16)  # type: ignore[no-untyped-call]  # Transformers' Auto classes are unannotated
+    return model
 
 
-def _conditioning_only(encoder: Any, depth: int) -> None:
+def _conditioning_only(encoder: Any, depth: int) -> None:  # type: ignore[explicit-any]  # Mistral3's or Qwen3's causal LM, by family
     """FLUX.2 reads its text encoder's hidden states up to `depth`: the later layers, the final norm
     and the head are never run, so they are not built (their stored bytes are skipped). With the norm
     an identity, hidden state `depth` stays the pre-norm output. [dev]'s prompts are text only, so
@@ -126,11 +144,11 @@ class Flux2Graph:
         if family not in TEXT_LAYERS:
             raise ValueError(f"FLUX.2 has no text encoder of type {family!r}")
         with transformer_init.no_init_weights():
-            transformer = Flux2Transformer2DModel.from_config(config.section("transformer").mapping())
+            transformer = construct(Flux2Transformer2DModel, config.section("transformer").mapping())
             encoder = text_encoder(text)
-            vae = AutoencoderKLFlux2.from_config(config.section("vae").mapping())
+            vae = construct(AutoencoderKLFlux2, config.section("vae").mapping())
         _conditioning_only(encoder, max(TEXT_LAYERS[family]))
-        if transformer.config.guidance_embeds:  # [dev]: its Turbo LoRA's sites
+        if transformer.config["guidance_embeds"]:  # [dev]: its Turbo LoRA's sites
             transformer._cozy_turbo = None
             for path, module in transformer.named_modules():
                 if isinstance(module, nn.Linear):
@@ -139,11 +157,17 @@ class Flux2Graph:
         # The VAE is built as stored (f32 in BFL's `ae`, bf16 in Diffusers' repositories); a GPU
         # serves it at `VAE_DTYPE` (`Flux2.hold_vae`).
         stored = config.tensor_dtype("vae.encoder.conv_in.weight", default="f32")
-        self.components: dict[str, nn.Module] = {
-            "transformer": transformer.to(dtype=torch.bfloat16),
+        self.components: Components = {
+            "transformer": _to(transformer, torch.bfloat16),
             "text_encoder": encoder.eval(),
-            "vae": vae.to(dtype=torch.float32 if stored == "f32" else torch.bfloat16),
+            "vae": _to(vae, torch.float32 if stored == "f32" else torch.bfloat16),
         }
+
+
+class Components(TypedDict):
+    transformer: Flux2Transformer2DModel
+    text_encoder: nn.Module
+    vae: AutoencoderKLFlux2
 
 
 def schedule(steps: int, tokens: int, sigmas: Sequence[float] | None = None) -> list[float]:
@@ -182,9 +206,9 @@ def text_ids(length: int) -> torch.Tensor:
     return torch.cartesian_prod(torch.arange(1), torch.arange(1), torch.arange(1), torch.arange(length))
 
 
-def _bn(vae: Any, like: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+def _bn(vae: AutoencoderKLFlux2, like: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     mean = vae.bn.running_mean.view(1, -1, 1, 1).to(like)
-    std = torch.sqrt(vae.bn.running_var.view(1, -1, 1, 1) + vae.config.batch_norm_eps).to(like)
+    std = torch.sqrt(vae.bn.running_var.view(1, -1, 1, 1) + vae.config["batch_norm_eps"]).to(like)
     return mean, std
 
 
@@ -194,7 +218,7 @@ class Flux2(Model[Flux2Graph]):
     the model's config."""
 
     graph: Flux2Graph
-    tokenizer: Any
+    tokenizer: PixtralProcessor | PreTrainedTokenizerFast
 
     def load(self, loader: Loader) -> None:
         self.graph = loader.construct(Flux2Graph)
@@ -269,7 +293,7 @@ class Flux2(Model[Flux2Graph]):
         tf = self.graph.components["transformer"]
         device = torch.device(str(self.device))
         rows, columns = height // PATCH, width // PATCH
-        noise = rng.noise((1, tf.config.in_channels, rows, columns), seed)
+        noise = rng.noise((1, int(tf.config["in_channels"]), rows, columns), seed)
         cfg = negative is not None
         steps = len(timesteps) - 1
         with torch.no_grad():

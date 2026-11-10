@@ -6,7 +6,6 @@ pixels and 512 new tokens are BFL's; decoding is greedy where BFL samples at tem
 
 from __future__ import annotations
 
-from typing import Any
 
 import torch
 from cozy_runtime import lm
@@ -20,6 +19,8 @@ from diffusers.pipelines.flux2.pipeline_flux2 import (
 from diffusers.pipelines.flux2.system_messages import SYSTEM_MESSAGE_UPSAMPLING_I2I, SYSTEM_MESSAGE_UPSAMPLING_T2I
 from PIL import Image, ImageOps
 from transformers import initialization as transformer_init
+
+from transformers import PixtralProcessor
 
 from .model import processor, text_encoder
 
@@ -40,7 +41,7 @@ class Flux2Upsampler(Model[UpsamplerGraph]):
     serving = Serving(min_bits=4, phase="decode")
 
     graph: UpsamplerGraph
-    processor: Any
+    processor: PixtralProcessor
 
     def load(self, loader: Loader) -> None:
         self.graph = loader.construct(UpsamplerGraph)
