@@ -23,7 +23,6 @@ from typing import Any, ClassVar, cast
 
 import torch
 from diffusers import MiniMaxH3Transformer3DModel
-from diffusers.models._modeling_parallel import ContextParallelInput
 from diffusers.models.modeling_utils import get_parameter_dtype
 from diffusers.models.transformers.transformer_minimax_h3 import (
     MINIMAX_H3_MODALITY_NUM,
@@ -213,17 +212,6 @@ class AdaLNPrunedMiniMaxH3Transformer(MiniMaxH3Transformer3DModel):  # type: ign
         *MiniMaxH3Transformer3DModel._keep_in_fp32_modules,
         "time_proj",
     ]
-    #: Diffusers' plan, the rotary tables split where each block reads them, not where `rope`
-    #: returns them. A denoise loop computes them once, on the GPU that runs it, and its calls
-    #: hand every GPU those tables (`rotary=`): each GPU must take its own rows of the whole
-    #: document's, never the rows of the GPU that ran the loop.
-    _cp_plan: ClassVar[dict[str, Any]] = {
-        **{k: plan for k, plan in MiniMaxH3Transformer3DModel._cp_plan.items() if k != "rope"},
-        "transformer_blocks.*": {
-            **MiniMaxH3Transformer3DModel._cp_plan["transformer_blocks.*"],
-            "rotary_emb": [ContextParallelInput(split_dim=0, expected_dims=2)] * 2,
-        },
-    }
 
     def __init__(
         self,
