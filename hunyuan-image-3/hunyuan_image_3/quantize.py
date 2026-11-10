@@ -5,13 +5,14 @@ encodings and their kernels are Runtime's."""
 from __future__ import annotations
 
 import math
-from typing import Any
+from collections.abc import Mapping
 
 import numpy as np
 from cozy_runtime.author import (
     Context,
     DerivationHook,
     EncodingRule,
+    Model,
     ModelArtifact,
     QuantizationPlan,
     Recipe,
@@ -21,20 +22,21 @@ from cozy_runtime.author import (
 )
 from cozy_runtime.derive.safetensors_io import from_f32, to_f32
 from cozy_runtime.weights_store import Derivation
+from tensorfs import TensorMetadata
 
 from .model import COMPONENT, HunyuanImage3
 
 _LAYERS = "model.model.layers.*"
 
 
-def _vae_operands(tensors: Any) -> list[str]:
+def _vae_operands(tensors: Mapping[str, TensorMetadata]) -> list[str]:
     """The VAE's conv operands: each conv's weight (every rank >= 2 `vae.` weight) and its bias."""
     convs = [key.removesuffix(".weight") for key, info in tensors.items()
              if key.startswith("vae.") and key.endswith(".weight") and len(info.shape) >= 2]
     return [key for conv in convs for key in (f"{conv}.weight", f"{conv}.bias") if key in tensors]
 
 
-def vae_operands_f16(ctx: Context, tel: Telemetry, source: Weights[Any], output: str) -> ModelArtifact:
+def vae_operands_f16(ctx: Context, tel: Telemetry, source: Weights[Model[object]], output: str) -> ModelArtifact:
     """The uploaded checkpoint with its VAE's conv operands in float16, everything else its own: Tencent
     computes the VAE's convs in float16 (`vae_autocast_dtype`), so the decode and encode give the same bits
     from half the bytes (5.0 GB of float32 become 2.5 GB) with no cast per call. The norms stay float32."""
