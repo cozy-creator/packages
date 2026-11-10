@@ -8,18 +8,20 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-def normalization(channels):
+def normalization(channels: int) -> nn.GroupNorm:
     return nn.GroupNorm(32, channels)
 
 
-def zero_module(module):
+def zero_module[M: nn.Module](module: M) -> M:
     for p in module.parameters():
         p.detach().zero_()
     return module
 
 
 class ResBlockEmb3D(nn.Module):
-    def __init__(self, channels, emb_channels, dropout=0, out_channels=None):
+    def __init__(
+        self, channels: int, emb_channels: int, dropout: float = 0, out_channels: int | None = None
+    ) -> None:
         super().__init__()
         self.out_channels = out_channels or channels
         self.in_layers = nn.Sequential(
@@ -39,19 +41,20 @@ class ResBlockEmb3D(nn.Module):
             if self.out_channels != channels else nn.Identity()
         )
 
-    def forward(self, x, emb):
-        h = self.in_layers(x)
+    def forward(self, x: torch.Tensor, emb: torch.Tensor) -> torch.Tensor:
+        h: torch.Tensor = self.in_layers(x)
         emb_out = self.emb_layers(emb).type(h.dtype)
         while len(emb_out.shape) < len(h.shape):
             emb_out = emb_out[..., None]
         scale, shift = torch.chunk(emb_out, 2, dim=1)
         h = self.out_norm(h) * (1 + scale) + shift
         h = self.out_layers(h)
-        return self.skip(x) + h
+        skipped: torch.Tensor = self.skip(x)
+        return skipped + h
 
 
 class TemporalConv(nn.Module):
-    def __init__(self, channels, kernel_size=5):
+    def __init__(self, channels: int, kernel_size: int = 5) -> None:
         super().__init__()
         padding = kernel_size // 2
         self.norm = normalization(channels)
@@ -61,9 +64,9 @@ class TemporalConv(nn.Module):
                                 groups=channels)
         self.pwconv = nn.Conv3d(channels, channels, kernel_size=1)
         nn.init.zeros_(self.pwconv.weight)
-        nn.init.zeros_(self.pwconv.bias)
+        nn.init.zeros_(self.pwconv.bias)  # type: ignore[arg-type]  # a Conv3d built with its bias
 
-    def forward(self, x):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         identity = x
         h = self.norm(x)
         h = F.silu(h)
@@ -73,9 +76,9 @@ class TemporalConv(nn.Module):
 
 
 class LatentResizer3D(nn.Module):
-    def __init__(self, in_channels=24, in_blocks=12, out_blocks=12,
-                 channels=512, dropout=0.1,
-                 temporal_every=2, temporal_kernel=5):
+    def __init__(self, in_channels: int = 24, in_blocks: int = 12, out_blocks: int = 12,
+                 channels: int = 512, dropout: float = 0.1,
+                 temporal_every: int = 2, temporal_kernel: int = 5) -> None:
         super().__init__()
         self.conv_in = nn.Conv3d(in_channels, channels, 3, padding=1)
         embed_dim = 64
@@ -97,7 +100,9 @@ class LatentResizer3D(nn.Module):
         self.norm_out = normalization(channels)
         self.conv_out = nn.Conv3d(channels, in_channels, 3, padding=1)
 
-    def forward(self, x, scale=None, target_size=None):
+    def forward(
+        self, x: torch.Tensor, scale: float | None = None, target_size: tuple[int, ...] | None = None
+    ) -> torch.Tensor:
         if target_size is not None:
             size = target_size
         elif scale is not None:
@@ -108,11 +113,11 @@ class LatentResizer3D(nn.Module):
             return x
         return self._forward_seg(x, scale, size)
 
-    def _forward_seg(self, x, scale, size):
+    def _forward_seg(self, x: torch.Tensor, scale: float | None, size: tuple[int, ...]) -> torch.Tensor:
         scale_emb = torch.tensor(
             [scale - 1 if scale is not None else 0.0],
             dtype=x.dtype, device=x.device).unsqueeze(0)
-        emb = self.embed(scale_emb)
+        emb: torch.Tensor = self.embed(scale_emb)
 
         x = self.conv_in(x)
         for b in self.in_blocks:

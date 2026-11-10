@@ -30,13 +30,11 @@ from typing import Any, Literal
 import msgspec
 import numpy as np
 import torch
-from diffusers import (
-    AutoencoderKLMiniMaxH3Audio,
-    MiniMaxH3Blocks,
-    MiniMaxH3ModularPipeline,
-    MiniMaxH3Scheduler,
-    MiniMaxH3Transformer3DModel,
-)
+from diffusers.models.autoencoders.autoencoder_kl_minimax_h3_audio import AutoencoderKLMiniMaxH3Audio
+from diffusers.models.transformers.transformer_minimax_h3 import MiniMaxH3Transformer3DModel
+from diffusers.modular_pipelines.minimax_h3.modular_blocks_minimax_h3 import MiniMaxH3Blocks
+from diffusers.modular_pipelines.minimax_h3.modular_pipeline import MiniMaxH3ModularPipeline
+from diffusers.schedulers.scheduling_minimax_h3 import MiniMaxH3Scheduler
 from diffusers.modular_pipelines.minimax_h3 import (
     MiniMaxH3AudioReference,
     MiniMaxH3ImageReference,

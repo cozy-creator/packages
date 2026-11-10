@@ -13,7 +13,7 @@ from diffusers.models.autoencoders.autoencoder_kl_minimax_h3 import MiniMaxH3Vid
 
 from cozy_runtime import rng
 from cozy_runtime.accel import fusion, stepcache
-from diffusers import MiniMaxH3Transformer3DModel
+from diffusers.models.transformers.transformer_minimax_h3 import MiniMaxH3Transformer3DModel
 from cozy_runtime.accel import concurrently, placeable, sequence_parallel
 from cozy_runtime.author import (
     Serving,

@@ -22,14 +22,14 @@ from contextvars import ContextVar
 from typing import Any, ClassVar, cast
 
 import torch
-from diffusers import MiniMaxH3Transformer3DModel
 from diffusers.models._modeling_parallel import ContextParallelInput
 from diffusers.models.modeling_utils import get_parameter_dtype
 from diffusers.models.transformers.transformer_minimax_h3 import (
     MINIMAX_H3_MODALITY_NUM,
+    MiniMaxH3Transformer3DModel,
     MiniMaxH3TransformerOutput,
 )
-from diffusers.utils import apply_lora_scale
+from diffusers.utils.peft_utils import apply_lora_scale
 from torch import nn
 from torch.nn import functional as F
 
@@ -66,31 +66,33 @@ def checked_loop() -> Iterator[None]:
         _CHECKED.reset(token)
 
 
-class _Armed:
+class _Armed[S]:
     """One module's turbo source for the forward in flight; a plain object, so placing it
     on a module registers nothing and the DiT's state dict is what it was."""
 
     __slots__ = ("source", "step")
 
-    def __init__(self, source: Any, step: int = 0) -> None:
+    def __init__(self, source: S, step: int = 0) -> None:
         self.source = source
         self.step = step
 
 
-class _AdaLNPrunedTimestepLookup(nn.Module):  # type: ignore[misc]
+class _AdaLNPrunedTimestepLookup(nn.Module):
     """Map exact float32 timestep values to the checkpoint's labelled rows."""
+
+    timesteps: torch.Tensor
 
     def __init__(self, timesteps: Sequence[float]) -> None:
         super().__init__()
         self.register_buffer(
             "timesteps", torch.tensor(tuple(timesteps), dtype=torch.float32), persistent=False
         )
-        self._armed: _Armed | None = None
+        self._armed: _Armed[Overlay] | None = None
 
     def forward(self, timestep: torch.Tensor) -> torch.Tensor:
         """The rows, on the device: the transformer checked them (`rows`) before its forward."""
         if self._armed is not None:
-            return cast(torch.Tensor, self._armed.source.rows(timestep))
+            return self._armed.source.rows(timestep)
         return self._lookup(timestep)
 
     def _lookup(self, timestep: torch.Tensor) -> torch.Tensor:
@@ -99,7 +101,7 @@ class _AdaLNPrunedTimestepLookup(nn.Module):  # type: ignore[misc]
 
     def rows(self, timestep: torch.Tensor) -> torch.Tensor:
         if self._armed is not None:
-            return cast(torch.Tensor, self._armed.source.rows(timestep))
+            return self._armed.source.rows(timestep)
         values = timestep.to(dtype=torch.float32).reshape(-1, 1)
         matches = values == self.timesteps.reshape(1, -1)
         counts = matches.sum(dim=1)
@@ -112,7 +114,7 @@ class _AdaLNPrunedTimestepLookup(nn.Module):  # type: ignore[misc]
         return matches.to(dtype=torch.int64).argmax(dim=1)
 
 
-class _AdaLNPrunedTimestepRows(nn.Module):  # type: ignore[misc]
+class _AdaLNPrunedTimestepRows(nn.Module):
     """Keep inherited ``forward`` intact while replacing the removed timestep MLP."""
 
     def __init__(self) -> None:
@@ -127,8 +129,10 @@ class _AdaLNPrunedTimestepRows(nn.Module):  # type: ignore[misc]
         return rows
 
 
-class _AdaLNPrunedBlockTable(nn.Module):  # type: ignore[misc]
+class _AdaLNPrunedBlockTable(nn.Module):
     """Sparse exact table with the dense local shape Diffusers blocks already consume."""
+
+    table_index: torch.Tensor
 
     def __init__(
         self,
@@ -144,7 +148,7 @@ class _AdaLNPrunedBlockTable(nn.Module):  # type: ignore[misc]
         for table_row, (timestep_row, modality_tag) in enumerate(keys):
             index[timestep_row, modality_tag] = table_row
         self.register_buffer("table_index", index, persistent=False)
-        self._armed: _Armed | None = None
+        self._armed: _Armed[OverlayTables] | None = None
 
     def forward(self, timestep_rows: torch.Tensor) -> tuple[torch.Tensor, ...]:
         source = self if self._armed is None else self._armed.source
@@ -161,14 +165,14 @@ class _AdaLNPrunedBlockTable(nn.Module):  # type: ignore[misc]
         )
 
 
-class _AdaLNPrunedOutputTable(nn.Module):  # type: ignore[misc]
+class _AdaLNPrunedOutputTable(nn.Module):
     """Official final RMSNorm with exact precomputed shift/scale rows."""
 
     def __init__(self, norm: nn.Module, *, hidden_size: int, timestep_count: int) -> None:
         super().__init__()
         self.norm = norm
         self.table = nn.Parameter(torch.empty(timestep_count, 2, hidden_size))
-        self._armed: _Armed | None = None
+        self._armed: _Armed[OverlayTables] | None = None
 
     def forward(
         self,
@@ -187,12 +191,12 @@ class _AdaLNPrunedOutputTable(nn.Module):  # type: ignore[misc]
         )
 
 
-class _SelectableHead(nn.Linear):  # type: ignore[misc]
+class _SelectableHead(nn.Linear):
     """The official output head, or the turbo evaluation's collapsed head when armed."""
 
     def __init__(self, in_features: int, out_features: int) -> None:
         super().__init__(in_features, out_features, bias=True)
-        self._armed: _Armed | None = None
+        self._armed: _Armed[nn.Module] | None = None
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         if self._armed is None:
@@ -206,10 +210,14 @@ def _projection_base(module: object) -> object:
     return get_base() if callable(get_base) else module
 
 
-class AdaLNPrunedMiniMaxH3Transformer(MiniMaxH3Transformer3DModel):  # type: ignore[misc]
+class AdaLNPrunedMiniMaxH3Transformer(MiniMaxH3Transformer3DModel):
     """Official MiniMax-H3 transformer with only its exact modulation source replaced."""
 
-    _keep_in_fp32_modules: ClassVar[list[str]] = [
+    # This class swaps Diffusers' modulation modules for its tables (`__init__`).
+    time_proj: _AdaLNPrunedTimestepLookup  # type: ignore[assignment]
+    time_embedder: _AdaLNPrunedTimestepRows  # type: ignore[assignment]
+    norm_out: _AdaLNPrunedOutputTable  # type: ignore[assignment]
+    _keep_in_fp32_modules: list[str] = [
         *MiniMaxH3Transformer3DModel._keep_in_fp32_modules,
         "time_proj",
     ]
@@ -217,7 +225,7 @@ class AdaLNPrunedMiniMaxH3Transformer(MiniMaxH3Transformer3DModel):  # type: ign
     #: returns them. A denoise loop computes them once, on the GPU that runs it, and its calls
     #: hand every GPU those tables (`rotary=`): each GPU must take its own rows of the whole
     #: document's, never the rows of the GPU that ran the loop.
-    _cp_plan: ClassVar[dict[str, Any]] = {
+    _cp_plan: dict[str, Any] = {  # type: ignore[explicit-any]  # Any: Diffusers' context-parallel plan
         **{k: plan for k, plan in MiniMaxH3Transformer3DModel._cp_plan.items() if k != "rope"},
         "transformer_blocks.*": {
             **MiniMaxH3Transformer3DModel._cp_plan["transformer_blocks.*"],
@@ -230,21 +238,21 @@ class AdaLNPrunedMiniMaxH3Transformer(MiniMaxH3Transformer3DModel):  # type: ign
         *,
         table_timesteps: Sequence[float],
         table_block_keys: Sequence[tuple[int, int]],
-        **config: Any,
+        **config: Any,  # type: ignore[explicit-any]  # Any: **config into Diffusers' typed keywords
     ) -> None:
         super().__init__(**config)
         self.time_proj = _AdaLNPrunedTimestepLookup(table_timesteps)
         self.time_embedder = _AdaLNPrunedTimestepRows()
         for block in self.transformer_blocks:
             block.adaln_proj = _AdaLNPrunedBlockTable(
-                hidden_size=int(self.config.hidden_size),
+                hidden_size=int(self.config["hidden_size"]),
                 timestep_count=len(table_timesteps),
                 keys=table_block_keys,
             )
-        norm_out = cast(Any, self.norm_out)  # type: ignore[has-type]
+        norm_out = self.norm_out
         self.norm_out = _AdaLNPrunedOutputTable(
             norm_out.norm,
-            hidden_size=int(self.config.hidden_size),
+            hidden_size=int(self.config["hidden_size"]),
             timestep_count=len(table_timesteps),
         )
         for name in ("proj_out", "audio_proj_out"):
@@ -365,10 +373,10 @@ class AdaLNPrunedMiniMaxH3Transformer(MiniMaxH3Transformer3DModel):  # type: ign
 
     def _arm(
         self,
-        timestep: Any,
-        timestep_indices: Any,
-        token_tags: Any,
-        selector: Any,
+        timestep: object,
+        timestep_indices: object,
+        token_tags: object,
+        selector: object,
     ) -> None:
         """Check one forward's rows against the tables it reads: the turbo overlay's, engaged
         here, when `selector` (its `attention_kwargs`) names the bank."""
@@ -389,7 +397,7 @@ class AdaLNPrunedMiniMaxH3Transformer(MiniMaxH3Transformer3DModel):  # type: ign
             raise ValueError(
                 "packed rows contain a modality tag outside the canonical 0/1/2 set",
             )
-        tables: Any = self
+        tables: AdaLNPrunedMiniMaxH3Transformer | Overlay = self
         try:
             if bank is not None:
                 overlay = selector.get(OVERLAY_KWARG) if isinstance(selector, Mapping) else None
@@ -407,7 +415,9 @@ class AdaLNPrunedMiniMaxH3Transformer(MiniMaxH3Transformer3DModel):  # type: ign
                 tables = overlay
             global_rows = self.time_proj.rows(timestep)
             row_timesteps = global_rows.index_select(0, timestep_indices)
-            table_index = tables.transformer_blocks[0].adaln_proj.table_index
+            # Each block's adaln_proj is this class's table (`__init__`), or the overlay's.
+            first = cast("_AdaLNPrunedBlockTable | OverlayTables", tables.transformer_blocks[0].adaln_proj)
+            table_index = first.table_index
             present = table_index[row_timesteps, token_tags] >= 0
             if not bool(torch.all(present)):
                 raise ValueError(
@@ -422,7 +432,8 @@ class AdaLNPrunedMiniMaxH3Transformer(MiniMaxH3Transformer3DModel):  # type: ign
         self._arming = OverlayArming(overlay, step)
         self.time_proj._armed = _Armed(overlay)
         for block, source in zip(self.transformer_blocks, overlay.transformer_blocks, strict=True):
-            block.adaln_proj._armed = _Armed(source.adaln_proj)
+            table = cast(_AdaLNPrunedBlockTable, block.adaln_proj)  # `__init__` installs one per block
+            table._armed = _Armed(cast(OverlayTables, source.adaln_proj))
         self.norm_out._armed = _Armed(overlay.norm_out)
         for name in ("proj_out", "audio_proj_out") if overlay.heads else ():
             head = _projection_base(getattr(self, name))
@@ -437,7 +448,7 @@ class AdaLNPrunedMiniMaxH3Transformer(MiniMaxH3Transformer3DModel):  # type: ign
         self._arming = None
         self.time_proj._armed = None
         for block in self.transformer_blocks:
-            block.adaln_proj._armed = None
+            cast(_AdaLNPrunedBlockTable, block.adaln_proj)._armed = None
         self.norm_out._armed = None
         for name in ("proj_out", "audio_proj_out"):
             head = _projection_base(getattr(self, name))
@@ -447,7 +458,7 @@ class AdaLNPrunedMiniMaxH3Transformer(MiniMaxH3Transformer3DModel):  # type: ign
     @classmethod
     def from_official_config(
         cls,
-        config: Mapping[str, Any],
+        config: Mapping[str, object],
         *,
         table_timesteps: Sequence[float],
         table_block_keys: Sequence[tuple[int, int]],

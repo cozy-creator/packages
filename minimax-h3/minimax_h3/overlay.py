@@ -50,7 +50,7 @@ _LORA_ROW_CHUNK = 4096
 _HEAD_ROW_CHUNK = 1024
 
 
-class LoRAFactors(nn.Module):  # type: ignore[misc]
+class LoRAFactors(nn.Module):
     """One site's rank-`r` factors over the original tensor operand."""
 
     def __init__(self, in_features: int, out_features: int, rank: int, scale: float) -> None:
@@ -67,7 +67,7 @@ class LoRAFactors(nn.Module):  # type: ignore[misc]
         return self.lora_down, self.lora_up, float(self.scale)
 
 
-class _Site(nn.Module):  # type: ignore[misc]
+class _Site(nn.Module):
     """A named container whose children reproduce the checkpoint's module paths."""
 
     def __init__(self, **children: nn.Module) -> None:
@@ -76,8 +76,10 @@ class _Site(nn.Module):  # type: ignore[misc]
             self.add_module(name, child)
 
 
-class OverlayTables(nn.Module):  # type: ignore[misc]
+class OverlayTables(nn.Module):
     """An overlay's exact rows for one family of tables: the same shape the base tables have."""
+
+    table_index: torch.Tensor
 
     def __init__(self, table: torch.Tensor, index: torch.Tensor | None = None) -> None:
         super().__init__()
@@ -90,7 +92,7 @@ class OverlayTables(nn.Module):  # type: ignore[misc]
         return self.table.index_select(0, rows)
 
 
-class TurboHeads(nn.Module):  # type: ignore[misc]
+class TurboHeads(nn.Module):
     """One collapsed head per transformer evaluation, selected by the step being served."""
 
     def __init__(self, evaluations: int, out_features: int, in_features: int) -> None:
@@ -141,7 +143,7 @@ class TurboSchedule:
         return steps[0]
 
 
-class Overlay(nn.Module):  # type: ignore[misc]
+class Overlay(nn.Module):
     """Everything one overlay adds to its trunk DiT, under the DiT's own paths.
 
     State-dict keys are the checkpoint's: `transformer_blocks.{i}.attn.to_q.lora_down`,
@@ -150,6 +152,7 @@ class Overlay(nn.Module):  # type: ignore[misc]
     """
 
     present = True
+    timesteps: torch.Tensor
     #: Its pieces: each site's factors, each table and each head is its own block, so a
     #: consumer binds the few MB it reads, never the whole overlay (~620 MB, cr-203 U9 (c)).
     _no_split_modules: ClassVar[list[str]] = ["LoRAFactors", "OverlayTables", "TurboHeads"]

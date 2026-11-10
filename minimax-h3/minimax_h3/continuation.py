@@ -278,7 +278,7 @@ def encode_context(context: AVContext) -> bytes:
     data = save(tensors, metadata=metadata)
     if len(data) > MAX_CONTEXT_BYTES:
         _refuse("encoded context exceeds its 16 MiB bound")
-    return cast(bytes, data)
+    return data
 
 
 def decode_context(data: bytes) -> AVContext:

@@ -26,7 +26,7 @@ from __future__ import annotations
 from collections.abc import Iterator
 
 import torch
-from diffusers import AutoencoderKLMiniMaxH3
+from diffusers.models.autoencoders.autoencoder_kl_minimax_h3 import AutoencoderKLMiniMaxH3
 from diffusers.models.autoencoders.vae import DiagonalGaussianDistribution
 from diffusers.models.modeling_utils import get_parameter_dtype
 
@@ -36,7 +36,7 @@ from cozy_runtime.author import Cut, split
 from cozy_runtime.author import device as placed_device
 
 
-class TileBatchedVideoVAE(AutoencoderKLMiniMaxH3):  # type: ignore[misc]
+class TileBatchedVideoVAE(AutoencoderKLMiniMaxH3):
     """`AutoencoderKLMiniMaxH3` whose tiled clip decode batches the tiles and whose temporal
     decode hands out each finished chunk as it lands (h3a-017)."""
 
@@ -50,9 +50,9 @@ class TileBatchedVideoVAE(AutoencoderKLMiniMaxH3):  # type: ignore[misc]
         z = z.to(next(self.decoder.parameters()).dtype)
         tokens_chunk_size = self.tokens_chunk_size
         temporal_ratio = self.temporal_compression_ratio
-        num_tokens = z.shape[2] + self.config.token_drop
+        num_tokens = z.shape[2] + self.config["token_drop"]
         pad_tokens = (-num_tokens) % tokens_chunk_size
-        intra_tail = self.config.clip_length % temporal_ratio
+        intra_tail = self.config["clip_length"] % temporal_ratio
         pad_frames = sum(
             intra_tail
             if intra_tail and (z.shape[2] + k) % tokens_chunk_size == 0
@@ -76,7 +76,7 @@ class TileBatchedVideoVAE(AutoencoderKLMiniMaxH3):  # type: ignore[misc]
 
     def _decode_pieces(self, z: torch.Tensor, pad_tokens: int) -> Iterator[torch.Tensor]:
         tokens_chunk_size = self.tokens_chunk_size
-        token_drop = self.config.token_drop
+        token_drop = self.config["token_drop"]
         chunk_num_frames = tokens_chunk_size * self.temporal_compression_ratio
         num_tokens = z.shape[2] + token_drop + pad_tokens
         num_chunks = num_tokens // tokens_chunk_size - int(token_drop > 0)
@@ -111,7 +111,7 @@ class TileBatchedVideoVAE(AutoencoderKLMiniMaxH3):  # type: ignore[misc]
         """Upstream's temporal encode with its clips spread over the group: each
         `clip_length` clip encodes from its own frames alone, so a round runs on the ranks
         at once and the moments join here in order, as one rank computes them."""
-        clip_length = self.config.clip_length
+        clip_length = self.config["clip_length"]
         if x.shape[2] == 1:
             return self._encode_clip(x)
         if x.shape[2] % clip_length:
@@ -119,7 +119,7 @@ class TileBatchedVideoVAE(AutoencoderKLMiniMaxH3):  # type: ignore[misc]
             x = torch.cat([x, pad], dim=2)
         clips = ((x[:, :, i : i + clip_length],) for i in range(0, x.shape[2], clip_length))
         moments = torch.cat(list(spread(self._encode_clip, clips)), dim=2)
-        token_drop = self.config.token_drop
+        token_drop = self.config["token_drop"]
         return moments[:, :, :-token_drop] if token_drop > 0 else moments
 
     def encode_frames(
@@ -133,7 +133,7 @@ class TileBatchedVideoVAE(AutoencoderKLMiniMaxH3):  # type: ignore[misc]
         uint8, a quarter of its float32 bytes (run 1516: 3.5-3.9 s per continuation export).
         Normalization is elementwise and padding repeats the last frame, so every clip's
         floats are the ones `_encode` would slice from the normalized video."""
-        clip_length = self.config.clip_length
+        clip_length = self.config["clip_length"]
         if pixels.shape[2] % clip_length:
             pad = pixels[:, :, -1:].repeat(1, 1, (-pixels.shape[2]) % clip_length, 1, 1)
             pixels = torch.cat([pixels, pad], dim=2)
@@ -142,7 +142,7 @@ class TileBatchedVideoVAE(AutoencoderKLMiniMaxH3):  # type: ignore[misc]
             for i in range(0, pixels.shape[2], clip_length)
         )
         moments = torch.cat(list(spread(self._encode_frames_clip, clips)), dim=2)
-        token_drop = self.config.token_drop
+        token_drop = self.config["token_drop"]
         if token_drop > 0:
             moments = moments[:, :, :-token_drop]
         return DiagonalGaussianDistribution(moments)
@@ -158,7 +158,8 @@ class TileBatchedVideoVAE(AutoencoderKLMiniMaxH3):  # type: ignore[misc]
 
     def _decode_clip(self, z: torch.Tensor) -> torch.Tensor:
         if not self.use_tiling:
-            return self.decoder(self.post_quant_conv(z))
+            decoded: torch.Tensor = self.decoder(self.post_quant_conv(z))
+            return decoded
 
         ratio = self.spatial_compression_ratio
         y_indices, y_lengths, y_overlaps = self._split_tiles(
@@ -189,7 +190,7 @@ class TileBatchedVideoVAE(AutoencoderKLMiniMaxH3):  # type: ignore[misc]
         decoder = self.decoder
         x = self.post_quant_conv(batch)
         tiles, channels, frames, height, width = x.shape
-        hidden = decoder.proj_in(
+        hidden: torch.Tensor = decoder.proj_in(
             x.permute(0, 2, 3, 4, 1).reshape(tiles, frames * height * width, channels)
         )
         patches = hidden.shape[1]
@@ -233,7 +234,8 @@ class _BlockRows:
         self.rotary = rotary
 
     def __call__(self, hidden: torch.Tensor) -> torch.Tensor:
-        return self.block(hidden, self.rotary)
+        out: torch.Tensor = self.block(hidden, self.rotary)
+        return out
 
 
 def encode_condition(
@@ -258,7 +260,7 @@ def encode_condition(
         else:
             pixels = pixels.permute(3, 0, 1, 2)[None]
         posterior = vae.encode(_normalized(pixels, pixel_mean, pixel_std), return_dict=False)[0]
-    latents = posterior.sample(generator=rng.generator(seed))
+    latents: torch.Tensor = posterior.sample(generator=rng.generator(seed))
     return latents.to(torch.float16).float()
 
 

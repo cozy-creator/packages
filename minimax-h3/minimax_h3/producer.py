@@ -26,7 +26,6 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from functools import partial
-from typing import Any
 
 import torch
 import torch.distributed as dist
@@ -190,7 +189,7 @@ def _whole_shard(attn: MiniMaxH3Attention) -> bool:
 Project = Callable[[torch.Tensor | PreQuantized, torch.Tensor], torch.Tensor]
 
 
-def whole(projection: Any) -> Project:
+def whole(projection: torch.nn.Module) -> Project:
     """A whole projection as a `Project`: the original module call (encoded leaves, Turbo hooks),
     an encoded leaf's GEMM writing `out` in place; a result elsewhere (another module, a hook
     that replaced it) is copied there."""
@@ -205,7 +204,8 @@ def whole(projection: Any) -> Project:
 
 def _empty(hidden: torch.Tensor | PreQuantized, tokens: int, width: int) -> torch.Tensor:
     if isinstance(hidden, PreQuantized):
-        return hidden.payload.new_empty((1, tokens, width), dtype=torch.bfloat16)
+        empty: torch.Tensor = hidden.payload.new_empty((1, tokens, width), dtype=torch.bfloat16)
+        return empty
     return hidden.new_empty((1, tokens, width))
 
 
@@ -361,7 +361,7 @@ def produce(
                 seed = KeyMean(torch.empty(attn.heads, 128, dtype=torch.float32, device=device))
         token = KEY_MEAN.set(seed)
         try:
-            output = call.original(hidden_states, rotary_emb, attention_mask)
+            output: torch.Tensor = call.original(hidden_states, rotary_emb, attention_mask)
         finally:
             KEY_MEAN.reset(token)
         if seed is not None and seed.heads >= attn.heads:
@@ -379,7 +379,7 @@ def produce(
         f"comfy_kitchen.sol_attn_chunked(int8, stats={statistics}, vmargin=1.1, "
         f"prefix=int8, qkv=one-operand{',v=once' if reuse and not parallel else ''})"
     )
-    out = attn.to_out[1](split(attn.to_out[0], output.flatten(2, 3), Cut(1), holds=2))
+    out: torch.Tensor = attn.to_out[1](split(attn.to_out[0], output.flatten(2, 3), Cut(1), holds=2))
     del output
     return out
 
@@ -417,7 +417,7 @@ class _Means:
         if self.carry is None:
             state.statistics[self.key] = (self.call.layout.step, self.geometry, self.mean, None)
         else:
-            self.carry.slots[id(attn)].copy_(self.mean)
+            self.carry.slots[id(attn)].copy_(self.mean)  # type: ignore[arg-type]  # keep() ran: a call keeps before it closes
             state.carried.add(id(attn))
 
 
@@ -442,9 +442,8 @@ class _Heads:
         self.projections = projections
         attn = call.module
         self.shape = (1, call.layout.live_tokens, attn.heads, 128)
-        quantized = isinstance(hidden, PreQuantized)
-        self.dtype = torch.bfloat16 if quantized else hidden.dtype
-        self.device = hidden.payload.device if quantized else hidden.device
+        self.dtype = torch.bfloat16 if isinstance(hidden, PreQuantized) else hidden.dtype
+        self.device = hidden.payload.device if isinstance(hidden, PreQuantized) else hidden.device
 
     @classmethod
     def of(
@@ -702,7 +701,7 @@ def end_loop() -> None:
             state.end_loop()
 
 
-class _RetainRotary(ModelHook):  # type: ignore[misc]  # untyped Diffusers hook API
+class _RetainRotary(ModelHook):
     """Keeps a sharded component's full rotary tables for the CP recipes' sparse calls, before
     Diffusers' split hook (registered after this one) shards them. Returns them unchanged.
     Kept whenever the component runs context-parallel, whatever serves now: the transformer
@@ -710,8 +709,8 @@ class _RetainRotary(ModelHook):  # type: ignore[misc]  # untyped Diffusers hook 
     (a kernel opening during the request), so a step-0 fallback must not leave it without
     them. The producer checks their length."""
 
-    def __init__(self, component: Any, key: object) -> None:
-        super().__init__()
+    def __init__(self, component: MiniMaxH3Transformer3DModel, key: object) -> None:
+        super().__init__()  # type: ignore[no-untyped-call]  # Diffusers' ModelHook.__init__ is untyped
         self.component, self.key = component, key
 
     def post_forward(self, module: object, output: object) -> object:
