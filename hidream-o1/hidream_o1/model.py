@@ -14,7 +14,7 @@ from __future__ import annotations
 import math
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Final, TypedDict, cast
+from typing import Final, Protocol, TypedDict, cast
 
 import numpy as np
 import torch
@@ -36,8 +36,17 @@ from transformers.models.qwen3_vl.processing_qwen3_vl import Qwen3VLProcessor
 
 from .sampling import Euler, Flash, UniPC
 
-if TYPE_CHECKING:
-    from cozy_runtime.author._retained import State, Store
+
+class State(Protocol):
+    """What one `put` of the Runtime's `retained` store holds."""
+
+    def get(self) -> tuple[torch.Tensor, ...]: ...
+
+
+class Store(Protocol):
+    """The Runtime's `retained` store, as the prefix fills it."""
+
+    def put(self, *tensors: torch.Tensor) -> State: ...
 
 COMPONENT: Final = "model"
 PATCH = 32
