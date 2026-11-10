@@ -97,47 +97,12 @@ examples/client-scripts/moe-grouped-gpu.py: [operator] "Tensor" not callable
 examples/client-scripts/moe-grouped-gpu.py: [union-attr] Item "Tensor" of "Tensor | Module" has no attribute "weight"
 examples/client-scripts/moe-grouped-gpu.py: [union-attr] Item "Tensor" of "Tensor | Module" has no attribute "weight"
 examples/client-scripts/moe-grouped-gpu.py: [union-attr] Item "Tensor" of "Tensor | Module" has no attribute "weight"
-fibo-2/fibo_2/__init__.py: [assignment] Incompatible types in assignment (expression has type "Prompt[Image]", base class "ImageRequest" defined the type as "str")
-fibo-2/fibo_2/model.py: [arg-type] Argument "sigmas" to "retrieve_timesteps" has incompatible type "ndarray[tuple[int], dtype[float64]]"; expected "list[float] | None"
-fibo-2/fibo_2/model.py: [attr-defined] "_Staged" has no attribute "_patchify_latents"
-fibo-2/fibo_2/model.py: [attr-defined] "_Staged" has no attribute "_unpatchify_latents"
-fibo-2/fibo_2/model.py: [attr-defined] "_Staged" has no attribute "default_sample_size"
-fibo-2/fibo_2/model.py: [attr-defined] "_Staged" has no attribute "image_processor"
-fibo-2/fibo_2/model.py: [attr-defined] "_Staged" has no attribute "image_processor"
-fibo-2/fibo_2/model.py: [attr-defined] "_Staged" has no attribute "prepare_image_latents"; maybe "prepare_latents"?
-fibo-2/fibo_2/model.py: [attr-defined] "_Staged" has no attribute "scheduler"
-fibo-2/fibo_2/model.py: [attr-defined] "_Staged" has no attribute "text_encoder_image_size"
-fibo-2/fibo_2/model.py: [attr-defined] "_Staged" has no attribute "text_images_max_noise_level"
-fibo-2/fibo_2/model.py: [attr-defined] "_Staged" has no attribute "transformer"
-fibo-2/fibo_2/model.py: [attr-defined] "_Staged" has no attribute "vae"
-fibo-2/fibo_2/model.py: [attr-defined] "_Staged" has no attribute "vae_scale_factor"
-fibo-2/fibo_2/model.py: [attr-defined] "_Staged" has no attribute "vae_scale_factor"
-fibo-2/fibo_2/model.py: [explicit-any] Explicit "Any" is not allowed
-fibo-2/fibo_2/model.py: [explicit-any] Explicit "Any" is not allowed
-fibo-2/fibo_2/model.py: [explicit-any] Explicit "Any" is not allowed
-fibo-2/fibo_2/model.py: [explicit-any] Explicit "Any" is not allowed
-fibo-2/fibo_2/model.py: [misc] "encode_prompt" undefined in superclass
-fibo-2/fibo_2/model.py: [no-untyped-call] Call to untyped function "_Staged" in typed context
-fibo-2/fibo_2/model.py: [no-untyped-call] Call to untyped function "from_config" of "AutoencoderKLFlux2" in typed context
-fibo-2/fibo_2/model.py: [no-untyped-call] Call to untyped function "from_config" of "BriaFibo2Transformer2DModel" in typed context
-fibo-2/fibo_2/model.py: [no-untyped-call] Call to untyped function "from_config" of "FlowMatchEulerDiscreteScheduler" in typed context
-fibo-2/fibo_2/model.py: [no-untyped-call] Call to untyped function "from_config" of "_BaseAutoModelClass" in typed context
-fibo-2/fibo_2/model.py: [operator] "_Staged" not callable
-fibo-2/fibo_2/model.py: [unused-ignore] Unused "type: ignore" comment
-fibo-2/fibo_2/model.py: [unused-ignore] Unused "type: ignore" comment
 fibo-2/fibo_2/quantize.py: [union-attr] Item "DerivationHook" of "QuantizationPlan | SelectionPlan | DerivationHook" has no attribute "components"
 fibo-2/fibo_2/quantize.py: [union-attr] Item "DerivationHook" of "QuantizationPlan | SelectionPlan | DerivationHook" has no attribute "components"
 fibo-2/fibo_2/quantize.py: [union-attr] Item "DerivationHook" of "QuantizationPlan | SelectionPlan | DerivationHook" has no attribute "include"
 fibo-2/fibo_2/quantize.py: [union-attr] Item "DerivationHook" of "QuantizationPlan | SelectionPlan | DerivationHook" has no attribute "include"
 fibo-2/fibo_2/quantize.py: [union-attr] Item "SelectionPlan" of "QuantizationPlan | SelectionPlan | DerivationHook" has no attribute "components"
 fibo-2/fibo_2/quantize.py: [union-attr] Item "SelectionPlan" of "QuantizationPlan | SelectionPlan | DerivationHook" has no attribute "components"
-fibo-2/fibo_2/upsampler.py: [arg-type] Argument 1 to "apply_chat_template" of "ProcessorMixin" has incompatible type "list[dict[str, Sequence[Collection[str]]]]"; expected "list[dict[str, str]] | list[list[dict[str, str]]]"
-fibo-2/fibo_2/upsampler.py: [arg-type] Argument 2 to "linear" has incompatible type "Any | Tensor | Module"; expected "Tensor"
-fibo-2/fibo_2/upsampler.py: [explicit-any] Explicit "Any" is not allowed
-fibo-2/fibo_2/upsampler.py: [explicit-any] Explicit "Any" is not allowed
-fibo-2/fibo_2/upsampler.py: [explicit-any] Explicit "Any" is not allowed
-fibo-2/fibo_2/upsampler.py: [no-untyped-call] Call to untyped function "from_config" of "_BaseAutoModelClass" in typed context
-fibo-2/fibo_2/upsampler.py: [union-attr] Item "Tensor" of "Tensor | Module" has no attribute "weight"
 flux-2/flux_2/__init__.py: [assignment] Incompatible types in assignment (expression has type "Prompt[Image]", base class "ImageRequest" defined the type as "str")
 flux-2/flux_2/model.py: [arg-type] Argument 1 to "Hook" has incompatible type "partial[Module | None]"; expected "Callable[[], Factors | None]"
 flux-2/flux_2/model.py: [arg-type] Argument 1 to "noise" has incompatible type "tuple[int, Any | Tensor | Module, int, int]"; expected "Sequence[int]"

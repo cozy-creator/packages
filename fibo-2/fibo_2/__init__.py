@@ -45,7 +45,7 @@ NEGATIVE_T2I = (
 
 class TurboInput(ImageRequest):
     #: Its text, and the pictures it edits, in order of first mention.
-    prompt: Prompt[Image] = Prompt()
+    prompt: Prompt[Image] = Prompt()  # type: ignore[assignment]  # a prompt with pictures, in place of the base's text
     steps: Steps = None
     prompt_upsampling: bool | None = None
 
