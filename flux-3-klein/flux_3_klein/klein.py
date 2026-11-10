@@ -304,7 +304,7 @@ class Klein(Model[KleinGraph]):
                 encoder,
                 self.processor,
                 prompt,
-                device=torch.device(str(self.device)),
+                device=self.device,
                 max_sequence_length=MAX_TOKENS,
                 pad_multiple=PAD_MULTIPLE,
                 hidden_states_layers=TEXT_LAYERS,
@@ -315,7 +315,7 @@ class Klein(Model[KleinGraph]):
         """Serve the VAE at `VAE_DTYPE` on a GPU from now on, before any VAE scope opens: the Runtime
         casts the stored float32 bytes when it next fills them. A CPU keeps float32."""
         vae = self.graph.components["vae"]
-        if torch.device(str(self.device)).type == "cuda" and next(vae.parameters()).dtype != VAE_DTYPE:
+        if self.device.type == "cuda" and next(vae.parameters()).dtype != VAE_DTYPE:
             hold_dtype(vae, VAE_DTYPE)
             tel.log("vae representation", dtype=str(VAE_DTYPE).removeprefix("torch."))
 
@@ -324,7 +324,7 @@ class Klein(Model[KleinGraph]):
     def encode_references(self, references: list[Image.Image]) -> tuple[torch.Tensor, torch.Tensor]:
         """Normalized packed latents of the prepared references as one token sequence, with ids."""
         vae = self.graph.components["vae"]
-        device = torch.device(str(self.device))
+        device = self.device
         tokens, ids = [], []
         with torch.inference_mode():
             for index, reference in enumerate(references):
@@ -364,7 +364,7 @@ class Klein(Model[KleinGraph]):
         so it runs them per step.
         """
         tf = self.graph.components["transformer"]
-        device = torch.device(str(self.device))
+        device = self.device
         rows, columns = height // PATCH, width // PATCH
         timesteps = schedule(steps)
         with torch.no_grad():
@@ -416,7 +416,7 @@ class Klein(Model[KleinGraph]):
     @uses_components("vae")
     def decode(self, tokens: torch.Tensor, *, width: int, height: int) -> Image.Image:
         vae = self.graph.components["vae"]
-        device = torch.device(str(self.device))
+        device = self.device
         rows, columns = height // PATCH, width // PATCH
         with torch.inference_mode():
             latents = tokens.to(device=device, dtype=torch.float32).view(1, rows, columns, -1).permute(0, 3, 1, 2)

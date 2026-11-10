@@ -153,7 +153,7 @@ def refine(
     over the video rows is the Runtime's (`rng.noise`, drawn on the CPU from `seed`), the same on
     every card.
     """
-    device = torch.device(str(placed_device()))
+    device = placed_device()
     _, _, latent_frames, height, width = (int(value) for value in latents.shape)
     rows_per_frame = (height // PATCH_SIZE[1]) * (width // PATCH_SIZE[2])
     spans = [(first, stop - first) for first, stop in layout]

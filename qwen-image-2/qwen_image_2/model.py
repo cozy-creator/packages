@@ -286,7 +286,7 @@ class QwenImage21Model(Model[QwenImage21Graph]):
         ComfyUI's 0.93 s. The Runtime casts the stored bytes when it next fills them; call this
         before any VAE scope opens."""
         vae = self.graph.components["vae"]
-        device = torch.device(str(self.device))
+        device = self.device
         if device.type != "cuda" or not torch.cuda.is_bf16_supported(including_emulation=False):
             return
         if next(vae.parameters()).dtype != VAE_DTYPE:
@@ -305,7 +305,7 @@ class QwenImage21Model(Model[QwenImage21Graph]):
             ),
             sample_sigmas=None if sigmas is None else list(sigmas),
         )
-        pipeline.device_placed = torch.device(str(self.device))
+        pipeline.device_placed = self.device
         return pipeline
 
     @memoize
@@ -314,7 +314,7 @@ class QwenImage21Model(Model[QwenImage21Graph]):
         encoder = self.graph.components["text_encoder"]
         with torch.inference_mode():
             embeds, mask, _ = self._pipeline().encode_prompt(
-                prompt, device=torch.device(str(self.device))
+                prompt, device=self.device
             )
         return embeds, mask
 
@@ -323,7 +323,7 @@ class QwenImage21Model(Model[QwenImage21Graph]):
     def encode_reference_images(self, images: list[Any]) -> tuple[list[Any], torch.Tensor]:
         """Encode each reference once, using Diffusers' 1 MP conditioning size."""
         vae = self.graph.components["vae"]
-        device = torch.device(str(self.device))
+        device = self.device
         pipeline = self._pipeline()
         resized, packed = [], []
         with torch.inference_mode():
@@ -351,7 +351,7 @@ class QwenImage21Model(Model[QwenImage21Graph]):
         encoder = self.graph.components["text_encoder"]
         with torch.inference_mode():
             encoded: tuple[Any, Any, Any] = self._pipeline().encode_prompt(
-                prompt, image=images, device=torch.device(str(self.device))
+                prompt, image=images, device=self.device
             )
         return encoded
 
@@ -386,7 +386,7 @@ class QwenImage21Model(Model[QwenImage21Graph]):
         transformer = self.graph.components["transformer"]
         if not transformer.config.causal_condition:
             raise UnsupportedInput("Qwen Image 2.1 denoises with causal conditioning", code="artifact_config")
-        device = torch.device(str(self.device))
+        device = self.device
         pipeline = self._pipeline(sigmas, scheduler)
         euler: Any = pipeline.scheduler
         blocks = transformer.transformer_blocks
@@ -475,7 +475,7 @@ class QwenImage21Model(Model[QwenImage21Graph]):
     @uses_components("vae")
     def decode(self, latents: Any, *, width: int, height: int) -> Any:
         vae = self.graph.components["vae"]
-        device = torch.device(str(self.device))
+        device = self.device
         with torch.inference_mode():
             latents = QwenImage21Pipeline._unpack_latents(latents, height, width, 16)
             latents = latents.to(device=device, dtype=vae.dtype)

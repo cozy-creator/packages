@@ -38,7 +38,7 @@ class BackgroundRemovalModel(Model[BiRefNetGraph]):
     @uses_components("model")
     def mask(self, image: Image.Image) -> Image.Image:
         model = self.graph.components["model"]
-        device = torch.device(str(self.device))
+        device = self.device
         # The official model's input transform and final sigmoid, using torchvision.
         prepare = transforms.Compose([
             transforms.Resize((1024, 1024)),

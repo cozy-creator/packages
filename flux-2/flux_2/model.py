@@ -209,7 +209,7 @@ class Flux2(Model[Flux2Graph]):
     @uses_components("text_encoder")
     def encode(self, prompt: str) -> torch.Tensor:
         encoder = self.graph.components["text_encoder"]
-        device = torch.device(str(self.device))
+        device = self.device
         layers = TEXT_LAYERS[self.graph.family]
         with torch.inference_mode():
             if self.dev:
@@ -228,7 +228,7 @@ class Flux2(Model[Flux2Graph]):
         """Serve the VAE at `VAE_DTYPE` on a GPU from now on, before any VAE scope opens: the Runtime
         casts the stored bytes when it next fills them. A CPU keeps the stored dtype."""
         vae = self.graph.components["vae"]
-        if torch.device(str(self.device)).type == "cuda" and next(vae.parameters()).dtype != VAE_DTYPE:
+        if self.device.type == "cuda" and next(vae.parameters()).dtype != VAE_DTYPE:
             hold_dtype(vae, VAE_DTYPE)
             tel.log("vae representation", dtype=str(VAE_DTYPE).removeprefix("torch."))
 
@@ -237,7 +237,7 @@ class Flux2(Model[Flux2Graph]):
     def encode_references(self, references: list[Image.Image]) -> tuple[torch.Tensor, torch.Tensor]:
         """Normalized packed latents of the prepared references as one token sequence, with ids."""
         vae = self.graph.components["vae"]
-        device = torch.device(str(self.device))
+        device = self.device
         tokens, ids = [], []
         with torch.inference_mode():
             for index, reference in enumerate(references):
@@ -267,7 +267,7 @@ class Flux2(Model[Flux2Graph]):
         """BFL's Euler sampler in bf16 (`denoise`, `denoise_cfg`): [dev] embeds `guidance`, [klein] Base
         takes CFG against `negative`, [klein] distilled takes neither."""
         tf = self.graph.components["transformer"]
-        device = torch.device(str(self.device))
+        device = self.device
         rows, columns = height // PATCH, width // PATCH
         noise = rng.noise((1, tf.config.in_channels, rows, columns), seed)
         cfg = negative is not None
@@ -305,7 +305,7 @@ class Flux2(Model[Flux2Graph]):
     @uses_components("vae")
     def decode(self, tokens: torch.Tensor, *, width: int, height: int) -> Image.Image:
         vae = self.graph.components["vae"]
-        device = torch.device(str(self.device))
+        device = self.device
         rows, columns = height // PATCH, width // PATCH
         with torch.inference_mode():
             latents = tokens.to(device=device, dtype=torch.float32).view(1, rows, columns, -1).permute(0, 3, 1, 2)

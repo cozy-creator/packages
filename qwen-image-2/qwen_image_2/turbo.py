@@ -84,7 +84,7 @@ class FunAccLoRA(Model[FunAccGraph]):
     def denoise(self, base: QwenImage21Model, *args: Any, **kwargs: Any) -> Any:
         """`base.denoise` with this overlay armed on its DiT, on Fun Acc's grid and per-step heads."""
         transformer = base.graph.components["transformer"]
-        heads = self.graph.heads.heads.to(device=torch.device(str(base.device))).clone()
+        heads = self.graph.heads.heads.to(device=base.device).clone()
         transformer._cozy_overlay = self.graph.sites
         try:
             return base.denoise(*args, sigmas=SIGMAS, scheduler=SCHEDULER, heads=heads, **kwargs)

@@ -124,7 +124,7 @@ class Fibo2(Model[FiboGraph]):
             processor=self.processor,
             scheduler=FlowMatchEulerDiscreteScheduler.from_config(self.graph.scheduler_config),
         )
-        pipe.stage_device = torch.device(str(self.device))
+        pipe.stage_device = self.device
         pipe.encoded = []
         return pipe
 
@@ -132,7 +132,7 @@ class Fibo2(Model[FiboGraph]):
         """Serve the VAE at `VAE_DTYPE` on a GPU from now on, before any VAE scope opens: the Runtime
         casts the stored float32 bytes when it next fills them. A CPU keeps float32."""
         vae = self.graph.components["vae"]
-        if torch.device(str(self.device)).type == "cuda" and next(vae.parameters()).dtype != VAE_DTYPE:
+        if self.device.type == "cuda" and next(vae.parameters()).dtype != VAE_DTYPE:
             hold_dtype(vae, VAE_DTYPE)
             tel.log("vae representation", dtype=str(VAE_DTYPE).removeprefix("torch."))
 

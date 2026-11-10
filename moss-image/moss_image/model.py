@@ -340,7 +340,7 @@ class MossImage(Model[MossGraph]):
         """Serve the VAE at `VAE_DTYPE` on a GPU from now on, before any VAE scope opens: the Runtime
         casts the stored float32 bytes when it next fills them. A CPU keeps float32."""
         vae = self.graph.components["vae"]
-        if torch.device(str(self.device)).type == "cuda" and next(vae.parameters()).dtype != VAE_DTYPE:
+        if self.device.type == "cuda" and next(vae.parameters()).dtype != VAE_DTYPE:
             hold_dtype(vae, VAE_DTYPE)
             tel.log("vae representation", dtype=str(VAE_DTYPE).removeprefix("torch."))
 
@@ -351,7 +351,7 @@ class MossImage(Model[MossGraph]):
         template with thinking open, at most 4096 tokens, one unpadded forward. One prompt a call, so
         a request's fixed negative is a memo hit."""
         encoder = self.graph.components["text_encoder"]
-        device = torch.device(str(self.device))
+        device = self.device
         with torch.inference_mode():
             text = self.tokenizer.apply_chat_template(
                 [{"role": "user", "content": prompt}], tokenize=False, add_generation_prompt=True,
@@ -386,7 +386,7 @@ class MossImage(Model[MossGraph]):
         pass through each block in turn inside one call of the transformer, so a streamed block comes in
         once per step. Their text lengths differ, so the branches are two streams, not one batch."""
         transformer = self.graph.components["transformer"]
-        device = torch.device(str(self.device))
+        device = self.device
         rows, columns = height // PATCH, width // PATCH
         fused = device.type == "cuda" and not native()
         scheduler: Any = MossScheduler.from_config(self.graph.scheduler_config)
@@ -416,7 +416,7 @@ class MossImage(Model[MossGraph]):
         decoder in the VAE's dtype."""
         vae = self.graph.components["vae"]
         with torch.inference_mode():
-            z = latents.to(str(self.device), torch.float32)
+            z = latents.to(self.device, torch.float32)
             bn, eps = vae.bn, vae.config.batch_norm_eps
             std = (bn.running_var.float() + eps).sqrt().view(1, -1, 1, 1)
             z = z * std.to(z.device) + bn.running_mean.float().to(z.device).view(1, -1, 1, 1)

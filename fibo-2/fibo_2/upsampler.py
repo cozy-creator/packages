@@ -94,7 +94,7 @@ class Captioner(Model[CaptionerGraph]):
             [{"role": "user", "content": content}], tokenize=False, add_generation_prompt=True
         )
         inputs = processor(text=[chat], images=images or None, padding=True, return_tensors="pt").to(
-            torch.device(str(self.device))
+            self.device
         )
         if "pixel_values" in inputs:
             inputs["pixel_values"] = inputs["pixel_values"].to(torch.bfloat16)

@@ -131,7 +131,7 @@ class AnimaModel(Model[AnimaPipeline]):
         casts the stored bytes when it next fills them; called before any VAE scope opens."""
         vae = self.pipe.components["vae"]
         dtype = optimization.VAE_DTYPE
-        if torch.device(str(self.device)).type != "cuda" or next(vae.parameters()).dtype == dtype:
+        if self.device.type != "cuda" or next(vae.parameters()).dtype == dtype:
             return
         hold_dtype(vae, dtype)
         tel.log("vae representation", dtype="float16")
@@ -151,7 +151,7 @@ class AnimaModel(Model[AnimaPipeline]):
         phases: _Phases,
         batched: bool,
     ) -> Any:
-        device = torch.device(str(self.device))
+        device = self.device
         generator = rng.generator(seed)
         fused = optimization.installed(self.pipe.components["transformer"])
         cache = stepcache.FirstBlockCache(first_block_cache) if first_block_cache > 0.0 else None

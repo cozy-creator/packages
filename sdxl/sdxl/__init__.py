@@ -339,7 +339,7 @@ class SdxlModel(Model[SdxlPipeline]):
             self.pipe.components[name]
             for name in ("text_encoder", "text_encoder_2", "unet", "vae")
         )
-        device = torch.device(str(self.device))
+        device = self.device
         generator = rng.generator(seed)
         sampler: Any = DDIMScheduler if hidiffusion else EulerDiscreteScheduler
         scheduler = sampler.from_config(self.pipe.scheduler_config)
