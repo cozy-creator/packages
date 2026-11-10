@@ -846,42 +846,6 @@ minimax-h3/minimax_h3/vae_tiles.py: [no-any-return] Returning Any from function 
 minimax-h3/minimax_h3/vae_tiles.py: [no-any-return] Returning Any from function declared to return "Tensor"
 minimax-h3/minimax_h3/vae_tiles.py: [no-any-return] Returning Any from function declared to return "Tensor"
 minimax-h3/minimax_h3/vae_tiles.py: [unused-ignore] Unused "type: ignore" comment
-moss-image/moss_image/model.py: [arg-type] Argument 1 to "noise" has incompatible type "tuple[int, Tensor | Module, int, int]"; expected "Sequence[int]"
-moss-image/moss_image/model.py: [arg-type] Argument 1 to "to" of "TensorBase" has incompatible type "Tensor | Module"; expected "Tensor"
-moss-image/moss_image/model.py: [assignment] Incompatible types in assignment (expression has type "Tensor", variable has type "PreQuantized | None")
-moss-image/moss_image/model.py: [assignment] Incompatible types in assignment (expression has type "Tensor", variable has type Module)
-moss-image/moss_image/model.py: [attr-defined] "MossScheduler" has no attribute "config"
-moss-image/moss_image/model.py: [attr-defined] "MossScheduler" has no attribute "config"
-moss-image/moss_image/model.py: [attr-defined] "MossScheduler" has no attribute "config"
-moss-image/moss_image/model.py: [attr-defined] "MossScheduler" has no attribute "register_to_config"
-moss-image/moss_image/model.py: [explicit-any] Explicit "Any" is not allowed
-moss-image/moss_image/model.py: [explicit-any] Explicit "Any" is not allowed
-moss-image/moss_image/model.py: [explicit-any] Explicit "Any" is not allowed
-moss-image/moss_image/model.py: [explicit-any] Explicit "Any" is not allowed
-moss-image/moss_image/model.py: [index] Value of type "Tensor | Module" is not indexable
-moss-image/moss_image/model.py: [misc] "set_timesteps" undefined in superclass
-moss-image/moss_image/model.py: [misc] Function is untyped after decorator transformation
-moss-image/moss_image/model.py: [no-any-return] Returning Any from function declared to return "Tensor"
-moss-image/moss_image/model.py: [no-any-return] Returning Any from function declared to return "Tensor"
-moss-image/moss_image/model.py: [no-any-return] Returning Any from function declared to return "Tensor"
-moss-image/moss_image/model.py: [no-untyped-call] Call to untyped function "TokenizersBackend" in typed context
-moss-image/moss_image/model.py: [no-untyped-call] Call to untyped function "__init__" in typed context
-moss-image/moss_image/model.py: [no-untyped-call] Call to untyped function "_from_config" of "PreTrainedModel" in typed context
-moss-image/moss_image/model.py: [no-untyped-call] Call to untyped function "from_config" of "AutoencoderKLFlux2" in typed context
-moss-image/moss_image/model.py: [operator] "Tensor" not callable
-moss-image/moss_image/model.py: [operator] "Tensor" not callable
-moss-image/moss_image/model.py: [operator] "Tensor" not callable
-moss-image/moss_image/model.py: [operator] "Tensor" not callable
-moss-image/moss_image/model.py: [operator] "Tensor" not callable
-moss-image/moss_image/model.py: [operator] "Tensor" not callable
-moss-image/moss_image/model.py: [operator] Unsupported left operand type for + (Module)
-moss-image/moss_image/model.py: [operator] Unsupported operand types for + ("Tensor" and Module)
-moss-image/moss_image/model.py: [operator] Unsupported operand types for + (Module and "Tensor")
-moss-image/moss_image/model.py: [union-attr] Item "Tensor" of "Tensor | Any" has no attribute "served"
-moss-image/moss_image/model.py: [union-attr] Item "Tensor" of "Tensor | Module" has no attribute "batch_norm_eps"
-moss-image/moss_image/model.py: [union-attr] Item "Tensor" of "Tensor | Module" has no attribute "running_mean"
-moss-image/moss_image/model.py: [union-attr] Item "Tensor" of "Tensor | Module" has no attribute "running_var"
-moss-image/moss_image/model.py: [unused-ignore] Unused "type: ignore" comment
 qwen-image-2/qwen_image_2/__init__.py: [assignment] Incompatible types in assignment (expression has type "Prompt[Image]", base class "ImageRequest" defined the type as "str")
 qwen-image-2/qwen_image_2/__init__.py: [assignment] Incompatible types in assignment (expression has type "int", variable has type "Literal[1, 2, 4]")
 qwen-image-2/qwen_image_2/__init__.py: [assignment] Incompatible types in assignment (expression has type "int", variable has type "Literal[1, 2, 4]")
