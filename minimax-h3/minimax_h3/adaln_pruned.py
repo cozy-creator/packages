@@ -179,11 +179,10 @@ def _modulate(normed: torch.Tensor, rows: torch.Tensor, indices: torch.Tensor) -
 
 
 class _BlockModulation(MiniMaxH3AdaLayerNormModulation):
-    """FULL: the official AdaLN projection, or an armed overlay's table."""
+    """FULL: the official AdaLN projection, or an armed overlay's table. Diffusers' module with
+    this class (`H3Transformer.__init__`): its parameters and their paths are the checkpoint's."""
 
-    def __init__(self, time_embed_dim: int, hidden_size: int) -> None:
-        super().__init__(time_embed_dim=time_embed_dim, hidden_size=hidden_size)
-        self._armed: _Armed[OverlayTables] | None = None
+    _armed: _Armed[OverlayTables] | None = None
 
     def forward(self, temb: torch.Tensor) -> tuple[torch.Tensor, ...]:
         if self._armed is not None:
@@ -192,11 +191,10 @@ class _BlockModulation(MiniMaxH3AdaLayerNormModulation):
 
 
 class _OutputModulation(MiniMaxH3AdaLayerNormOut):
-    """FULL: the official final norm and its projection, or an armed overlay's table."""
+    """FULL: the official final norm and its projection, or an armed overlay's table (as
+    `_BlockModulation`, Diffusers' module with this class)."""
 
-    def __init__(self, hidden_size: int, time_embed_dim: int, eps: float) -> None:
-        super().__init__(hidden_size=hidden_size, time_embed_dim=time_embed_dim, eps=eps)
-        self._armed: _Armed[OverlayTables] | None = None
+    _armed: _Armed[OverlayTables] | None = None
 
     def forward(
         self,
@@ -272,10 +270,11 @@ class H3Transformer(MiniMaxH3Transformer3DModel):
 
     def __init__(self, **config: Any) -> None:  # type: ignore[explicit-any]  # **config into Diffusers' typed keywords
         super().__init__(**config)
-        hidden, time_dim = int(self.config["hidden_size"]), int(self.config["time_embed_dim"])
+        # Armable in place: no module is built or dropped, so the construction (its random draws
+        # included) and the state dict are Diffusers' own.
         for block in self.transformer_blocks:
-            block.adaln_proj = _BlockModulation(time_dim, hidden)
-        self.norm_out = _OutputModulation(hidden, time_dim, float(self.config["final_norm_eps"]))
+            block.adaln_proj.__class__ = _BlockModulation
+        self.norm_out.__class__ = _OutputModulation
         for name in ("proj_out", "audio_proj_out"):
             head = cast(nn.Linear, getattr(self, name))
             setattr(self, name, _SelectableHead(head.in_features, head.out_features))
