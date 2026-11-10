@@ -2,15 +2,20 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING
 
 import torch
 from cozy_runtime.accel import hold_dtype
 from cozy_runtime.author import Cut, Telemetry, split
 from transformers.masking_utils import create_causal_mask
 
+if TYPE_CHECKING:
+    from diffusers.models.autoencoders.autoencoder_kl import AutoencoderKL
+    from diffusers.models.unets.unet_2d_condition import UNet2DConditionModel
+    from transformers.models.clip.modeling_clip import CLIPTextModel, CLIPTextModelWithProjection
 
-def _clip_text(model: Any, ids: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+
+def _clip_text(model: CLIPTextModel, ids: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     """CLIP's tensor orchestration, with an explicit penultimate result.
 
     Transformers 5.16 installs Python output-collection hooks when hidden states are
@@ -19,7 +24,7 @@ def _clip_text(model: Any, ids: torch.Tensor) -> tuple[torch.Tensor, torch.Tenso
     The real parity gate compares this path with that pinned library forward.
     """
     ids = ids.view(-1, ids.shape[-1])
-    hidden = model.embeddings(input_ids=ids)
+    hidden: torch.Tensor = model.embeddings(input_ids=ids)
     # This helper always encodes a dense sequence, without a padding mask or KV cache, so
     # SDPA keeps its implicit causal path (an equivalent explicit mask rounds differently).
     mask = (
@@ -41,7 +46,8 @@ def _clip_text(model: Any, ids: torch.Tensor) -> tuple[torch.Tensor, torch.Tenso
     hidden = model.final_layer_norm(hidden)
     positions = ids.to(dtype=torch.int, device=hidden.device)
     if model.eos_token_id != 2:
-        positions = (positions == model.eos_token_id).int()
+        # CLIP's config types eos_token_id as int | list[int] | None; a text tower's is one int.
+        positions = (positions == model.eos_token_id).int()  # type: ignore[attr-defined]
     pooled = hidden[
         torch.arange(hidden.shape[0], device=hidden.device),
         positions.argmax(dim=-1),
@@ -50,16 +56,18 @@ def _clip_text(model: Any, ids: torch.Tensor) -> tuple[torch.Tensor, torch.Tenso
 
 
 def encode_tokens(
-    first_encoder: Any,
-    second_encoder: Any,
+    first_encoder: CLIPTextModel,
+    second_encoder: CLIPTextModelWithProjection,
     ids: torch.Tensor,
     ids_2: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """The two-tower tensor computation, after inputs and weights have been placed."""
     first, _ = _clip_text(first_encoder, ids)
-    second, pooled = _clip_text(second_encoder.text_model, ids_2)
+    text: CLIPTextModel = second_encoder.text_model
+    second, pooled = _clip_text(text, ids_2)
     prompt = torch.cat([first, second], dim=-1)
-    return prompt, second_encoder.text_projection(pooled)
+    projected: torch.Tensor = second_encoder.text_projection(pooled)
+    return prompt, projected
 
 
 #: Latents a decode window shares with each neighbour, cross-faded (256 px): the blend of Diffusers'
@@ -70,21 +78,23 @@ OVERLAP = 32
 HOLDS = 290
 
 
-def decode_latents(vae: Any, latents: torch.Tensor, scale: float) -> torch.Tensor:
+def decode_latents(vae: AutoencoderKL, latents: torch.Tensor, scale: float) -> torch.Tensor:
     """Decode with the VAE's already selected representation, never changing its weights: whole
     where it fits, else in the fewest windows that do (`split`), neighbours cross-faded. Each
     window's GroupNorms read its own statistics: 34 dB against a whole decode at 2048²."""
-    factor = 2 ** (len(vae.config.block_out_channels) - 1)
+    factor = 2 ** (len(vae.config["block_out_channels"]) - 1)
     quant = vae.post_quant_conv
 
     def decoded(z: torch.Tensor) -> torch.Tensor:
-        return vae.decoder(quant(z) if quant is not None else z)  # type: ignore[no-any-return]
+        image: torch.Tensor = vae.decoder(quant(z) if quant is not None else z)
+        return image
 
     cuts = (Cut(-2, factor, OVERLAP), Cut(-1, factor, OVERLAP))
-    return split(decoded, latents / scale, *cuts, holds=HOLDS)  # type: ignore[no-any-return]
+    image: torch.Tensor = split(decoded, latents / scale, *cuts, holds=HOLDS)
+    return image
 
 
-def decode_dtype(vae: Any) -> torch.dtype:
+def decode_dtype(vae: AutoencoderKL) -> torch.dtype:
     """The dtype every SDXL decode runs the VAE in. The SDXL VAE overflows fp16 (force_upcast):
     bf16 where the GPU computes it natively (fp32's range; 48 dB PSNR to fp32 on the 1024px fox,
     run 1642), else fp32."""
@@ -95,7 +105,7 @@ def decode_dtype(vae: Any) -> torch.dtype:
     )
 
 
-def hold_decode_dtype(vae: Any, tel: Telemetry) -> None:
+def hold_decode_dtype(vae: AutoencoderKL, tel: Telemetry) -> None:
     """Hold the VAE in `decode_dtype` for good, before any VAE scope opens: the Runtime casts its
     stored bytes when it next fills them, so nothing loads here and no request converts weights."""
     dtype = decode_dtype(vae)
@@ -106,16 +116,16 @@ def hold_decode_dtype(vae: Any, tel: Telemetry) -> None:
 
 
 def guided(
-    unet: Any, latents: torch.Tensor, timestep: torch.Tensor, prompt: torch.Tensor, pooled: torch.Tensor,
+    unet: UNet2DConditionModel, latents: torch.Tensor, timestep: torch.Tensor, prompt: torch.Tensor, pooled: torch.Tensor,
     time_ids: torch.Tensor, guidance: float,
 ) -> torch.Tensor:
     """The UNet's noise prediction, guided against the negative half of `prompt` above 1."""
     batch = torch.cat([latents] * 2) if guidance > 1.0 else latents
-    noise = unet(
+    noise: torch.Tensor = unet(
         batch, timestep, encoder_hidden_states=prompt,
         added_cond_kwargs={"text_embeds": pooled, "time_ids": time_ids},
     ).sample
     if guidance > 1.0:
         uncond, cond = noise.chunk(2)
         noise = uncond + guidance * (cond - uncond)
-    return noise  # type: ignore[no-any-return]
+    return noise
