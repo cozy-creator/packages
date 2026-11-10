@@ -93,8 +93,12 @@ class _ImageProcessor(Protocol):
     def build_cond_images(self, *, image_list: list[Image.Image], infer_align_image_size: bool) -> Cond: ...
 
 
+class _Mlp(Protocol):
+    experts: moe.Experts
+
+
 class _Layer(Protocol):
-    mlp: torch.nn.Module
+    mlp: _Mlp
 
 
 class _Body(Protocol):
@@ -130,7 +134,10 @@ class Tencent(Protocol):
 def _tokenizer(read: Callable[[str], bytes]) -> PreTrainedTokenizerFast:
     config = json.loads(read("tokenizer_config.json"))
     config.pop("tokenizer_class", None)
-    return HunyuanImage3TokenizerFast(tokenizer_object=Tokenizer.from_str(read("tokenizer.json").decode()), **config)
+    tokenizer: PreTrainedTokenizerFast = HunyuanImage3TokenizerFast(
+        tokenizer_object=Tokenizer.from_str(read("tokenizer.json").decode()), **config
+    )
+    return tokenizer
 
 
 def _system(bot_task: str) -> str:
@@ -177,7 +184,7 @@ class HunyuanImage3(Model[Graph]):
     @contextmanager
     def _routing(self) -> Iterator[Routing]:
         routing = Routing()
-        experts: list[torch.nn.Module] = [
+        experts: list[moe.Experts] = [
             layer.mlp.experts for layer in self._tencent().model.layers if isinstance(layer.mlp, HunyuanMoE)
         ]
         for layer in experts:
