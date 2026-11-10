@@ -80,23 +80,6 @@ anima/anima/optimization.py: [method-assign] Cannot assign to a method
 anima/anima/optimization.py: [misc] Type of decorated function contains type "Any" ("Callable[[FusedLatents, Any, Any], Any]")
 anima/anima/optimization.py: [union-attr] Item "Tensor" of "Tensor | Module" has no attribute "bias"
 anima/anima/optimization.py: [union-attr] Item "Tensor" of "Tensor | Module" has no attribute "weight"
-examples/client-scripts/h3-memo-bank/adopt_full.py: [explicit-any] Explicit "Any" is not allowed
-examples/client-scripts/h3-memo-bank/adopt_full.py: [misc] Type of decorated function contains type "Any" ("Callable[[Context, Nothing, Weights[Any]], ModelArtifact]")
-examples/client-scripts/h3-te-drift/h3_te_drift.py: [explicit-any] Explicit "Any" is not allowed
-examples/client-scripts/h3-te-drift/h3_te_drift.py: [explicit-any] Explicit "Any" is not allowed
-examples/client-scripts/h3-te-drift/h3_te_drift.py: [explicit-any] Explicit "Any" is not allowed
-examples/client-scripts/h3-te-drift/h3_te_drift.py: [explicit-any] Explicit "Any" is not allowed
-examples/client-scripts/h3-te-drift/h3_te_drift.py: [explicit-any] Explicit "Any" is not allowed
-examples/client-scripts/h3-te-drift/h3_te_drift.py: [explicit-any] Explicit "Any" is not allowed
-examples/client-scripts/h3-te-drift/h3_te_drift.py: [explicit-any] Explicit "Any" is not allowed
-examples/client-scripts/h3-te-drift/h3_te_drift.py: [misc] Type of decorated function contains type "Any" ("Callable[[Context, WeightRequest, Weights[Any], Weights[Any], Telemetry], Result]")
-examples/client-scripts/moe-grouped-gpu.py: [arg-type] Argument 1 to "Int8Leaf" has incompatible type "Any | Tensor | Module"; expected "Tensor"
-examples/client-scripts/moe-grouped-gpu.py: [arg-type] Argument 1 to "Int8Leaf" has incompatible type "Any | Tensor | Module"; expected "Tensor"
-examples/client-scripts/moe-grouped-gpu.py: [no-any-return] Returning Any from function declared to return "Tensor"
-examples/client-scripts/moe-grouped-gpu.py: [operator] "Tensor" not callable
-examples/client-scripts/moe-grouped-gpu.py: [union-attr] Item "Tensor" of "Tensor | Module" has no attribute "weight"
-examples/client-scripts/moe-grouped-gpu.py: [union-attr] Item "Tensor" of "Tensor | Module" has no attribute "weight"
-examples/client-scripts/moe-grouped-gpu.py: [union-attr] Item "Tensor" of "Tensor | Module" has no attribute "weight"
 fibo-2/fibo_2/__init__.py: [assignment] Incompatible types in assignment (expression has type "Prompt[Image]", base class "ImageRequest" defined the type as "str")
 fibo-2/fibo_2/model.py: [arg-type] Argument "sigmas" to "retrieve_timesteps" has incompatible type "ndarray[tuple[int], dtype[float64]]"; expected "list[float] | None"
 fibo-2/fibo_2/model.py: [attr-defined] "_Staged" has no attribute "_patchify_latents"

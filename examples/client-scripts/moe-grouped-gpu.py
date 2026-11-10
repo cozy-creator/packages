@@ -17,6 +17,8 @@ from __future__ import annotations
 
 import json
 import time
+from collections.abc import Callable
+from typing import Any
 
 import msgspec
 import torch
@@ -41,7 +43,7 @@ class Passed(msgspec.Struct):
     results: str
 
 
-def launch(kernel, grid, *args):  # type: ignore[no-untyped-def]
+def launch(kernel: Any, grid: tuple[int, ...], *args: object) -> None:  # type: ignore[explicit-any]  # a Triton JIT kernel: Triton ships no types
     kernel[grid[:2]](*args)
 
 
@@ -49,6 +51,8 @@ class Int8Leaf(nn.Module):
     """An int8.convrot leaf's operands and eager law (`int8_linear.eager`)."""
 
     provider = INT8_CONVROT
+    data: torch.Tensor
+    scale: torch.Tensor
 
     def __init__(self, weight: torch.Tensor) -> None:
         super().__init__()
@@ -62,7 +66,8 @@ class Int8Leaf(nn.Module):
         self.out_features, self.in_features = weight.shape
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return int8_linear.eager(torch, x, self.data, self.scale, torch.bfloat16)
+        out: torch.Tensor = int8_linear.eager(torch, x, self.data, self.scale, torch.bfloat16)
+        return out
 
 
 def layer(experts: int, gate_first: bool) -> moe.Experts:
@@ -74,6 +79,7 @@ def layer(experts: int, gate_first: bool) -> moe.Experts:
         layer=0,
     )
     for expert in built:
+        assert isinstance(expert, moe.RoutedExpert)
         for linear in (expert.gate_and_up_proj, expert.down_proj):
             linear.weight.data.normal_(0, 0.02)
     return built
@@ -123,7 +129,7 @@ def check(experts: moe.Experts, kind: str, tokens: int) -> dict[str, float]:
     return {"whole_path_rel": round(worst, 5)}
 
 
-def timed(call, repeats: int = 50) -> float:  # type: ignore[no-untyped-def]
+def timed(call: Callable[[], object], repeats: int = 50) -> float:
     call()
     torch.cuda.synchronize()
     started = time.perf_counter()
@@ -146,8 +152,9 @@ def main(payload: Nothing, tel: Telemetry) -> Passed:
         experts = layer(16, gate_first)
         passed(f"bf16 gate_first={gate_first}", check(experts, "bf16", 5))
         for expert in experts:
-            expert.gate_and_up_proj = Int8Leaf(expert.gate_and_up_proj.weight.data)
-            expert.down_proj = Int8Leaf(expert.down_proj.weight.data)
+            assert isinstance(expert, moe.RoutedExpert)
+            expert.gate_and_up_proj = Int8Leaf(expert.gate_and_up_proj.weight.data)  # type: ignore[assignment, unused-ignore]  # the leaf stands in for the Linear
+            expert.down_proj = Int8Leaf(expert.down_proj.weight.data)  # type: ignore[assignment, unused-ignore]  # the leaf stands in for the Linear
         passed(f"int8 gate_first={gate_first}", check(experts, "int8", 5))
     decode = layer(256, True)
     hidden, index = torch.randn(1, H, dtype=torch.bfloat16, device="cuda"), routing(1, 256)

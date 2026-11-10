@@ -22,12 +22,12 @@ import json
 import math
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
-from typing import Annotated, Any
+from typing import Annotated, Any, TypedDict
 
 import msgspec
 import numpy as np
 import torch
-from cozy_runtime.author import App, Context, Telemetry, Weights
+from cozy_runtime.author import App, Context, Model, Telemetry, Weights
 from cozy_runtime.fields import FileBound
 from cozy_runtime.media import File
 from safetensors.torch import load
@@ -93,6 +93,23 @@ class Result(msgspec.Struct):
 
 
 Loader = Callable[[int], dict[str, torch.Tensor]]
+#: `drift`'s report: its summary per layer and its final layer per prompt, metric -> value.
+Drift = dict[str, dict[str, dict[str, float]]]
+
+
+class LayerInputs(TypedDict):
+    """A decoder layer's keyword inputs besides the hidden states."""
+
+    attention_mask: None
+    position_ids: torch.Tensor
+    position_embeddings: tuple[torch.Tensor, torch.Tensor]
+
+
+class Report(TypedDict):
+    device: str
+    community_files: dict[str, dict[str, str | int]]
+    weight_only: dict[str, Drift]
+    errors: dict[str, str]
 
 
 def compare(reference: torch.Tensor, candidate: torch.Tensor) -> dict[str, float]:
@@ -111,7 +128,7 @@ def compare(reference: torch.Tensor, candidate: torch.Tensor) -> dict[str, float
     }
 
 
-def decoded(view: Any, key: str) -> torch.Tensor:
+def decoded(view: Weights[Model[object]], key: str) -> torch.Tensor:
     """One tensor's exact logical values by Runtime's reviewed reader, as float32 on the GPU."""
     tensor = view.tensor("text_encoder", key)
     count = math.prod(tensor.shape)
@@ -122,7 +139,7 @@ def decoded(view: Any, key: str) -> torch.Tensor:
     return torch.from_numpy(out).reshape(tuple(tensor.shape)).to(DEVICE)
 
 
-def checkpoint_layers(view: Any, pool: ThreadPoolExecutor) -> Loader:
+def checkpoint_layers(view: Weights[Model[object]], pool: ThreadPoolExecutor) -> Loader:
     keys = [f"{name}.weight" for name in LINEARS] + list(NORMS)
 
     def layer(index: int) -> dict[str, torch.Tensor]:
@@ -160,13 +177,13 @@ def emulated(layer: Loader, scheme: str) -> Loader:
 
 
 def layer0_inputs(
-    view: Any, token_ids: dict[str, list[int]], config: Any
-) -> dict[str, tuple[torch.Tensor, dict[str, Any]]]:
+    view: Weights[Model[object]], token_ids: dict[str, list[int]], config: Qwen3VLTextConfig
+) -> dict[str, tuple[torch.Tensor, LayerInputs]]:
     """The conditioner's layer-0 call for text-only token ids: the bf16 embedding rows and the
     rotary embedding at positions 0..T-1 on all three M-RoPE axes; causal attention."""
     width = int(config.hidden_size)
     rotary = Qwen3VLTextRotaryEmbedding(config=config).to(DEVICE)
-    inputs = {}
+    inputs: dict[str, tuple[torch.Tensor, LayerInputs]] = {}
     for prompt, ids in token_ids.items():
         rows = np.empty((len(ids), width), dtype=np.float32)
         for row, token in enumerate(ids):
@@ -185,7 +202,11 @@ def layer0_inputs(
 
 
 def weight_only(
-    ctx: Context, layer_weights: Loader, config: Any, inputs: dict[str, Any], wanted: list[int]
+    ctx: Context,
+    layer_weights: Loader,
+    config: Qwen3VLTextConfig,
+    inputs: dict[str, tuple[torch.Tensor, LayerInputs]],
+    wanted: list[int],
 ) -> dict[str, dict[int, torch.Tensor]]:
     """Every prompt through the decoder one layer at a time, keeping the wanted states."""
     layer = Qwen3VLTextDecoderLayer(config, 0).to(device=DEVICE, dtype=torch.bfloat16).eval()
@@ -207,7 +228,7 @@ def weight_only(
 
 def drift(
     reference: dict[str, dict[int, torch.Tensor]], candidate: dict[str, dict[int, torch.Tensor]]
-) -> dict[str, Any]:
+) -> Drift:
     rows = {
         prompt: {k: compare(reference[prompt][k], candidate[prompt][k]) for k in reference[prompt]}
         for prompt in reference
@@ -228,7 +249,7 @@ def drift(
 
 
 @app.entrypoint
-def weight_drift(
+def weight_drift(  # type: ignore[explicit-any, misc]  # static describe's any-layout spelling
     ctx: Context,
     payload: WeightRequest,
     bf16: Weights[Any],
@@ -244,7 +265,7 @@ def weight_drift(
     reference = {
         str(i): {k: served[f"{i}.hidden_states.{k}"].float() for k in wanted} for i in prompts
     }
-    result: dict[str, Any] = {
+    result: Report = {
         "device": torch.cuda.get_device_name(),
         "community_files": {
             name: {"files": files, "bytes": size} for name, (files, _, size) in COMMUNITY.items()
