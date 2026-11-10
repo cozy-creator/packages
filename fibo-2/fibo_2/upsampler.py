@@ -11,17 +11,18 @@ temperature 0.2 and 0.4), so a caption is a function of its request.
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping
-from typing import Any
+from typing import cast
 
 import torch
 import torch.nn.functional as F
 from cozy_runtime import lm, vlm
+from cozy_runtime.accel.kernels import Plan
 from cozy_runtime.author import Config, Loader, Model, Serving, UnsupportedInput, memoize, uses_components
 from PIL import Image
 from transformers import (
     AutoConfig,
     AutoModelForImageTextToText,
+    PreTrainedModel,
     Qwen3VLProcessor,
 )
 from transformers.initialization import no_init_weights
@@ -40,6 +41,8 @@ class TiedHead(torch.nn.Module):
     embedding's weight, which the checkpoint stores once. Holding the embedding outside the module
     tree keeps that weight under its one stored name, so Runtime fills it once."""
 
+    embedding: torch.nn.Embedding
+
     def __init__(self, embedding: torch.nn.Embedding) -> None:
         super().__init__()
         object.__setattr__(self, "embedding", embedding)
@@ -51,12 +54,12 @@ class TiedHead(torch.nn.Module):
 
 class CaptionerGraph:
     def __init__(self, config: Config) -> None:
-        mapping: Mapping[str, Any] = config.mapping()
+        mapping = config.mapping()
         with no_init_weights():
-            model = AutoModelForImageTextToText.from_config(AutoConfig.for_model(**mapping), dtype=torch.bfloat16)
+            model: PreTrainedModel = AutoModelForImageTextToText.from_config(AutoConfig.for_model(**mapping), dtype=torch.bfloat16)  # type: ignore[no-untyped-call]  # Transformers' auto classes are unannotated
         if model.config.get_text_config().tie_word_embeddings:
-            model.lm_head = TiedHead(model.get_input_embeddings())
-        self.components: dict[str, torch.nn.Module] = {COMPONENT: model.eval()}
+            model.lm_head = TiedHead(cast(torch.nn.Embedding, model.get_input_embeddings()))  # a token embedding
+        self.components: dict[str, PreTrainedModel] = {COMPONENT: model.eval()}  # type: ignore[no-untyped-call]  # Transformers' eval is unannotated
 
 
 class Captioner(Model[CaptionerGraph]):
@@ -69,9 +72,9 @@ class Captioner(Model[CaptionerGraph]):
 
     def load(self, loader: Loader) -> None:
         self.graph = loader.construct(CaptionerGraph)
-        self.processor = vlm.processor(loader.assets, image=BRIA_IMAGE)
+        self.processor = cast(Qwen3VLProcessor, vlm.processor(loader.assets, image=BRIA_IMAGE))  # Qwen3-VL's own
 
-    def execution_plan(self, plan: Any) -> str:
+    def execution_plan(self, plan: Plan) -> str:
         return lm.install(plan, self.graph.components[COMPONENT])
 
     @memoize
@@ -79,7 +82,7 @@ class Captioner(Model[CaptionerGraph]):
     def caption(self, prompt: str, image: Image.Image | None) -> str:
         """The structured caption for `prompt` (`<generate>`), or with `image` the edit's caption
         with its `edit_instruction` (`<edit>`), as compact JSON."""
-        content: list[dict[str, Any]] = []
+        content: list[dict[str, str]] = []
         images = []
         if image is None:
             content.append({"type": "text", "text": f"<generate>\n{prompt.strip()}"})
@@ -91,7 +94,7 @@ class Captioner(Model[CaptionerGraph]):
             content.append({"type": "text", "text": f"<edit>\nEditing instructions:\n{prompt.strip()}"})
         model, processor = self.graph.components[COMPONENT], self.processor
         chat = processor.apply_chat_template(
-            [{"role": "user", "content": content}], tokenize=False, add_generation_prompt=True
+            [{"role": "user", "content": content}], tokenize=False, add_generation_prompt=True  # type: ignore[arg-type]  # content as parts
         )
         inputs = processor(text=[chat], images=images or None, padding=True, return_tensors="pt").to(
             torch.device(str(self.device))

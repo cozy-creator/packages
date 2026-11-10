@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from importlib.resources import files
-from typing import Any
+from typing import TypedDict, cast
 
 import numpy as np
 import torch
@@ -26,17 +26,16 @@ from cozy_runtime.author import (
     memoize,
     uses_components,
 )
-from diffusers import (
-    AutoencoderKLFlux2,
-    BriaFibo2Pipeline,
-    BriaFibo2Transformer2DModel,
-    FlowMatchEulerDiscreteScheduler,
-)
-from diffusers.pipelines.bria_fibo2.pipeline_bria_fibo2 import calculate_shift, retrieve_timesteps
+from diffusers.configuration_utils import ConfigMixin
+from diffusers.models.autoencoders.autoencoder_kl_flux2 import AutoencoderKLFlux2
+from diffusers.models.transformers.transformer_bria_fibo2 import BriaFibo2Transformer2DModel
+from diffusers.pipelines.bria_fibo2.pipeline_bria_fibo2 import BriaFibo2Pipeline, calculate_shift, retrieve_timesteps
+from diffusers.schedulers.scheduling_flow_match_euler_discrete import FlowMatchEulerDiscreteScheduler
 from PIL import Image
 from transformers import (
     AutoModelForImageTextToText,
     Qwen3VLConfig,
+    Qwen3VLForConditionalGeneration,
     Qwen3VLProcessor,
 )
 from transformers import initialization as transformer_init
@@ -62,12 +61,15 @@ class _Staged(BriaFibo2Pipeline):
 
     stage_device: torch.device
     encoded: list[Encoding]
+    transformer: BriaFibo2Transformer2DModel
+    scheduler: FlowMatchEulerDiscreteScheduler
+    vae: AutoencoderKLFlux2
 
     @property
     def _execution_device(self) -> torch.device:
         return self.stage_device
 
-    def encode_prompt(  # type: ignore[override]
+    def encode_prompt(
         self,
         prompt: str | list[str],
         image: list[Image.Image] | None = None,
@@ -75,34 +77,59 @@ class _Staged(BriaFibo2Pipeline):
         num_images_per_prompt: int = 1,
         prompt_embeds: torch.Tensor | None = None,
         prompt_embeds_mask: torch.Tensor | None = None,
-        text_images: Any = None,
+        text_images: list[Image.Image] | list[list[Image.Image]] | None = None,
     ) -> Encoding:
         embeds, mask = super().encode_prompt(prompt, image, device, 1, None, None, text_images)
         self.encoded.append((embeds.cpu(), None if mask is None else mask.cpu()))
         return embeds, mask
 
-    def prepare_latents(self, *args: Any, **kwargs: Any) -> torch.Tensor:  # type: ignore[override]
+    def prepare_latents(
+        self,
+        batch_size: int,
+        num_channels_latents: int,
+        height: int,
+        width: int,
+        device: torch.device,
+        generator: torch.Generator | list[torch.Generator] | None,
+        latents: torch.Tensor | None = None,
+    ) -> torch.Tensor:
         raise _Encoded
 
 
 class FiboGraph:
     def __init__(self, config: Config) -> None:
         with transformer_init.no_init_weights():
-            text_encoder = AutoModelForImageTextToText.from_config(
+            text_encoder: Qwen3VLForConditionalGeneration = AutoModelForImageTextToText.from_config(  # type: ignore[no-untyped-call]  # Transformers' auto classes are unannotated
                 Qwen3VLConfig(**config.section("text_encoder").mapping()), dtype=torch.bfloat16
             )
-            self.components: dict[str, Any] = {
-                "transformer": BriaFibo2Transformer2DModel.from_config(config.section("transformer").mapping()).to(
-                    dtype=torch.bfloat16
-                ),
+            self.components: Components = {
+                "transformer": _to(construct(BriaFibo2Transformer2DModel, config.section("transformer").mapping()), torch.bfloat16),
                 "text_encoder": text_encoder,
-                "vae": AutoencoderKLFlux2.from_config(config.section("vae").mapping()).to(dtype=torch.float32),
+                "vae": _to(construct(AutoencoderKLFlux2, config.section("vae").mapping()), torch.float32),
             }
         # The pipeline reads hidden states only: the language-model head is never built.
         text_encoder.lm_head = torch.nn.Identity()
-        self.scheduler_config = config.section("scheduler").mapping()
+        self.scheduler_config: dict[str, object] = config.section("scheduler").mapping()
         # The processor folder's config file, which TensorFS keeps as its component's config.
-        self.processor_config = config.section("processor").mapping() if "processor" in config.keys() else {}
+        self.processor_config: dict[str, object] = (
+            config.section("processor").mapping() if "processor" in config.keys() else {}
+        )
+
+
+class Components(TypedDict):
+    transformer: BriaFibo2Transformer2DModel
+    text_encoder: Qwen3VLForConditionalGeneration
+    vae: AutoencoderKLFlux2
+
+
+def construct[M: ConfigMixin](cls: type[M], config: dict[str, object]) -> M:
+    """`cls.from_config(config)`, typed: it returns a tuple only with `return_unused_kwargs=True`."""
+    return cast(M, cls.from_config(config))
+
+
+def _to[M: torch.nn.Module](module: M, dtype: torch.dtype) -> M:
+    """`module.to(dtype=dtype)`, typed: Diffusers' `to` is `functools.wraps`'d, which the checkers bind without `self`."""
+    return module.to(dtype=dtype)
 
 
 class Fibo2(Model[FiboGraph]):
@@ -116,13 +143,13 @@ class Fibo2(Model[FiboGraph]):
 
     def load(self, loader: Loader) -> None:
         self.graph = loader.construct(FiboGraph)
-        self.processor = vlm.processor(loader.assets, "processor/", self.graph.processor_config)
+        self.processor = cast(Qwen3VLProcessor, vlm.processor(loader.assets, "processor/", self.graph.processor_config))  # Qwen3-VL's folder
 
     def _pipeline(self, component: str) -> _Staged:
         pipe = _Staged(
             **self.graph.components,
             processor=self.processor,
-            scheduler=FlowMatchEulerDiscreteScheduler.from_config(self.graph.scheduler_config),
+            scheduler=construct(FlowMatchEulerDiscreteScheduler, self.graph.scheduler_config),
         )
         pipe.stage_device = torch.device(str(self.device))
         pipe.encoded = []
@@ -169,7 +196,7 @@ class Fibo2(Model[FiboGraph]):
                 images, height=height, width=width, area=(pipe.default_sample_size * pipe.vae_scale_factor) ** 2,
                 text_encoder_image_size=pipe.text_encoder_image_size,
             )
-            latents = pipe.prepare_image_latents(crops, 1, pipe.stage_device, torch.bfloat16)
+            latents = pipe.prepare_image_latents(crops, 1, pipe.stage_device, torch.bfloat16)  # type: ignore[no-untyped-call]  # Diffusers' own, unannotated
         return [tensor.cpu() for tensor in latents]
 
     @uses_components("transformer")
@@ -191,19 +218,20 @@ class Fibo2(Model[FiboGraph]):
         is above `text_images_max_noise_level`."""
         pipe = self._pipeline("transformer")
         transformer, device = pipe.transformer, pipe.stage_device
-        scheduler: Any = pipe.scheduler
+        scheduler = pipe.scheduler
         cfg = guidance > 1.0
         batch = encoded["prompt"][0].shape[0]
         with torch.no_grad():
-            shape = (batch, transformer.config.in_channels, height // pipe.vae_scale_factor, width // pipe.vae_scale_factor)
+            shape = (batch, transformer.config["in_channels"], height // pipe.vae_scale_factor, width // pipe.vae_scale_factor)
             latents = rng.noise(shape, seed, device=device)
-            patch = transformer.config.patch_size
+            patch = transformer.config["patch_size"]
             config = scheduler.config
             mu = calculate_shift(
                 (latents.shape[2] // patch) * (latents.shape[3] // patch),
-                config.base_image_seq_len, config.max_image_seq_len, config.base_shift, config.max_shift,
+                config["base_image_seq_len"], config["max_image_seq_len"], config["base_shift"], config["max_shift"],
             )
-            retrieve_timesteps(scheduler, steps, device, sigmas=np.linspace(1.0, 1 / steps, steps), mu=mu)
+            # Diffusers types sigmas as a list; the scheduler takes the array as it is.
+            retrieve_timesteps(scheduler, steps, device, sigmas=np.linspace(1.0, 1 / steps, steps), mu=mu)  # type: ignore[arg-type]
             timesteps = scheduler.timesteps
             texts = {
                 role: (embeds.to(device), None if mask is None else mask.to(device))
@@ -225,7 +253,7 @@ class Fibo2(Model[FiboGraph]):
                 noise_pred = predictions[0]
                 if cfg:
                     noise_pred = predictions[1] + guidance * (noise_pred - predictions[1])
-                latents = scheduler.step(noise_pred, timesteps[i], latents, return_dict=False)[0]
+                latents = scheduler.step(noise_pred, timesteps[i], latents, return_dict=False)[0]  # type: ignore[arg-type]  # Diffusers annotates the legacy FloatTensor
                 progress(i, steps)
         return latents.cpu()
 
@@ -235,10 +263,10 @@ class Fibo2(Model[FiboGraph]):
         pipe = self._pipeline("vae")
         vae = pipe.vae
         with torch.inference_mode():
-            latents = pipe._patchify_latents(latents.to(pipe.stage_device, torch.float32))
-            mean = vae.bn.running_mean.view(1, -1, 1, 1).to(latents)
-            scale = (1 / torch.sqrt(vae.bn.running_var + vae.config.batch_norm_eps)).view(1, -1, 1, 1)
-            latents = pipe._unpatchify_latents(latents / scale.to(latents) + mean)
+            latents = pipe._patchify_latents(latents.to(pipe.stage_device, torch.float32))  # type: ignore[no-untyped-call]  # Diffusers' own, unannotated
+            mean = vae.bn.running_mean.view(1, -1, 1, 1).to(latents)  # type: ignore[union-attr]  # tracked: it keeps its statistics
+            scale = (1 / torch.sqrt(vae.bn.running_var + vae.config["batch_norm_eps"])).view(1, -1, 1, 1)
+            latents = pipe._unpatchify_latents(latents / scale.to(latents) + mean)  # type: ignore[no-untyped-call]  # Diffusers' own, unannotated
             image = vae.decode(latents.to(vae.dtype), return_dict=False)[0]
             if not torch.isfinite(image).all():
                 raise OutputError(
@@ -246,5 +274,5 @@ class Fibo2(Model[FiboGraph]):
                     "and if it repeats another lane with `--lane bf16`",
                     code="output_integrity",
                 )
-            (picture,) = pipe.image_processor.postprocess(image.float(), output_type="pil")
+            (picture,) = pipe.image_processor.postprocess(image.float(), output_type="pil")  # type: ignore[misc]  # a list, for "pil"
         return picture  # type: ignore[no-any-return]
