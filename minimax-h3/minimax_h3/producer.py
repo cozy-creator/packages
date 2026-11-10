@@ -147,10 +147,10 @@ def present(
         state.carried.clear()  # this loop's slots start unwritten
     first, *others = states.values()
     # Sharded, `rotary` holds this GPU's rows; the calls attend whole sequences, with the tables
-    # `retain_rotary` kept before the split.
-    rotary = first.parallel_rotary.get(
-        getattr(sites[0].module, "_cozy_producer_rotary_key", None), rotary
-    )
+    # `retain_rotary` kept before the split, under the key the DiT's blocks carry (the token
+    # refiner's sites, which come first, read no rotary and carry none).
+    keys = (getattr(site.module, "_cozy_producer_rotary_key", None) for site in sites)
+    rotary = first.parallel_rotary.get(next((key for key in keys if key is not None), None), rotary)
     presentation = rope_presentation(rotary, tokens, first)
     for state in others:
         state.rope = (rotary[0], rotary[1], presentation)
