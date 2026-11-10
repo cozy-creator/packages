@@ -16,26 +16,29 @@ import inspect
 import json
 from collections.abc import Callable
 from types import MethodType
-from typing import Any
+from typing import TYPE_CHECKING, Protocol, cast
 
 import torch
 import torch.nn.functional as F
 from cozy_runtime import tiles
 from cozy_runtime.accel import fusion
 from cozy_runtime.author import device
-from cozy_runtime.accel.kernels import int8_rows, native, quantize_once, rms_rope_split_half
+from cozy_runtime.accel.kernels import PreQuantized, int8_rows, native, quantize_once, rms_rope_split_half
 from diffusers.models.activations import GELU
 from diffusers.models.attention import FeedForward
-from diffusers.models.attention_dispatch import dispatch_attention_fn
+from diffusers.models.attention_dispatch import AttentionBackendName, dispatch_attention_fn
+from diffusers.models.attention_processor import Attention
 from diffusers.models.autoencoders.autoencoder_kl_qwenimage import (
     AutoencoderKLQwenImage,
     QwenImageCausalConv3d,
     QwenImageDecoder3d,
     QwenImageResidualBlock,
     QwenImageRMS_norm,
+    QwenImageUpBlock,
     QwenImageUpsample,
 )
 from diffusers.models.autoencoders.vae import DecoderOutput
+from diffusers.models.modeling_outputs import Transformer2DModelOutput
 from diffusers.models.normalization import RMSNorm
 from diffusers.models.transformers.transformer_cosmos import (
     CosmosAdaLayerNormZero,
@@ -45,13 +48,25 @@ from diffusers.models.transformers.transformer_cosmos import (
     CosmosTransformerBlock,
 )
 from diffusers.modular_pipelines.anima.before_denoise import AnimaPrepareLatentsStep
+from diffusers.modular_pipelines.anima.modular_pipeline import AnimaModularPipeline
+from diffusers.modular_pipelines.modular_pipeline import BlockState, PipelineState
+
+if TYPE_CHECKING:
+    from diffusers.models._modeling_parallel import ParallelConfig
+
+    from .model import AnimaPipeline
+
+#: A rotary table: the fused kernel's rotation matrices, or Diffusers' (cos, sin) pair.
+Rotary = torch.Tensor | tuple[torch.Tensor, torch.Tensor]
 
 # The extension takes DLPack arrays and a CUDA stream through nanobind and never links libtorch,
 # so any torch this package installs on serves it. It is built for CUDA 13.0: a torch built for
 # CUDA 13.0 or later proves the driver runs it.
 CUDA_MIN = (13, 0)
 #: Diffusers 0.40.0's sources the plan replaces or mirrors.
-_SOURCE_DIGESTS: dict[str, tuple[Callable[..., object], str]] = {
+#: A reviewed Diffusers function, checked by its source text.
+type Reviewed = Callable[..., object]  # type: ignore[explicit-any]  # any signature: its source is what is read
+_SOURCE_DIGESTS: dict[str, tuple[Reviewed, str]] = {
     "RMSNorm.forward": (
         RMSNorm.forward,
         "fa91ca74b4badaaf916ec4892e2b6ad90b4b904c7b570dba8ed99fd0ec69439b",
@@ -86,7 +101,7 @@ _SOURCE_DIGESTS: dict[str, tuple[Callable[..., object], str]] = {
     ),
 }
 #: Diffusers 0.40.0's source the frame decode replaces.
-_VAE_DIGESTS: dict[str, tuple[Callable[..., object], str]] = {
+_VAE_DIGESTS: dict[str, tuple[Reviewed, str]] = {
     "AutoencoderKLQwenImage._decode": (
         AutoencoderKLQwenImage._decode,
         "5e714669ba0348fba8b2437d4fd4f32299b976fa64a3bd54b79affc41ae2deb0",
@@ -141,7 +156,7 @@ class PlanRefusal(RuntimeError):
         self.code = code
 
 
-def apply(pipe: Any) -> tuple[str, str]:
+def apply(pipe: AnimaPipeline) -> tuple[str, str]:
     """Install the plan on a filled pipeline: why the transformer and why the VAE run as
     Diffusers wrote them instead, each "" where its part installed."""
     vae = pipe.components["vae"]
@@ -156,7 +171,7 @@ def apply(pipe: Any) -> tuple[str, str]:
     return fused, decode
 
 
-def _unchanged(module: Any, install: Callable[[Any], None]) -> None:
+def _unchanged[M: torch.nn.Module](module: M, install: Callable[[M], None]) -> None:
     before = _tensor_census(module)
     install(module)
     if _tensor_census(module) != before:
@@ -166,9 +181,23 @@ def _unchanged(module: Any, install: Callable[[Any], None]) -> None:
         )
 
 
-def installed(transformer: Any) -> bool:
+def installed(transformer: CosmosTransformer3DModel) -> bool:
     """Whether `apply` installed the plan on this transformer."""
-    return isinstance(transformer.transformer_blocks[0].attn1.processor, _FusedSelfAttention)
+    block = cast(CosmosTransformerBlock, transformer.transformer_blocks[0])  # its blocks
+    return isinstance(block.attn1.processor, _FusedSelfAttention)
+
+
+class _LatentState(Protocol):
+    """The latent step's `BlockState`: the fields it reads and writes."""
+
+    height: int | None
+    width: int | None
+    latents: torch.Tensor | None
+    batch_size: int
+    num_images_per_prompt: int
+    generator: torch.Generator | list[torch.Generator] | None
+    padding_mask: torch.Tensor
+    dtype: torch.dtype
 
 
 class FusedLatents(AnimaPrepareLatentsStep):
@@ -176,8 +205,10 @@ class FusedLatents(AnimaPrepareLatentsStep):
     resizes it to latent size every step, and resizing zeros gives the same zeros."""
 
     @torch.no_grad()
-    def __call__(self, components: Any, state: Any) -> Any:
-        block_state = self.get_block_state(state)
+    def __call__(
+        self, components: AnimaModularPipeline, state: PipelineState
+    ) -> tuple[AnimaModularPipeline, PipelineState]:
+        block_state = cast(_LatentState, self.get_block_state(state))  # Diffusers annotates its BlockState as dict
         block_state.height = block_state.height or components.default_height
         block_state.width = block_state.width or components.default_width
         self.check_inputs(components, block_state)
@@ -196,7 +227,7 @@ class FusedLatents(AnimaPrepareLatentsStep):
             1, 1, block_state.latents.shape[-2], block_state.latents.shape[-1],
             dtype=block_state.dtype,
         )
-        self.set_block_state(state, block_state)
+        self.set_block_state(state, cast(BlockState, block_state))
         return components, state
 
 
@@ -210,7 +241,7 @@ def _capability() -> str:
     return native()
 
 
-def _digest_refusal(digests: dict[str, tuple[Callable[..., object], str]]) -> str:
+def _digest_refusal(digests: dict[str, tuple[Reviewed, str]]) -> str:
     for name, (source, expected) in digests.items():
         actual = hashlib.sha256(inspect.getsource(source).encode()).hexdigest()
         if actual != expected:
@@ -218,7 +249,7 @@ def _digest_refusal(digests: dict[str, tuple[Callable[..., object], str]]) -> st
     return ""
 
 
-def _plan_refusal(pipe: Any) -> str:
+def _plan_refusal(pipe: AnimaPipeline) -> str:
     """Why this construction is not the reviewed Anima graph, or "" when it is."""
     if refusal := _digest_refusal(_SOURCE_DIGESTS):
         return refusal
@@ -231,7 +262,7 @@ def _plan_refusal(pipe: Any) -> str:
     return ""
 
 
-def _tensor_census(module: Any) -> tuple[tuple[object, ...], tuple[object, ...]]:
+def _tensor_census(module: torch.nn.Module) -> tuple[tuple[object, ...], tuple[object, ...]]:
     schema = tuple(
         (name, tuple(value.shape), str(value.dtype), type(value).__qualname__)
         for name, value in module.state_dict(keep_vars=True).items()
@@ -250,21 +281,22 @@ class _RopeMatrix:
     """One call-scoped conversion shared by all 28 self-attention blocks."""
 
     def __init__(self) -> None:
-        self.value: Any | None = None
+        self.value: torch.Tensor | None = None
 
     def clear(self) -> None:
         self.value = None
 
-    def get(self, rotary: Any) -> Any:
+    def get(self, rotary: Rotary) -> torch.Tensor:
         if self.value is not None:
             return self.value
         if hasattr(rotary, "shape"):
-            if rotary.ndim != 6 or tuple(rotary.shape[-3:]) != (64, 2, 2):
+            matrix = cast(torch.Tensor, rotary)  # the direct rotation matrices
+            if matrix.ndim != 6 or tuple(matrix.shape[-3:]) != (64, 2, 2):
                 raise PlanRefusal(
                     "anima_optimization_rope_layout",
-                    f"direct Cosmos rotary matrix has unsupported shape {tuple(rotary.shape)}",
+                    f"direct Cosmos rotary matrix has unsupported shape {tuple(matrix.shape)}",
                 )
-            return rotary
+            return matrix
         if not isinstance(rotary, tuple) or len(rotary) != 2:
             raise PlanRefusal(
                 "anima_optimization_rope_layout",
@@ -287,7 +319,7 @@ class _RopeMatrix:
         return self.value
 
 
-def _direct_rope_forward(rope: Any, hidden_states: Any, fps: int | None = None) -> Any:
+def _direct_rope_forward(rope: CosmosRotaryPosEmbed, hidden_states: torch.Tensor, fps: int | None = None) -> torch.Tensor:
     """The fused kernel's rotation matrix directly, without duplicate cosine/sine tensors."""
     _, _, frames, height, width = hidden_states.shape
     sizes = [
@@ -298,7 +330,7 @@ def _direct_rope_forward(rope: Any, hidden_states: Any, fps: int | None = None) 
     device = hidden_states.device
     seq = torch.arange(max(rope.max_size), device=device, dtype=torch.float32)
 
-    def frequencies(dim: int, ntk: float) -> Any:
+    def frequencies(dim: int, ntk: float) -> torch.Tensor:
         exponent = torch.arange(0, dim, 2, device=device, dtype=torch.float32)[: dim // 2] / dim
         return 1.0 / ((10000.0 * ntk) ** exponent)
 
@@ -318,21 +350,28 @@ def _direct_rope_forward(rope: Any, hidden_states: Any, fps: int | None = None) 
 
 class _FusedSelfAttention:
     #: A Runtime attention site: the Runtime sets the kernel per site (`dispatch_attention_fn`).
-    _attention_backend: Any = None
-    _parallel_config: Any = None
+    _attention_backend: AttentionBackendName | None = None
+    _parallel_config: ParallelConfig | None = None
 
-    def __init__(self, kernel: Callable[..., tuple[Any, Any]], rope: _RopeMatrix) -> None:
+    def __init__(
+        self,
+        kernel: Callable[
+            [torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, float],
+            tuple[torch.Tensor, torch.Tensor],
+        ],
+        rope: _RopeMatrix,
+    ) -> None:
         self.kernel = kernel
         self.rope = rope
 
     def __call__(
         self,
-        attn: Any,
-        hidden_states: Any,
-        encoder_hidden_states: Any | None = None,
-        attention_mask: Any | None = None,
-        image_rotary_emb: Any | None = None,
-    ) -> Any:
+        attn: Attention,
+        hidden_states: torch.Tensor,
+        encoder_hidden_states: torch.Tensor | None = None,
+        attention_mask: torch.Tensor | None = None,
+        image_rotary_emb: Rotary | None = None,
+    ) -> torch.Tensor:
         if encoder_hidden_states is not None or attention_mask is not None:
             raise PlanRefusal(
                 "anima_optimization_attention_shape",
@@ -349,13 +388,14 @@ class _FusedSelfAttention:
                 for projection in (attn.to_q, attn.to_k, attn.to_v)
             )
         # The kernel reads the scales by pointer, without calling the norms that own them.
+        norm_q, norm_k = cast(RMSNorm, attn.norm_q), cast(RMSNorm, attn.norm_k)  # the head-width RMSNorms the plan checked
         query, key = self.kernel(
             query,
             key,
             self.rope.get(image_rotary_emb),
-            attn.norm_q.weight,
-            attn.norm_k.weight,
-            attn.norm_q.eps,
+            norm_q.weight,  # type: ignore[arg-type]  # affine, as the plan checked
+            norm_k.weight,  # type: ignore[arg-type]  # affine
+            norm_q.eps,
         )
         # Diffusers repeats K and V by the ratio of head widths, 1 in every Cosmos model;
         # `repeat_interleave(1)` still copies both whole (huaisang, rtx-4070-super: 0.35 s
@@ -375,19 +415,26 @@ class _FusedSelfAttention:
             parallel_config=self._parallel_config,
         )
         output = output.flatten(2, 3).type_as(query)
-        return attn.to_out[1](attn.to_out[0](output))
+        out: torch.Tensor = attn.to_out[1](attn.to_out[0](output))
+        return out
 
 
-def _native_rms_forward(module: Any, hidden_states: Any) -> Any:
+def _native_rms_forward(module: RMSNorm, hidden_states: torch.Tensor) -> torch.Tensor:
     output = torch.nn.functional.rms_norm(hidden_states, module.dim, module.weight, module.eps)
     return output if module.bias is None else output + module.bias
 
 
-def _hooked(*modules: Any) -> bool:
+def _hooked(*modules: torch.nn.Module) -> bool:
     return any(m._forward_hooks or m._forward_pre_hooks for m in modules)
 
 
-def _normed(norm: Any, hidden: Any, timestep: Any, temb: Any, consumers: tuple[Any, ...]) -> Any:
+def _normed(
+    norm: CosmosAdaLayerNormZero,
+    hidden: torch.Tensor,
+    timestep: torch.Tensor,
+    temb: torch.Tensor | None,
+    consumers: tuple[torch.nn.Module, ...],
+) -> tuple[torch.Tensor | PreQuantized, torch.Tensor]:
     """`CosmosAdaLayerNormZero.forward`'s rows and gate. When every consumer is an int8 leaf the
     rows come quantized from the norm's one pass (`int8_rows`), else as Diffusers makes them."""
     table = norm.linear_2(norm.linear_1(norm.activation(timestep)))
@@ -396,7 +443,7 @@ def _normed(norm: Any, hidden: Any, timestep: Any, temb: Any, consumers: tuple[A
     shift, scale, gate = table.chunk(3, dim=-1)
     if table.ndim == 2:
         shift, scale, gate = (t.unsqueeze(1) for t in (shift, scale, gate))
-    rows = int8_rows(hidden, consumers, norm="layer", eps=norm.norm.eps, scale=scale, shift=shift)
+    rows: torch.Tensor | PreQuantized | None = int8_rows(hidden, consumers, norm="layer", eps=norm.norm.eps, scale=scale, shift=shift)
     if rows is None and table.ndim == 2 and table.shape[0] == 1:
         # One modulation row for the batch (both CFG halves share the timestep): it is the
         # LayerNorm's own affine, one pass and one rounding instead of three.
@@ -408,28 +455,30 @@ def _normed(norm: Any, hidden: Any, timestep: Any, temb: Any, consumers: tuple[A
     return rows, gate
 
 
-def _feed_forward(ff: Any, rows: Any) -> Any:
+def _feed_forward(ff: FeedForward, rows: torch.Tensor | PreQuantized) -> torch.Tensor:
     """`FeedForward.forward` for Cosmos' GELU MLP, its GELU folded into the down projection's
     int8 quantization when that is an int8 leaf."""
-    up = ff.net[0].proj(rows)
-    activation = "gelu" if ff.net[0].approximate == "none" else "gelu_tanh"
+    gelu = cast(GELU, ff.net[0])  # Cosmos' GELU MLP, as the plan checked it
+    up = gelu.proj(rows)
+    activation = "gelu" if gelu.approximate == "none" else "gelu_tanh"
     down = int8_rows(up, (ff.net[2],), activation=activation)
-    return ff.net[2](ff.net[1](ff.net[0].gelu(up)) if down is None else down)
+    out: torch.Tensor = ff.net[2](ff.net[1](gelu.gelu(up)) if down is None else down)
+    return out
 
 
 def _block_forward(
-    block: Any,
-    hidden_states: Any,
-    encoder_hidden_states: Any,
-    embedded_timestep: Any,
-    temb: Any | None = None,
-    image_rotary_emb: Any | None = None,
-    extra_pos_emb: Any | None = None,
-    attention_mask: Any | None = None,
-    controlnet_residual: Any | None = None,
-    latents: Any | None = None,
+    block: CosmosTransformerBlock,
+    hidden_states: torch.Tensor,
+    encoder_hidden_states: torch.Tensor,
+    embedded_timestep: torch.Tensor,
+    temb: torch.Tensor | None = None,
+    image_rotary_emb: Rotary | None = None,
+    extra_pos_emb: torch.Tensor | None = None,
+    attention_mask: torch.Tensor | None = None,
+    controlnet_residual: torch.Tensor | None = None,
+    latents: torch.Tensor | None = None,
     block_idx: int | None = None,
-) -> Any:
+) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
     """`CosmosTransformerBlock.forward` with each gated residual as one `addcmul`."""
     if not isinstance(hidden_states, torch.Tensor):
         raise PlanRefusal("anima_optimization_tensor_type", "Cosmos received a non-torch tensor")
@@ -440,7 +489,7 @@ def _block_forward(
     attn1, attn2, ff = block.attn1, block.attn2, block.ff
     # Rows quantized in the norm's pass reach the projections through modules nothing hooks.
     fused = not _hooked(attn1, attn2, ff, *ff.net)
-    consumers: tuple[Any, ...] = (attn1.to_q, attn1.to_k, attn1.to_v) if fused else ()
+    consumers: tuple[torch.nn.Module, ...] = (attn1.to_q, attn1.to_k, attn1.to_v) if fused else ()
     normalized, gate = _normed(block.norm1, hidden_states, embedded_timestep, temb, consumers)
     output = attn1(normalized, image_rotary_emb=image_rotary_emb)
     hidden_states = torch.addcmul(hidden_states, gate, output)
@@ -451,7 +500,7 @@ def _block_forward(
             normalized, encoder_hidden_states=encoder_hidden_states, attention_mask=attention_mask
         )
     hidden_states = torch.addcmul(hidden_states, gate, output)
-    consumers = (ff.net[0].proj,) if fused else ()
+    consumers = (cast(GELU, ff.net[0]).proj,) if fused else ()
     normalized, gate = _normed(block.norm3, hidden_states, embedded_timestep, temb, consumers)
     output = _feed_forward(ff, normalized) if fused else ff(normalized)
     hidden_states = torch.addcmul(hidden_states, gate, output)
@@ -467,9 +516,9 @@ def _block_forward(
     return hidden_states
 
 
-def _install_transformer_plan(transformer: Any) -> None:
+def _install_transformer_plan(transformer: CosmosTransformer3DModel) -> None:
     rope = _RopeMatrix()
-    blocks = tuple(transformer.transformer_blocks)
+    blocks = cast("tuple[CosmosTransformerBlock, ...]", tuple(transformer.transformer_blocks))  # checked below
     if len(blocks) != 28 or any(type(block) is not CosmosTransformerBlock for block in blocks):
         raise PlanRefusal(
             "anima_optimization_block_shape",
@@ -489,22 +538,23 @@ def _install_transformer_plan(transformer: Any) -> None:
             "Anima RMSNorm affine/bias/epsilon does not match the fused plan",
         )
     for norm in norms:
-        norm.forward = MethodType(_native_rms_forward, norm)
+        norm.forward = MethodType(_native_rms_forward, norm)  # type: ignore[method-assign]  # the plan's forward
     for block in blocks:
         if (
             block.before_proj is not None
             or block.after_proj is not None
-            or type(block.attn1.processor) is not CosmosAttnProcessor2_0
-            or type(block.attn2.processor) is not CosmosAttnProcessor2_0
+            # Diffusers types a processor as its base class; any is set.
+            or type(cast(object, block.attn1.processor)) is not CosmosAttnProcessor2_0
+            or type(cast(object, block.attn2.processor)) is not CosmosAttnProcessor2_0
         ):
             raise PlanRefusal(
                 "anima_optimization_block_shape",
                 "Anima Cosmos block projections or attention processors do not match the plan",
             )
-        norms = (block.norm1, block.norm2, block.norm3)
+        ada = (block.norm1, block.norm2, block.norm3)
         if (
-            any(type(n) is not CosmosAdaLayerNormZero for n in norms)
-            or any(n.norm.weight is not None or n.norm.bias is not None for n in norms)
+            any(type(n) is not CosmosAdaLayerNormZero for n in ada)
+            or any(n.norm.weight is not None or n.norm.bias is not None for n in ada)  # type: ignore[unreachable]  # torch types an absent affine as a tensor
             or len(block.ff.net) != 3
             or type(block.ff.net[0]) is not GELU
             or type(block.ff.net[1]) is not torch.nn.Dropout
@@ -513,34 +563,40 @@ def _install_transformer_plan(transformer: Any) -> None:
                 "anima_optimization_block_shape",
                 "Anima Cosmos block norms or feed-forward do not match the plan",
             )
-        block.attn1.set_processor(_FusedSelfAttention(rms_rope_split_half, rope))
-        block.forward = MethodType(_block_forward, block)
-    transformer.rope.forward = MethodType(_direct_rope_forward, transformer.rope)
+        block.attn1.set_processor(_FusedSelfAttention(rms_rope_split_half, rope))  # type: ignore[arg-type]  # the plan's own processor
+        block.forward = MethodType(_block_forward, block)  # type: ignore[method-assign]  # the plan's forward
+    transformer.rope.forward = MethodType(_direct_rope_forward, transformer.rope)  # type: ignore[method-assign]  # the plan's
     original = transformer.forward
 
-    def forward(_self: Any, *args: object, **kwargs: object) -> Any:
+    def forward(
+        _self: CosmosTransformer3DModel, *args: object, **kwargs: object
+    ) -> tuple[torch.Tensor] | Transformer2DModelOutput:
         rope.clear()
         try:
-            return original(*args, **kwargs)
+            out: tuple[torch.Tensor] | Transformer2DModelOutput = original(*args, **kwargs)  # type: ignore[arg-type]  # its own arguments, passed on
+            return out
         finally:
             rope.clear()
 
-    transformer.forward = MethodType(forward, transformer)
+    transformer.forward = MethodType(forward, transformer)  # type: ignore[method-assign]  # the plan's forward
 
 
-def _install_vae_plan(vae: Any) -> None:
-    vae._decode = MethodType(_decode_frame, vae)
+def _install_vae_plan(vae: AutoencoderKLQwenImage) -> None:
+    vae._decode = MethodType(_decode_frame, vae)  # type: ignore[method-assign]  # the plan's decode
 
 
-def _decode_frame(vae: Any, z: Any, return_dict: bool = True) -> Any:
+def _decode_frame(
+    vae: AutoencoderKLQwenImage, z: torch.Tensor, return_dict: bool = True
+) -> DecoderOutput | tuple[torch.Tensor]:
     """`AutoencoderKLQwenImage._decode` for one latent frame (`_decoded`)."""
     if z.shape[2] != 1 or vae.use_tiling:
-        return type(vae)._decode(vae, z, return_dict=return_dict)
+        decoded: DecoderOutput | tuple[torch.Tensor] = type(vae)._decode(vae, z, return_dict=return_dict)
+        return decoded
     out = _decoded(vae, z).clamp(-1.0, 1.0)
     return DecoderOutput(sample=out) if return_dict else (out,)
 
 
-def _decoded(vae: Any, z: Any) -> Any:
+def _decoded(vae: AutoencoderKLQwenImage, z: torch.Tensor) -> torch.Tensor:
     """The decode of one frame, the whole canvas: Diffusers' without its feature cache (each
     convolution's input kept for a next frame an image never has), every residual and resample
     block over the canvas in strips of rows (`tiles.rows`: exact, a strip's working set)."""
@@ -551,10 +607,11 @@ def _decoded(vae: Any, z: Any) -> Any:
     for attention, resnet in zip(mid.attentions, mid.resnets[1:], strict=True):
         x = tiles.rows(resnet, attention(x), halo=2)
     for block in decoder.up_blocks:
-        for resnet in block.resnets:
+        up = cast(QwenImageUpBlock, block)  # its up blocks
+        for resnet in up.resnets:
             x = tiles.rows(resnet, x, halo=2)
-        if block.upsamplers is not None:
-            x = tiles.rows(block.upsamplers[0], x, halo=1, scale=2)
+        if up.upsamplers is not None:
+            x = tiles.rows(up.upsamplers[0], x, halo=1, scale=2)
     return tiles.rows(
         lambda s: decoder.conv_out(decoder.nonlinearity(decoder.norm_out(s))), x, halo=1
     )
