@@ -216,31 +216,6 @@ flux-3-klein/flux_3_klein/upsampler.py: [explicit-any] Explicit "Any" is not all
 flux-3-klein/flux_3_klein/upsampler.py: [explicit-any] Explicit "Any" is not allowed
 flux-3-klein/flux_3_klein/upsampler.py: [explicit-any] Explicit "Any" is not allowed
 flux-3-klein/flux_3_klein/upsampler.py: [explicit-any] Explicit "Any" is not allowed
-hidream-o1/hidream_o1/__init__.py: [assignment] Incompatible types in assignment (expression has type "Prompt[Image]", base class "ImageRequest" defined the type as "str")
-hidream-o1/hidream_o1/model.py: [arg-type] Argument 1 to "rectangle" of "ImageDraw" has incompatible type "tuple[int, int, int, int] | None"; expected "Sequence[float] | Sequence[Sequence[float]]"
-hidream-o1/hidream_o1/model.py: [arg-type] Argument 1 to "to" of "TensorBase" has incompatible type "dtype | Tensor | Module"; expected "dtype"
-hidream-o1/hidream_o1/model.py: [assignment] Incompatible types in assignment (expression has type "Tensor | Module", variable has type "Body")
-hidream-o1/hidream_o1/model.py: [explicit-any] Explicit "Any" is not allowed
-hidream-o1/hidream_o1/model.py: [explicit-any] Explicit "Any" is not allowed
-hidream-o1/hidream_o1/model.py: [explicit-any] Explicit "Any" is not allowed
-hidream-o1/hidream_o1/model.py: [explicit-any] Explicit "Any" is not allowed
-hidream-o1/hidream_o1/model.py: [explicit-any] Explicit "Any" is not allowed
-hidream-o1/hidream_o1/model.py: [explicit-any] Explicit "Any" is not allowed
-hidream-o1/hidream_o1/model.py: [explicit-any] Explicit "Any" is not allowed
-hidream-o1/hidream_o1/model.py: [explicit-any] Explicit "Any" is not allowed
-hidream-o1/hidream_o1/model.py: [no-any-return] Returning Any from function declared to return "Tensor"
-hidream-o1/hidream_o1/model.py: [no-any-return] Returning Any from function declared to return "Tensor"
-hidream-o1/hidream_o1/model.py: [no-any-return] Returning Any from function declared to return "Tensor"
-hidream-o1/hidream_o1/model.py: [no-untyped-call] Call to untyped function "_from_config" of "PreTrainedModel" in typed context
-hidream-o1/hidream_o1/model.py: [no-untyped-call] Call to untyped function "_from_config" of "PreTrainedModel" in typed context
-hidream-o1/hidream_o1/model.py: [union-attr] Item "None" of "dict[Any, Any] | PreTrainedConfig | None" has no attribute "hidden_size"
-hidream-o1/hidream_o1/model.py: [union-attr] Item "dict[Any, Any]" of "dict[Any, Any] | PreTrainedConfig | None" has no attribute "hidden_size"
-hidream-o1/hidream_o1/sampling.py: [attr-defined] "FlowMatchEulerDiscreteScheduler" has no attribute "set_begin_index"
-hidream-o1/hidream_o1/sampling.py: [attr-defined] "FlowMatchEulerDiscreteScheduler" has no attribute "set_timesteps"
-hidream-o1/hidream_o1/sampling.py: [attr-defined] "FlowMatchEulerDiscreteScheduler" has no attribute "sigmas"
-hidream-o1/hidream_o1/sampling.py: [explicit-any] Explicit "Any" is not allowed
-hidream-o1/hidream_o1/sampling.py: [explicit-any] Explicit "Any" is not allowed
-hidream-o1/hidream_o1/sampling.py: [no-untyped-call] Call to untyped function "FlowMatchEulerDiscreteScheduler" in typed context
 hunyuan-image-3/hunyuan_image_3/__init__.py: [arg-type] Argument 2 to "log" of "Telemetry" has incompatible type "**dict[str, float]"; expected "str"
 hunyuan-image-3/hunyuan_image_3/model.py: [assignment] Incompatible types in assignment (expression has type "SimpleNamespace", variable has type "Tensor | Module")
 hunyuan-image-3/hunyuan_image_3/model.py: [explicit-any] Explicit "Any" is not allowed
