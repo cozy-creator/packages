@@ -34,7 +34,7 @@ from .official import (
 from .steps import denoise_refine
 
 if TYPE_CHECKING:
-    from .adaln_pruned import AdaLNPrunedMiniMaxH3Transformer
+    from .adaln_pruned import H3Transformer
     from .overlay import Overlay
 
 #: Output size -> (computed height, width, kept rows): 1080p and 2160p compute whole latent
@@ -139,7 +139,7 @@ def plan_windows(shape: tuple[int, ...]) -> Windows:
 
 
 def refine(
-    transformer: AdaLNPrunedMiniMaxH3Transformer,
+    transformer: H3Transformer,
     overlay: Overlay,
     *,
     latents: torch.Tensor,

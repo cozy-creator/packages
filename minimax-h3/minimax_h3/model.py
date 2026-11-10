@@ -31,7 +31,6 @@ from . import glue, producer, regenerate, shot_latents
 from .latent_upscaler import H3LatentUpscaler as H3LatentUpscaler
 from .official import (
     REGENERATE_COMPONENT,
-    _pruned,
     OfficialH3Pipeline,
     OfficialH3RegenerateLoRA,
     OfficialH3TurboLoRA,
@@ -450,7 +449,7 @@ class H3RegenerateLoRA(Model[OfficialH3RegenerateLoRA]):
         on_step: Callable[[int], None],
     ) -> torch.Tensor:
         return regenerate.refine(
-            _pruned(base.pipe.components["transformer"]),
+            base.pipe.components["transformer"],
             self.pipe.overlay(base.pipe),
             latents=latents, prompt_embeds=prompt_embeds, text_tags=text_tags, layout=layout,
             audio=audio, schedule=schedule, seed=seed, quality=quality, on_step=on_step,

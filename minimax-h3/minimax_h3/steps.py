@@ -25,7 +25,7 @@ if TYPE_CHECKING:
     from diffusers.models.transformers.transformer_minimax_h3 import MiniMaxH3Attention
     from diffusers.schedulers.scheduling_minimax_h3 import MiniMaxH3Scheduler
 
-    from .adaln_pruned import AdaLNPrunedMiniMaxH3Transformer
+    from .adaln_pruned import H3Transformer
     from .reference_rows import LoopState
 
 
@@ -40,7 +40,7 @@ class Schedulers(Protocol):
 
 
 def denoise_official(
-    transformer: AdaLNPrunedMiniMaxH3Transformer,
+    transformer: H3Transformer,
     schedulers: Schedulers,
     state: LoopState,
     layout_at: Callable[[int], AttentionLayout],
@@ -134,7 +134,7 @@ def denoise_official(
 
 
 def denoise_refine(
-    transformer: AdaLNPrunedMiniMaxH3Transformer,
+    transformer: H3Transformer,
     overlay: Overlay,
     *,
     video: torch.Tensor,
