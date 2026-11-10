@@ -54,7 +54,7 @@ Corners = tuple[float, float, float, float]
 
 class TurboInput(ImageRequest):
     #: Its text, and the pictures it mentions, in the order it first mentions them: up to ten.
-    prompt: Prompt[Image] = Prompt()
+    prompt: Prompt[Image] = Prompt()  # type: ignore[assignment]  # a prompt with pictures, in place of the base's text
     #: Where a mentioned picture goes in the output, by its key. Placed, the pictures are elements, not the canvas.
     boxes: dict[str, Box] = msgspec.field(default_factory=dict)
     steps: Steps = None
