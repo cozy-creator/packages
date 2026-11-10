@@ -266,37 +266,6 @@ hunyuan-image-3/hunyuan_image_3/quantize.py: [union-attr] Item "DerivationHook" 
 hunyuan-image-3/hunyuan_image_3/quantize.py: [union-attr] Item "DerivationHook" of "QuantizationPlan | SelectionPlan | DerivationHook" has no attribute "include"
 hunyuan-image-3/hunyuan_image_3/quantize.py: [union-attr] Item "SelectionPlan" of "QuantizationPlan | SelectionPlan | DerivationHook" has no attribute "components"
 hunyuan-image-3/hunyuan_image_3/quantize.py: [union-attr] Item "SelectionPlan" of "QuantizationPlan | SelectionPlan | DerivationHook" has no attribute "components"
-ideogram-4/ideogram_4/__init__.py: [explicit-any] Explicit "Any" is not allowed
-ideogram-4/ideogram_4/__init__.py: [explicit-any] Explicit "Any" is not allowed
-ideogram-4/ideogram_4/__init__.py: [explicit-any] Explicit "Any" is not allowed
-ideogram-4/ideogram_4/__init__.py: [explicit-any] Explicit "Any" is not allowed
-ideogram-4/ideogram_4/model.py: [arg-type] Argument 1 to "noise" has incompatible type "tuple[int, int, Any | Tensor | Module]"; expected "Sequence[int]"
-ideogram-4/ideogram_4/model.py: [arg-type] Argument 1 to "to" of "TensorBase" has incompatible type "Tensor | Module"; expected "Tensor"
-ideogram-4/ideogram_4/model.py: [assignment] Incompatible types in assignment (expression has type "type[Transformer]", variable has type "type[Module]")
-ideogram-4/ideogram_4/model.py: [attr-defined] "Transformer" has no attribute "adaln_proj"
-ideogram-4/ideogram_4/model.py: [attr-defined] "Transformer" has no attribute "embed_image_indicator"
-ideogram-4/ideogram_4/model.py: [attr-defined] "Transformer" has no attribute "final_layer"
-ideogram-4/ideogram_4/model.py: [attr-defined] "Transformer" has no attribute "input_proj"
-ideogram-4/ideogram_4/model.py: [attr-defined] "Transformer" has no attribute "layers"
-ideogram-4/ideogram_4/model.py: [attr-defined] "Transformer" has no attribute "t_embedding"
-ideogram-4/ideogram_4/model.py: [explicit-any] Explicit "Any" is not allowed
-ideogram-4/ideogram_4/model.py: [explicit-any] Explicit "Any" is not allowed
-ideogram-4/ideogram_4/model.py: [explicit-any] Explicit "Any" is not allowed
-ideogram-4/ideogram_4/model.py: [no-any-return] Returning Any from function declared to return "Image"
-ideogram-4/ideogram_4/model.py: [no-any-return] Returning Any from function declared to return "Tensor"
-ideogram-4/ideogram_4/model.py: [no-untyped-call] Call to untyped function "from_config" of "AutoencoderKLFlux2" in typed context
-ideogram-4/ideogram_4/model.py: [no-untyped-call] Call to untyped function "from_config" of "FlowMatchEulerDiscreteScheduler" in typed context
-ideogram-4/ideogram_4/model.py: [no-untyped-call] Call to untyped function "from_config" of "Ideogram4Transformer2DModel" in typed context
-ideogram-4/ideogram_4/model.py: [operator] "Tensor" not callable
-ideogram-4/ideogram_4/model.py: [operator] "Tensor" not callable
-ideogram-4/ideogram_4/model.py: [operator] Unsupported left operand type for + (Module)
-ideogram-4/ideogram_4/model.py: [operator] Unsupported operand types for + ("Tensor" and Module)
-ideogram-4/ideogram_4/model.py: [operator] Unsupported operand types for + (Module and "Tensor")
-ideogram-4/ideogram_4/model.py: [union-attr] Item "Tensor" of "Tensor | Module" has no attribute "batch_norm_eps"
-ideogram-4/ideogram_4/model.py: [union-attr] Item "Tensor" of "Tensor | Module" has no attribute "in_channels"
-ideogram-4/ideogram_4/model.py: [union-attr] Item "Tensor" of "Tensor | Module" has no attribute "running_mean"
-ideogram-4/ideogram_4/model.py: [union-attr] Item "Tensor" of "Tensor | Module" has no attribute "running_var"
-ideogram-4/ideogram_4/model.py: [unused-ignore] Unused "type: ignore" comment
 ideogram-4/ideogram_4/text_encoder.py: [arg-type] Argument 1 to "apply_chat_template" of "PreTrainedTokenizerBase" has incompatible type "list[dict[str, Sequence[Collection[str]]]]"; expected "list[dict[str, str]] | list[list[dict[str, str]]]"
 ideogram-4/ideogram_4/text_encoder.py: [explicit-any] Explicit "Any" is not allowed
 ideogram-4/ideogram_4/text_encoder.py: [explicit-any] Explicit "Any" is not allowed
