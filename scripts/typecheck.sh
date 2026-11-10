@@ -17,5 +17,10 @@ if ! cmp -s "$req.txt" "$venv/requirements.txt"; then
   uv pip install -q --python "$venv/bin/python" -r "$req.txt"
   cp "$req.txt" "$venv/requirements.txt"
 fi
-"$venv/bin/mypy" --python-executable "$venv/bin/python" --no-error-summary --no-pretty --show-error-codes \
-  | "$venv/bin/python" scripts/typecheck.py "${1:-check}"
+out=$(mktemp)
+trap 'rm -f "$out"' EXIT
+# mypy exits 1 when it reports errors (the baseline judges those) and 2 when it cannot run.
+status=0
+"$venv/bin/mypy" --python-executable "$venv/bin/python" --no-error-summary --no-pretty --show-error-codes > "$out" || status=$?
+if [ "$status" -gt 1 ]; then cat "$out" >&2; exit "$status"; fi
+"$venv/bin/python" scripts/typecheck.py "${1:-check}" < "$out"

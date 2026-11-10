@@ -58,8 +58,8 @@ def main() -> None:
         print(f"typecheck: {sum(new.values())} new error(s) above; fix them (the baseline never grows)")
     if gone and mode == "check":
         print(f"typecheck: {sum(gone.values())} baseline error(s) fixed; run `scripts/typecheck.sh prune` and commit .mypy-baseline.txt")
-        for key in sorted(gone.elements()):
-            print(f"  fixed: {key}")
+        for fixed in sorted(gone.elements()):
+            print(f"  fixed: {fixed}")
     if new or (gone and mode == "check"):
         sys.exit(1)
     print(f"typecheck: ok, {sum(errors.values())} known error(s) left")
