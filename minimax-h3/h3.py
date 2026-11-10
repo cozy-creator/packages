@@ -492,7 +492,7 @@ def _finish(
             waveform=waveform,
             sample_rate=sample_rate,
             cancel=cancel,
-            progress=lambda step: progress(step, frames),
+            progress=progress,
         )
         try:
             decode(on_chunk=stream.push)
@@ -609,7 +609,7 @@ class _VideoStream:
         waveform: Any | None,
         sample_rate: int,
         cancel: Any,
-        progress: Callable[[int], None],
+        progress: Callable[[int, int], None],
     ) -> None:
         """`waveform` is the `(channels, samples)` soundtrack, or None for a silent video."""
         self._torch = torch
@@ -665,7 +665,7 @@ class _VideoStream:
             _land(torch, chunk[start : start + len(landed)], landed)
             self._slices.put((self.landed, self.landed + len(landed)))
             self.landed += len(landed)
-        self._progress(self.landed - 1)
+        self._progress(self.landed - 1, self._frames)
 
     def finish(self, progress: Callable[[int, int], None]) -> SavedVideo:
         """Close the stream once every requested frame has landed; the sink's probed asset,
@@ -1457,7 +1457,7 @@ async def regenerate_shot(
     with tel.stage("decode_video"):
         stream = _VideoStream(
             torch, out, frames=frames, waveform=waveform, sample_rate=sample_rate, cancel=cancel,
-            progress=lambda step: ctx.progress(step, frames),
+            progress=ctx.progress,
         )  # fmt: skip
         delivered = 0
 
