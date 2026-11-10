@@ -1044,7 +1044,7 @@ class _Heads:
         d = self.attn.head_dim
         start, stop = window.start * d, window.stop * d
         query, key, value = (
-            project(self.hidden, start, stop).unflatten(-1, (-1, d))  # type: ignore[no-untyped-call]  # torch's Tensor.unflatten is unannotated
+            project(self.hidden, start, stop).unflatten(-1, (-1, d))
             for project in self.projections
         )
         query, key = self.processor.rope(self.attn, query, key, self.rotary)
@@ -1344,9 +1344,9 @@ def _validate_transformer(transformer: MiniMaxH3Transformer3DModel, root: str) -
                 type(m) is torch.nn.RMSNorm and plain_forward(m)
                 for m in (block.norm1, block.norm2, attn.norm_q, attn.norm_k)
             )
-            and block.norm1.weight is not None  # type: ignore[redundant-expr]  # torch types it present; a norm without affine has None
-            and block.norm2.weight is not None  # type: ignore[redundant-expr]  # as above
-            and attn.norm_q.weight is not None  # type: ignore[redundant-expr]  # as above
+            and block.norm1.weight is not None
+            and block.norm2.weight is not None
+            and attn.norm_q.weight is not None
             and attn.norm_k.weight is not None,
             f"{path} is not the MiniMax-H3 block shape the fused plan was matched to ({CONTRACT})",
         )
