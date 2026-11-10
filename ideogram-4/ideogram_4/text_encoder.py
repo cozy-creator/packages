@@ -167,7 +167,7 @@ class QwenUpsampler(Model[UpsamplerGraph]):
         ).to(torch.device(str(self.device)))
         stop = self.tokenizer.eos_token_id
         # Transformers' default top-k (50), which Diffusers' `generate_captions` sampled under.
-        out = lm.generate(model, inputs, max_new_tokens=MAX_TOKENS, stop=[stop], pad=stop,
+        out = lm.generate(model, inputs, max_new_tokens=MAX_TOKENS, stop=[stop], pad=stop,  # type: ignore[arg-type]  # Qwen3-VL's PreTrainedModel
                           temperature=PROMPT_UPSAMPLE_TEMPERATURE, top_k=50, seed=seed, allowed=Schema(self.index))
         text = str(self.tokenizer.decode(out[0], skip_special_tokens=True)).strip()
         try:
