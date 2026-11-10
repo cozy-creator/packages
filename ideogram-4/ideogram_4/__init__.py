@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from typing import Annotated, Any, Literal
+from typing import TYPE_CHECKING, Annotated, Literal
 
 import msgspec
 import numpy as np
@@ -25,6 +25,9 @@ from . import quantize as quantize  # its recipes
 from .model import PATCH, Ideogram4, guidance_schedule
 from .text_encoder import QwenEncoder, QwenUpsampler
 
+if TYPE_CHECKING:
+    from PIL import Image as PILImage
+
 app = App()
 
 #: Ideogram 4 serves 256-2048 px sides on its 16 px grid, at most 6:1 (README, `docs/inference.md`); the
@@ -42,7 +45,7 @@ class GenerateInput(ImageRequest):
     regions: list[Region] = msgspec.field(default_factory=list)
 
 
-def element(region: Region, index: int) -> dict[str, Any]:
+def element(region: Region, index: int) -> dict[str, object]:
     """A region as Ideogram's caption element: `bbox` is `[y_min, x_min, y_max, x_max]` on its
     0-1000 grid, keys in the order it was trained on."""
     x0, y0, x1, y1 = corners(region.box, f"regions.{index}.box")
@@ -52,7 +55,7 @@ def element(region: Region, index: int) -> dict[str, Any]:
     return {"type": "text", "bbox": bbox, "text": region.text, "desc": region.prompt}
 
 
-def _json_object(prompt: str) -> dict[str, Any] | None:
+def _json_object(prompt: str) -> dict[str, object] | None:
     try:
         value = json.loads(prompt)
     except json.JSONDecodeError:
@@ -60,7 +63,7 @@ def _json_object(prompt: str) -> dict[str, Any] | None:
     return value if isinstance(value, dict) else None
 
 
-def _with_regions(caption: dict[str, Any], regions: list[Region]) -> str:
+def _with_regions(caption: dict[str, object], regions: list[Region]) -> str:
     composition = caption.setdefault("compositional_deconstruction", {"background": "", "elements": []})
     if not isinstance(composition, dict):
         raise UnsupportedInput("the caption's compositional_deconstruction is not an object: give it a background and elements",
@@ -92,7 +95,7 @@ def caption(payload: GenerateInput, prompt: str, upsampler: QwenUpsampler, *, wi
     return _with_regions(written, payload.regions)
 
 
-def refusal_card(image: Any) -> bool:
+def refusal_card(image: PILImage.Image) -> bool:
     """Whether `image` looks like Ideogram 4's own refusal, the flat grey "Image blocked by safety
     filter" card its weights draw for some captions and seeds (RGB about 114 with one line of light
     text): every pixel grey, and nearly all of them the field's one shade. A flat grey design can
