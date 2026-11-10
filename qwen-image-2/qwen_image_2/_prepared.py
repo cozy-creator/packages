@@ -14,18 +14,35 @@ numerics are the Diffusers/Runtime ones.
 
 from __future__ import annotations
 
-from typing import Any
+from collections.abc import Mapping
+from typing import TYPE_CHECKING
 
 import torch
 import torch.nn.functional as F
-from diffusers import QwenImage21Transformer2DModel
+from diffusers.models.modeling_outputs import Transformer2DModelOutput
 from diffusers.models.transformers.transformer_qwenimage21 import (
     QwenImage21KVLayerCache,
+    QwenImage21Transformer2DModel,
     _qwenimage21_prefix_segments,
 )
 
+if TYPE_CHECKING:
+    from cozy_runtime.accel.lora import Factors
+
 #: A layer's prefix keys and values.
 KV = tuple[torch.Tensor, torch.Tensor]
+#: A cached step's inputs after the latents: t, the target rotary table, the target mask, each layer's prefix K/V.
+Cached = tuple[torch.Tensor, torch.Tensor, torch.Tensor, list[KV]]
+#: `_Joint.inputs()`: image and text indices, text source, rotary table, target mask, key validity, segments, length.
+JointLayout = tuple[
+    torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor | None,
+    list[tuple[int, int, bool]], int,
+]
+#: A joint step's inputs after the latents: t, text embeds, reference latents, then `JointLayout`.
+Joint = tuple[
+    torch.Tensor, torch.Tensor, tuple[torch.Tensor, ...], torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor,
+    torch.Tensor, torch.Tensor | None, list[tuple[int, int, bool]], int,
+]
 
 
 def _timestep(t: torch.Tensor) -> torch.Tensor:
@@ -40,24 +57,28 @@ class Transformer(QwenImage21Transformer2DModel):
     latents, *`_Joint.inputs()`). `t` is [1], already over 1000. `projection`: a parallel decoder's
     output projection for this step (PDD), whose prediction is F32."""
 
-    def forward(  # type: ignore[override]
-        self, hidden_states: torch.Tensor, *args: Any, cached: tuple[Any, ...] | None = None,
-        joint: tuple[Any, ...] | None = None, projection: torch.Tensor | None = None, **kwargs: Any,
-    ) -> Any:
+    #: The armed overlay's factors by site (`turbo.FunAccLoRA`), else None.
+    _cozy_overlay: Mapping[str, Factors] | None
+
+    def forward(
+        self, hidden_states: torch.Tensor, *args: object, cached: Cached | None = None,
+        joint: Joint | None = None, projection: torch.Tensor | None = None, **kwargs: object,
+    ) -> torch.Tensor | Transformer2DModelOutput:
         if cached is not None:
             return self._cached(hidden_states, *cached, projection=projection)
         if joint is not None:
             return self._joint(hidden_states, *joint, projection=projection)
-        return super().forward(hidden_states, *args, **kwargs)
+        out: torch.Tensor | Transformer2DModelOutput = super().forward(hidden_states, *args, **kwargs)
+        return out
 
-    def _cached(self, latents: torch.Tensor, t: torch.Tensor, rotary: Any, target: torch.Tensor,
+    def _cached(self, latents: torch.Tensor, t: torch.Tensor, rotary: torch.Tensor, target: torch.Tensor,
                 prefix: list[KV], projection: torch.Tensor | None) -> torch.Tensor:
         """The prediction from the target tokens and the prefix's cached K/V."""
         hidden = self.img_in(latents.to(self.dtype))
         temb = self.time_text_embed(_timestep(t), hidden)
         modulation = self.modulation(temb)
         for layer, block in enumerate(self.transformer_blocks):
-            cache = QwenImage21KVLayerCache()
+            cache = QwenImage21KVLayerCache()  # type: ignore[no-untyped-call]  # Diffusers' cache __init__ is unannotated
             cache.store(*prefix[layer])
             hidden = block(
                 hidden_states=hidden,
@@ -78,7 +99,7 @@ class Transformer(QwenImage21Transformer2DModel):
 
     def _joint(
         self, latents: torch.Tensor, t: torch.Tensor, embeds: torch.Tensor, references: tuple[torch.Tensor, ...],
-        image_index: torch.Tensor, text_index: torch.Tensor, text_source: torch.Tensor, rotary: Any,
+        image_index: torch.Tensor, text_index: torch.Tensor, text_source: torch.Tensor, rotary: torch.Tensor,
         target: torch.Tensor, key_valid: torch.Tensor | None, segments: list[tuple[int, int, bool]], length: int,
         projection: torch.Tensor | None,
     ) -> torch.Tensor:
@@ -123,10 +144,10 @@ class _Layout:
 
     def __init__(
         self,
-        transformer: Any,
+        transformer: Transformer,
         img_shapes: list[list[tuple[int, int, int]]],
         img_mask: torch.Tensor,
-        device: Any,
+        device: torch.device,
     ) -> None:
         repeats = torch.where(img_mask, self._IMG_TOKENS_PER_SLOT, 1)[0]
         expanded = torch.repeat_interleave(img_mask[0], repeats)
@@ -148,11 +169,11 @@ class _Joint:
 
     def __init__(
         self,
-        transformer: Any,
+        transformer: Transformer,
         img_shapes: list[list[tuple[int, int, int]]],
         img_mask: torch.Tensor,
         text_mask: torch.Tensor | None,
-        device: Any,
+        device: torch.device,
     ) -> None:
         repeats = torch.where(img_mask, _Layout._IMG_TOKENS_PER_SLOT, 1)[0]
         expanded = torch.repeat_interleave(img_mask[0], repeats)
@@ -169,7 +190,7 @@ class _Joint:
         image_ids, self.target_mask = transformer.build_token_metadata(expanded, img_shapes[0])
         self.segments = _qwenimage21_prefix_segments(image_ids, int((~self.target_mask).sum()))
 
-    def inputs(self) -> tuple[Any, ...]:
+    def inputs(self) -> JointLayout:
         """What `Transformer.forward(joint=...)` reads after the timestep, embeds and references."""
         return (self.image_index, self.text_index, self.text_source, self.rotary_emb, self.target_mask,
                 self.key_valid, self.segments, self.length)

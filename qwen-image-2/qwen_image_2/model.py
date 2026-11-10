@@ -13,19 +13,17 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
 from functools import partial
-from typing import Any
+from typing import Protocol, TypedDict, cast
 
 import numpy as np
 import torch
+from PIL import Image
 from torch import nn
 from torch.nn import functional as F
-from diffusers import (
-    AutoencoderKLQwenImage21,
-    FlowMatchEulerDiscreteScheduler,
-    QwenImage21Pipeline,
-    QwenImage21Transformer2DModel,
-)
+from diffusers.configuration_utils import ConfigMixin
+from diffusers.schedulers.scheduling_flow_match_euler_discrete import FlowMatchEulerDiscreteScheduler
 from diffusers.models.autoencoders.autoencoder_kl_qwenimage21 import (
+    AutoencoderKLQwenImage21,
     QwenImage21CausalConv3d,
     QwenImage21Decoder3d,
     QwenImage21Encoder3d,
@@ -38,9 +36,11 @@ from diffusers.models.autoencoders.autoencoder_kl_qwenimage21 import (
 from diffusers.models.transformers.transformer_qwenimage21 import (
     QwenImage21KVCache,
     QwenImage21KVLayerCache,
+    QwenImage21Transformer2DModel,
     QwenImage21TransformerBlock,
 )
 from diffusers.pipelines.qwenimage21.pipeline_qwenimage21 import (
+    QwenImage21Pipeline,
     calculate_dimensions,
     calculate_shift,
     retrieve_timesteps,
@@ -48,6 +48,8 @@ from diffusers.pipelines.qwenimage21.pipeline_qwenimage21 import (
 from transformers import (
     AutoModelForImageTextToText,
     Qwen3VLConfig,
+    Qwen3VLForConditionalGeneration,
+    Qwen3VLProcessor,
 )
 from transformers import initialization as transformer_init
 from transformers.modeling_utils import local_torch_dtype
@@ -70,11 +72,13 @@ from cozy_runtime.accel.kernels import Plan
 from ._prepared import KV, Transformer, _Joint, _Layout
 
 
-def _modulation(block: Any, arguments: Mapping[str, Any]) -> fusion.Modulation:
+def _modulation(block: nn.Module, arguments: Mapping[str, object]) -> fusion.Modulation:
     """Diffusers' `_select_modulation_rows` as a row per token: a target-image token reads its
     sample's row, the text and condition-image prefix the trailing t=0 row."""
-    table, mask = arguments["modulation"], arguments["target_token_mask"]
-    batch, tokens = arguments["hidden_states"].shape[:2]
+    # The block's own keywords (`QwenImage21TransformerBlock.forward`).
+    table = cast(torch.Tensor, arguments["modulation"])
+    mask = cast("torch.Tensor | None", arguments["target_token_mask"])
+    batch, tokens = cast(torch.Tensor, arguments["hidden_states"]).shape[:2]
     samples = torch.arange(batch, device=table.device)[:, None]
     if mask is None:
         index = samples.expand(batch, tokens)
@@ -124,13 +128,26 @@ VAE_NORM = fusion.ChannelNorm(
 VAE_FRAME = fusion.LoneFrame(QwenImage21CausalConv3d, upsample=QwenImage21Upsample)
 
 
+class State(Protocol):
+    """What one `put` of the Runtime's `retained` store holds."""
+
+    def get(self) -> tuple[torch.Tensor, ...]: ...
+
+
+class Store(Protocol):
+    """The Runtime's `retained` store, as the prefix fills it."""
+
+    def put(self, *tensors: torch.Tensor) -> State: ...
+
+
 class _RetainedLayer(QwenImage21KVLayerCache):
     """A layer's prefix K/V held by the Runtime (`retained`): on the card while there is room,
     else in pinned host RAM, filled ahead of the layer's next step."""
 
-    def __init__(self, held: Any) -> None:
-        super().__init__()
-        self.held, self.state = held, None
+    def __init__(self, held: Store) -> None:
+        super().__init__()  # type: ignore[no-untyped-call]  # Diffusers' cache __init__ is unannotated
+        self.held: Store = held
+        self.state: State | None = None
 
     def store(self, k: torch.Tensor, v: torch.Tensor) -> None:
         self.state = self.held.put(k, v)
@@ -138,7 +155,7 @@ class _RetainedLayer(QwenImage21KVLayerCache):
     def get(self) -> tuple[torch.Tensor, torch.Tensor]:
         if self.state is None:
             raise RuntimeError("KV cache has not been populated yet.")
-        return self.state.get()
+        return cast(KV, self.state.get())  # the two `store` put
 
 
 class _RetainedKV(QwenImage21KVCache):
@@ -146,7 +163,7 @@ class _RetainedKV(QwenImage21KVCache):
     tokens keep 132 MiB a block, 7.9 GB over the stack: kept as tensors they outgrew an 8 GB card
     in step 1 (runs 39611, 39615)."""
 
-    def __init__(self, num_layers: int, held: Any) -> None:
+    def __init__(self, num_layers: int, held: Store) -> None:
         self.layer_caches = [_RetainedLayer(held) for _ in range(num_layers)]
 
     def prefix(self) -> list[KV]:
@@ -181,7 +198,7 @@ SITES: dict[str, tuple[int, int]] = {
 PROJ_OUT = (64, 4096)
 
 
-def _armed(transformer: nn.Module, path: str) -> nn.Module | None:
+def _armed(transformer: nn.Module, path: str) -> lora.Factors | None:
     """The overlay's factors at `path` while one is armed (`_cozy_overlay`), else None."""
     armed = getattr(transformer, "_cozy_overlay", None)
     return None if armed is None else armed.get(path)
@@ -209,28 +226,27 @@ class QwenImage21Graph:
         # timestep `freqs` and the text encoder's RoPE. A cast of the built module would round them.
         with transformer_init.no_init_weights():
             with local_torch_dtype(torch.bfloat16):
-                transformer: Any = QwenImage21Transformer2DModel.from_config(
-                    config.section("transformer").mapping()
-                )
-            transformer.__class__ = Transformer
+                built = construct(QwenImage21Transformer2DModel, config.section("transformer").mapping())
+            built.__class__ = Transformer
+            transformer = cast(Transformer, built)  # its class, set above
             transformer._cozy_overlay = None
             for path in SITES:
                 transformer.get_submodule(path).register_forward_hook(lora.Hook(partial(_armed, transformer, path)))
-            self.components: dict[str, Any] = {
+            self.components: Components = {
                 "transformer": transformer,
-                "text_encoder": AutoModelForImageTextToText.from_config(
+                "text_encoder": AutoModelForImageTextToText.from_config(  # type: ignore[no-untyped-call]  # Transformers' auto classes are unannotated
                     Qwen3VLConfig(**config.section("text_encoder").mapping()),
                     dtype=torch.bfloat16,
                 ),
-                "vae": AutoencoderKLQwenImage21.from_config(config.section("vae").mapping()),
+                "vae": construct(AutoencoderKLQwenImage21, config.section("vae").mapping()),
             }
         vae = self.components["vae"]
-        vae.to(dtype=_stored(config, "vae", vae))
+        _to(vae, _stored(config, "vae", vae))
         # Runtime pages a model by its `_no_split_modules`; Diffusers names none for this VAE, so
         # its 1.35 GB of F32 weights, encoder included, stayed resident through a decode and left
         # a 3 GB card short for the decode's activations. Each residual, attention and resample
         # block is one page instead (every one is called as a module, also by `_decoded`).
-        vae._no_split_modules = [
+        vae._no_split_modules = [  # type: ignore[assignment]  # Diffusers declares None
             "QwenImage21ResidualBlock",
             "QwenImage21AttentionBlock",
             "QwenImage21Resample",
@@ -238,9 +254,27 @@ class QwenImage21Graph:
         # The pipeline reads hidden states only, so the 1.24 GB language-model head is not
         # built; Runtime skips its stored weight.
         self.components["text_encoder"].lm_head = torch.nn.Identity()
-        self.scheduler_config = config.section("scheduler").mapping()
+        self.scheduler_config: dict[str, object] = config.section("scheduler").mapping()
         # The processor folder's config file, which TensorFS keeps as its component's config.
-        self.processor_config = config.section("processor").mapping() if "processor" in config.keys() else {}
+        self.processor_config: dict[str, object] = (
+            config.section("processor").mapping() if "processor" in config.keys() else {}
+        )
+
+
+class Components(TypedDict):
+    transformer: Transformer
+    text_encoder: Qwen3VLForConditionalGeneration
+    vae: AutoencoderKLQwenImage21
+
+
+def construct[M: ConfigMixin](cls: type[M], config: dict[str, object]) -> M:
+    """`cls.from_config(config)`, typed: it returns a tuple only with `return_unused_kwargs=True`."""
+    return cast(M, cls.from_config(config))
+
+
+def _to[M: nn.Module](module: M, dtype: torch.dtype) -> M:
+    """`module.to(dtype=dtype)`, typed: Diffusers' `to` is `functools.wraps`'d, which the checkers bind without `self`."""
+    return module.to(dtype=dtype)
 
 
 def build_qwen_image21(config: Config) -> QwenImage21Graph:
@@ -265,11 +299,11 @@ class QwenImage21Model(Model[QwenImage21Graph]):
     serving = Serving(attention_bits={"transformer.transformer_blocks.": 8}, loras=("transformer",))
 
     graph: QwenImage21Graph
-    processor: Any
+    processor: Qwen3VLProcessor
 
     def load(self, loader: Loader) -> None:
         self.graph = loader.construct(build_qwen_image21)
-        self.processor = vlm.processor(loader.assets, "processor/", self.graph.processor_config)
+        self.processor = cast(Qwen3VLProcessor, vlm.processor(loader.assets, "processor/", self.graph.processor_config))  # Qwen3-VL's
 
     def execution_plan(self, plan: Plan) -> str:
         vae = self.graph.components["vae"]
@@ -294,15 +328,13 @@ class QwenImage21Model(Model[QwenImage21Graph]):
             tel.log("vae representation", dtype="bfloat16")
 
     def _pipeline(
-        self, sigmas: Sequence[float] | None = None, scheduler: Mapping[str, Any] | None = None
+        self, sigmas: Sequence[float] | None = None, scheduler: Mapping[str, object] | None = None
     ) -> _StagedPipeline:
         """`scheduler`: fields an overlay's sampling sets over the checkpoint's scheduler."""
         pipeline = _StagedPipeline(
             **self.graph.components,
             processor=self.processor,
-            scheduler=FlowMatchEulerDiscreteScheduler.from_config(
-                {**self.graph.scheduler_config, **(scheduler or {})}
-            ),
+            scheduler=construct(FlowMatchEulerDiscreteScheduler, {**self.graph.scheduler_config, **(scheduler or {})}),
             sample_sigmas=None if sigmas is None else list(sigmas),
         )
         pipeline.device_placed = torch.device(str(self.device))
@@ -310,7 +342,7 @@ class QwenImage21Model(Model[QwenImage21Graph]):
 
     @memoize
     @uses_components("text_encoder")
-    def encode(self, prompt: str) -> tuple[Any, Any]:
+    def encode(self, prompt: str) -> tuple[torch.Tensor, torch.Tensor | None]:
         encoder = self.graph.components["text_encoder"]
         with torch.inference_mode():
             embeds, mask, _ = self._pipeline().encode_prompt(
@@ -320,7 +352,7 @@ class QwenImage21Model(Model[QwenImage21Graph]):
 
     @memoize
     @uses_components("vae")
-    def encode_reference_images(self, images: list[Any]) -> tuple[list[Any], torch.Tensor]:
+    def encode_reference_images(self, images: list[Image.Image]) -> tuple[list[Image.Image], torch.Tensor]:
         """Encode each reference once, using Diffusers' 1 MP conditioning size."""
         vae = self.graph.components["vae"]
         device = torch.device(str(self.device))
@@ -329,7 +361,7 @@ class QwenImage21Model(Model[QwenImage21Graph]):
         with torch.inference_mode():
             for image in images:
                 image = image.convert("RGBA")
-                width, height, _ = calculate_dimensions(1024 * 1024, image.width / image.height)
+                width, height, _ = calculate_dimensions(1024 * 1024, image.width / image.height)  # type: ignore[no-untyped-call]  # Diffusers' own, unannotated
                 resized.append(pipeline.image_processor.resize(image, width=width, height=height))
                 pixels = (
                     pipeline.image_processor.preprocess(image, width=width, height=height)
@@ -338,7 +370,7 @@ class QwenImage21Model(Model[QwenImage21Graph]):
                 )
                 encoded = _encoded(vae, pixels)
                 packed.append(
-                    pipeline._pack_latents(
+                    pipeline._pack_latents(  # type: ignore[no-untyped-call]  # Diffusers' own, unannotated
                         encoded, 1, pipeline.latent_channels, encoded.shape[3], encoded.shape[4]
                     ).cpu()
                 )
@@ -346,20 +378,22 @@ class QwenImage21Model(Model[QwenImage21Graph]):
 
     @memoize
     @uses_components("text_encoder")
-    def encode_image_prompt(self, prompt: str, images: list[Any]) -> tuple[Any, Any, Any]:
+    def encode_image_prompt(
+        self, prompt: str, images: list[Image.Image]
+    ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
         """Encode the instruction and ordered reference images as one condition."""
         encoder = self.graph.components["text_encoder"]
         with torch.inference_mode():
-            encoded: tuple[Any, Any, Any] = self._pipeline().encode_prompt(
-                prompt, image=images, device=torch.device(str(self.device))
+            encoded: tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None] = self._pipeline().encode_prompt(
+                prompt, image=images, device=torch.device(str(self.device))  # type: ignore[arg-type]  # pictures, of its input union
             )
         return encoded
 
     @uses_components("transformer")
     def denoise(
         self,
-        embeds: Any,
-        mask: Any,
+        embeds: torch.Tensor,
+        mask: torch.Tensor | None,
         *,
         width: int,
         height: int,
@@ -367,12 +401,12 @@ class QwenImage21Model(Model[QwenImage21Graph]):
         seed: int,
         progress: Callable[[int, int], None],
         sigmas: Sequence[float] | None = None,
-        scheduler: Mapping[str, Any] | None = None,
+        scheduler: Mapping[str, object] | None = None,
         heads: torch.Tensor | None = None,
-        reference_images: list[Any] | None = None,
+        reference_images: list[Image.Image] | None = None,
         reference_latents: torch.Tensor | None = None,
         image_pad_mask: torch.Tensor | None = None,
-    ) -> Any:
+    ) -> torch.Tensor:
         """`QwenImage21Pipeline.__call__`'s loop, the references' latent tokens before the target's.
         Its preparation mirrors the pipeline's, reusing its `prepare_latents`, `calculate_shift`
         and `retrieve_timesteps`, so the schedule, noise and layout match the Diffusers loop.
@@ -384,24 +418,25 @@ class QwenImage21Model(Model[QwenImage21Graph]):
         `heads`: a parallel decoder's output projection per step (PDD), whose prediction, and so the
         state, is F32."""
         transformer = self.graph.components["transformer"]
-        if not transformer.config.causal_condition:
+        if not transformer.config["causal_condition"]:
             raise UnsupportedInput("Qwen Image 2.1 denoises with causal conditioning", code="artifact_config")
         device = torch.device(str(self.device))
         pipeline = self._pipeline(sigmas, scheduler)
-        euler: Any = pipeline.scheduler
+        euler = pipeline.scheduler
         blocks = transformer.transformer_blocks
         multiple_of = pipeline.vae_scale_factor * 2
         width = width // multiple_of * multiple_of
         height = height // multiple_of * multiple_of
         factor = pipeline.vae_scale_factor
-        sizes = [calculate_dimensions(1024 * 1024, image.width / image.height)[:2] for image in reference_images or []]
+        sizes = [calculate_dimensions(1024 * 1024, image.width / image.height)[:2] for image in reference_images or []]  # type: ignore[no-untyped-call]  # Diffusers' own
 
         with torch.no_grad():
             embeds = embeds.to(device=device, dtype=transformer.dtype)
             mask = None if mask is None else mask.to(device=device)
             references = () if reference_latents is None else (reference_latents.to(device=device, dtype=transformer.dtype),)
-            latents, _ = pipeline.prepare_latents(
-                None, 1, transformer.config.in_channels, height, width, transformer.dtype, device,
+            latents: torch.Tensor
+            latents, _ = pipeline.prepare_latents(  # type: ignore[no-untyped-call]  # Diffusers' own, unannotated
+                None, 1, transformer.config["in_channels"], height, width, transformer.dtype, device,
                 rng.generator(seed), None,
             )
             # The distilled schedule when given (Turbo), else the uniform spacing the pipeline uses
@@ -414,7 +449,7 @@ class QwenImage21Model(Model[QwenImage21Graph]):
                 euler.config.get("base_shift", 0.5),
                 euler.config.get("max_shift", 1.15),
             )
-            _, steps = retrieve_timesteps(euler, steps, device, sigmas=spacing, mu=mu)
+            _, steps = retrieve_timesteps(euler, steps, device, sigmas=spacing, mu=mu)  # type: ignore[arg-type]  # Diffusers types sigmas as a list; the array serves
             euler.set_begin_index(0)
             timesteps = euler.timesteps
             # The pipeline casts the timestep to the latent dtype and only then divides by 1000.
@@ -436,7 +471,7 @@ class QwenImage21Model(Model[QwenImage21Graph]):
                 return latents
             layout = _Layout(transformer, img_shapes, img_mask, device)
             config = transformer.config
-            nbytes = 2 * layout.prefix_len * config.num_attention_heads * config.attention_head_dim
+            nbytes = 2 * layout.prefix_len * config["num_attention_heads"] * config["attention_head_dim"]
             with retained(nbytes * transformer.dtype.itemsize * len(blocks)) as held:
                 # Step 0 prefills each layer's prefix K/V into the store over the full joint sequence.
                 kv_cache = _RetainedKV(len(blocks), held)
@@ -473,30 +508,31 @@ class QwenImage21Model(Model[QwenImage21Graph]):
         return latents
 
     @uses_components("vae")
-    def decode(self, latents: Any, *, width: int, height: int) -> Any:
+    def decode(self, latents: torch.Tensor, *, width: int, height: int) -> torch.Tensor:
         vae = self.graph.components["vae"]
         device = torch.device(str(self.device))
         with torch.inference_mode():
-            latents = QwenImage21Pipeline._unpack_latents(latents, height, width, 16)
+            latents = QwenImage21Pipeline._unpack_latents(latents, height, width, 16)  # type: ignore[no-untyped-call]  # Diffusers' own
             latents = latents.to(device=device, dtype=vae.dtype)
-            mean = latents.new_tensor(vae.config.latents_mean).view(1, vae.config.z_dim, 1, 1, 1)
-            std = latents.new_tensor(vae.config.latents_std).view(1, vae.config.z_dim, 1, 1, 1)
+            mean = latents.new_tensor(vae.config["latents_mean"]).view(1, vae.config["z_dim"], 1, 1, 1)
+            std = latents.new_tensor(vae.config["latents_std"]).view(1, vae.config["z_dim"], 1, 1, 1)
             return _decoded(vae, latents * std + mean).clamp(-1.0, 1.0)[:, :, 0]
 
 
-def _encoded(vae: Any, pixels: torch.Tensor) -> torch.Tensor:
+def _encoded(vae: AutoencoderKLQwenImage21, pixels: torch.Tensor) -> torch.Tensor:
     """The pipeline's `_encode_vae_image` of one frame (argmax, normalized): Diffusers' `encode`
     without its feature cache (each convolution's input kept on the VAE for a next frame an image
     never has)."""
-    x = pixels if vae.config.patch_size is None else _patchify(pixels, patch_size=vae.config.patch_size)
-    z = vae.config.z_dim
-    latents = vae.quant_conv(vae.encoder(x))[:, :z]
-    mean = torch.tensor(vae.config.latents_mean).view(1, z, 1, 1, 1).to(latents)
-    std = torch.tensor(vae.config.latents_std).view(1, z, 1, 1, 1).to(latents)
+    patch = vae.config["patch_size"]
+    x = pixels if patch is None else _patchify(pixels, patch_size=patch)  # type: ignore[no-untyped-call]  # Diffusers' own
+    z = vae.config["z_dim"]
+    latents: torch.Tensor = vae.quant_conv(vae.encoder(x))[:, :z]
+    mean = torch.tensor(vae.config["latents_mean"]).view(1, z, 1, 1, 1).to(latents)
+    std = torch.tensor(vae.config["latents_std"]).view(1, z, 1, 1, 1).to(latents)
     return (latents - mean) / std
 
 
-def _decoded(vae: Any, z: torch.Tensor) -> torch.Tensor:
+def _decoded(vae: AutoencoderKLQwenImage21, z: torch.Tensor) -> torch.Tensor:
     """The pipeline's decode of one frame, the whole canvas: Diffusers' `decode` without its
     feature cache (each convolution's input kept for a next frame an image never has), every
     residual and resample block over the canvas in strips of rows (`tiles.rows`: exact, a strip's
@@ -519,7 +555,7 @@ def _decoded(vae: Any, z: torch.Tensor) -> torch.Tensor:
         if shortcut is not None:
             duplicate = block.avg_shortcut
             x = tiles.rows(
-                lambda s, up=duplicate: up(s, first_chunk=True), shortcut, halo=0, scale=2, out=x
+                lambda s, up=duplicate: up(s, first_chunk=True), shortcut, halo=0, scale=2, out=x  # type: ignore[misc]  # binds its block
             )
         del shortcut
     return tiles.rows(
