@@ -9,8 +9,15 @@ on:
   workflow_dispatch:
 jobs:
   e2e:
-    uses: cozy-creator/cozy-creator/.github/workflows/e2e.yaml@master
+    # Keep the isolated test harness fixed while candidates follow the open RC.
+    uses: cozy-creator/cozy-creator/.github/workflows/e2e.yaml@c445e313128bc476031c7bfd4d01c4ef40bf30d8
+    secrets:
+      TENSORHUB_READ_KEY: ${{ secrets.TENSORHUB_READ_KEY }}
     with:
       repo: packages
       ref: ${{ github.event.merge_group.head_sha || github.event.pull_request.head.sha || github.sha }}
       base: ${{ github.event.merge_group.base_sha || github.event.pull_request.base.sha }}
+      creator_ref: c445e313128bc476031c7bfd4d01c4ef40bf30d8
+      stack_ref: rc/0.25.0
+      runtime_ref: rc/0.25.0
+      packages_ref: ${{ github.event.merge_group.head_sha || github.event.pull_request.head.sha || github.sha }}
