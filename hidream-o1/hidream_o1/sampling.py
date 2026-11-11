@@ -12,12 +12,10 @@ clean image and noises it again to the next sigma, with noise computed from the 
 
 from __future__ import annotations
 
-from typing import Any
-
 import numpy as np
 import torch
 from cozy_runtime import rng
-from diffusers import FlowMatchEulerDiscreteScheduler
+from diffusers.schedulers.scheduling_flow_match_euler_discrete import FlowMatchEulerDiscreteScheduler
 
 #: The Dev model's 28 timesteps (`DEFAULT_TIMESTEPS`).
 DEV_TIMESTEPS = (
@@ -31,7 +29,7 @@ class Euler:
 
     def __init__(self, device: torch.device, timesteps: tuple[int, ...] = DEV_TIMESTEPS) -> None:
         self.timesteps = list(timesteps)
-        self.scheduler: Any = FlowMatchEulerDiscreteScheduler(shift=1.0)
+        self.scheduler = FlowMatchEulerDiscreteScheduler(shift=1.0)
         self.scheduler.set_timesteps(sigmas=[t / 1000.0 for t in timesteps], device=device)
         self.scheduler.set_begin_index(0)
         self.sigmas: torch.Tensor = self.scheduler.sigmas
@@ -128,7 +126,7 @@ class UniPC:
         if self.last is not None:
             ratio, phi, b_h, rk = corrector
             out = ratio * self.last - phi * self.x0[-1]
-            residual: Any = 0
+            residual: torch.Tensor | float = 0
             if self.orders[i - 1] == 2:
                 residual = rho_0 * ((self.x0[-2] - self.x0[-1]) / rk)
             sample = out - b_h * (residual + rho_last * (x0 - self.x0[-1]))

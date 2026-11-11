@@ -2,8 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, cast
-from collections.abc import Callable
+from typing import Protocol, TypedDict
 
 
 import numpy as np
@@ -92,14 +91,69 @@ class Conditioning(torch.nn.Module):
         self.register_buffer("negative", torch.empty(64, 5120, dtype=torch.bfloat16))
 
 
-def modules() -> dict[str, torch.nn.Module]:
-    return {
-        "dit": cast(Callable[..., torch.nn.Module], NaDiT)(**DIT).eval().half(),
-        "vae": cast(Callable[..., torch.nn.Module], VideoAutoencoderKLWrapper)(**VAE).eval().half(),
-    }
+class Encoded(Protocol):
+    @property
+    def latent(self) -> torch.Tensor: ...
+
+
+class Decoded(Protocol):
+    @property
+    def sample(self) -> torch.Tensor: ...
+
+
+class VideoVae(Protocol):
+    """What the restoration calls of upstream's VAE wrapper (vendored, not type-checked)."""
+
+    def encode(self, x: torch.Tensor, generator: torch.Generator) -> Encoded: ...
+
+    def decode(self, z: torch.Tensor) -> Decoded: ...
+
+    def set_causal_slicing(self, *, split_size: int | None, memory_device: str) -> None: ...
+
+
+class Schedule(Protocol):
+    def forward(self, x_0: torch.Tensor, x_T: torch.Tensor, t: torch.Tensor) -> torch.Tensor: ...
+
+
+class Runner(Protocol):
+    """What the restoration calls of upstream's `VideoDiffusionInfer` (vendored, not type-checked)."""
+
+    dit: torch.nn.Module
+    schedule: Schedule
+
+    def configure_diffusion(self, device: torch.device) -> None: ...
+
+    def timestep_transform(self, timesteps: torch.Tensor, latents_shapes: torch.Tensor) -> torch.Tensor: ...
+
+    def get_condition(self, latent: torch.Tensor, latent_blur: torch.Tensor, task: str) -> torch.Tensor: ...
+
+    def inference(
+        self,
+        noises: list[torch.Tensor],
+        conditions: list[torch.Tensor],
+        texts_pos: list[torch.Tensor],
+        texts_neg: list[torch.Tensor],
+    ) -> list[torch.Tensor]: ...
+
+
+class Modules(TypedDict):
+    dit: torch.nn.Module
+    vae: VideoVae
+
+
+class Components(Modules):
+    conditioning: Conditioning
+
+
+def modules() -> Modules:
+    dit: torch.nn.Module = NaDiT(**DIT).eval().half()
+    vae: VideoVae = VideoAutoencoderKLWrapper(**VAE).eval().half()
+    return {"dit": dit, "vae": vae}
 
 
 class Graph:
+    components: Components
+
     def __init__(self, config: Config) -> None:
         if config.mapping().get("architecture") != ARCHITECTURE:
             raise ValueError(f"this checkpoint is {config.mapping().get('architecture')!r}, and SeedVR2 runs the {ARCHITECTURE!r} one: leave `model` at its default")
@@ -136,7 +190,7 @@ class RestorationModel(Model[Graph]):
         """The one-step restoration of a window's latent, conditioned on itself, from
         `generator`'s noise, in pieces along time from its shape alone."""
         runner = _runner(self.graph, torch.device(str(self.device)))
-        conditioning = cast(Conditioning, self.graph.components["conditioning"])
+        conditioning = self.graph.components["conditioning"]
 
         def draw() -> torch.Tensor:
             return rng.noise(latent.shape, generator, dtype=latent.dtype, device=latent.device)
@@ -172,7 +226,7 @@ class RestorationModel(Model[Graph]):
         return _vae(self.graph).decode(z).sample[0]
 
 
-def _runner(graph: Graph, device: torch.device) -> Any:
+def _runner(graph: Graph, device: torch.device) -> Runner:
     """Upstream's inference driver over the constructed components (configuration only)."""
     cfg = OmegaConf.create(
         {
@@ -188,14 +242,14 @@ def _runner(graph: Graph, device: torch.device) -> Any:
             },
         }
     )
-    runner = cast(Any, VideoDiffusionInfer(cfg))
+    runner: Runner = VideoDiffusionInfer(cfg)
     runner.dit = graph.components["dit"]
     runner.configure_diffusion(device)
     return runner
 
 
-def _vae(graph: Graph) -> Any:
-    vae = cast(Any, graph.components["vae"])
+def _vae(graph: Graph) -> VideoVae:
+    vae = graph.components["vae"]
     # One latent frame a step of the causal scan, its finest; the Runtime cuts each op's rows.
     vae.set_causal_slicing(split_size=4, memory_device="same")
     return vae

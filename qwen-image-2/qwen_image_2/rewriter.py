@@ -143,7 +143,7 @@ def parse(answer: str, pictures: int) -> Rewrite | None:
         follow = _FOLLOW.fullmatch(str(found.get("ratio_follow") or ""))
         followed = int(follow[1]) if follow and 1 <= int(follow[1]) <= pictures else None
         valid = ratio is not None and float(ratio[1]) > 0 and float(ratio[2]) > 0
-        return Rewrite(prompt.strip(), f"{ratio[1]}:{ratio[2]}" if valid else None, None if valid else followed)
+        return Rewrite(prompt.strip(), f"{ratio[1]}:{ratio[2]}" if valid else None, None if valid else followed)  # type: ignore[index]  # `valid`: matched
     return None
 
 
@@ -159,7 +159,7 @@ class Enhancer(VisionLM):
         the tokens decoded of its budget."""
         content = [*({"type": "image"} for _ in question.images), {"type": "text", "text": question.text}]
         chat: str = self.processor.apply_chat_template(
-            [{"role": "system", "content": system}, {"role": "user", "content": content}],
+            [{"role": "system", "content": system}, {"role": "user", "content": content}],  # type: ignore[arg-type, unused-ignore]  # content as parts
             add_generation_prompt=True, tokenize=False, enable_thinking=True,
         )
         tokenizer = self.processor.tokenizer
@@ -176,13 +176,13 @@ class Enhancer(VisionLM):
             tokens = self._decode(chat, question.images, ends + [tokenizer.convert_tokens_to_ids("</think>")], think,
                                   presence_penalty, seed, decoded)
             thought_tokens = tokens.shape[1]
-            thought = str(self.processor.batch_decode(tokens, skip_special_tokens=True)[0])
+            thought = str(self.processor.batch_decode(tokens, skip_special_tokens=True)[0])  # type: ignore[no-untyped-call, unused-ignore]  # Transformers' own, unannotated
         # No thought is the template's own empty one; one that stopped short of its budget ended itself.
         thought, ended, _ = thought.partition("</think>")
         closed = chat + thought.rstrip() + (CLOSE if think and not ended and thought_tokens >= think else "\n</think>\n\n")
         tokens = self._decode(closed, question.images, ends, MAX_ANSWER, presence_penalty, seed,
                               lambda n: decoded(thought_tokens + n))
-        return str(self.processor.batch_decode(tokens, skip_special_tokens=True)[0]), thought_tokens, tokens.shape[1]
+        return str(self.processor.batch_decode(tokens, skip_special_tokens=True)[0]), thought_tokens, tokens.shape[1]  # type: ignore[no-untyped-call, unused-ignore]  # Transformers' batch_decode is untyped in some releases
 
     def _decode(self, text: str, images: list[Image.Image], stop: list[int], most: int, presence_penalty: float,
                 seed: int, progress: Callable[[int], None]) -> torch.Tensor:

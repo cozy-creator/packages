@@ -19,13 +19,14 @@ import math
 import re
 from collections.abc import Callable, Sequence
 from importlib.resources import files
-from typing import Any
+from typing import TypedDict, cast
 
 import torch
 from cozy_runtime import lm, vlm
+from cozy_runtime.accel.kernels import Plan
 from cozy_runtime.author import Config, Loader, Model, Serving, UnsupportedInput, memoize, uses_components
 from PIL import Image, ImageOps
-from transformers import AutoConfig
+from transformers import AutoConfig, PreTrainedModel, ProcessorMixin
 from transformers.initialization import no_init_weights
 from transformers.models.qwen3_5 import modeling_qwen3_5
 
@@ -55,7 +56,12 @@ MAX_PIXELS_BY_REFS = {1: 1024 * 1024, 2: 724 * 724, **{n: 512 * 512 for n in ran
 SCALE = 1000
 ID = re.compile(r"[A-Za-z][A-Za-z0-9_]*")
 #: A row: {"id", "bbox", "desc"}, or {"id", "from", "src_bbox", "tgt_bbox", "desc"} in an edit.
-Row = dict[str, Any]
+Row = TypedDict(
+    "Row",
+    {"id": str, "bbox": Sequence[float], "from": str, "src_bbox": Sequence[float] | None, "tgt_bbox": Sequence[float] | None,
+     "desc": str},
+    total=False,
+)
 
 
 def canvas_box(box: Sequence[float]) -> list[int]:
@@ -69,7 +75,7 @@ def with_table(caption: str, rows: list[Row]) -> str:
     return f"{caption.rstrip()} {json.dumps(rows, ensure_ascii=False)}"
 
 
-def split(text: str) -> tuple[str, list[Any] | None]:
+def split(text: str) -> tuple[str, list[object] | None]:
     """The caption and the rows: from the last '[' at which the rest parses as a JSON list. Not a
     regex: descs may hold brackets and escaped quotes."""
     for i in range(len(text) - 1, -1, -1):
@@ -83,7 +89,7 @@ def split(text: str) -> tuple[str, list[Any] | None]:
     return text.strip(), None
 
 
-def valid_box(box: Any) -> list[Any] | None:
+def valid_box(box: object) -> list[float] | None:
     if not isinstance(box, (list, tuple)) or len(box) != 4:
         return None
     if any(isinstance(v, bool) or not isinstance(v, (int, float)) or v != v or abs(v) == math.inf for v in box):
@@ -107,7 +113,7 @@ def detect(prompt: str) -> tuple[str, list[Row]] | None:
     ):
         return None
     locked = re.fullmatch(r"ORIGINAL PROMPT:\n(.*?)\n\nLOCKED BOUNDING-BOX ANNOTATIONS .*", text, re.S)
-    return (locked.group(1) if locked else text), rows
+    return (locked.group(1) if locked else text), cast("list[Row]", rows)  # every row checked above
 
 
 def is_finished(prompt: str) -> bool:
@@ -125,7 +131,7 @@ def upsampling_input(prompt: str, rows: list[Row]) -> str:
     )
 
 
-def _valid_added(row: Any, caption: str) -> Row | None:
+def _valid_added(row: object, caption: str) -> Row | None:
     """A row the upsampler added: kept only when its id is cited as `<id>` and it is well formed."""
     if not isinstance(row, dict):
         return None
@@ -145,7 +151,7 @@ def _valid_added(row: Any, caption: str) -> Row | None:
     return {"id": row_id, "from": origin, "src_bbox": src_box, "tgt_bbox": tgt_box, "desc": desc.strip()}
 
 
-def _iou(a: list[Any], b: list[Any]) -> float:
+def _iou(a: Sequence[float], b: Sequence[float]) -> float:
     inter = max(0, min(a[2], b[2]) - max(a[0], b[0])) * max(0, min(a[3], b[3]) - max(a[1], b[1]))
     union = (a[2] - a[0]) * (a[3] - a[1]) + (b[2] - b[0]) * (b[3] - b[1]) - inter
     return inter / union if union > 0 else 0.0
@@ -177,7 +183,7 @@ def reconcile(text: str, locked: list[Row]) -> str:
     for old, new in renamed.items():
         caption = caption.replace(f"<{old}>", f"<{new}>")
     by_id = {r["id"]: r for r in rows if isinstance(r, dict) and isinstance(r.get("id"), str)}
-    out = []
+    out: list[Row] = []
     for lock in locked:
         desc = by_id.get(lock["id"], {}).get("desc")
         out.append({**lock, "desc": desc.strip() if isinstance(desc, str) and desc.strip() else lock.get("desc", "")})
@@ -215,7 +221,7 @@ class Drafter(Model[DrafterGraph]):
 class UpsamplerGraph:
     def __init__(self, config: Config) -> None:
         # Every parameter in its stored dtype: Qwen3.5 keeps A_log and its gated norms in f32.
-        self.components: dict[str, torch.nn.Module] = {COMPONENT: vlm.construct(config.mapping(), config)}
+        self.components: dict[str, PreTrainedModel] = {COMPONENT: vlm.construct(config.mapping(), config)}  # type: ignore[dict-item, unused-ignore]  # the pinned Runtime returns nn.Module
 
 
 def _floor(value: float) -> int:
@@ -258,11 +264,11 @@ class Upsampler(Model[UpsamplerGraph]):
     serving = Serving(min_bits=4, phase="decode")
 
     graph: UpsamplerGraph
-    processor: Any
+    processor: ProcessorMixin
     #: BFL's system prompts (`system_prompts.json` of its repository), by task.
     system_prompts: dict[str, str]
 
-    def execution_plan(self, plan: Any) -> str:
+    def execution_plan(self, plan: Plan) -> str:
         return lm.install(plan, self.graph.components[COMPONENT])
 
     def load(self, loader: Loader) -> None:
@@ -287,7 +293,7 @@ class Upsampler(Model[UpsamplerGraph]):
         if images:
             references = [policy_reference(image, len(images)) for image in images]
             text = I2I_SCAFFOLD[bool(locked)].format(instruction=prompt)
-            content: Any = [{"type": "image"} for _ in references] + [{"type": "text", "text": text}]
+            content: str | list[dict[str, str]] = [{"type": "image"} for _ in references] + [{"type": "text", "text": text}]
         else:
             references = []
             content = f"TARGET CANVAS: {canvas}\n{prompt}" if canvas else prompt
@@ -296,7 +302,7 @@ class Upsampler(Model[UpsamplerGraph]):
             {"role": "user", "content": content},
         ]
         chat = processor.apply_chat_template(
-            messages, tokenize=False, add_generation_prompt=True, enable_thinking=False
+            messages, tokenize=False, add_generation_prompt=True, enable_thinking=False  # type: ignore[arg-type]  # content as parts
         )
         inputs = processor(
             text=[chat], images=references or None, return_tensors="pt"

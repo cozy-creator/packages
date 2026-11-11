@@ -4,11 +4,10 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
 from importlib.resources import files
-from typing import Any
 
 import msgspec
 import torch
-from cozy_runtime.author import Context, UnsupportedInput, Weights, canonical_json
+from cozy_runtime.author import Context, Model, UnsupportedInput, Weights, canonical_json
 from cozy_runtime.weights_store import Checkpoint, Output, TensorMetadata
 
 from .kernel import (
@@ -58,7 +57,7 @@ def plain(row: Row, expected: str, shape: tuple[int, ...]) -> bool:
     return row.encoding is None and dtype(row) == expected and tuple(row.shape) == shape
 
 
-def open_source(ctx: Context, weights: Weights[Any]) -> Checkpoint:
+def open_source(ctx: Context, weights: Weights[Model[object]]) -> Checkpoint:
     return ctx.tensorfs_source(weights)
 
 
@@ -225,7 +224,7 @@ class _FullSpecs(msgspec.Struct, forbid_unknown_fields=True):
 
 
 def official_full_specs(
-    config: dict[str, Any],
+    config: Mapping[str, object],
 ) -> dict[str, tuple[str, tuple[int, ...]]]:
     """Load the ordered 638-row serving destination contract without importing Diffusers.
 

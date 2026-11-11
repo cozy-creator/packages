@@ -21,7 +21,7 @@ video is never a reference (`guide_rows`).
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
-from typing import Any
+from typing import Protocol
 
 import torch
 
@@ -41,6 +41,32 @@ _LAYOUT_FIELDS = {
 }
 
 
+class LoopState(Protocol):
+    """The official denoise loop's `BlockState`: the fields H3 reads and writes."""
+
+    denoiser_input_fields: dict[str, torch.Tensor]
+    row_timestep_plan: list[tuple[torch.Tensor, torch.Tensor]]
+    latents: torch.Tensor
+    audio_latents: torch.Tensor
+    num_condition_video_rows: int
+    num_condition_audio_rows: int
+    video_indices: torch.Tensor
+    token_tags: torch.Tensor
+    prompt_embeds: torch.Tensor
+    timesteps: torch.Tensor
+    audio_timesteps: torch.Tensor
+    noise_pred: torch.Tensor | None
+    audio_noise_pred: torch.Tensor | None
+    attention_kwargs: dict[str, object] | None
+
+
+class Kinded(Protocol):
+    """A packed reference: Diffusers' three, or a carried context's layout entry."""
+
+    @property
+    def kind(self) -> str: ...
+
+
 def motion_size(height: int, width: int) -> tuple[int, int]:
     """A clip's (height, width) once its canvas-sized frames shrink to guide motion."""
     small_height, small_width = (
@@ -49,7 +75,7 @@ def motion_size(height: int, width: int) -> tuple[int, int]:
     return small_height, small_width
 
 
-def public_video(reference: Any) -> bool:
+def public_video(reference: Kinded) -> bool:
     return reference.kind == "video" and not isinstance(reference, ContextReferenceLayout)
 
 
@@ -59,9 +85,9 @@ class ClipRows:
 
     def __init__(
         self,
-        block_state: Any,
-        references: Sequence[Any],
-        condition_latents: Sequence[Any],
+        block_state: LoopState,
+        references: Sequence[Kinded],
+        condition_latents: Sequence[torch.Tensor],
         patch: Sequence[int],
         *,
         start: int = 0,
@@ -81,7 +107,7 @@ class ClipRows:
         if next(latents, None) is not None or offset != block_state.num_condition_video_rows:
             raise ValueError("video reference rows disagree with the packed layout")
 
-    def thin(self, block_state: Any) -> None:
+    def thin(self, block_state: LoopState) -> None:
         """Before the first evaluation: keep every `FRAME_STRIDE`-th latent frame of each clip."""
         self._drop(block_state, lambda frame: frame % FRAME_STRIDE != 0)
 
@@ -89,12 +115,12 @@ class ClipRows:
         """Whether `release` drops any rows: some clip's latent frames are still in the sequence."""
         return bool((self.frame >= 0).any())
 
-    def release(self, block_state: Any) -> None:
+    def release(self, block_state: LoopState) -> None:
         """Before the first sparse evaluation: every clip's latent rows leave."""
         self._drop(block_state, lambda frame: torch.ones_like(frame, dtype=torch.bool))
 
     def _drop(
-        self, block_state: Any, dropped_frame: Callable[[torch.Tensor], torch.Tensor]
+        self, block_state: LoopState, dropped_frame: Callable[[torch.Tensor], torch.Tensor]
     ) -> None:
         dropped = (self.frame >= 0) & dropped_frame(self.frame)
         if not bool(dropped.any()):
@@ -108,7 +134,7 @@ class ClipRows:
         self.frame = self.frame[~dropped]
 
 
-def select_rows(block_state: Any, keep: torch.Tensor) -> None:
+def select_rows(block_state: LoopState, keep: torch.Tensor) -> None:
     """Keep the packed rows `keep` marks, renumbered in order, with every per-row field."""
     fields = dict(block_state.denoiser_input_fields)
     if set(fields) != _LAYOUT_FIELDS:

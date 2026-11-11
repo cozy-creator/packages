@@ -13,7 +13,7 @@ from typing import Any, TypeVar
 import torch
 from cozy_runtime.accel import lora
 from cozy_runtime.author import Config, Loader, Model, Serving, uses_components
-from diffusers import Flux2Transformer2DModel
+from diffusers.models.transformers.transformer_flux2 import Flux2Transformer2DModel
 from torch import nn
 
 
@@ -39,7 +39,9 @@ class Factors(nn.Module):
 
 
 class TurboGraph:
-    def __init__(self, config: Config, geometry: Mapping[str, Any] | None = None) -> None:
+    def __init__(  # type: ignore[explicit-any]  # geometry: **config into Diffusers' typed keywords
+        self, config: Config, geometry: Mapping[str, Any] | None = None
+    ) -> None:
         adapter = config.section(COMPONENT).mapping()
         rank = int(adapter["r"])
         scale = float(adapter.get("lora_alpha", rank)) / rank
@@ -76,8 +78,8 @@ class Flux2TurboLoRA(Model[TurboGraph]):
         """`body` with this overlay armed on [dev]'s `transformer`."""
         if not hasattr(transformer, "_cozy_turbo"):
             raise ValueError("the Turbo LoRA adapts FLUX.2 [dev] only")
-        transformer._cozy_turbo = self.graph.sites
+        transformer._cozy_turbo = self.graph.sites  # type: ignore[assignment]  # a plain attribute: nn.Module keeps non-tensors as such
         try:
             return body()
         finally:
-            transformer._cozy_turbo = None
+            transformer._cozy_turbo = None  # type: ignore[assignment]  # a plain attribute

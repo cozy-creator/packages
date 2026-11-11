@@ -46,7 +46,7 @@ MAX_PICTURES = 10
 class TurboInput(ImageRequest):
     #: Its text, and the pictures it mentions in order of first mention: given, Qwen-Image-Edit-2511
     #: edits or composes them; else Qwen-Image-2512 generates from the text.
-    prompt: Prompt[Image] = Prompt()
+    prompt: Prompt[Image] = Prompt()  # type: ignore[assignment]  # a prompt with pictures, in place of the base's text
     steps: Steps = None
 
 

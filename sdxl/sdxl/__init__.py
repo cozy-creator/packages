@@ -34,7 +34,7 @@ import json
 import math
 from collections.abc import Callable
 from pathlib import Path
-from typing import Annotated, Any, Literal
+from typing import TYPE_CHECKING, Annotated, Any, Literal, TypedDict, cast
 
 import msgspec
 import torch
@@ -45,11 +45,13 @@ from cozy_runtime.author import (
     AdjustmentRows,
     Adjustments,
     App,
+    Config,
     Context,
     EncodingRule,
     ImageFrame,
     Loader,
     Model,
+    ModelAssets,
     OutputError,
     Outputs,
     QuantizationPlan,
@@ -70,11 +72,11 @@ from cozy_runtime.image import (
     Steps,
     held,
 )
-from diffusers import AutoencoderKL, DDIMScheduler, EulerDiscreteScheduler, UNet2DConditionModel
-from hidiffusion import (  # type: ignore[import-not-found,import-untyped]
-    apply_hidiffusion,
-    remove_hidiffusion,
-)
+from diffusers.models.autoencoders.autoencoder_kl import AutoencoderKL
+from diffusers.models.unets.unet_2d_condition import UNet2DConditionModel
+from diffusers.schedulers.scheduling_ddim import DDIMScheduler
+from diffusers.schedulers.scheduling_euler_discrete import EulerDiscreteScheduler
+from hidiffusion import apply_hidiffusion, remove_hidiffusion
 from transformers import (
     CLIPTextConfig,
     CLIPTextModel,
@@ -84,6 +86,13 @@ from transformers import (
 from transformers import initialization as transformer_init
 
 from ._numerics import decode_latents, encode_tokens, guided, hold_decode_dtype
+
+if TYPE_CHECKING:
+    from diffusers.configuration_utils import ConfigMixin
+    from diffusers.models.attention import BasicTransformerBlock
+    from diffusers.utils.outputs import BaseOutput
+    from torch import nn
+    from torch.utils.hooks import RemovableHandle
 
 app = App()
 
@@ -112,80 +121,91 @@ class GenerateInput(ImageRequest):
 # ------------------------------------------------------------------ the model
 
 
-def _hidiffusion_unet_type() -> type[Any]:
-    """The patched UNet owner, imported only when Runtime constructs the model."""
+class HiDiffusionInfo(TypedDict):
+    """The state `apply_hidiffusion` shares across a patched UNet and its blocks (`info`): the
+    size, cleared between requests, is set by HiDiffusion's UNet hook before any block runs."""
 
-    class HiDiffusionUNet(UNet2DConditionModel):
-        """Select and reset the request's denoising implementation before step zero.
+    size: tuple[int, int] | None
+    upsample_size: tuple[int, int] | None
+    hooks: list[RemovableHandle]
 
-        HiDiffusion's blocks count steps on themselves, and its window blocks draw their shift
-        from torch's global RNG. So before every call each counting block is set to the request's
-        step (`cozy_step`), and each window block (`_windowed`) takes its shift from the request's
-        seed, step and its own index: a block runs the same however often it runs."""
 
-        _cozy_base_num_upsamplers: int
-        _cozy_hidiffusion_active: bool
-        cozy_step = 0
-        _cozy_seed = 0
+class HiDiffusionUNet(UNet2DConditionModel):
+    """Select and reset the request's denoising implementation before step zero.
 
-        def begin_denoise_request(self, steps: int, hidiffusion: bool, seed: int) -> None:
-            if steps <= 0:
-                raise ValueError("HiDiffusion requires a positive timestep count")
-            active = bool(getattr(self, "_cozy_hidiffusion_active", False))
-            if hidiffusion != active:
-                if hidiffusion:
-                    self.num_upsamplers = self._cozy_base_num_upsamplers
-                    apply_hidiffusion(self)
-                    window = 0
-                    for block in [m for m in self.modules() if hasattr(m, "_parent")]:
-                        if hasattr(block, "max_timestep"):
-                            hook: Any = self._cozy_count
-                        else:
-                            block.__class__ = _windowed(block._parent)
-                            hook, window = functools.partial(self._cozy_draw, window), window + 1
-                        self.info["hooks"].append(block.register_forward_pre_hook(hook))
-                else:
-                    remove_hidiffusion(self)
-                    self.num_upsamplers = self._cozy_base_num_upsamplers
-                self._cozy_hidiffusion_active = hidiffusion
-            if not hidiffusion:
-                return
-            self._num_timesteps, self._cozy_seed = steps, seed
-            self.info["size"] = self.info["upsample_size"] = None
-            for module in self.modules():  # type: ignore[attr-defined]
-                if hasattr(module, "max_timestep"):
-                    module.max_timestep = steps
+    HiDiffusion's blocks count steps on themselves, and its window blocks draw their shift
+    from torch's global RNG. So before every call each counting block is set to the request's
+    step (`cozy_step`), and each window block (`_windowed`) takes its shift from the request's
+    seed, step and its own index: a block runs the same however often it runs."""
 
-        def _cozy_count(self, block: Any, *_: Any) -> None:
-            block.timestep = self.cozy_step
+    _cozy_base_num_upsamplers: int
+    _cozy_hidiffusion_active: bool
+    _num_timesteps: int
+    name_or_path: str
+    info: HiDiffusionInfo
+    cozy_step = 0
+    _cozy_seed = 0
 
-        def _cozy_draw(self, index: int, block: Any, *_: Any) -> None:
-            """HiDiffusion's `torch.rand(1)`, from the request's stream at this step and window."""
-            draw = (self._cozy_seed * 1_000_003 + self.cozy_step * 1_009 + index) % 2**63
-            block.cozy_draw = float(torch.rand(1, generator=rng.generator(draw)))
+    def begin_denoise_request(self, steps: int, hidiffusion: bool, seed: int) -> None:
+        if steps <= 0:
+            raise ValueError("HiDiffusion requires a positive timestep count")
+        active = bool(getattr(self, "_cozy_hidiffusion_active", False))
+        if hidiffusion != active:
+            if hidiffusion:
+                self.num_upsamplers = self._cozy_base_num_upsamplers
+                apply_hidiffusion(self)
+                window = 0
+                for block in [m for m in self.modules() if hasattr(m, "_parent")]:
+                    hook: Callable[[nn.Module, tuple[object, ...]], None]
+                    if hasattr(block, "max_timestep"):
+                        hook = self._cozy_count
+                    else:
+                        block.__class__ = _windowed(block._parent)
+                        hook, window = functools.partial(self._cozy_draw, window), window + 1
+                    self.info["hooks"].append(block.register_forward_pre_hook(hook))
+            else:
+                remove_hidiffusion(self)
+                self.num_upsamplers = self._cozy_base_num_upsamplers
+            self._cozy_hidiffusion_active = hidiffusion
+        if not hidiffusion:
+            return
+        self._num_timesteps, self._cozy_seed = steps, seed
+        self.info["size"] = self.info["upsample_size"] = None
+        for module in self.modules():
+            if hasattr(module, "max_timestep"):
+                module.max_timestep = steps  # type: ignore[assignment]  # HiDiffusion's block attribute
 
-    return HiDiffusionUNet
+    def _cozy_count(self, block: nn.Module, *_: object) -> None:
+        block.timestep = self.cozy_step  # type: ignore[assignment]  # HiDiffusion's block attribute
+
+    def _cozy_draw(self, index: int, block: nn.Module, *_: object) -> None:
+        """HiDiffusion's `torch.rand(1)`, from the request's stream at this step and window."""
+        draw = (self._cozy_seed * 1_000_003 + self.cozy_step * 1_009 + index) % 2**63
+        block.cozy_draw = float(torch.rand(1, generator=rng.generator(draw)))  # type: ignore[assignment]  # `Windowed`'s
 
 
 @functools.cache
-def _windowed(parent: type[Any]) -> type[Any]:
+def _windowed(parent: type[BasicTransformerBlock]) -> type[BasicTransformerBlock]:
     """HiDiffusion's MSW-MSA block (`make_diffusers_transformer_block`) over SDXL's layer-norm
     `BasicTransformerBlock`, its window shift from `cozy_draw`, not torch's global RNG.
     `remove_hidiffusion` restores `_parent`."""
 
-    class Windowed(parent):  # type: ignore[valid-type,misc]
+    class Windowed(parent):  # type: ignore[valid-type,misc]  # a subclass of the block class HiDiffusion patched
         _parent = parent
         cozy_draw = 0.0
+        info: HiDiffusionInfo
 
-        def forward(
-            self, hidden_states: Any, attention_mask: Any = None, encoder_hidden_states: Any = None,
-            encoder_attention_mask: Any = None, timestep: Any = None, cross_attention_kwargs: Any = None,
-            class_labels: Any = None, added_cond_kwargs: Any = None,
-        ) -> Any:
+        def forward(  # type: ignore[explicit-any]  # cross_attention_kwargs: Diffusers' attention-processor kwargs
+            self, hidden_states: torch.Tensor, attention_mask: torch.Tensor | None = None,
+            encoder_hidden_states: torch.Tensor | None = None, encoder_attention_mask: torch.Tensor | None = None,
+            timestep: torch.Tensor | None = None,
+            cross_attention_kwargs: dict[str, Any] | None = None,
+            class_labels: torch.Tensor | None = None, added_cond_kwargs: dict[str, torch.Tensor] | None = None,
+        ) -> torch.Tensor:
             kwargs = dict(cross_attention_kwargs or {})
             kwargs.pop("gligen", None)
             _, tokens, _ = hidden_states.shape
-            height, width = self.info["size"]
+            height, width = self.info["size"]  # type: ignore[misc]  # set by HiDiffusion's UNet hook before blocks run
             ratio = round((height * width / tokens) ** 0.5)
             rows, columns = math.ceil(height / ratio), math.ceil(width / ratio)
             size = (math.ceil(rows / 2), math.ceil(columns / 2))
@@ -193,18 +213,25 @@ def _windowed(parent: type[Any]) -> type[Any]:
             shift = (size[0] // 4 * quarter, size[1] // 4 * quarter)
             windows = _partition(self.norm1(hidden_states), size, shift, rows, columns)
             context = encoder_hidden_states if self.only_cross_attention else None
-            attended = self.attn1(windows, encoder_hidden_states=context, attention_mask=attention_mask, **kwargs)
+            attended: torch.Tensor = self.attn1(
+                windows, encoder_hidden_states=context, attention_mask=attention_mask, **kwargs
+            )
             hidden_states = _unpartition(attended, size, shift, rows, columns) + hidden_states
-            hidden_states = self.attn2(
-                self.norm2(hidden_states), encoder_hidden_states=encoder_hidden_states,
-                attention_mask=encoder_attention_mask, **kwargs,
-            ) + hidden_states
-            return self.ff(self.norm3(hidden_states)) + hidden_states
+            # SDXL's blocks all cross-attend: their attn2, norm2 and norm3 are set.
+            crossed: torch.Tensor = self.attn2(  # pyright: ignore[reportOptionalCall]
+                self.norm2(hidden_states),  # pyright: ignore[reportOptionalCall]
+                encoder_hidden_states=encoder_hidden_states, attention_mask=encoder_attention_mask, **kwargs,
+            )
+            hidden_states = crossed + hidden_states
+            fed: torch.Tensor = self.ff(self.norm3(hidden_states))  # pyright: ignore[reportOptionalCall]
+            return fed + hidden_states
 
     return Windowed
 
 
-def _partition(x: Any, size: tuple[int, int], shift: tuple[int, int], rows: int, columns: int) -> Any:
+def _partition(
+    x: torch.Tensor, size: tuple[int, int], shift: tuple[int, int], rows: int, columns: int
+) -> torch.Tensor:
     """HiDiffusion's `window_partition`: the map rolled by `shift`, as 2x2 windows of `size`."""
     batch, _, channels = x.shape
     x = x.view(batch, rows, columns, channels)
@@ -217,7 +244,9 @@ def _partition(x: Any, size: tuple[int, int], shift: tuple[int, int], rows: int,
     return x.view(-1, size[0] * size[1], channels)
 
 
-def _unpartition(windows: Any, size: tuple[int, int], shift: tuple[int, int], rows: int, columns: int) -> Any:
+def _unpartition(
+    windows: torch.Tensor, size: tuple[int, int], shift: tuple[int, int], rows: int, columns: int
+) -> torch.Tensor:
     """HiDiffusion's `window_reverse`: the windows back as the map, rolled back."""
     channels = windows.shape[-1]
     batch = windows.shape[0] // 4
@@ -229,6 +258,24 @@ def _unpartition(windows: Any, size: tuple[int, int], shift: tuple[int, int], ro
         x = F.interpolate(x.permute(0, 3, 1, 2).contiguous(), size=(rows, columns), mode="bicubic")
         x = x.permute(0, 2, 3, 1).contiguous()
     return x.view(batch, rows * columns, channels)
+
+
+class SdxlComponents(TypedDict):
+    text_encoder: CLIPTextModel
+    text_encoder_2: CLIPTextModelWithProjection
+    unet: HiDiffusionUNet
+    vae: AutoencoderKL
+
+
+def construct[M: ConfigMixin](cls: type[M], config: dict[str, object]) -> M:
+    """`cls.from_config(config)`, typed: it returns a tuple only with `return_unused_kwargs=True`."""
+    return cast(M, cls.from_config(config))
+
+
+def _half[M: nn.Module](module: M) -> M:
+    """`module.to(torch.float16)`, typed: Diffusers' and Transformers' `to` is `functools.wraps`'d,
+    which the checkers bind without `self`."""
+    return module.to(torch.float16)
 
 
 class SdxlPipeline:
@@ -246,25 +293,18 @@ class SdxlPipeline:
     encoded implementations when the checkpoint carries FP8 weights.
     """
 
-    def __init__(self, config: Any) -> None:
+    def __init__(self, config: Config) -> None:
         mapping = config.mapping()
         text_encoder = dict(mapping["text_encoder"])
         text_encoder_2 = dict(mapping["text_encoder_2"])
         for clip_config in (text_encoder, text_encoder_2):
             clip_config["initializer_factor"] = float(clip_config["initializer_factor"])
-        unet_type = _hidiffusion_unet_type()
         with transformer_init.no_init_weights():
-            self.components: dict[str, Any] = {
-                "text_encoder": CLIPTextModel(CLIPTextConfig(**text_encoder)).to(
-                    torch.float16  # type: ignore[arg-type]
-                ),
-                "text_encoder_2": CLIPTextModelWithProjection(CLIPTextConfig(**text_encoder_2)).to(
-                    torch.float16
-                ),  # type: ignore[arg-type]
-                "unet": unet_type.from_config(mapping["unet"]).to(torch.float16),
-                "vae": AutoencoderKL.from_config(mapping["vae"]).to(  # type: ignore[no-untyped-call]
-                    torch.float16
-                ),
+            self.components: SdxlComponents = {
+                "text_encoder": _half(CLIPTextModel(CLIPTextConfig(**text_encoder))),
+                "text_encoder_2": _half(CLIPTextModelWithProjection(CLIPTextConfig(**text_encoder_2))),
+                "unet": _half(construct(HiDiffusionUNet, mapping["unet"])),
+                "vae": _half(construct(AutoencoderKL, mapping["vae"])),
             }
         unet = self.components["unet"]
         # HiDiffusion recognizes this constructed SDXL UNet by its module keys. Keep the
@@ -272,17 +312,16 @@ class SdxlPipeline:
         unet.name_or_path = ""
         unet._cozy_base_num_upsamplers = unet.num_upsamplers
         unet._cozy_hidiffusion_active = False
-        self.scheduler_config: dict[str, Any] = dict(mapping["scheduler"])
+        self.scheduler_config: dict[str, object] = dict(mapping["scheduler"])
         self.vae_scale: float = float(mapping["vae"]["scaling_factor"])
 
 
 def warmup() -> None:
-    """Runtime's off-lock import hook (cr-104). Every import is at module scope (se-041), so
-    `import sdxl` already paid the cost; the HiDiffusion subclass body left here is free."""
-    _hidiffusion_unet_type()
+    """Runtime's off-lock import hook (cr-104). Every import and class is at module scope (se-041),
+    so `import sdxl` already paid the cost."""
 
 
-def build_pipeline(config: Any) -> SdxlPipeline:
+def build_pipeline(config: Config) -> SdxlPipeline:
     return SdxlPipeline(config)
 
 
@@ -306,7 +345,7 @@ class SdxlModel(Model[SdxlPipeline]):
     serving = Serving(loras=("unet", "text_encoder", "text_encoder_2"))
 
     pipe: SdxlPipeline
-    tokenizers: tuple[Any, Any]
+    tokenizers: tuple[CLIPTokenizer, CLIPTokenizer]
 
     def load(self, loader: Loader) -> None:
         self.pipe = loader.construct(build_pipeline)
@@ -320,8 +359,8 @@ class SdxlModel(Model[SdxlPipeline]):
     @uses_components("text_encoder", "text_encoder_2", "unet", "vae")
     def generate(
         self,
-        tokens: tuple[Any, Any],
-        negative_tokens: tuple[Any, Any] | None,
+        tokens: tuple[torch.Tensor, torch.Tensor],
+        negative_tokens: tuple[torch.Tensor, torch.Tensor] | None,
         *,
         width: int,
         height: int,
@@ -330,24 +369,26 @@ class SdxlModel(Model[SdxlPipeline]):
         hidiffusion: bool,
         seed: int,
         progress: Callable[[int, int], None],
-    ) -> tuple[Any, Any, Any, Any]:
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """Text encoding, every step and the decode: Diffusers' `EulerDiscreteScheduler`, or with
         HiDiffusion its recipe's `DDIMScheduler` at eta 1. HiDiffusion's blocks choose by step
         (RAU-Net's switch, each window's shift). Returns the image, conditioning and latents."""
-        first, second, unet, vae = (
-            self.pipe.components[name]
-            for name in ("text_encoder", "text_encoder_2", "unet", "vae")
-        )
+        components = self.pipe.components
+        first, second = components["text_encoder"], components["text_encoder_2"]
+        unet, vae = components["unet"], components["vae"]
         device = torch.device(str(self.device))
         generator = rng.generator(seed)
-        sampler: Any = DDIMScheduler if hidiffusion else EulerDiscreteScheduler
-        scheduler = sampler.from_config(self.pipe.scheduler_config)
-        scheduler.set_timesteps(steps, device=device)
-        advance = functools.partial(scheduler.step, return_dict=False)
+        scheduler: DDIMScheduler | EulerDiscreteScheduler
+        advance: Callable[[torch.Tensor, int, torch.Tensor], BaseOutput | tuple[torch.Tensor, ...]]
         if hidiffusion:
-            advance = functools.partial(advance, eta=1.0, generator=generator)
+            ddim = construct(DDIMScheduler, self.pipe.scheduler_config)
+            ddim.set_timesteps(steps, device=device)
+            scheduler, advance = ddim, functools.partial(ddim.step, return_dict=False, eta=1.0, generator=generator)
         else:
-            scheduler.set_begin_index(0)
+            euler = construct(EulerDiscreteScheduler, self.pipe.scheduler_config)
+            euler.set_timesteps(steps, device=device)
+            scheduler, advance = euler, functools.partial(euler.step, return_dict=False)
+            euler.set_begin_index(0)
         unet.begin_denoise_request(steps, hidiffusion, seed)
         batch = 1 if negative_tokens is None else 2
         dtype, scale = next(vae.parameters()).dtype, self.pipe.vae_scale
@@ -378,7 +419,7 @@ class SdxlModel(Model[SdxlPipeline]):
 # ------------------------------------------------------------------ the handler
 
 
-def _finite(torch: Any, value: Any) -> float:
+def _finite(value: torch.Tensor) -> float:
     """The tensor's largest magnitude, with NaN neutralized so the metric is spellable.
 
     A metric that cannot be serialized is a metric that is not there: the observation emit
@@ -388,7 +429,7 @@ def _finite(torch: Any, value: Any) -> float:
     return round(float(torch.nan_to_num(value, 0.0, 0.0, 0.0).abs().max()), 4)
 
 
-def _tokenizer(assets: Any, name: str) -> Any:
+def _tokenizer(assets: ModelAssets, name: str) -> CLIPTokenizer:
     """Use checkpoint overrides, or bundled CLIP data when the whole pair is absent.
 
     A partial override still fails through ModelAssets; mixing vocabularies and merges
@@ -411,24 +452,25 @@ def _tokenizer(assets: Any, name: str) -> Any:
         for line in merges_bytes.decode().splitlines()
         if line and not line.startswith("#version")
     ]
-    return CLIPTokenizer(
-        vocab=vocab, merges=merges, errors="replace", pad_token=pad, model_max_length=77
+    return CLIPTokenizer(  # Transformers types merges as strings; Tokenizers' BPE takes these pairs.
+        vocab=vocab, merges=merges, errors="replace", pad_token=pad, model_max_length=77  # type: ignore[arg-type]
     )
 
 
-def _tokenize(tokenizers: tuple[Any, Any], prompt: str) -> tuple[Any, Any]:
+def _tokenize(tokenizers: tuple[CLIPTokenizer, CLIPTokenizer], prompt: str) -> tuple[torch.Tensor, torch.Tensor]:
     first, second = tokenizers
     return _ids(first, prompt), _ids(second, prompt)
 
 
-def _ids(tok: Any, prompt: str) -> Any:
-    return tok(
+def _ids(tok: CLIPTokenizer, prompt: str) -> torch.Tensor:
+    ids: torch.Tensor = tok(
         prompt,
         padding="max_length",
         max_length=tok.model_max_length,
         truncation=True,
         return_tensors="pt",
     ).input_ids
+    return ids
 
 
 #: THE NaN CHECK reads the FLOAT decode, before quantization, and that is the whole of
@@ -440,7 +482,7 @@ def _ids(tok: Any, prompt: str) -> Any:
 #: mode (a wrong VAE scaling factor, an unfilled decoder) but it is also a real REQUEST:
 #: "solid white background", "minimalist pure black poster", "flat pastel swatch". A
 #: refusal here destroyed a correct, completed, billed generation.
-def _integrity(torch: Any, image: Any, pixels: Any, tel: Telemetry) -> None:
+def _integrity(image: torch.Tensor, pixels: torch.Tensor, tel: Telemetry) -> None:
     nan_fraction = float(torch.isnan(image).float().mean())
     tel.metric("image_nan_fraction", round(nan_fraction, 6))
     if nan_fraction > 0.0:
@@ -469,8 +511,8 @@ def _negative_prompt(requested: str, hidiffusion: bool) -> str:
 
 def _sample(
     model: SdxlModel,
-    tokens: tuple[Any, Any],
-    negative_tokens: tuple[Any, Any] | None,
+    tokens: tuple[torch.Tensor, torch.Tensor],
+    negative_tokens: tuple[torch.Tensor, torch.Tensor] | None,
     *,
     width: int,
     height: int,
@@ -480,7 +522,7 @@ def _sample(
     seed: int,
     tel: Telemetry,
     progress: Callable[[int, int], None],
-) -> Any:
+) -> torch.Tensor:
     """Encode, denoise and decode: Euler, or HiDiffusion's DDIM."""
     with tel.stage("generate"):
         image, prompt, pooled, latents = model.generate(
@@ -488,9 +530,9 @@ def _sample(
             width=width, height=height, steps=steps, guidance=guidance,
             hidiffusion=hidiffusion_applied, seed=seed, progress=progress,
         )
-    tel.metric("prompt_absmax", _finite(torch, prompt))
-    tel.metric("pooled_absmax", _finite(torch, pooled))
-    tel.metric("latent_absmax", _finite(torch, latents))
+    tel.metric("prompt_absmax", _finite(prompt))
+    tel.metric("pooled_absmax", _finite(pooled))
+    tel.metric("latent_absmax", _finite(latents))
     return image
 
 
@@ -554,19 +596,18 @@ def generate(
 
     with tel.stage("tokenize"):
         ids, ids_2 = _tokenize(model.tokenizers, prompt)
-        if classifier_free:
-            neg, neg_2 = _tokenize(model.tokenizers, negative_prompt)
+        negative = _tokenize(model.tokenizers, negative_prompt) if classifier_free else None
 
     image = _sample(
-        model, (ids, ids_2), (neg, neg_2) if classifier_free else None,
+        model, (ids, ids_2), negative,
         width=width, height=height, steps=steps, guidance=guidance,
         hidiffusion_applied=hidiffusion_applied, seed=seed, tel=tel, progress=ctx.progress,
     )
-    tel.metric("image_absmax", _finite(torch, image))
+    tel.metric("image_absmax", _finite(image))
     # F32 and rounded, as Diffusers' `VaeImageProcessor`: bf16 then truncation darkened every pixel.
     pixels = ((image[0].float() / 2 + 0.5).clamp(0, 1) * 255).round().to(torch.uint8)
     pixels = pixels.permute(1, 2, 0).contiguous()
-    _integrity(torch, image, pixels, tel)
+    _integrity(image, pixels, tel)
 
     rgb = bytes(pixels.cpu().numpy().tobytes())
     decoded_h, decoded_w = int(pixels.shape[0]), int(pixels.shape[1])

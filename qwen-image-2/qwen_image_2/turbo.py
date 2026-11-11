@@ -11,11 +11,13 @@ The overlay is never merged into a base lane: while `denoise` runs, the base DiT
 
 from __future__ import annotations
 
-from typing import Any
+from collections.abc import Callable
+from typing import cast
 
 import torch
 from cozy_runtime.accel import lora
 from cozy_runtime.author import Config, Loader, Model, Serving, uses_components
+from PIL import Image
 from torch import nn
 
 from .model import PROJ_OUT, SITES, QwenImage21Model
@@ -60,7 +62,7 @@ class FunAccGraph:
             for name in parents:
                 if name not in parent._modules:
                     parent.add_module(name, nn.Module())
-                parent = parent._modules[name]
+                parent = cast(nn.Module, parent._modules[name])  # added above
             self.sites[path] = Factors(inputs, outputs, rank, scale)
             parent.add_module(leaf, self.sites[path])
         self.heads = nn.Module()
@@ -81,12 +83,30 @@ class FunAccLoRA(Model[FunAccGraph]):
         self.graph = loader.construct(FunAccGraph)
 
     @uses_components(COMPONENT)
-    def denoise(self, base: QwenImage21Model, *args: Any, **kwargs: Any) -> Any:
+    def denoise(
+        self,
+        base: QwenImage21Model,
+        embeds: torch.Tensor,
+        mask: torch.Tensor | None,
+        *,
+        width: int,
+        height: int,
+        steps: int,
+        seed: int,
+        progress: Callable[[int, int], None],
+        reference_images: list[Image.Image] | None = None,
+        reference_latents: torch.Tensor | None = None,
+        image_pad_mask: torch.Tensor | None = None,
+    ) -> torch.Tensor:
         """`base.denoise` with this overlay armed on its DiT, on Fun Acc's grid and per-step heads."""
         transformer = base.graph.components["transformer"]
-        heads = self.graph.heads.heads.to(device=torch.device(str(base.device))).clone()
+        heads = cast(torch.Tensor, self.graph.heads.heads).to(device=torch.device(str(base.device))).clone()  # its Parameter
         transformer._cozy_overlay = self.graph.sites
         try:
-            return base.denoise(*args, sigmas=SIGMAS, scheduler=SCHEDULER, heads=heads, **kwargs)
+            return base.denoise(
+                embeds, mask, width=width, height=height, steps=steps, seed=seed, progress=progress,
+                sigmas=SIGMAS, scheduler=SCHEDULER, heads=heads, reference_images=reference_images,
+                reference_latents=reference_latents, image_pad_mask=image_pad_mask,
+            )
         finally:
             transformer._cozy_overlay = None

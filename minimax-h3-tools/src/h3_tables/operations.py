@@ -23,8 +23,8 @@ from .adaln_operations import (
 from .lanes import Encoding
 from .model_config import DIT_COMPONENT, parse_full_config
 from .order import current_order, full_order
+from .plans import Task
 from .quantization import dit_plan
-
 
 def quantization_plan(encoding: Encoding) -> QuantizationPlan:
     """Bind reviewed H3 geometry and canonical order without loading a source model."""

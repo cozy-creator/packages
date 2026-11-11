@@ -18,7 +18,7 @@ import hashlib
 import json
 import struct
 from fractions import Fraction
-from typing import Any
+from typing import TYPE_CHECKING
 
 import torch
 from cozy_runtime.author import InvalidRequest
@@ -28,6 +28,9 @@ from safetensors.torch import save as save_tensors
 from .continuation import TICKS_PER_FRAME, AVContext, audio_ticks, decode_context, encode_context, video_tokens
 from .official import FRAMES_PER_CHUNK, LATENTS_PER_CHUNK
 
+if TYPE_CHECKING:
+    from diffusers.models.autoencoders.autoencoder_kl_minimax_h3 import AutoencoderKLMiniMaxH3
+
 FORMAT = "minimax-h3/latents/2"
 #: H3's sound: 32 kHz, 40 audio latents a second.
 SAMPLES_PER_TICK = 800
@@ -35,7 +38,7 @@ SAMPLES_PER_TICK = 800
 _SPACE = ("latent_channels", "latents_mean", "latents_std", "spatial_compression_ratio", "temporal_compression_ratio")
 
 
-def vae_space(vae: Any) -> str:
+def vae_space(vae: AutoencoderKLMiniMaxH3) -> str:
     """The latent space's identity: the video VAE's channels, normalization and compression, the
     same for every lane and release that shares them."""
     config = vae.config

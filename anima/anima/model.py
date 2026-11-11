@@ -7,24 +7,23 @@ from collections.abc import Callable
 from contextlib import AbstractContextManager, nullcontext
 from pathlib import Path
 from types import TracebackType
-from typing import Any
+from typing import Any, NamedTuple, Protocol, TypedDict, cast
 
 import torch
 from cozy_runtime import rng
 from cozy_runtime.accel import fusion, hold_dtype, stepcache
-from cozy_runtime.author import Loader, Model, Telemetry, uses_components
+from cozy_runtime.author import Config, Loader, Model, Telemetry, uses_components
 from cozy_runtime.accel.kernels import Plan
-from diffusers import (
-    AnimaAutoBlocks,
-    AnimaModularPipeline,
-    AnimaTextConditioner,
-    AutoencoderKLQwenImage,
-    CosmosTransformer3DModel,
-    FlowMatchEulerDiscreteScheduler,
-)
-from diffusers.modular_pipelines import ModularPipelineBlocks
+from diffusers.configuration_utils import ConfigMixin
+from diffusers.models.autoencoders.autoencoder_kl_qwenimage import AutoencoderKLQwenImage
+from diffusers.models.condition_embedders.condition_embedder_anima import AnimaTextConditioner
+from diffusers.models.transformers.transformer_cosmos import CosmosTransformer3DModel
+from diffusers.modular_pipelines.anima.modular_blocks_anima import AnimaAutoBlocks
+from diffusers.modular_pipelines.anima.modular_pipeline import AnimaModularPipeline
+from diffusers.modular_pipelines.modular_pipeline import BlockState, ModularPipeline, ModularPipelineBlocks, PipelineState
+from diffusers.schedulers.scheduling_flow_match_euler_discrete import FlowMatchEulerDiscreteScheduler
 from diffusers.modular_pipelines.anima.denoise import AnimaDenoiseStep
-from transformers import AutoModel, PreTrainedTokenizerFast, Qwen3Config
+from transformers import AutoModel, PreTrainedTokenizerFast, Qwen3Config, Qwen3Model
 from transformers import initialization as transformer_init
 from transformers.modeling_utils import local_torch_dtype
 
@@ -45,35 +44,33 @@ _DECODE = "decoding"
 _SAVE = "saving image"
 
 
-def _tokenizer(path: Path) -> Any:
+def _tokenizer(path: Path) -> PreTrainedTokenizerFast:
     config = json.loads((path / "tokenizer_config.json").read_text())
     config.pop("tokenizer_class", None)
-    return PreTrainedTokenizerFast(
+    return PreTrainedTokenizerFast(  # type: ignore[no-untyped-call]  # Transformers' tokenizer __init__ is unannotated
         tokenizer_file=str(path / "tokenizer.json"), **config
     )
 
 
 class AnimaPipeline:
-    def __init__(self, config: Any) -> None:
+    def __init__(self, config: Config) -> None:
         mapping = config.mapping()
         with transformer_init.no_init_weights():
-            transformer = CosmosTransformer3DModel.from_config(mapping["transformer"]).to(
-                torch.bfloat16
-            )
+            transformer = _to(construct(CosmosTransformer3DModel, mapping["transformer"]), torch.bfloat16)
             # Built in bf16, not cast to it: each rotary inv_freq stays f32, as upstream's.
-            text_encoder: Any = AutoModel.from_config(
+            text_encoder: Qwen3Model = AutoModel.from_config(  # type: ignore[no-untyped-call]  # Transformers' auto classes are unannotated
                 Qwen3Config(**mapping["text_encoder"]), dtype=torch.bfloat16
             )
             with local_torch_dtype(torch.bfloat16):
-                text_conditioner = AnimaTextConditioner.from_config(mapping["text_conditioner"])
-            vae = AutoencoderKLQwenImage.from_config(mapping["vae"]).to(torch.bfloat16)
+                text_conditioner = construct(AnimaTextConditioner, mapping["text_conditioner"])
+            vae = _to(construct(AutoencoderKLQwenImage, mapping["vae"]), torch.bfloat16)
 
         for component in (transformer, text_encoder, text_conditioner, vae):
             component.eval()
-        self.scheduler_config = mapping["scheduler"]
+        self.scheduler_config: dict[str, object] = mapping["scheduler"]
         self.tokenizer = _tokenizer(_ROOT / "tokenizer")
         self.t5_tokenizer = _tokenizer(_ROOT / "t5_tokenizer")
-        self.components: dict[str, Any] = {
+        self.components: Components = {
             "transformer": transformer,
             "text_encoder": text_encoder,
             "text_conditioner": text_conditioner,
@@ -81,7 +78,24 @@ class AnimaPipeline:
         }
 
 
-def build_pipeline(config: Any) -> AnimaPipeline:
+class Components(TypedDict):
+    transformer: CosmosTransformer3DModel
+    text_encoder: Qwen3Model
+    text_conditioner: AnimaTextConditioner
+    vae: AutoencoderKLQwenImage
+
+
+def construct[M: ConfigMixin](cls: type[M], config: dict[str, object]) -> M:
+    """`cls.from_config(config)`, typed: it returns a tuple only with `return_unused_kwargs=True`."""
+    return cast(M, cls.from_config(config))
+
+
+def _to[M: torch.nn.Module](module: M, dtype: torch.dtype) -> M:
+    """`module.to(dtype)`, typed: Diffusers' `to` is `functools.wraps`'d, which the checkers bind without `self`."""
+    return module.to(dtype)
+
+
+def build_pipeline(config: Config) -> AnimaPipeline:
     return AnimaPipeline(config)
 
 
@@ -137,15 +151,15 @@ class AnimaModel(Model[AnimaPipeline]):
         seed: int,
         phases: _Phases,
         batched: bool,
-    ) -> Any:
+    ) -> torch.Tensor:
         device = torch.device(str(self.device))
         generator = rng.generator(seed)
         fused = optimization.installed(self.pipe.components["transformer"])
         cache = stepcache.FirstBlockCache(first_block_cache) if first_block_cache > 0.0 else None
-        pipeline: Any = _text2image_pipeline(device, phases, batched, fused, cache)
-        pipeline.register_components(
+        pipeline = _text2image_pipeline(device, phases, batched, fused, cache)
+        pipeline.register_components(  # type: ignore[no-untyped-call]  # Diffusers' own, unannotated
             **self.pipe.components,
-            scheduler=FlowMatchEulerDiscreteScheduler.from_config(self.pipe.scheduler_config),
+            scheduler=construct(FlowMatchEulerDiscreteScheduler, self.pipe.scheduler_config),
             tokenizer=self.pipe.tokenizer,
             t5_tokenizer=self.pipe.t5_tokenizer,
         )
@@ -154,7 +168,7 @@ class AnimaModel(Model[AnimaPipeline]):
         # outside [start, stop) num_conditions == 1 and the uncond forward never runs.
         pipeline.guider._start, pipeline.guider._stop = cfg_interval
         phases.enter(_ENCODE_PROMPT)
-        return pipeline(
+        images: torch.Tensor = pipeline(
             prompt=prompt,
             negative_prompt=negative_prompt,
             width=width,
@@ -164,11 +178,12 @@ class AnimaModel(Model[AnimaPipeline]):
             output="images",
             output_type="pt",
         )
+        return images
 
 
 def _text2image_pipeline(
-    device: Any, phases: _Phases, batched: bool, fused: bool, cache: stepcache.Policy | None
-) -> Any:
+    device: torch.device, phases: _Phases, batched: bool, fused: bool, cache: stepcache.Policy | None
+) -> AnimaModularPipeline:
     """The text2image pipeline, instrumented on the blocks it will actually run, its denoise loop
     `_Denoise`, its padding mask at latent size when `fused`.
 
@@ -180,22 +195,22 @@ def _text2image_pipeline(
     class Announce(ModularPipelineBlocks):
         """A weightless block whose only effect is to advance the meter."""
 
-        model_name = "anima"
+        model_name = "anima"  # type: ignore[assignment]  # Diffusers declares None
 
         @property
         def description(self) -> str:
             return "Announces Anima's conditioning phase to Runtime telemetry."
 
-        def __call__(self, components: Any, state: Any) -> tuple[Any, Any]:
+        def __call__(self, components: ModularPipeline, state: PipelineState) -> tuple[ModularPipeline, PipelineState]:
             phases.enter(_CONDITION)
             return components, state
 
     class RuntimeAnimaPipeline(AnimaModularPipeline):
         @property
-        def _execution_device(self) -> Any:
+        def _execution_device(self) -> torch.device:
             return device
 
-    blocks = AnimaAutoBlocks().get_workflow("text2image")
+    blocks = AnimaAutoBlocks().get_workflow("text2image")  # type: ignore[no-untyped-call]  # Diffusers' blocks, unannotated
     order = list(blocks.sub_blocks)
     if not {"denoise.denoise", "denoise.text_conditioning", "denoise.prepare_latents"} <= set(
         order
@@ -203,9 +218,20 @@ def _text2image_pipeline(
         raise RuntimeError(f"Diffusers Anima text2image blocks changed: {order}")
     blocks.sub_blocks["denoise.denoise"] = _Denoise(phases, batched, cache)
     if fused:
-        blocks.sub_blocks["denoise.prepare_latents"] = optimization.FusedLatents()
-    blocks.sub_blocks.insert("conditioning", Announce(), order.index("denoise.text_conditioning"))
+        blocks.sub_blocks["denoise.prepare_latents"] = optimization.FusedLatents()  # type: ignore[no-untyped-call]  # its base's __init__
+    blocks.sub_blocks.insert("conditioning", Announce(), order.index("denoise.text_conditioning"))  # type: ignore[no-untyped-call]  # its base's __init__
     return RuntimeAnimaPipeline(blocks=blocks)
+
+
+class _DenoiseState(Protocol):
+    """The denoise loop's `BlockState`: the fields it reads and writes."""
+
+    dtype: torch.dtype
+    timesteps: torch.Tensor
+    latents: torch.Tensor
+    prompt_embeds: torch.Tensor
+    padding_mask: torch.Tensor
+    num_inference_steps: int
 
 
 class _Denoise(AnimaDenoiseStep):
@@ -218,17 +244,19 @@ class _Denoise(AnimaDenoiseStep):
     contexts did."""
 
     def __init__(self, phases: _Phases, batched: bool, cache: stepcache.Policy | None) -> None:
-        super().__init__()
+        super().__init__()  # type: ignore[no-untyped-call]  # Diffusers' blocks, unannotated
         self.phases, self.batched, self.cache = phases, batched, cache
 
     @torch.no_grad()
-    def __call__(self, components: Any, state: Any) -> Any:
-        block_state = self.get_block_state(state)
+    def __call__(
+        self, components: AnimaModularPipeline, state: PipelineState
+    ) -> tuple[AnimaModularPipeline, PipelineState]:
+        block_state = cast(_DenoiseState, self.get_block_state(state))  # Diffusers annotates its BlockState as dict
         guider, transformer, scheduler = components.guider, components.transformer, components.scheduler
         dtype, timesteps, latents = block_state.dtype, block_state.timesteps, block_state.latents
         steps = len(timesteps)
         positive = block_state.prompt_embeds.to(dtype)
-        negative: Any = getattr(block_state, "negative_prompt_embeds", None)
+        negative: torch.Tensor | None = getattr(block_state, "negative_prompt_embeds", None)
         if negative is not None:
             negative = torch.cat([positive, negative.to(dtype)]) if self.batched else negative.to(dtype)
 
@@ -252,16 +280,16 @@ class _Denoise(AnimaDenoiseStep):
                     prediction = predict(hidden, timestep, positive)
                 else:
                     if self.batched:
-                        conditional, unconditional = predict(torch.cat([hidden] * 2), timestep, negative).chunk(2)
+                        conditional, unconditional = predict(torch.cat([hidden] * 2), timestep, negative).chunk(2)  # type: ignore[arg-type]  # two conditions: a negative
                     else:
                         conditional = predict(hidden, timestep, positive)
-                        unconditional = predict(hidden, timestep, negative)
+                        unconditional = predict(hidden, timestep, negative)  # type: ignore[arg-type]  # two conditions: a negative
                     prediction = unconditional + guider.guidance_scale * (conditional - unconditional)
                 latents = scheduler.step(prediction, t, latents, return_dict=False)[0]
                 on_step(i)
         self.phases.enter(_DECODE)
         block_state.latents = latents
-        self.set_block_state(state, block_state)
+        self.set_block_state(state, cast(BlockState, block_state))
         return components, state
 
 

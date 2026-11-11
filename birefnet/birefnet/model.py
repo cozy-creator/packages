@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from typing import cast
-
 import torch
 from PIL import Image
 from torchvision import transforms
@@ -18,9 +16,8 @@ class BiRefNetGraph:
     def __init__(self, config: Config) -> None:
         if config.mapping().get("bb_pretrained") is not False:
             raise ValueError("BiRefNet's checkpoint is the complete model (bb_pretrained: false)")
-        self.components = {
-            "model": BiRefNet(config=BiRefNetConfig(bb_pretrained=False)).eval().half(),
-        }
+        model: torch.nn.Module = BiRefNet(config=BiRefNetConfig(bb_pretrained=False)).eval().half()
+        self.components = {"model": model}
 
 
 def build_birefnet(config: Config) -> BiRefNetGraph:
@@ -47,6 +44,7 @@ class BackgroundRemovalModel(Model[BiRefNetGraph]):
         ])
         with torch.inference_mode():
             pixels = prepare(image).unsqueeze(0).to(device=device, dtype=torch.float16)
-            probability = model(pixels)[-1].sigmoid().float().cpu()[0].squeeze(0)
-        mask = cast(Image.Image, transforms.ToPILImage()(probability))
+            predictions: list[torch.Tensor] = model(pixels)
+            probability = predictions[-1].sigmoid().float().cpu()[0].squeeze(0)
+        mask = transforms.ToPILImage()(probability)
         return mask.resize(image.size, Image.Resampling.BILINEAR)
