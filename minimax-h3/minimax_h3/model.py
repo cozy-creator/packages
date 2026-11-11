@@ -164,7 +164,7 @@ class H3Model(Model[OfficialH3Pipeline]):
 
     def load(self, loader: Loader) -> None:
         plans = model_plans(loader.assets)
-        self.pipe = loader.construct(partial(build_h3_pipeline, plans=plans))
+        self.pipe = loader.construct(partial(build_h3_pipeline, plans=plans, assets=loader.assets))
         self._declare_caches(loader)
 
     def _declare_caches(self, loader: Loader) -> None:
@@ -278,7 +278,7 @@ class H3TurboBase(H3Model):
 
     def load(self, loader: Loader) -> None:
         plans = model_plans(loader.assets)
-        self.pipe = loader.construct(partial(build_h3_turbo_base, plans=plans))
+        self.pipe = loader.construct(partial(build_h3_turbo_base, plans=plans, assets=loader.assets))
         self._declare_caches(loader)
 
     @uses_components("transformer")

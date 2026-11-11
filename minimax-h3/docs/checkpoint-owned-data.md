@@ -20,3 +20,8 @@ checkpoint identifiers. No package or model publication is performed by this PR.
 
 Anima's current `1.0.0` lanes already carry both tokenizers and their configuration.
 Its consumer uses those selected checkpoint assets directly.
+
+H3 lane production and retabling validate all source construction facts before
+opening an output writer. Library version labels and intentional AdaLN/conditioner
+stamps may change; learned VAE and audio normalization values may not be silently
+replaced by the package's supported-constructor reference.

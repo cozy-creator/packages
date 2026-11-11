@@ -23,7 +23,6 @@ from dataclasses import dataclass, replace
 from fractions import Fraction
 from functools import partial
 from itertools import pairwise
-from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Literal, NotRequired, Protocol, TypedDict, cast
 
@@ -52,6 +51,7 @@ from diffusers.modular_pipelines.minimax_h3.modular_pipeline import (
 from diffusers.modular_pipelines.modular_pipeline import PipelineState
 from diffusers.utils.torch_utils import randn_tensor
 from torch.nn.utils.weight_norm import WeightNorm
+from transformers.processing_utils import ProcessorMixin
 
 from cozy_runtime import rng, vlm
 from cozy_runtime.accel import stepcache
@@ -162,7 +162,6 @@ _DISTILLATION = "pdd"
 PLAN_ASSET = "timestep-plan.json"
 #: The first release of each model whose components carry their plans.
 PLANS_SINCE = {False: "minimaxai/minimax-h3@1.0.0-rc.4", True: "alibaba-pai/minimax-h3-turbo-lora@1.0.1"}
-_ASSETS = Path(__file__).resolve().parent
 # NVIDIA's H3 sparse policy protects conditioning and the initial sensitive work.
 # This supplies semantics only; Runtime chooses the kernels.
 _DENSE_ATTENTION_PATHS = ("token_refiner", "transformer_blocks.0", "transformer_blocks.1")
@@ -1021,7 +1020,9 @@ def _audio_weight_norm_scope(audio_vae: torch.nn.Module) -> Iterator[None]:
 class OfficialH3Pipeline:
     """Both official task workflows over one shared, dual-DiT construction."""
 
-    def __init__(self, config: Config, plans: Mapping[Trunk, TimestepPlan]) -> None:
+    def __init__(
+        self, config: Config, plans: Mapping[Trunk, TimestepPlan], *, assets: ModelAssets
+    ) -> None:
         dit_specs = _dit_specs(_artifact_sections(config))
         for trunk, (_upstream, layout) in dit_specs.items():
             _validate_plan(plans[trunk], trunk, layout)
@@ -1040,7 +1041,7 @@ class OfficialH3Pipeline:
         audio_vae: AutoencoderKLMiniMaxH3Audio = AutoencoderKLMiniMaxH3Audio.from_config(audio).eval()
         for trunk in _TRUNKS:
             _validate_model_contract(pipes[trunk], dits[trunk], video_vae, audio_vae)
-        processor = vlm.processor(_ASSETS / "processor")
+        processor = checkpoint_processor(assets)
         tokenizer = processor.tokenizer
 
         for workflow, task in _WORKFLOW_TASKS.items():
@@ -1880,9 +1881,11 @@ class OfficialH3TurboLoRA:
         return self.components[_OVERLAY_COMPONENT[trunk]]
 
 
-def build_h3_turbo_base(config: Config, plans: Mapping[Trunk, TimestepPlan]) -> OfficialH3Pipeline:
+def build_h3_turbo_base(
+    config: Config, plans: Mapping[Trunk, TimestepPlan], *, assets: ModelAssets
+) -> OfficialH3Pipeline:
     """The ordinary five-root artifact, with its turbo consumers installed before fill."""
-    pipe = OfficialH3Pipeline(config, plans)
+    pipe = OfficialH3Pipeline(config, plans, assets=assets)
     for name in _DIT_COMPONENT.values():
         pipe.components[name].install_lora_consumers()
     return pipe
@@ -1946,8 +1949,14 @@ def build_h3_regenerate_lora(config: Config, plan: TimestepPlan) -> OfficialH3Re
     return OfficialH3RegenerateLoRA(config, plan)
 
 
-def build_h3_pipeline(config: Config, plans: Mapping[Trunk, TimestepPlan]) -> OfficialH3Pipeline:
-    return OfficialH3Pipeline(config, plans)
+def checkpoint_processor(assets: ModelAssets) -> ProcessorMixin:
+    return vlm.processor(assets, "text_encoder/processor/")
+
+
+def build_h3_pipeline(
+    config: Config, plans: Mapping[Trunk, TimestepPlan], *, assets: ModelAssets
+) -> OfficialH3Pipeline:
+    return OfficialH3Pipeline(config, plans, assets=assets)
 
 
 def _artifact_sections(config: Config) -> Config:
