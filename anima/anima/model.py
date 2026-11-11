@@ -5,14 +5,14 @@ from __future__ import annotations
 import json
 from collections.abc import Callable
 from contextlib import AbstractContextManager, nullcontext
-from pathlib import Path
+from functools import partial
 from types import TracebackType
 from typing import Any, NamedTuple
 
 import torch
 from cozy_runtime import rng
 from cozy_runtime.accel import fusion, hold_dtype, stepcache
-from cozy_runtime.author import Loader, Model, Telemetry, uses_components
+from cozy_runtime.author import Loader, Model, ModelAssets, Telemetry, uses_components
 from cozy_runtime.accel.kernels import Plan
 from diffusers import (
     AnimaAutoBlocks,
@@ -27,10 +27,10 @@ from diffusers.modular_pipelines.anima.denoise import AnimaDenoiseStep
 from transformers import AutoModel, PreTrainedTokenizerFast, Qwen3Config
 from transformers import initialization as transformer_init
 from transformers.modeling_utils import local_torch_dtype
+from tokenizers import Tokenizer
 
 from . import optimization
 
-_ROOT = Path(__file__).resolve().parent
 #: The DiT's block stack for `stepcache` (FBCache): each Cosmos block returns its hidden states.
 STACK = stepcache.Stack(CosmosTransformer3DModel, blocks="transformer_blocks", carried=(0,))
 
@@ -58,16 +58,18 @@ _DECODE = _Phase("decoding", 0.90, 0.98)
 _SAVE = _Phase("saving image", 0.98, 1.00)
 
 
-def _tokenizer(path: Path) -> Any:
-    config = json.loads((path / "tokenizer_config.json").read_text())
+def _tokenizer(assets: ModelAssets, folder: str) -> Any:
+    config = json.loads(assets.read(f"{folder}/tokenizer_config.json"))
     config.pop("tokenizer_class", None)
+    if f"{folder}/chat_template.jinja" in assets.names():
+        config["chat_template"] = assets.read(f"{folder}/chat_template.jinja").decode()
     return PreTrainedTokenizerFast(
-        tokenizer_file=str(path / "tokenizer.json"), **config
+        tokenizer_object=Tokenizer.from_str(assets.read(f"{folder}/tokenizer.json").decode()), **config
     )
 
 
 class AnimaPipeline:
-    def __init__(self, config: Any) -> None:
+    def __init__(self, config: Any, *, assets: ModelAssets) -> None:
         mapping = config.mapping()
         with transformer_init.no_init_weights():
             transformer = CosmosTransformer3DModel.from_config(mapping["transformer"]).to(
@@ -84,8 +86,8 @@ class AnimaPipeline:
         for component in (transformer, text_encoder, text_conditioner, vae):
             component.eval()
         self.scheduler_config = mapping["scheduler"]
-        self.tokenizer = _tokenizer(_ROOT / "tokenizer")
-        self.t5_tokenizer = _tokenizer(_ROOT / "t5_tokenizer")
+        self.tokenizer = _tokenizer(assets, "tokenizer")
+        self.t5_tokenizer = _tokenizer(assets, "t5_tokenizer")
         self.components: dict[str, Any] = {
             "transformer": transformer,
             "text_encoder": text_encoder,
@@ -94,8 +96,8 @@ class AnimaPipeline:
         }
 
 
-def build_pipeline(config: Any) -> AnimaPipeline:
-    return AnimaPipeline(config)
+def build_pipeline(config: Any, *, assets: ModelAssets) -> AnimaPipeline:
+    return AnimaPipeline(config, assets=assets)
 
 
 class AnimaModel(Model[AnimaPipeline]):
@@ -106,7 +108,7 @@ class AnimaModel(Model[AnimaPipeline]):
     pipe: AnimaPipeline
 
     def load(self, loader: Loader) -> None:
-        self.pipe = loader.construct(build_pipeline)
+        self.pipe = loader.construct(partial(build_pipeline, assets=loader.assets))
 
     def execution_plan(self, plan: Plan) -> str:
         refusals = optimization.apply(self.pipe)

@@ -33,7 +33,6 @@ import functools
 import json
 import math
 from collections.abc import Callable
-from pathlib import Path
 from typing import Annotated, Any, Literal
 
 import msgspec
@@ -390,22 +389,11 @@ def _finite(torch: Any, value: Any) -> float:
 
 
 def _tokenizer(assets: Any, name: str) -> Any:
-    """Use checkpoint overrides, or bundled CLIP data when the whole pair is absent.
-
-    A partial override still fails through ModelAssets; mixing vocabularies and merges
-    from different sources would silently change the model's tokenization. No download
-    or temporary file is needed, including during read-only admission.
-    """
+    """Read CLIP vocabulary and merges from this checkpoint."""
     pad = {"tokenizer": "<|endoftext|>", "tokenizer_2": "!"}[name]
     vocab_name, merges_name = f"{name}/vocab.json", f"{name}/merges.txt"
-    names = assets.names()
-    if vocab_name in names or merges_name in names:
-        vocab_bytes = assets.read(vocab_name)
-        merges_bytes = assets.read(merges_name)
-    else:
-        root = Path(__file__).parent
-        vocab_bytes = (root / "clip_vocab.json").read_bytes()
-        merges_bytes = (root / "clip_merges.txt").read_bytes()
+    vocab_bytes = assets.read(vocab_name)
+    merges_bytes = assets.read(merges_name)
     vocab = json.loads(vocab_bytes)
     merges = [
         tuple(line.split(" "))
