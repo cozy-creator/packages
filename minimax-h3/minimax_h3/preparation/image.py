@@ -155,7 +155,9 @@ IMAGE_NVFP4 = Recipe(
     plan=QuantizationPlan(
         encoding="int8.convrot", components=IMAGE_INT8.plan.components, include=IMAGE_INT8.plan.include,
         encodings=(
-            *(EncodingRule(f"transformer.transformer_blocks.{block}.ff.net.2.weight", "int8.convrot") for block in range(3)),
+            EncodingRule("transformer.transformer_blocks.0.ff.net.2.weight", "int8.convrot"),
+            EncodingRule("transformer.transformer_blocks.1.ff.net.2.weight", "int8.convrot"),
+            EncodingRule("transformer.transformer_blocks.2.ff.net.2.weight", "int8.convrot"),
             EncodingRule(_BLOCKS, "nvfp4"),
         ),
         output_precision="preserve",
