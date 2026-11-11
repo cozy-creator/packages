@@ -16,7 +16,7 @@ on:
 jobs:
   e2e:
     # Keep the isolated test harness fixed while candidates follow the open RC.
-    uses: cozy-creator/cozy-creator/.github/workflows/e2e.yaml@2f954c46b3eeaeba434c63579b9d0f858e2c0ca2
+    uses: cozy-creator/cozy-creator/.github/workflows/e2e.yaml@b16e847d519b5031d12da695d921c23586cd8d6b
     secrets:
       TENSORHUB_READ_KEY: ${{ secrets.TENSORHUB_READ_KEY }}
     with:
@@ -24,7 +24,7 @@ jobs:
       ref: ${{ github.event.merge_group.head_sha || github.event.pull_request.head.sha || github.sha }}
       base: ${{ github.event.merge_group.base_sha || github.event.pull_request.base.sha }}
       select: ${{ inputs.select }}
-      creator_ref: 2f954c46b3eeaeba434c63579b9d0f858e2c0ca2
+      creator_ref: b16e847d519b5031d12da695d921c23586cd8d6b
       stack_ref: rc/0.25.0
       runtime_ref: rc/0.25.0
       packages_ref: ${{ github.event.merge_group.head_sha || github.event.pull_request.head.sha || github.sha }}
