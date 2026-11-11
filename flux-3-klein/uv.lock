@@ -219,7 +219,7 @@ wheels = [
 ]
 
 [[package]]
-name = "flux-3-klein"
+name = "flux-3"
 version = "0.8.0"
 source = { editable = "." }
 dependencies = [
