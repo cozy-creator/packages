@@ -39,7 +39,7 @@ encoding refuses, so `--lane fp8` on an `fp8` commit encodes only the conditione
 ingest rental:
 
 ```sh
-cozy run minimax-h3/fp8-pruned minimaxai/minimax-h3@1.0.0 minimaxai/minimax-h3 --lane bf16-full --on NAME
+cozy run minimax-h3/fp8-pruned minimaxai/minimax-h3@1.0.0-rc.8 minimaxai/minimax-h3 --lane bf16-full --on NAME
 cozy run minimax-h3/turbo-lora minimax-h3-acc-loras@1.0.0 alibaba-pai/minimax-h3-turbo-lora --lane bf16 \
   model.base=minimaxai/minimax-h3@sha256:<bf16-full commit> --on NAME
 ```

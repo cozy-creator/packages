@@ -12,11 +12,11 @@ The latent upscaler's construction config must contain `latent_normalization`:
 `enabled: true`, 24 finite `mean` values and 24 finite, positive `std` values. These
 are learned model data, not package-wide constants.
 
-The current public H3 `1.0.0-rc.7` lanes and upscaler `0.1.0` omit this data. Their
-replacement checkpoints and new release mappings must be qualified before this
-consumer change merges or publishes. Preserve existing weights, configuration,
-timestep plans and old immutable releases; the added data necessarily changes
-checkpoint identifiers. No package or model publication is performed by this PR.
+H3 `1.0.0-rc.8` and the upscaler's `0.1.1` release carry this data. This consumer
+adopts those independently published checkpoints. Their previous releases remain
+immutable; the added data changes checkpoint identifiers without changing weights,
+construction geometry or timestep plans. No package or model publication is
+performed by this PR.
 
 Anima's current `1.0.0` lanes already carry both tokenizers and their configuration.
 Its consumer uses those selected checkpoint assets directly.
@@ -32,3 +32,8 @@ DiT weights and plans, so unused processor data is not required there. Assetless
 inputs refuse before an output writer opens. Runtime's `Output.inherit` preserves
 all source component assets for fresh lanes; a retable Writer preserves its base
 assets and replaces only the requested timestep plans.
+
+P-H3-Image is a separate model. Its existing `prunaai/p-h3-image@0.1.0` checkpoints
+already contain their own `processor` and `prompt_upsampler_processor` components.
+Those consumers read the selected checkpoint's assets directly; they do not use
+the official H3 folded processor namespace or its base-model guards.
