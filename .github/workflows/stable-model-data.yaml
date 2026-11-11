@@ -75,13 +75,14 @@ jobs:
           uv pip install --python .venv-stable/bin/python --no-deps "$RUNNER_TEMP/minimax_h3-0.9.4-py3-none-any.whl"
           .venv-stable/bin/python -I - <<'PY'
           from importlib.metadata import version
-          from cozy_runtime.author import Config
+          from cozy_runtime.author import Config, InvalidRequest
           from minimax_h3.latent_upscaler import _normalization
           assert version('msgspec') == '0.21.1'
           try:
               _normalization(Config({'latent_normalization': {'enabled': True, 'mean': [0] * 24, 'std': [1] * 24}}))
-          except TypeError as error:
-              assert 'Literal' in str(error), str(error)
+          except InvalidRequest as error:
+              assert error.code == 'config_invalid'
+              assert isinstance(error.__cause__, TypeError) and 'Literal' in str(error.__cause__), str(error)
               print('Expected published 0.9.4 normalization failure reproduced with locked msgspec0.21.1')
           else:
               raise AssertionError('The published normalization regression did not reproduce')
