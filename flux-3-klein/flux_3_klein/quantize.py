@@ -99,15 +99,12 @@ def calibrate(
     """Klein at 16 bits generates each of `CALIBRATION` at 1 MP and edits it by its `EDITS` instruction while
     each svdq linear's inputs are recorded."""
     steps, guidance = (16, None) if model.flow_map else (24, 4.0)
-    runs = 2 * len(CALIBRATION)
-    with record(cast("Mapping[str, nn.Module]", model.graph.components)), tel.stage("calibrating", overall_range=(0.0, 0.3)):
+    with record(cast("Mapping[str, nn.Module]", model.graph.components)), tel.stage("calibrating"):
         for seed, (prompt, edit) in enumerate(zip(CALIBRATION, EDITS, strict=True)):
             references, size = None, (1024, 1024)
-            for n, text in enumerate((prompt, edit)):
-                span = (0.3 * (2 * seed + n) / runs, 0.3 * (2 * seed + n + 1) / runs)
+            for text in (prompt, edit):
                 embeds = model.encode(text)
                 negative = model.encode("") if guidance is not None else None
-                step = tel.step_callback(steps, stage="calibrating", overall_range=span)
                 tokens = model.denoise(
                     embeds,
                     negative,
@@ -117,7 +114,7 @@ def calibrate(
                     steps=steps,
                     guidance=guidance,
                     seed=seed,
-                    progress=lambda i, _total: step(i),
+                    progress=ctx.progress,
                 )
                 if references is None:
                     image = model.decode(tokens, width=size[0], height=size[1])

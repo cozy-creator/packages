@@ -7,6 +7,7 @@ import hashlib
 import math
 import re
 from collections.abc import Iterable, Iterator, Mapping, Sequence
+from contextlib import AbstractContextManager
 from fractions import Fraction
 from itertools import accumulate, pairwise
 from typing import Annotated, Literal, NamedTuple
@@ -38,7 +39,6 @@ from cozy_runtime.media import (
     DecodedAudioFormat,
     DecodedMediaEvent,
     DecodedMediaHeader,
-    DecodedMediaStream,
     DecodedVideoFormat,
     DecodedVideoFrame,
     File,
@@ -539,7 +539,9 @@ def unusable(take: ShotVideo) -> str:
     return ""
 
 
-def sound_chunks(stream: DecodedMediaStream) -> list[npt.NDArray[np.float32]]:
+def sound_chunks(
+    stream: AbstractContextManager[Iterable[DecodedMediaEvent]],
+) -> list[npt.NDArray[np.float32]]:
     """A decoded video's sound, `(channels, samples)` per chunk, none of its pictures."""
     with stream as events:
         return [np.stack([np.frombuffer(pcm, dtype=np.float32) for pcm in event.pcm_f32le])

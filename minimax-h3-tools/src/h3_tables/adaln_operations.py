@@ -16,7 +16,6 @@ from cozy_runtime.author import (
     UnsupportedInput,
     Weights,
     canonical_json,
-    invocable,
 )
 from cozy_runtime.weights_store import Checkpoint, Derivation
 
@@ -196,8 +195,7 @@ def _project(ctx: Context, source: Checkpoint, task: Task, output: str) -> Model
         return ctx.adopt_model(out)
 
 
-@invocable
-async def select_adaln_weights(ctx: Context, *, source: Weights[Any], task: Task) -> Selection:  # type: ignore[explicit-any, misc]  # static describe's any-layout spelling
+async def select_adaln_weights(ctx: Context, *, source: Weights, task: Task) -> Selection:
     """One DiT's AdaLN generating weights, selected from a full or pruned checkpoint."""
     ctx.raise_if_cancelled()
     opened = open_source(ctx, source)
@@ -233,11 +231,10 @@ def _bank_config(task: Task, projection: str, plan: TimestepPlan) -> bytes:
     )
 
 
-@invocable
-async def compute_adaln_tables(  # type: ignore[explicit-any, misc]  # static describe's any-layout spelling
+async def compute_adaln_tables(
     ctx: Context,
     *,
-    source: Weights[Any],
+    source: Weights,
     task: Task,
     plan_digest: str,
     tel: Telemetry,
@@ -265,11 +262,12 @@ async def compute_adaln_tables(  # type: ignore[explicit-any, misc]  # static de
         if out.done is None:
             copy_assets(out, opened, component, omit=(METADATA,))
             out.component(component).asset(METADATA, _bank_config(task, source.checkpoint_ref, plan))
-        read, _, reused = write_tables(
-            ctx, plan=plan, topology=topology, source=opened, component=component,
-            outputs=(out,),
-            progress=lambda done, total: tel.progress(done / total, stage=f"timestep-table-{task}"),
-        )  # fmt: skip
+        with tel.stage(f"timestep-table-{task}"):
+            read, _, reused = write_tables(
+                ctx, plan=plan, topology=topology, source=opened, component=component,
+                outputs=(out,),
+                progress=lambda done, total: ctx.progress(done - 1, total),
+            )  # fmt: skip
         artifact = ctx.adopt_model(out)
     tel.metric("h3.adaln.source_bytes", float(read), unit="bytes")
     tel.metric("h3.adaln.reused_tables", float(reused), unit="tables")
@@ -373,25 +371,23 @@ def _apply_adaln(
         return ctx.adopt_model(out)
 
 
-@invocable
-async def apply_adaln(  # type: ignore[explicit-any, misc]  # static describe's any-layout spelling
+async def apply_adaln(
     ctx: Context,
     *,
-    source: Weights[Any],
-    fl2va: Weights[Any],
-    ref2va: Weights[Any],
+    source: Weights,
+    fl2va: Weights,
+    ref2va: Weights,
 ) -> ModelArtifact:
     """A full checkpoint AdaLN-pruned: both DiTs' modulation rows replaced by their tables."""
     return _apply_adaln(ctx, source=source, fl2va=fl2va, ref2va=ref2va, require_pruned=False)
 
 
-@invocable
-async def retable_adaln(  # type: ignore[explicit-any, misc]  # static describe's any-layout spelling
+async def retable_adaln(
     ctx: Context,
     *,
-    source: Weights[Any],
-    fl2va: Weights[Any],
-    ref2va: Weights[Any],
+    source: Weights,
+    fl2va: Weights,
+    ref2va: Weights,
 ) -> ModelArtifact:
     """An AdaLN-pruned checkpoint with both DiTs' tables replaced."""
     return _apply_adaln(ctx, source=source, fl2va=fl2va, ref2va=ref2va, require_pruned=True)

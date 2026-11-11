@@ -14,7 +14,6 @@ from cozy_runtime.author import (
     UnsupportedInput,
     Weights,
     canonical_json,
-    invocable,
 )
 from cozy_runtime.weights_store import Checkpoint, Derivation
 
@@ -162,12 +161,11 @@ def _topologies() -> tuple[dict[Task, dict[str, object]], dict[Task, H3Topology]
     return configs, {task: H3Topology.from_config(configs[task]) for task in TASKS}
 
 
-@invocable
-async def turbo_lora(  # type: ignore[explicit-any, misc]  # static describe's any-layout spelling
+async def turbo_lora(
     ctx: Context,
     *,
-    adapters: Weights[Any],
-    base: Weights[Any],
+    adapters: Weights,
+    base: Weights,
     tel: Telemetry,
 ) -> ModelArtifact:
     """Build the standalone PDD-8 turbo LoRA from the upstream PDD adapter pair.
@@ -221,20 +219,18 @@ async def turbo_lora(  # type: ignore[explicit-any, misc]  # static describe's a
             ) -> torch.Tensor:
                 return read(pair, adapter, key, dtype, shape)
 
-            def progress(done: int, total: int, task: Task = task) -> None:
-                tel.progress(done / total, stage=f"turbo-{task}")
-
-            _, _, kept = write_tables(
-                ctx,
-                plan=plans[task],
-                topology=topologies[task],
-                source=full,
-                component=DIT_COMPONENT[task],
-                target=component,
-                outputs=(out,),
-                progress=progress,
-                adapter=LowRankAdapter(RANK, 1.0, reader),
-            )
+            with tel.stage(f"turbo-{task}"):
+                _, _, kept = write_tables(
+                    ctx,
+                    plan=plans[task],
+                    topology=topologies[task],
+                    source=full,
+                    component=DIT_COMPONENT[task],
+                    target=component,
+                    outputs=(out,),
+                    progress=lambda done, total: ctx.progress(done - 1, total),
+                    adapter=LowRankAdapter(RANK, 1.0, reader),
+                )
             tables = len(table_shapes(topologies[task], plans[task]))
             reused, computed = reused + kept, computed + tables - kept
             for prefix, shift in zip(("proj_out", "audio_proj_out"), plans[task].shifts, strict=True):

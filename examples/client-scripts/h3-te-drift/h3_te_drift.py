@@ -249,11 +249,11 @@ def drift(
 
 
 @app.entrypoint
-def weight_drift(  # type: ignore[explicit-any, misc]  # static describe's any-layout spelling
+def weight_drift(
     ctx: Context,
     payload: WeightRequest,
-    bf16: Weights[Any],
-    fp8: Weights[Any],
+    bf16: Weights,
+    fp8: Weights,
     tel: Telemetry,
 ) -> Result:
     config = Qwen3VLTextConfig.from_dict(json.loads(payload.text_config))

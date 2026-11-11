@@ -79,15 +79,12 @@ def calibrate(
     """Qwen-Image-2.1 at 16 bits generates each of `CALIBRATION` at 1 MP on the checkpoint's
     base schedule while each svdq linear's inputs are recorded."""
     steps = 20
-    with record(cast("Mapping[str, nn.Module]", model.graph.components)), tel.stage("calibrating", overall_range=(0.0, 0.3)):
+    with record(cast("Mapping[str, nn.Module]", model.graph.components)), tel.stage("calibrating"):
         for seed, prompt in enumerate(CALIBRATION):
             embeds, mask = model.encode(prompt)
-            span = (0.3 * seed / len(CALIBRATION), 0.3 * (seed + 1) / len(CALIBRATION))
-            step = tel.step_callback(steps, stage="calibrating", overall_range=span)
             model.denoise(
-                embeds, mask, width=1024, height=1024, steps=steps, seed=seed,
-                progress=lambda i, _total: step(i),
-            )  # fmt: skip
+                embeds, mask, width=1024, height=1024, steps=steps, seed=seed, progress=ctx.progress
+            )
 
 
 #: Blackwell's 4-bit lane (xs-066): the int8 lane's weights with the DiT blocks in SVDQuant

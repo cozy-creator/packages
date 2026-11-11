@@ -50,7 +50,6 @@ from cozy_runtime.author import (
     EncodingRule,
     ImageFrame,
     Loader,
-    Memoize,
     Model,
     ModelAssets,
     OutputError,
@@ -525,7 +524,7 @@ def _sample(
     progress: Callable[[int, int], None],
 ) -> torch.Tensor:
     """Encode, denoise and decode: Euler, or HiDiffusion's DDIM."""
-    with tel.stage("generate", overall_range=(0.02, 0.98)):
+    with tel.stage("generate"):
         image, prompt, pooled, latents = model.generate(
             tokens, negative_tokens if guidance > 1.0 else None,
             width=width, height=height, steps=steps, guidance=guidance,
@@ -571,7 +570,7 @@ def resolve_generate(payload: GenerateInput) -> GenerateFacts:
 _DEFAULTS = {"model": "stabilityai/sdxl@1.0.0"}
 
 
-@app.entrypoint(defaults=_DEFAULTS, memoize=Memoize(requires=["seed"]), preflight=resolve_generate)
+@app.entrypoint(defaults=_DEFAULTS, memoize=True, preflight=resolve_generate)
 def generate(
     ctx: Context,
     payload: GenerateInput,
@@ -595,7 +594,7 @@ def generate(
     # 1.0 the negative branch is worth its second forward pass, at or below it is not.
     classifier_free = guidance > 1.0
 
-    with tel.stage("tokenize", overall_range=(0.00, 0.02)):
+    with tel.stage("tokenize"):
         ids, ids_2 = _tokenize(model.tokenizers, prompt)
         negative = _tokenize(model.tokenizers, negative_prompt) if classifier_free else None
 
@@ -613,7 +612,7 @@ def generate(
     rgb = bytes(pixels.cpu().numpy().tobytes())
     decoded_h, decoded_w = int(pixels.shape[0]), int(pixels.shape[1])
     tel.metric("decoded_pixels", float(decoded_w * decoded_h))
-    with tel.stage("encode_webp", overall_range=(0.98, 1.00)):
+    with tel.stage("encode_webp"):
         asset = out.save_image(ImageFrame(decoded_w, decoded_h, rgb), format="webp")
     tel.log("sampled", sampler="ddim eta=1.0" if hidiffusion_applied else "euler", steps=steps,
             guidance=guidance, classifier_free=classifier_free, hidiffusion=hidiffusion_applied)
@@ -643,7 +642,7 @@ def resolve_image(payload: ImageBox) -> GenerateFacts:
     return resolve_generate(_request(payload))
 
 
-@app.tool(label="Image", named="image", defaults=_DEFAULTS, memoize=Memoize(requires=["seed"]), preflight=resolve_image)
+@app.tool(label="Image", named="image", defaults=_DEFAULTS, memoize=True, preflight=resolve_image)
 def image(ctx: Context, payload: ImageBox, facts: Preflight[GenerateFacts], model: SdxlModel, out: Outputs,
           tel: Telemetry, adj: Adjustments) -> ImageResult:
     """SDXL on a canvas: `generate` from the box."""

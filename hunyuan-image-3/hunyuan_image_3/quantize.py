@@ -56,19 +56,20 @@ def vae_operands_f16(ctx: Context, tel: Telemetry, source: Weights[Model[object]
     order = [(COMPONENT, key) for key in tensors]
     cast = 0
     with ctx.output(output, Derivation(base=opened, order=order)) as out:
-        for done, key in enumerate(keys, 1):
-            ctx.raise_if_cancelled()
-            info = tensors[key]
-            if info.dtype != "F16" and not out.has(COMPONENT, key):
-                shape = list(info.shape)
-                raw = bytearray(math.prod(shape) * 4 if info.dtype == "F32" else math.prod(shape) * 2)
-                tensors.read_into(key, raw)
-                half = from_f32(to_f32(raw, info.dtype, shape), "F16")
-                if not np.isfinite(np.frombuffer(half, dtype="<f2")).all():
-                    raise UnsupportedInput(f"{COMPONENT}.{key} overflows float16", code="quantization_tripwire")
-                out.put(COMPONENT, key, "F16", shape, half)
-                cast += 1
-            tel.progress(done / len(keys), stage="vae operands")
+        with tel.stage("vae operands"):
+            for done, key in enumerate(keys, 1):
+                ctx.raise_if_cancelled()
+                info = tensors[key]
+                if info.dtype != "F16" and not out.has(COMPONENT, key):
+                    shape = list(info.shape)
+                    raw = bytearray(math.prod(shape) * 4 if info.dtype == "F32" else math.prod(shape) * 2)
+                    tensors.read_into(key, raw)
+                    half = from_f32(to_f32(raw, info.dtype, shape), "F16")
+                    if not np.isfinite(np.frombuffer(half, dtype="<f2")).all():
+                        raise UnsupportedInput(f"{COMPONENT}.{key} overflows float16", code="quantization_tripwire")
+                    out.put(COMPONENT, key, "F16", shape, half)
+                    cast += 1
+                ctx.progress(done - 1, len(keys))
         tel.log("vae operands", operands=len(keys), cast=cast)
         return ctx.adopt_model(out)
 

@@ -11,7 +11,6 @@ from cozy_runtime.author import (
     App,
     Context,
     ImageFrame,
-    Memoize,
     Outputs,
     QuantizationPlan,
     Recipe,
@@ -87,7 +86,7 @@ def warmup() -> None:
 _DEFAULTS = {"model": "circlestone-labs/anima@1.0.0"}
 
 
-@app.entrypoint(defaults=_DEFAULTS, memoize=Memoize(requires=["seed"]))
+@app.entrypoint(defaults=_DEFAULTS, memoize=True)
 def generate(
     ctx: Context,
     payload: GenerateInput,
@@ -113,7 +112,7 @@ def generate(
     # keeps a cache per condition, so it runs them apart.
     guided = guidance > 1.0 and interval[0] < interval[1]
     batched = guided and payload.first_block_cache <= 0.0
-    with _Phases(tel) as phases:
+    with _Phases(tel, ctx.progress) as phases:
         images = model.render(
             prompt,
             negative,
@@ -188,7 +187,7 @@ class ImageBox(msgspec.Struct, kw_only=True):
     seed: Seed | None = None
 
 
-@app.tool(label="Image", named="image", defaults=_DEFAULTS, memoize=Memoize(requires=["seed"]))
+@app.tool(label="Image", named="image", defaults=_DEFAULTS, memoize=True)
 def image(ctx: Context, payload: ImageBox, model: AnimaModel, out: Outputs, tel: Telemetry, adj: Adjustments) -> ImageResult:
     """Anima on a canvas: `generate` from the box."""
     request = GenerateInput(prompt=payload.instructions, aspect_ratio=payload.aspect_ratio, megapixels=float(payload.megapixels),

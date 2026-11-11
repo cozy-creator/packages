@@ -7,7 +7,7 @@ import math
 from typing import Annotated, Literal
 
 import msgspec
-from cozy_runtime.author import Adjustments, App, Context, Memoize, Outputs, Seed, Telemetry
+from cozy_runtime.author import Adjustments, App, Context, Outputs, Seed, Telemetry
 from cozy_runtime.fields import AspectRatio, Ratios
 from cozy_runtime.image import (
     Guidance,
@@ -70,7 +70,7 @@ _DEFAULTS = {"model": "openmoss-team/moss-image@0.1.0"}
 _COMPONENTS = {"model": ("transformer", "text_encoder", "vae")}
 
 
-@app.entrypoint(defaults=_DEFAULTS, components=_COMPONENTS, memoize=Memoize(requires=["seed"]))
+@app.entrypoint(defaults=_DEFAULTS, components=_COMPONENTS, memoize=True)
 def generate(ctx: Context, payload: GenerateInput, model: MossImage, out: Outputs, tel: Telemetry,
              adj: Adjustments) -> ImageResult:
     """MOSS-Image SFT, 50 Euler steps at CFG 3, with `regions` laid out as upstream's layout JSON.
@@ -84,18 +84,18 @@ def generate(ctx: Context, payload: GenerateInput, model: MossImage, out: Output
     width, height = payload.size(adj, None, SIZES, megapixels=1.0)
     prompt = layout_prompt(payload.prompt, payload.regions, width, height)
     ctx.raise_if_cancelled()
-    with tel.stage("encoding prompt", overall_range=(0.0, 0.05)):
+    with tel.stage("encoding prompt"):
         positive = model.encode(prompt)
         negative = None if guidance == 1.0 else model.encode(payload.negative_prompt or "")
     ctx.raise_if_cancelled()
-    with tel.stage("generating image", overall_range=(0.05, 0.97)):
+    with tel.stage("generating image"):
         latents = model.denoise(
             positive, negative, width=width, height=height, steps=steps,
             guidance=guidance, seed=seed, tel=tel, progress=ctx.progress,
         )
-    with tel.stage("decoding image", overall_range=(0.97, 0.99)):
+    with tel.stage("decoding image"):
         image = model.decode(latents)
-    with tel.stage("saving image", overall_range=(0.99, 1.0)):
+    with tel.stage("saving image"):
         asset = out.save_image(image, format="png")
     return ImageResult(asset, width, height, seed, prompt)
 
@@ -112,7 +112,7 @@ class ImageBox(msgspec.Struct, kw_only=True):
     seed: Seed | None = None
 
 
-@app.tool(label="Image", named="image", defaults=_DEFAULTS, components=_COMPONENTS, memoize=Memoize(requires=["seed"]))  # fmt: skip
+@app.tool(label="Image", named="image", defaults=_DEFAULTS, components=_COMPONENTS, memoize=True)  # fmt: skip
 def image(ctx: Context, payload: ImageBox, model: MossImage, out: Outputs, tel: Telemetry, adj: Adjustments) -> ImageResult:
     """MOSS-Image on a canvas: `generate` from the box."""
     request = GenerateInput(prompt=payload.instructions, aspect_ratio=payload.aspect_ratio, megapixels=payload.megapixels,

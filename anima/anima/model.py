@@ -7,7 +7,7 @@ from collections.abc import Callable
 from contextlib import AbstractContextManager, nullcontext
 from pathlib import Path
 from types import TracebackType
-from typing import NamedTuple, Protocol, TypedDict, cast
+from typing import Any, NamedTuple, Protocol, TypedDict, cast
 
 import torch
 from cozy_runtime import rng
@@ -34,27 +34,14 @@ _ROOT = Path(__file__).resolve().parent
 STACK = stepcache.Stack(CosmosTransformer3DModel, blocks="transformer_blocks", carried=(0,))
 
 
-class _Phase(NamedTuple):
-    """One render phase: the stage name a person reads, and its overall-progress span."""
-
-    stage: str
-    start: float
-    stop: float
-
-    @property
-    def bounds(self) -> tuple[float, float]:
-        return self.start, self.stop
-
-
 #: The render ladder. `cozy run ls` renders "<stage> <percent>" verbatim, so these names
-#: are read by a person; the spans are contiguous and cover the whole request. Only
-#: `denoise` is measured per step — it is the only phase long enough to need it, and at the
-#: default 1536 class it is 150 of the roughly 160 seconds.
-_ENCODE_PROMPT = _Phase("encoding prompt", 0.00, 0.06)
-_CONDITION = _Phase("conditioning", 0.06, 0.10)
-_DENOISE = _Phase("denoise", 0.10, 0.90)
-_DECODE = _Phase("decoding", 0.90, 0.98)
-_SAVE = _Phase("saving image", 0.98, 1.00)
+#: are read by a person. Only `denoise` is measured per step — it is the only phase long enough
+#: to need it, and at the default 1536 class it is 150 of the roughly 160 seconds.
+_ENCODE_PROMPT = "encoding prompt"
+_CONDITION = "conditioning"
+_DENOISE = "denoise"
+_DECODE = "decoding"
+_SAVE = "saving image"
 
 
 def _tokenizer(path: Path) -> PreTrainedTokenizerFast:
@@ -311,26 +298,28 @@ class _Phases:
 
     `pipeline(...)` runs text encoding, conditioning, denoise and decode behind a single
     call, so the brackets are opened and closed by the blocks themselves rather than by
-    `with` statements around them. Without a `tel` it is silent.
+    `with` statements around them. `progress` is the handler's `ctx.progress`. Without `tel`
+    there are no stages, and without `progress` no steps.
     """
 
-    def __init__(self, tel: Telemetry | None = None) -> None:
-        self.tel = tel
+    def __init__(
+        self, tel: Telemetry | None = None, progress: Callable[[int, int], None] | None = None
+    ) -> None:
+        self.tel, self.progress = tel, progress
         self.open: AbstractContextManager[None] | None = None
 
-    def enter(self, phase: _Phase) -> None:
+    def enter(self, stage: str) -> None:
         self.close()
         if self.tel is None:
             return
-        self.open = self.tel.stage(phase.stage, overall_range=phase.bounds)
+        self.open = self.tel.stage(stage)
         self.open.__enter__()
 
     def steps(self, total: int) -> Callable[[int], None]:
-        if self.tel is None:
+        progress = self.progress
+        if progress is None:
             return lambda position: None
-        return self.tel.step_callback(  # type: ignore[no-any-return, unused-ignore]  # the pinned Runtime's is untyped
-            total, stage=_DENOISE.stage, overall_range=_DENOISE.bounds
-        )
+        return lambda step: progress(step, total)
 
     def close(self) -> None:
         self.__exit__(None, None, None)

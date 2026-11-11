@@ -227,16 +227,17 @@ qwen-image-2 = { index = "tensorhub" }
 
 Creator writes the `tensorhub` index (`<hub>/v1/index/<account>/simple/`, explicit)
 for the command's Hub and account, so lock with `cozy package lock`, not raw
-`uv lock`. uv resolves this distribution only from that index. Import its generated
-managed caller:
+`uv lock`. uv resolves this distribution only from that index. Run its functions as managed
+calls:
 
 ```python
-from qwen_image_2 import generate
+from cozy_runtime.author import call
+from cozy_runtime.fields import Prompt
+from qwen_image_2 import GenerateInput, generate
 
-image = await generate(
-    prompt="An explorer in a blue coat",
-    aspect_ratio="3:4",
-    megapixels=1.0,
+image = await call(
+    generate,
+    payload=GenerateInput(prompt=Prompt(text="An explorer in a blue coat"), aspect_ratio="3:4", megapixels=1),
 )
 ```
 
@@ -246,5 +247,5 @@ for Turbo, `alibaba-pai/qwen-image-2.1-fun-acc@0.1.0`; all read
 `atomicchat/qwen-image-2.1-text-encoder-abliterated@0.1.0` (`text_encoder`),
 `darrellbest/qwen-image-2.1-pe-i2i-abliterated@0.1.0` (`rewriter`) and
 `pottokao/qwen-image-2.1-pe-t2i-abliterated@0.1.0` (`expander`).
-Installing the wheel alone does not turn GPU execution into an in-process call;
-Cozy supplies the managed caller when composing package functions.
+A plain `generate(...)` is an ordinary in-process Python call; `call` runs it as its own job on
+the machine.

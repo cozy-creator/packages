@@ -411,40 +411,40 @@ def write_cast(
     read = written = reused = 0
     worst = 0.0
     total = len(selection.cast)
-    for done, (key, shape) in enumerate(selection.cast, 1):
-        ctx.raise_if_cancelled()
-        stage = f"cast-{target}-{component}"
-        if out.has(component, key):
-            reused += 1
-            tel.progress(done / total, stage=stage)
-            continue
-        values, length = _read_f32(source, component, key, shape)
-        with np.errstate(over="ignore"):
-            raw = st.from_f32(values, carrier)
-        restored = st.to_f32(raw, carrier, list(shape))
-        if not bool(np.isfinite(restored).all()):
-            raise UnsupportedInput(
-                f"{component}.{key}: the {target} cast overflowed to a non-finite value "
-                f"(source amax {float(np.max(np.abs(values))):.6g})",
-                code="quantization_tripwire",
-            )
-        error = np.abs(values - restored)
-        allowed = float(np.max(np.abs(values))) * bound
-        if float(np.max(error)) > allowed:
-            raise UnsupportedInput(
-                f"{component}.{key}: {target} round-trip error {float(np.max(error)):.4g} "
-                f"exceeds the representational bound {allowed:.4g}",
-                code="quantization_tripwire",
-            )
-        norm = float(np.linalg.norm(values))
-        relative = float(np.linalg.norm(error)) / norm if norm else 0.0
-        worst = max(worst, relative)
-        out.put(component, key, carrier, shape, raw)
-        read += length
-        written += len(raw)
-        tel.log("cast tensor", level="info", dtype=target, component=component, key=key,
-                relative_frobenius=relative, done=done, total=total)  # fmt: skip
-        tel.progress(done / total, stage=stage)
+    with tel.stage(f"cast-{target}-{component}"):
+        for done, (key, shape) in enumerate(selection.cast, 1):
+            ctx.raise_if_cancelled()
+            if out.has(component, key):
+                reused += 1
+                ctx.progress(done - 1, total)
+                continue
+            values, length = _read_f32(source, component, key, shape)
+            with np.errstate(over="ignore"):
+                raw = st.from_f32(values, carrier)
+            restored = st.to_f32(raw, carrier, list(shape))
+            if not bool(np.isfinite(restored).all()):
+                raise UnsupportedInput(
+                    f"{component}.{key}: the {target} cast overflowed to a non-finite value "
+                    f"(source amax {float(np.max(np.abs(values))):.6g})",
+                    code="quantization_tripwire",
+                )
+            error = np.abs(values - restored)
+            allowed = float(np.max(np.abs(values))) * bound
+            if float(np.max(error)) > allowed:
+                raise UnsupportedInput(
+                    f"{component}.{key}: {target} round-trip error {float(np.max(error)):.4g} "
+                    f"exceeds the representational bound {allowed:.4g}",
+                    code="quantization_tripwire",
+                )
+            norm = float(np.linalg.norm(values))
+            relative = float(np.linalg.norm(error)) / norm if norm else 0.0
+            worst = max(worst, relative)
+            out.put(component, key, carrier, shape, raw)
+            read += length
+            written += len(raw)
+            tel.log("cast tensor", level="info", dtype=target, component=component, key=key,
+                    relative_frobenius=relative, done=done, total=total)  # fmt: skip
+            ctx.progress(done - 1, total)
     return CastStats(total - reused, reused, read, written, None if reused else worst)
 
 

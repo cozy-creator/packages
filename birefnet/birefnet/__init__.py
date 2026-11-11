@@ -56,11 +56,11 @@ def remove_background(
 ) -> RemoveBackgroundOutput:
     """An image's subject cut out onto a white background, as a WebP."""
     ctx.raise_if_cancelled()
-    with tel.stage("reading reference", overall_range=(0.0, 0.1)):
+    with tel.stage("reading reference"):
         image = payload.image.read()
-    with tel.stage("removing background", overall_range=(0.1, 0.9)):
+    with tel.stage("removing background"):
         mask = model.mask(image)
     ctx.raise_if_cancelled()
-    with tel.stage("saving character reference", overall_range=(0.9, 1.0)):
+    with tel.stage("saving character reference"):
         result = out.save_image(white_background(image, mask), format="webp")
     return RemoveBackgroundOutput(result)

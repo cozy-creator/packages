@@ -7,7 +7,7 @@ from functools import partial
 from typing import Annotated, Literal
 
 import msgspec
-from cozy_runtime.author import Adjustments, App, Context, Memoize, Outputs, Seed, Telemetry
+from cozy_runtime.author import Adjustments, App, Context, Outputs, Seed, Telemetry
 from cozy_runtime.fields import Advanced, AspectRatio, Image, Prompt, Ratios
 from cozy_runtime.image import Guidance, ImageRequest, ImageResult, Sizes, Steps, held
 
@@ -79,7 +79,7 @@ def _generate(ctx: Context, payload: TurboInput, model: Flux2, turbo: Flux2Turbo
             regime="turbo" if turbo else "distilled" if distilled else "base", steps=steps,
             guidance=guidance, cfg=cfg)
     if payload.prompt_upsampling:
-        with tel.stage("upsampling prompt", overall_range=(0.0, 0.15)):
+        with tel.stage("upsampling prompt"):
             caption = upsampler.upsample(prompt, images)
         if caption:
             prompt = caption
@@ -89,9 +89,9 @@ def _generate(ctx: Context, payload: TurboInput, model: Flux2, turbo: Flux2Turbo
     ctx.raise_if_cancelled()
     references = None
     if images:
-        with tel.stage("encoding reference images", overall_range=(0.15, 0.2)):
+        with tel.stage("encoding reference images"):
             references = model.encode_references(prepare_references(images))
-    with tel.stage("encoding prompt", overall_range=(0.2, 0.25)):
+    with tel.stage("encoding prompt"):
         embeds = model.encode(prompt)
         negative = model.encode("") if cfg else None
     ctx.raise_if_cancelled()
@@ -101,11 +101,11 @@ def _generate(ctx: Context, payload: TurboInput, model: Flux2, turbo: Flux2Turbo
         model.denoise, embeds, negative, references, width=width, height=height, timesteps=timesteps,
         guidance=guidance, seed=seed, progress=ctx.progress,
     )
-    with tel.stage("generating image", overall_range=(0.25, 0.95)):
+    with tel.stage("generating image"):
         latents = turbo.applied(model.graph.components["transformer"], denoise) if turbo else denoise()
-    with tel.stage("decoding image", overall_range=(0.95, 0.99)):
+    with tel.stage("decoding image"):
         image = model.decode(latents, width=width, height=height)
-    with tel.stage("saving image", overall_range=(0.99, 1.0)):
+    with tel.stage("saving image"):
         asset = out.save_image(image, format="png")
     return ImageResult(asset, width, height, seed, prompt)
 
@@ -120,7 +120,7 @@ _TURBO_COMPONENTS = {"model": ("transformer", "text_encoder", "vae"), "upsampler
 
 
 @app.entrypoint(defaults={"model": _DEV, "upsampler": _DEV}, components=_COMPONENTS, on_demand=("upsampler",),
-                memoize=Memoize(requires=["seed"]))
+                memoize=True)
 def generate(ctx: Context, payload: GenerateInput, model: Flux2, upsampler: Flux2Upsampler, out: Outputs,
              tel: Telemetry, adj: Adjustments) -> ImageResult:
     """The full model: FLUX.2 [dev] (50 steps, guidance 4), or a [klein] Base by `model=` (50 steps, CFG 4)."""
@@ -128,7 +128,7 @@ def generate(ctx: Context, payload: GenerateInput, model: Flux2, upsampler: Flux
 
 
 @app.entrypoint(defaults={"model": _DEV, "turbo_lora": _TURBO, "upsampler": _DEV},
-                components=_TURBO_COMPONENTS, on_demand=("upsampler", "turbo_lora"), memoize=Memoize(requires=["seed"]))
+                components=_TURBO_COMPONENTS, on_demand=("upsampler", "turbo_lora"), memoize=True)
 def generate_turbo(ctx: Context, payload: TurboInput, model: Flux2, turbo_lora: Flux2TurboLoRA,
                    upsampler: Flux2Upsampler, out: Outputs, tel: Telemetry, adj: Adjustments) -> ImageResult:
     """The fast model: FLUX.2 [dev] with fal's Turbo LoRA (8 steps, guidance 2.5), or a [klein] by
@@ -152,7 +152,7 @@ class ImageBox(msgspec.Struct, kw_only=True):
 
 
 @app.tool(label="Image", named="image", defaults={"model": _DEV, "turbo_lora": _TURBO, "upsampler": _DEV},
-          components=_TURBO_COMPONENTS, on_demand=("turbo_lora", "upsampler"), memoize=Memoize(requires=["seed"]))
+          components=_TURBO_COMPONENTS, on_demand=("turbo_lora", "upsampler"), memoize=True)
 def image(ctx: Context, payload: ImageBox, model: Flux2, turbo_lora: Flux2TurboLoRA, upsampler: Flux2Upsampler,
           out: Outputs, tel: Telemetry, adj: Adjustments) -> ImageResult:
     """FLUX.2 [dev] on a canvas: with its Turbo LoRA, which loads only when asked for, or without."""

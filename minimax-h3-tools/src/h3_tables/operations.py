@@ -2,20 +2,19 @@
 
 from __future__ import annotations
 
-from collections.abc import Awaitable
 from importlib.resources import files
-from typing import Protocol, cast
 
 from cozy_runtime.author import (
     ModelArtifact,
+    ModelChoice,
     QuantizationPlan,
     UnsupportedInput,
+    call,
     canonical_json,
 )
 from cozy_runtime.derive.operations import quantize as runtime_quantize
 
 from .adaln_operations import (
-    Selection,
     apply_adaln,
     compute_adaln_tables,
     retable_adaln,
@@ -26,31 +25,6 @@ from .model_config import DIT_COMPONENT, parse_full_config
 from .order import current_order, full_order
 from .plans import Task
 from .quantization import dit_plan
-
-# The call proxies' caller interfaces: services injected, each bound Model a ModelArtifact.
-
-
-class _Quantize(Protocol):
-    def __call__(
-        self, *, source: ModelArtifact, plan: QuantizationPlan, max_relative_frobenius: float | None
-    ) -> Awaitable[ModelArtifact]: ...
-
-
-class _Select(Protocol):
-    def __call__(self, *, source: ModelArtifact, task: Task) -> Awaitable[Selection]: ...
-
-
-class _Compute(Protocol):
-    def __call__(
-        self, *, source: ModelArtifact, task: Task, plan_digest: str
-    ) -> Awaitable[ModelArtifact]: ...
-
-
-class _Attach(Protocol):
-    def __call__(
-        self, *, source: ModelArtifact, fl2va: ModelArtifact, ref2va: ModelArtifact
-    ) -> Awaitable[ModelArtifact]: ...
-
 
 def quantization_plan(encoding: Encoding) -> QuantizationPlan:
     """Bind reviewed H3 geometry and canonical order without loading a source model."""
@@ -87,9 +61,9 @@ async def quantize(
     The exact assembled full/pruned source order is required. Unselected tensors and
     configs retain their source precision; an encoded or malformed source refuses.
     """
-    call = cast(_Quantize, runtime_quantize)
     return await call(
-        source=source,
+        runtime_quantize,
+        source=ModelChoice(ref=source),
         plan=quantization_plan(encoding),
         max_relative_frobenius=max_relative_frobenius,
     )
@@ -107,17 +81,10 @@ async def precompute_adaln(
     Retabling an already pruned model requires its full generating model. The current
     approved union bank supports all three schedules and is shared across body encodings.
     """
-    # The generated interfaces remove injected services and replace bound Model
-    # parameters with ModelArtifact. These remain the same admitted call proxies.
-    select = cast(_Select, select_adaln_weights)
-    compute = cast(_Compute, compute_adaln_tables)
-    attach = cast(_Attach, retable_adaln if generating_model is not None else apply_adaln)
-
-    # Managed proxies carry exact ModelArtifact values; the owner injects the bound
-    # model only into each child implementation. Generated caller interfaces express this.
-    generator = generating_model or model
-    selected_fl = await select(source=generator, task="fl2va")
-    selected_ref = await select(source=generator, task="ref2va")
+    # Each step is a managed call, its models chosen by exact ModelArtifact.
+    generator = ModelChoice(ref=generating_model or model)
+    selected_fl = await call(select_adaln_weights, source=generator, task="fl2va")
+    selected_ref = await call(select_adaln_weights, source=generator, task="ref2va")
     if (
         type(timesteps) is not int
         or timesteps not in selected_fl.steps
@@ -138,18 +105,22 @@ async def precompute_adaln(
             "H3 source does not contain both tasks' generating weights",
             code="adaln_generating_weights",
         )
-    fl = await compute(
-        source=selected_fl.projection,
+    fl = await call(
+        compute_adaln_tables,
+        source=ModelChoice(ref=selected_fl.projection),
         task="fl2va",
         plan_digest=selected_fl.plan_digest,
     )
-    ref = await compute(
-        source=selected_ref.projection,
+    ref = await call(
+        compute_adaln_tables,
+        source=ModelChoice(ref=selected_ref.projection),
         task="ref2va",
         plan_digest=selected_ref.plan_digest,
     )
-    return await attach(
-        source=model,
-        fl2va=fl,
-        ref2va=ref,
+    attach = retable_adaln if generating_model is not None else apply_adaln
+    return await call(
+        attach,
+        source=ModelChoice(ref=model),
+        fl2va=ModelChoice(ref=fl),
+        ref2va=ModelChoice(ref=ref),
     )

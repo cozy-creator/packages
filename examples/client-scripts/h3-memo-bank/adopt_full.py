@@ -18,7 +18,7 @@ class Nothing(msgspec.Struct):
 
 
 @app.entrypoint(accelerator=False, weights=(WeightsOutput("original", max_new_bytes=1),))
-def main(ctx: Context, payload: Nothing, source: Weights[Any]) -> ModelArtifact:  # type: ignore[explicit-any, misc]  # static describe's any-layout spelling
+def main(ctx: Context, payload: Nothing, source: Weights) -> ModelArtifact:
     opened = ctx.tensorfs_source(source)
     tensors = {name: component.tensors for name, component in opened.components.items()}
     for component in ("transformer", "transformer_ref"):

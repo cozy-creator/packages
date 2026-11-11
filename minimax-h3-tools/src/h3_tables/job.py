@@ -21,7 +21,6 @@ from cozy_runtime.author import (
     Weights,
     WeightsOutput,
     canonical_json,
-    invocable,
 )
 from cozy_runtime.derive.quantization import (
     ArtifactQuantizationRequest,
@@ -184,12 +183,7 @@ def _tables(
     sections = parse_full_config(_asset("model-config.json"))
     read = written = reused = 0
     for task, component in DIT_COMPONENT.items():
-        stage = f"timestep-table-{task}"
-
-        def progress(done: int, total: int, stage: str = stage) -> None:
-            tel.progress(done / total, stage=stage)
-
-        with tel.stage(stage):
+        with tel.stage(f"timestep-table-{task}"):
             got = (write_curve_tables if curve else write_tables)(
                 ctx,
                 plan=_production_plan(source, task),
@@ -197,7 +191,7 @@ def _tables(
                 source=source,
                 component=component,
                 outputs=outputs,
-                progress=progress,
+                progress=lambda done, total: ctx.progress(done - 1, total),
             )
         read, written, reused = read + got[0], written + got[1], reused + got[2]
     return read, written, reused
@@ -394,7 +388,7 @@ def _produce_lane(
                     put(out, *row, value.to(torch.float32))
                 elif row not in computed and row not in replaced and not out.has(*row):
                     out.copy(*row, source)
-                tel.progress(done / len(order), stage=f"{name}-copy")
+                ctx.progress(done - 1, len(order))
         if computed:
             read_bytes, written, reused = _tables(ctx, tel, source, (out,), curve)
         for selection in selections:
@@ -412,31 +406,27 @@ def _produce_lane(
 
 
 # One function per lane: Runtime requires a receipt for EVERY declared weights output.
-@invocable
-async def bf16_full(ctx: Context, *, source: Weights[Any], tel: Telemetry) -> ModelArtifact:  # type: ignore[explicit-any, misc]  # static describe's any-layout spelling
+async def bf16_full(ctx: Context, *, source: Weights, tel: Telemetry) -> ModelArtifact:
     """The reviewed full-precision lane: source-only rows dropped, video VAE normalised."""
     return _produce_lane(ctx, tel, source, "bf16-full")
 
 
-@invocable
-async def bf16_pruned(ctx: Context, *, source: Weights[Any], tel: Telemetry) -> ModelArtifact:  # type: ignore[explicit-any, misc]  # static describe's any-layout spelling
+async def bf16_pruned(ctx: Context, *, source: Weights, tel: Telemetry) -> ModelArtifact:
     """AdaLN-pruned BF16: 106 modulation rows per DiT replaced by timestep tables."""
     return _produce_lane(ctx, tel, source, "bf16")
 
 
-@invocable
-async def curve_pruned(ctx: Context, *, source: Weights[Any], tel: Telemetry) -> ModelArtifact:  # type: ignore[explicit-any, misc]  # static describe's any-layout spelling
+async def curve_pruned(ctx: Context, *, source: Weights, tel: Telemetry) -> ModelArtifact:
     """AdaLN-pruned BF16 from ComfyUI's curve-form DiTs (TensorFS `h3.curve`).
 
     PinkCherry and Eros Max ship this form; each table row is the modulation ComfyUI computes at that timestep."""
     return _produce_lane(ctx, tel, source, "bf16", curve=True)
 
 
-@invocable
-async def fp8_pruned(  # type: ignore[explicit-any, misc]  # static describe's any-layout spelling
+async def fp8_pruned(
     ctx: Context,
     *,
-    source: Weights[Any],
+    source: Weights,
     max_relative_frobenius: float | None = None,
     tel: Telemetry,
 ) -> ModelArtifact:
@@ -450,8 +440,9 @@ app.entrypoint(
     weights=(WeightsOutput("bf16-full", max_new_bytes=MAX_FULL_BYTES + MAX_VIDEO_VAE_BYTES),),
     accelerator=False,
 )
-@invocable
-async def vae(ctx: Context, *, source: Weights[Any], tel: Telemetry) -> ModelArtifact:  # type: ignore[explicit-any, misc]  # static describe's any-layout spelling
+
+
+async def vae(ctx: Context, *, source: Weights, tel: Telemetry) -> ModelArtifact:
     """A lane's video VAE alone, normalised.
 
     `NORMALISED_COMPONENTS`: one component and no base, so writing it fetches that component
@@ -715,12 +706,11 @@ def retable_rows(
     return tables
 
 
-@invocable
-async def retable(  # type: ignore[explicit-any, misc]  # static describe's any-layout spelling
+async def retable(
     ctx: Context,
     *,
-    pruned: Weights[Any],
-    full: Weights[Any],
+    pruned: Weights,
+    full: Weights,
     tel: Telemetry,
 ) -> RetableResult:
     """Recompute one AdaLN-pruned checkpoint's tables for the current plans.

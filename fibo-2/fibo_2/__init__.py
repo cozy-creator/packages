@@ -7,7 +7,7 @@ import re
 from typing import Annotated
 
 import msgspec
-from cozy_runtime.author import Adjustments, App, Context, Memoize, Outputs, Seed, Telemetry, UnsupportedInput
+from cozy_runtime.author import Adjustments, App, Context, Outputs, Seed, Telemetry, UnsupportedInput
 from cozy_runtime.fields import Advanced, AspectRatio, Image, Prompt, Ratios
 from cozy_runtime.image import Guidance, ImageRequest, ImageResult, NegativePrompt, Sizes, Steps, held
 from PIL import Image as PILImage
@@ -135,26 +135,26 @@ def _generate(
     seed = payload.drawn_seed()
     width, height = payload.size(adj, images[0].size if images else None, SIZES, megapixels=1.0)
     upsample = True if payload.prompt_upsampling is None else payload.prompt_upsampling
-    with tel.stage("upsampling prompt", overall_range=(0.0, 0.15)):
+    with tel.stage("upsampling prompt"):
         caption = _caption(prompt, images, upsample, upsampler, edit_upsampler, adj)
     if caption != prompt:
         tel.log("upsampled prompt", caption=caption[:2000])
     ctx.raise_if_cancelled()
-    with tel.stage("encoding prompt", overall_range=(0.15, 0.2)):
+    with tel.stage("encoding prompt"):
         encoded = model.encode(caption, images, width=width, height=height, guidance=guidance, negative=negative)
     latents = []
     if images:
-        with tel.stage("encoding reference images", overall_range=(0.2, 0.25)):
+        with tel.stage("encoding reference images"):
             latents = model.encode_images(images, width=width, height=height)
     ctx.raise_if_cancelled()
-    with tel.stage("generating image", overall_range=(0.25, 0.95)):
+    with tel.stage("generating image"):
         tokens = model.denoise(
             encoded, latents, width=width, height=height, steps=steps, guidance=guidance, seed=seed,
             progress=ctx.progress,
         )
-    with tel.stage("decoding image", overall_range=(0.95, 0.99)):
+    with tel.stage("decoding image"):
         image = model.decode(tokens)
-    with tel.stage("saving image", overall_range=(0.99, 1.0)):
+    with tel.stage("saving image"):
         asset = out.save_image(image, format="png")
     return ImageResult(asset, image.width, image.height, seed, caption)
 
@@ -170,7 +170,7 @@ _COMPONENTS = {"model": _MODEL, "upsampler": ("model",), "edit_upsampler": ("mod
 # A VLM is built and fetched on first use: a request that skips upsampling never pulls one. Model
 # parameters are in name order: Runtime refuses a binding set whose paths are not sorted.
 @app.entrypoint(defaults={"model": _DEV, "upsampler": _VLM, "edit_upsampler": _EDIT_VLM}, components=_COMPONENTS,
-                on_demand=("upsampler", "edit_upsampler"), memoize=Memoize(requires=["seed"]))
+                on_demand=("upsampler", "edit_upsampler"), memoize=True)
 def generate(ctx: Context, payload: GenerateInput, edit_upsampler: Captioner, model: Fibo2, upsampler: Captioner,
              out: Outputs, tel: Telemetry, adj: Adjustments) -> ImageResult:
     """Fibo 2.0 Dev, 50 steps with CFG 5: text to image, or an edit of up to four ordered pictures."""
@@ -178,7 +178,7 @@ def generate(ctx: Context, payload: GenerateInput, edit_upsampler: Captioner, mo
 
 
 @app.entrypoint(defaults={"model": _TURBO, "upsampler": _VLM, "edit_upsampler": _EDIT_VLM}, components=_COMPONENTS,
-                on_demand=("upsampler", "edit_upsampler"), memoize=Memoize(requires=["seed"]))
+                on_demand=("upsampler", "edit_upsampler"), memoize=True)
 def generate_turbo(ctx: Context, payload: TurboInput, edit_upsampler: Captioner, model: Fibo2,
                    upsampler: Captioner, out: Outputs, tel: Telemetry, adj: Adjustments) -> ImageResult:
     """Fibo 2.0 Edit Turbo, 4 steps without guidance: text to image, or an edit of up to four ordered pictures."""
@@ -202,7 +202,7 @@ class ImageBox(msgspec.Struct, kw_only=True):
 @app.tool(label="Image", named="image",
           defaults={"model": _TURBO, "full": _DEV, "upsampler": _VLM, "edit_upsampler": _EDIT_VLM},
           components={"model": _MODEL, "full": _MODEL, "upsampler": ("model",), "edit_upsampler": ("model",)},
-          on_demand=("edit_upsampler", "full", "model", "upsampler"), memoize=Memoize(requires=["seed"]))
+          on_demand=("edit_upsampler", "full", "model", "upsampler"), memoize=True)
 def image(ctx: Context, payload: ImageBox, edit_upsampler: Captioner, full: Fibo2, model: Fibo2, upsampler: Captioner,
           out: Outputs, tel: Telemetry, adj: Adjustments) -> ImageResult:
     """Fibo 2.0 on a canvas: Edit Turbo, or Dev."""

@@ -7,7 +7,7 @@ import secrets
 from typing import Annotated
 
 import msgspec
-from cozy_runtime.author import Adjustments, App, Context, Memoize, Outputs, Seed, Telemetry
+from cozy_runtime.author import Adjustments, App, Context, Outputs, Seed, Telemetry
 from cozy_runtime.fields import Advanced, AspectRatio, Image, Prompt, Ratios
 from cozy_runtime.image import Guidance, ImageResult, ratio_of, Steps
 
@@ -78,22 +78,22 @@ def _generate(ctx: Context, payload: HunyuanRequest, steps: int, model: HunyuanI
     size = requested_size(adj, payload.aspect_ratio) if payload.aspect_ratio else None
     cot = None
     if payload.prompt_upsampling is not False:
-        with tel.stage("thinking", overall_range=(0.0, 0.3)):
+        with tel.stage("thinking"):
             cot, picked, routing = model.think(
                 prompt, references, seed=seed, pick_size=size is None, cancel=ctx.raise_if_cancelled,
-                on_token=tel.step_callback(MAX_NEW_TOKENS, stage="thinking", overall_range=(0.0, 0.3)))
+                on_token=lambda i: ctx.progress(i, MAX_NEW_TOKENS))
         tel.log("thinking routing", **routing)  # type: ignore[arg-type]  # its keys are statistics' names, never `level`
         tel.log("rewritten prompt", caption=caption(cot, prompt)[:2000])
         size = size or picked
     if size is None:
-        with tel.stage("picking size", overall_range=(0.0, 0.05)):
+        with tel.stage("picking size"):
             size = model.pick_size(prompt, references, seed=seed)
-    with tel.stage("generating image", overall_range=(0.3, 0.97)):
+    with tel.stage("generating image"):
         image = model.paint(
             prompt, references, cot, size=size, steps=steps, guidance=guidance, seed=seed,
             cancel=ctx.raise_if_cancelled,
-            on_step=tel.step_callback(steps, stage="generating image", overall_range=(0.3, 0.95)))
-    with tel.stage("saving image", overall_range=(0.97, 1.0)):
+            on_step=lambda i: ctx.progress(i, steps))
+    with tel.stage("saving image"):
         asset = out.save_image(image, format="png")
     return ImageResult(asset, image.width, image.height, seed, caption(cot, prompt))
 
@@ -102,7 +102,7 @@ _DISTIL = "tencent/hunyuan-image-3-instruct-distil@0.1.1"
 _INSTRUCT = "tencent/hunyuan-image-3-instruct@0.1.1"
 
 
-@app.entrypoint(defaults={"model": _DISTIL}, memoize=Memoize(requires=["seed"]))
+@app.entrypoint(defaults={"model": _DISTIL}, memoize=True)
 def generate_turbo(ctx: Context, payload: HunyuanRequest, model: HunyuanImage3, out: Outputs, tel: Telemetry,
                    adj: Adjustments) -> ImageResult:
     """HunyuanImage 3.0 Instruct-Distil, 8 steps at guidance 2.5: text to image, or an edit of up to three pictures.
@@ -111,7 +111,7 @@ def generate_turbo(ctx: Context, payload: HunyuanRequest, model: HunyuanImage3, 
     return _generate(ctx, payload, payload.steps or DISTIL_STEPS, model, out, tel, adj)
 
 
-@app.entrypoint(defaults={"model": _INSTRUCT}, memoize=Memoize(requires=["seed"]))
+@app.entrypoint(defaults={"model": _INSTRUCT}, memoize=True)
 def generate(ctx: Context, payload: HunyuanRequest, model: HunyuanImage3, out: Outputs, tel: Telemetry,
              adj: Adjustments) -> ImageResult:
     """HunyuanImage 3.0 Instruct, 50 steps with CFG 2.5: text to image, or an edit of up to three pictures.
@@ -136,7 +136,7 @@ class ImageBox(msgspec.Struct, kw_only=True):
 # Each checkpoint is built, and its weights fetched, only when a render asks for it.
 @app.tool(label="Image", named="image", defaults={"model": _DISTIL, "full": _INSTRUCT},
           on_demand=("full", "model"),
-          memoize=Memoize(requires=["seed"]))
+          memoize=True)
 def image(ctx: Context, payload: ImageBox, full: HunyuanImage3, model: HunyuanImage3, out: Outputs, tel: Telemetry,
           adj: Adjustments) -> ImageResult:
     """HunyuanImage 3.0 on a canvas: Instruct-Distil, or Instruct."""
