@@ -20,7 +20,6 @@ from typing import cast
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "minimax-h3"))
-sys.path.insert(0, str(ROOT / "minimax-h3-tools" / "src"))
 
 import torch  # noqa: E402
 from diffusers.schedulers.scheduling_minimax_h3 import MiniMaxH3Scheduler  # noqa: E402

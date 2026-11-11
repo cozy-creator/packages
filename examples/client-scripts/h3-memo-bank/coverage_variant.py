@@ -5,8 +5,8 @@ from pathlib import Path
 import tensorfs
 
 from cozy_runtime.author import canonical_json
-from h3_tables.plans import parse_plan
-from h3_tables.source import timestep_plan
+from minimax_h3.preparation.plans import parse_plan
+from minimax_h3.preparation.source import timestep_plan
 
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument("checkpoint", type=Path, help="local migrated source checkpoint")

@@ -10,7 +10,6 @@ from typing import Any, Literal, get_args
 import msgspec
 import torch
 from cozy_runtime.author import (
-    App,
     Context,
     DerivationHook,
     Model,
@@ -70,7 +69,7 @@ from .source import (
     write_tables,
 )
 
-app = App()
+from ..application import app
 
 
 def _asset(name: str) -> bytes:

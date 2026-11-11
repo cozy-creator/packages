@@ -9,6 +9,12 @@ Video with sound from MiniMax H3, as three tools. Each is a box on a canvas and 
   guide-edit LoRAs: character swap, head swap, style transfer, VFX edit or motion transfer.
 - **`upscale`** (MiniMax H3 Upscale) re-renders a take at 1080p, 1440p or 2160p with NVIDIA's Regenerate-2K ([UPSCALE.md](UPSCALE.md)).
 
+Checkpoint preparation now ships in the same package, under `minimax_h3.preparation`:
+the BF16/FP8 producers, AdaLN operations, Turbo and Regenerate LoRA preparation, and
+quantization recipes use the same application and version as these media tools.
+See [preparation functions and recipes](docs/preparation.md). Previously published
+`minimax-h3-tools` releases remain available for older pinned installations.
+
 ```yaml
 # shot.yaml — cozy run minimax-h3/generate --input shot.yaml (in a project: each <name> is that box)
 summary: <theo> and <juno> fight on <dock>, on 35 mm film, in a warm grade, with no crowd.   # every segment reads it
