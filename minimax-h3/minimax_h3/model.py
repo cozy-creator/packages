@@ -152,11 +152,11 @@ class H3Model(Model[OfficialH3Pipeline]):
     have not yet run on GPUs (h3a-019).
     """
 
-    # The DiTs' attention holds at 4 bits (fp4 where the GPU has it), the video VAE decoder's at 8
-    # (Kitchen INT8 on consumer cards, as ComfyUI's int8 decoder); the audio VAE and the text
-    # encoder keep exact attention.
+    # The DiTs' and the video VAE decoder's attention hold at 8 bits (Kitchen INT8 on consumer
+    # cards, as ComfyUI's); never 4 (Paul, 11-11: 4-bit attention loses small details, the
+    # seagulls, for little speed). The audio VAE and the text encoder keep exact attention.
     serving = Serving(
-        attention_bits={"transformer": 4, "transformer_ref": 4, "vae": 8},
+        attention_bits={"transformer": 8, "transformer_ref": 8, "vae": 8},
         loras=("transformer", "transformer_ref"),
     )
 
