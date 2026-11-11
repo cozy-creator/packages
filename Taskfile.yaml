@@ -38,20 +38,23 @@ tasks:
         # A callee whose Runtime/TensorFS floor is above what the dependent locks takes the dependent's lock up too.
         raised() { for q in $up; do for d in cozy-runtime tensorfs; do f=$(floor "$q" "$d"); l=$(locked "$1" "$d")
           [ -n "$f" ] && [ -n "$l" ] && [ "$(printf '%s\n' "$f" "$l" | sort -V | head -1)" != "$f" ] && echo "$d"; done; done | sort -u; }
-        published() {
-          i=$(grep -om1 'https\?://[^"]*/v1/index/[^/]*/simple/' "$1/uv.lock"); a=${i%/simple/}
-          COZY_HUB_URL="${i%%/v1/*}" cozy package info "${a##*/}/$1" --json | jq -e --arg v "$(ver "$1")" 'any(.releases[]; .release == $v)' >/dev/null
+        # The CLI lists a package's latest release, not every release (`cozy package ls`; cozy 0.24.0 has no `package info`). A version
+        # at or below it is held; a yanked one above it shows only when its publish answers `already published` (`ship`).
+        atmost() { [ "$(printf '%s\n' "$1" "$2" | sort -V | head -1)" = "$1" ]; }
+        latest() {  # latest <package> <hub> [account]: empty with no release there. A hub that cannot answer stops everything.
+          out=$(COZY_HUB_URL="$2" cozy package ls "$1" --json --limit 200 2>/dev/null) || { echo "$2 cannot list $1: nothing more published" >&2; exit 1; }
+          jq -r --arg p "${3:+$3/}$1" --arg q "$1" '[.packages[] | select(.package == $p or .package == $q)][0].latest_release // empty' <<< "$out"
         }
-        # held <package>: the hubs that already hold its master version. A hub that cannot say stops everything.
+        published() {
+          i=$(grep -om1 'https\?://[^"]*/v1/index/[^/]*/simple/' "$1/uv.lock"); a=${i%/simple/}; l=$(latest "$1" "${i%%/v1/*}" "${a##*/}")
+          [ -n "$l" ] && atmost "$(ver "$1")" "$l"
+        }
+        # held <package>: the hubs whose latest release is at or above its master version.
         held() {
           for h in {{.HUBS}}; do
-            out=$(COZY_HUB_URL="$h" cozy package info "$1" --json 2>/dev/null) || true
+            l=$(latest "$1" "$h")
             # if, not &&: Task's shell exits on a false && inside a function's loop.
-            if jq -e .releases <<< "$out" >/dev/null 2>&1; then
-              if jq -e --arg v "$(ver "$1")" 'any(.releases[]; .release == $v)' <<< "$out" >/dev/null; then printf '%s ' "$h"; fi
-            elif [ "$(jq -r '.error.code // empty' <<< "$out" 2>/dev/null)" != package_not_found ]; then
-              echo "$h cannot say whether it holds $1 $(ver "$1"): nothing more published" >&2; exit 1
-            fi
+            if [ -n "$l" ] && atmost "$(ver "$1")" "$l"; then printf '%s ' "$h"; fi
           done
         }
         # A version a hub already holds is never published or yanked again: bump it on master first.
@@ -90,7 +93,9 @@ tasks:
           for h in {{.HUBS}}; do
             rm -rf "${work:?}/$1"; git archive HEAD "$1" | tar -x -C "$work"
             [ ! -d "$work/.kernels/$1" ] || cp -r "$work/.kernels/$1/." "$work/$1/"
-            (cd "$work/$1" && COZY_HUB_URL="$h" cozy package publish --root {{.YANKED}})
+            said=$(cd "$work/$1" && COZY_HUB_URL="$h" cozy package publish --root {{.YANKED}} --json) || exit 1
+            status=$(jq -r .status <<< "$said"); echo "$1 $(ver "$1") on $h: $status"
+            case $status in published*) ;; *) echo "$h holds $1 $(ver "$1") already ($status): bump its version on master" >&2; exit 1 ;; esac
           done
           shipped="$shipped${shipped:+,}$1@$(ver "$1")"
         }
