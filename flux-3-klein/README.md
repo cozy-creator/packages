@@ -1,5 +1,7 @@
 # FLUX.3 Image Klein
 
+CLI package: `flux.3`. Existing `flux-3-klein` releases remain available for compatibility.
+
 Black Forest Labs' FLUX.3 Image Klein: a 5.6B DiT for text-to-image generation and editing with up
 to ten reference images. Its text encoder is Qwen3-VL-4B.
 
@@ -21,15 +23,15 @@ seed: 7
 ```
 
 ```sh
-cozy run flux-3-klein/generate_turbo --input request.yaml
+cozy run flux.3/generate_turbo --input request.yaml
 ```
 
 Inline inputs work too, and override the file's:
 
 ```sh
-cozy run flux-3-klein/generate_turbo prompt='A lighthouse on a basalt cliff in a winter storm' \
+cozy run flux.3/generate_turbo prompt='A lighthouse on a basalt cliff in a winter storm' \
   aspect_ratio=16:9 seed=7
-cozy run flux-3-klein/generate prompt='Make <lighthouse> night, the lamp lit'   # in a project: <lighthouse> is that box
+cozy run flux.3/generate prompt='Make <lighthouse> night, the lamp lit'   # in a project: <lighthouse> is that box
 ```
 
 Inputs: `prompt` (its text and the pictures it mentions), `boxes` (below), `aspect_ratio` (any W:H), `megapixels` (any size, 1024² pixels each), `seed`, `steps`, `prompt_upsampling`, `regions` (below) and `prompt_drafting`; `generate` also takes `guidance` and `negative_prompt`, since the distilled Klein samples without CFG. Left out, each
@@ -59,10 +61,10 @@ origin top-left.
   there.
 
 ```sh
-cozy run flux-3-klein/generate_turbo prompt='A picnic on a hillside' \
+cozy run flux.3/generate_turbo prompt='A picnic on a hillside' \
   'regions:=[{"box": [0.05, 0.55, 0.45, 0.95], "prompt": "a wicker basket"},
              {"box": [0.1, 0.05, 0.9, 0.2], "prompt": "a hand-painted banner", "text": "SUMMER FAIR"}]'
-cozy run flux-3-klein/generate_turbo prompt='<mug> on a desk by a window' \
+cozy run flux.3/generate_turbo prompt='<mug> on a desk by a window' \
   'boxes:={"mug": [0.55, 0.5, 0.85, 0.9]}'
 ```
 
@@ -139,7 +141,7 @@ the image and joint blocks declare 8-bit attention (`attention_bits`; Runtime's 
 RTX 30/40); the text and reference early blocks, and `--lane bf16`, keep exact attention.
 
 ```sh
-cozy model quantize black-forest-labs/flux-3-klein@sha256:<bf16 commit> --lane int8 --package flux-3-klein --on <machine>
+cozy model quantize black-forest-labs/flux-3-klein@sha256:<bf16 commit> --lane int8 --package flux.3 --on <machine>
 cozy model publish black-forest-labs/flux-3-klein 0.1.0 sha256:<bf16 commit> sha256:<int8 commit>
 ```
 

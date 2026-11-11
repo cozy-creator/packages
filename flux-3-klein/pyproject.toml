@@ -1,5 +1,5 @@
 [project]
-name = "flux-3-klein"
+name = "flux.3"
 version = "0.8.0"
 description = "Cozy text-to-image and reference editing with FLUX.3 Image Klein, distilled and base"
 requires-python = ">=3.12"
