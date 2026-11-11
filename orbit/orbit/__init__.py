@@ -32,7 +32,7 @@ from PIL import Image as PILImage
 app = App()
 
 #: MATLOWAI's ORB360 step 1500 (hf://MATLOWAI/MiniMax-H3-ORB360-CardSpin), trained on H3's Ref2VA DiT, clockwise only.
-ORB360 = "matlowai/orb360@0.1.0"
+ORB360 = "matlowai/orb360@0.1.1"
 #: What the video is, for its viewer: one clockwise turn whose end is its start.
 TURN = {"degrees": 360, "direction": "cw", "loops": True}
 #: The share of the turn the loop's join redraws, from about 330 degrees (se-114: a longer one reversed and stalled).
@@ -40,7 +40,7 @@ JOINED = 1 / 12
 
 
 class Orbit(msgspec.Struct, kw_only=True):
-    #: The view the turn starts and ends on.
+    #: The view the turn starts and ends on: a picture put in this field.
     picture: Annotated[ImageFile, ImagePreparation(max_pixels=16 << 20)]
     #: What the picture shows, in a word or two: the caption names it.
     subject: Annotated[str, Placeholder("motorcycle")] = ""
@@ -259,7 +259,7 @@ def silent(frames: Sequence[tuple[VideoFile, int]]) -> Iterator[DecodedMediaEven
                         break
 
 
-@app.tool(label="Orbit", named="orbit", accelerator=False)
+@app.tool(label="Orbit", named="video", accelerator=False)
 async def orbit(ctx: Context, payload: Orbit, out: Outputs, tel: Telemetry) -> OrbitResult:
     """The picture's subject seen from all the way round: one clockwise camera turn around it, frozen in time, that
     loops. H3 renders it under ORB360 from its trained caption, which names the subject and the angle every third of
