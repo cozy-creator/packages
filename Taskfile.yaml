@@ -34,12 +34,14 @@ tasks:
         git diff --quiet HEAD || { echo "commit or discard tracked changes first" >&2; exit 1; }
         [ -n "$dry" ] || { git fetch -q origin master; git merge -q --ff-only FETCH_HEAD; }
         start=$(git rev-parse HEAD); here=$PWD; work=$(mktemp -d); shipped=
-        finish() {
-          git checkout -q -- .; [ -z "$dry" ] || git reset -q --keep "$start"; rm -rf "$work"; [ -n "$shipped" ] || return 0
-          if [ -n "$dry" ]; then echo "dry run, nothing pushed or published: $shipped (wheels in dist/)"; return; fi
-          echo "{{if .YANKED}}candidates (yanked){{else}}published live{{end}}: $shipped
+        finish() {  # no `return`: Task's shell runs on past it in a trap
+          git checkout -q -- .; if [ -n "$dry" ]; then git reset -q --keep "$start"; fi; rm -rf "$work"
+          if [ -z "$shipped" ]; then :
+          elif [ -n "$dry" ]; then echo "dry run, nothing pushed or published: $shipped (wheels in dist/)"
+          else echo "{{if .YANKED}}candidates (yanked){{else}}published live{{end}}: $shipped
         gate: gh workflow run release-gate.yml -R cozy-creator/cozy-creator -f suites=packages -f pins=$shipped -f only=$(echo "$shipped" | sed "s/@[^,]*//g")
         then: task promote GATE=<passing release-gate run id>  (a hand gate: GATE=<its dirs> RECORD=<URL of its recorded result>)"
+          fi
         }
         trap finish EXIT
         ver() { grep -m1 '^version = ' "$1/pyproject.toml" | cut -d'"' -f2; }
@@ -100,7 +102,7 @@ tasks:
             if rows:
                 print("%s: %d kernels, %d KiB, %d of %d set rows" % (home, said["kernels"], said["bytes"] // 1024, len(rows) - len(left), len(rows)), file=sys.stderr)
             for row in left:
-                print("  machines compile %s: %s" % (row, rows[row]), file=sys.stderr)
+                print("  %s %s" % (row, rows[row]), file=sys.stderr)
             if rows and not said["kernels"]:
                 sys.exit(home + ": its Triton sets compiled for no card row")'
         kernels() { m=$(sed -n '/cozy\.application/,/^\[/s/^default = "\([A-Za-z0-9_.]*\):.*/\1/p' "$1/pyproject.toml"); e=$work/.env-$1
@@ -146,7 +148,7 @@ tasks:
           up=$(for q in $(deps "$p"); do case $changed in *" $q "*) echo "$q" ;; esac; done)
           [ -n "$up" ] || continue
           changed="$changed$p "
-          published "$p" || { echo "$p $(ver "$p") on master is unpublished; release it first: task publish -- $p" >&2; exit 1; }
+          published "$p" || { echo "$p $(ver "$p") on master is unpublished: publish it with what it takes, task publish --$roots$p" >&2; exit 1; }
           ! pinned "$p" || { echo "$p $(ver "$p") is released and already locks $up: nothing to cascade; release it by hand" >&2; exit 1; }
           # The next patch version no hub holds.
           for _ in 1 2 3 4 5 6 7 8 9 10; do
