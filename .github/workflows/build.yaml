@@ -188,22 +188,34 @@ jobs:
           PY
       - name: Install the qualification environment with explicit candidate overrides
         run: |
-          uv venv --python 3.12 "$RUNNER_TEMP/model-data/env"
           python3 - <<'PY'
-          import os
+          import json, os, tomllib
           from pathlib import Path
-          overrides = Path(os.environ['RUNNER_TEMP']) / 'model-data/overrides.txt'
-          overrides.write_text(
+          root = Path(os.environ['RUNNER_TEMP']) / 'model-data'
+          common = (
               'tensorfs @ ' + Path(os.environ['SDK_WHEEL']).as_uri() + '\n' +
               'cozy-runtime @ ' + Path(os.environ['RUNTIME_WHEEL']).as_uri() + '\n' +
               'torchvision @ https://download-r2.pytorch.org/whl/cpu/torchvision-0.29.1%2Bcpu-cp312-cp312-manylinux_2_28_x86_64.whl#sha256=ef220d4b21878c58947851beb7337382897159105f012f0c9c07bf7e84174d7e\n'
           )
+          selected = {}
+          for package in ['minimax-h3', 'sdxl']:
+              lock = tomllib.loads((Path(package) / 'uv.lock').read_text())
+              pins = {row['name']: row['version'] for row in lock['package']
+                      if row['name'] in ['diffusers', 'transformers', 'tokenizers']}
+              assert len(pins) == 3, (package, pins)
+              selected[package] = pins
+              (root / f'overrides-{package}.txt').write_text(common + ''.join(f'{name}=={version}\n' for name, version in sorted(pins.items())))
+          Path('proof/library-pins.json').write_text(json.dumps(selected, indent=2) + '\n')
           PY
-          uv pip install --python "$RUNNER_TEMP/model-data/env/bin/python" -r scripts/typecheck-requirements.txt --override "$RUNNER_TEMP/model-data/overrides.txt" 'torchvision>=0.29.1' 2>&1 | tee proof/install.log
-          uv pip freeze --python "$RUNNER_TEMP/model-data/env/bin/python" > proof/environment.txt
+          for package in minimax-h3 sdxl; do
+            uv venv --python 3.12 "$RUNNER_TEMP/model-data/env-$package"
+            uv pip install --python "$RUNNER_TEMP/model-data/env-$package/bin/python" -r scripts/typecheck-requirements.txt --override "$RUNNER_TEMP/model-data/overrides-$package.txt" 'torchvision>=0.29.1' 2>&1 | tee "proof/install-$package.log"
+            uv pip freeze --python "$RUNNER_TEMP/model-data/env-$package/bin/python" > "proof/environment-$package.txt"
+          done
       - name: Native checkpoint processor and pre-write guard fixtures
         run: |
-          "$RUNNER_TEMP/model-data/env/bin/python" - <<'PY'
+          for package in minimax-h3 sdxl; do
+            QUALIFICATION_PACKAGE="$package" "$RUNNER_TEMP/model-data/env-$package/bin/python" - <<'PY'
           import hashlib, json, os
           from importlib.metadata import version
           from pathlib import Path
@@ -211,20 +223,23 @@ jobs:
           native = Path(tensorfs._ext.__file__)
           actual = hashlib.sha256(native.read_bytes()).hexdigest()
           assert actual == os.environ['TENSORFS_NATIVE_SHA256'], (actual, native)
-          Path('proof/loaded-candidates.json').write_text(json.dumps({
+          Path(f'proof/loaded-candidates-{os.environ["QUALIFICATION_PACKAGE"]}.json').write_text(json.dumps({
               'runtime': version('cozy-runtime'), 'tensorfs': version('tensorfs'),
               'native_extension_sha256': actual,
               'qualification_scope': 'package-source CPU fixtures only; no SDK promotion or security qualification'
           }, indent=2) + '\n')
           PY
-          "$RUNNER_TEMP/model-data/env/bin/python" checks/test_checkpoint_model_data.py 2>&1 | tee proof/checkpoint-model-data.log
-          "$RUNNER_TEMP/model-data/env/bin/python" checks/test_sdxl_checkpoint_assets.py 2>&1 | tee proof/sdxl-checkpoint-assets.log
+          done
+          "$RUNNER_TEMP/model-data/env-minimax-h3/bin/python" checks/test_checkpoint_model_data.py 2>&1 | tee proof/checkpoint-model-data.log
+          "$RUNNER_TEMP/model-data/env-sdxl/bin/python" checks/test_sdxl_checkpoint_assets.py 2>&1 | tee proof/sdxl-checkpoint-assets.log
       - name: Describe and verify the current RC interfaces without running package code
         run: |
           for package in anima sdxl minimax-h3; do
-            "$RUNNER_TEMP/model-data/env/bin/cozy-runtime" --json --dir "$package" --environment-python "$RUNNER_TEMP/model-data/env/bin/python" describe > "proof/interface-$package.json"
+            environment=sdxl
+            if [ "$package" = minimax-h3 ]; then environment=minimax-h3; fi
+            "$RUNNER_TEMP/model-data/env-$environment/bin/cozy-runtime" --json --dir "$package" --environment-python "$RUNNER_TEMP/model-data/env-$environment/bin/python" describe > "proof/interface-$package.json"
           done
-          "$RUNNER_TEMP/model-data/env/bin/python" checks/check_model_data_interfaces.py proof
+          "$RUNNER_TEMP/model-data/env-minimax-h3/bin/python" checks/check_model_data_interfaces.py proof
       - uses: actions/upload-artifact@v4
         if: always()
         with:
