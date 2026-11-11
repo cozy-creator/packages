@@ -7,6 +7,12 @@ on:
   pull_request:
   merge_group:
   workflow_dispatch:
+    inputs:
+      select:
+        description: Test suites to run
+        required: false
+        type: string
+        default: ''
 jobs:
   e2e:
     # Keep the isolated test harness fixed while candidates follow the open RC.
@@ -17,6 +23,7 @@ jobs:
       repo: packages
       ref: ${{ github.event.merge_group.head_sha || github.event.pull_request.head.sha || github.sha }}
       base: ${{ github.event.merge_group.base_sha || github.event.pull_request.base.sha }}
+      select: ${{ inputs.select }}
       creator_ref: c445e313128bc476031c7bfd4d01c4ef40bf30d8
       stack_ref: rc/0.25.0
       runtime_ref: rc/0.25.0
