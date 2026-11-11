@@ -8,6 +8,40 @@ on:
   pull_request:
   merge_group:
   workflow_dispatch:
+    inputs:
+      scope:
+        description: Standard source checks, or the bounded checkpoint-data qualification
+        type: choice
+        options: [standard, model-data]
+        default: standard
+      tensorfs_sha256:
+        description: Reviewed SHA256 of the TensorFS candidate wheel
+        type: string
+        default: ''
+      tensorfs_run:
+        description: Exact existing successful SDK candidate run
+        type: string
+        default: ''
+      tensorfs_artifact:
+        description: Exact artifact from that SDK run
+        type: string
+        default: ''
+      tensorfs_native_sha256:
+        description: Reviewed SHA256 of the TensorFS native extension payload
+        type: string
+        default: 44cc978bd3a9c99bc048b3aa47d05b1e0470ca1c2861e9697cf621873b76af98
+      runtime_run:
+        description: Exact successful Runtime candidate run
+        type: string
+        default: '42999786408'
+      runtime_artifact:
+        description: Exact artifact from that Runtime run
+        type: string
+        default: xs170-runtime-candidate-239d614fbca98b27666cf7948a6f26542d23c175
+      runtime_sha256:
+        description: Reviewed SHA256 of the Runtime wheel
+        type: string
+        default: 74b5099606c079c6c9abc635787982b006d1e50fe704e9b4c474a5adba974e86
 
 concurrency:
   group: build-${{ github.event.merge_group.head_ref || github.event.pull_request.number || github.ref }}
@@ -15,10 +49,11 @@ concurrency:
 
 permissions:
   contents: read
+  actions: read
 
 jobs:
   build:
-    if: github.event_name != 'pull_request'
+    if: github.event_name != 'pull_request' && inputs.scope != 'model-data'
     runs-on: ubuntu-24.04
     # Hang bound, not a work budget.
     timeout-minutes: 15
@@ -55,3 +90,170 @@ jobs:
           restore-keys: typecheck-${{ runner.os }}-${{ hashFiles('scripts/typecheck-requirements.txt') }}-
       - if: steps.scope.outputs.run == 'true'
         run: scripts/typecheck.sh
+
+  model-data:
+    name: checkpoint data (package source only)
+    if: github.event_name == 'workflow_dispatch' && inputs.scope == 'model-data'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    defaults:
+      run:
+        shell: bash
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TENSORFS_SHA256: ${{ inputs.tensorfs_sha256 }}
+      TENSORFS_RUN: ${{ inputs.tensorfs_run }}
+      TENSORFS_ARTIFACT: ${{ inputs.tensorfs_artifact }}
+      TENSORFS_NATIVE_SHA256: ${{ inputs.tensorfs_native_sha256 }}
+      RUNTIME_RUN: ${{ inputs.runtime_run }}
+      RUNTIME_ARTIFACT: ${{ inputs.runtime_artifact }}
+      RUNTIME_SHA256: ${{ inputs.runtime_sha256 }}
+      CUDA_VISIBLE_DEVICES: ''
+      HF_HUB_OFFLINE: '1'
+      TRANSFORMERS_OFFLINE: '1'
+      OMP_NUM_THREADS: '2'
+    steps:
+      - uses: actions/checkout@v5
+      - uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+      - name: Validate immutable candidate inputs
+        run: |
+          mkdir -p proof
+          python3 - <<'PY'
+          import json, os, re
+          from pathlib import Path
+          assert os.environ['TENSORFS_RUN'].isdecimal()
+          assert re.fullmatch(r'[A-Za-z0-9._-]+', os.environ['TENSORFS_ARTIFACT'])
+          assert os.environ['RUNTIME_RUN'].isdecimal()
+          assert re.fullmatch(r'[A-Za-z0-9._-]+', os.environ['RUNTIME_ARTIFACT'])
+          for name in ['TENSORFS_SHA256', 'TENSORFS_NATIVE_SHA256', 'RUNTIME_SHA256']:
+              assert re.fullmatch(r'[0-9a-f]{64}', os.environ[name]), name
+          Path('proof/inputs.json').write_text(json.dumps({name: os.environ[name] for name in [
+              'GITHUB_SHA', 'TENSORFS_SHA256', 'TENSORFS_RUN', 'TENSORFS_ARTIFACT',
+              'TENSORFS_NATIVE_SHA256', 'RUNTIME_RUN', 'RUNTIME_ARTIFACT', 'RUNTIME_SHA256'
+          ]}, indent=2) + '\n')
+          PY
+          gh api "repos/cozy-creator/cozy-runtime/actions/runs/$RUNTIME_RUN" --jq '{head_sha,status,conclusion}' > proof/runtime-run.json
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          run = json.loads(Path('proof/runtime-run.json').read_text())
+          assert run['status'] == 'completed' and run['conclusion'] == 'success', run
+          assert run['head_sha'] == '239d614fbca98b27666cf7948a6f26542d23c175', run
+          PY
+          gh api "repos/cozy-creator/cozy-creator/actions/runs/$TENSORFS_RUN" --jq '{head_sha,status,conclusion}' > proof/tensorfs-run.json
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          run = json.loads(Path('proof/tensorfs-run.json').read_text())
+          assert run['status'] == 'completed' and run['conclusion'] == 'success', run
+          PY
+      - uses: actions/download-artifact@v4
+        with:
+          repository: cozy-creator/cozy-runtime
+          run-id: ${{ inputs.runtime_run }}
+          name: ${{ inputs.runtime_artifact }}
+          github-token: ${{ github.token }}
+          path: ${{ runner.temp }}/model-data/runtime
+      - uses: actions/download-artifact@v4
+        with:
+          repository: cozy-creator/cozy-creator
+          run-id: ${{ inputs.tensorfs_run }}
+          name: ${{ inputs.tensorfs_artifact }}
+          github-token: ${{ github.token }}
+          path: ${{ runner.temp }}/model-data/sdk
+      - name: Verify the reviewed wheels
+        run: |
+          python3 - <<'PY'
+          import hashlib, json, os
+          from pathlib import Path
+          wheels = list((Path(os.environ['RUNNER_TEMP']) / 'model-data/runtime').rglob('*.whl'))
+          assert len(wheels) == 1, wheels
+          runtime = wheels[0]
+          actual = hashlib.sha256(runtime.read_bytes()).hexdigest()
+          assert actual == os.environ['RUNTIME_SHA256'], (actual, runtime)
+          wheels = list((Path(os.environ['RUNNER_TEMP']) / 'model-data/sdk').rglob('tensorfs-*-cp311-abi3-*x86_64.whl'))
+          assert len(wheels) == 1, wheels
+          sdk = wheels[0]
+          sdk_hash = hashlib.sha256(sdk.read_bytes()).hexdigest()
+          assert sdk_hash == os.environ['TENSORFS_SHA256'], (sdk_hash, sdk)
+          with Path(os.environ['GITHUB_ENV']).open('a') as output:
+              output.write(f'RUNTIME_WHEEL={runtime}\nSDK_WHEEL={sdk}\n')
+          Path('proof/verified-wheels.json').write_text(json.dumps({
+              'runtime': {'filename': runtime.name, 'sha256': actual},
+              'tensorfs': {'filename': sdk.name, 'sha256': sdk_hash},
+              'qualification_scope': 'package source, metadata and CPU processor fixtures only; no SDK promotion or security qualification'
+          }, indent=2) + '\n')
+          PY
+      - name: Install the qualification environment with explicit candidate overrides
+        id: environments
+        run: |
+          python3 - <<'PY'
+          import json, os, tomllib
+          from pathlib import Path
+          root = Path(os.environ['RUNNER_TEMP']) / 'model-data'
+          torch_source = next(line for line in Path('scripts/typecheck-requirements.txt').read_text().splitlines() if line.startswith('torch @ '))
+          common = (
+              'tensorfs @ ' + Path(os.environ['SDK_WHEEL']).as_uri() + '\n' +
+              'cozy-runtime @ ' + Path(os.environ['RUNTIME_WHEEL']).as_uri() + '\n' +
+              torch_source + '\n' +
+              'torchvision @ https://download-r2.pytorch.org/whl/cpu/torchvision-0.29.1%2Bcpu-cp312-cp312-manylinux_2_28_x86_64.whl#sha256=ef220d4b21878c58947851beb7337382897159105f012f0c9c07bf7e84174d7e\n'
+          )
+          selected = {}
+          for package in ['minimax-h3', 'sdxl']:
+              lock = tomllib.loads((Path(package) / 'uv.lock').read_text())
+              pins = {row['name']: row['version'] for row in lock['package']
+                      if row['name'] in ['diffusers', 'transformers', 'tokenizers']}
+              assert len(pins) == 3, (package, pins)
+              selected[package] = pins
+              (root / f'overrides-{package}.txt').write_text(common)
+          Path('proof/library-pins.json').write_text(json.dumps(selected, indent=2) + '\n')
+          PY
+          for package in minimax-h3 sdxl; do
+            uv export --project "$package" --frozen --no-dev --no-emit-project --no-hashes --no-header --format requirements-txt > "proof/requirements-$package.txt"
+            uv venv --python 3.12 "$RUNNER_TEMP/model-data/env-$package"
+            uv pip install --python "$RUNNER_TEMP/model-data/env-$package/bin/python" -r "proof/requirements-$package.txt" --override "$RUNNER_TEMP/model-data/overrides-$package.txt" torch torchvision 2>&1 | tee "proof/install-$package.log"
+            uv pip freeze --python "$RUNNER_TEMP/model-data/env-$package/bin/python" > "proof/environment-$package.txt"
+          done
+      - name: Verify the installed native candidate payloads
+        id: loaded
+        run: |
+          for package in minimax-h3 sdxl; do
+            QUALIFICATION_PACKAGE="$package" "$RUNNER_TEMP/model-data/env-$package/bin/python" - <<'PY'
+          import hashlib, json, os
+          from importlib.metadata import version
+          from pathlib import Path
+          import tensorfs._ext
+          native = Path(tensorfs._ext.__file__)
+          actual = hashlib.sha256(native.read_bytes()).hexdigest()
+          assert actual == os.environ['TENSORFS_NATIVE_SHA256'], (actual, native)
+          Path(f'proof/loaded-candidates-{os.environ["QUALIFICATION_PACKAGE"]}.json').write_text(json.dumps({
+              'runtime': version('cozy-runtime'), 'tensorfs': version('tensorfs'),
+              'native_extension_sha256': actual,
+              'qualification_scope': 'package-source CPU fixtures only; no SDK promotion or security qualification'
+          }, indent=2) + '\n')
+          PY
+          done
+      - name: H3 and Anima checkpoint processor and pre-write guard fixtures
+        run: |
+          "$RUNNER_TEMP/model-data/env-minimax-h3/bin/python" checks/test_checkpoint_model_data.py 2>&1 | tee proof/checkpoint-model-data.log
+      - name: SDXL checkpoint tokenizer fixtures
+        if: always() && steps.loaded.outcome == 'success'
+        run: |
+          "$RUNNER_TEMP/model-data/env-sdxl/bin/python" checks/test_sdxl_checkpoint_assets.py 2>&1 | tee proof/sdxl-checkpoint-assets.log
+      - name: Describe and verify the current RC interfaces without running package code
+        if: always() && steps.loaded.outcome == 'success'
+        run: |
+          for package in anima sdxl minimax-h3; do
+            environment=sdxl
+            if [ "$package" = minimax-h3 ]; then environment=minimax-h3; fi
+            "$RUNNER_TEMP/model-data/env-$environment/bin/cozy-runtime" --json --dir "$package" --environment-python "$RUNNER_TEMP/model-data/env-$environment/bin/python" describe > "proof/interface-$package.json"
+          done
+          "$RUNNER_TEMP/model-data/env-minimax-h3/bin/python" checks/check_model_data_interfaces.py proof
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: model-data-${{ github.sha }}
+          path: proof
+          retention-days: 14

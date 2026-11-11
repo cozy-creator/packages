@@ -102,7 +102,7 @@ The result is `video` (768p mp4), `latents` (its own, which a pickup resumes and
   at tau 0.5, with EasyCache; standard 10 dense at tau 1.0; draft that with FirstBlockCache.
 - **Length.** A segment renders whole seconds on H3's 17n+5 frame grid, so the video can run up to a second past its
   beats.
-- **Models.** `minimaxai/minimax-h3@1.0.0-rc.7` and `alibaba-pai/minimax-h3-turbo-lora@1.0.1`.
+- **Models.** `minimaxai/minimax-h3@1.0.0-rc.8` and `alibaba-pai/minimax-h3-turbo-lora@1.0.1`.
   `model.base_model=<checkpoint>` and `--lora <org/lora>[,strength]` serve every segment; a
   LoRA trained on the other transformer than a segment runs is applied to it, with a warning. Edit's LoRAs are
   Alissonerdx's ([Minimax-H3-ComfyUI](https://huggingface.co/Alissonerdx/Minimax-H3-ComfyUI)), each at strength 1.0.

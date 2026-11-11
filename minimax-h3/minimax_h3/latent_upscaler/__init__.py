@@ -4,27 +4,49 @@ the ComfyUI node does to the already-normalized latents it receives."""
 
 from __future__ import annotations
 
-import json
-from importlib.resources import files
+import math
 from typing import cast
 
+import msgspec
 import torch
 from cozy_runtime.accel import sequence_parallel
-from cozy_runtime.author import Config, Loader, Model, uses_components
+from cozy_runtime.author import Config, InvalidRequest, Loader, Model, uses_components
 
 from .architecture import LatentResizer3D
 
 ARCHITECTURE = "minimax-h3-latent-upscaler-3d-conv-v1"
-_STATS = json.loads(files(__name__).joinpath("config.json").read_text())
-MEAN = torch.tensor(_STATS["latent_normalization"]["mean"]).view(1, -1, 1, 1, 1)
-STD = torch.tensor(_STATS["latent_normalization"]["std"]).view(1, -1, 1, 1, 1)
+
+
+class _Normalization(msgspec.Struct, frozen=True):
+    enabled: bool
+    mean: tuple[float, ...]
+    std: tuple[float, ...]
+
+
+def _normalization(config: Config) -> _Normalization:
+    stats = config.section("latent_normalization").typed(_Normalization)
+    if not stats.enabled:
+        raise InvalidRequest(
+            "latent_normalization.enabled must be true", code="config_invalid",
+            fields=["latent_normalization.enabled"],
+        )
+    for name, values in (("mean", stats.mean), ("std", stats.std)):
+        if len(values) != 24 or any(
+            not math.isfinite(value) or (name == "std" and value <= 0) for value in values
+        ):
+            raise InvalidRequest(
+                f"latent_normalization.{name} must contain 24 finite {'positive ' if name == 'std' else ''}numbers",
+                code="config_invalid", fields=[f"latent_normalization.{name}"],
+            )
+    return stats
 
 
 class UpscalerGraph:
     def __init__(self, config: Config) -> None:
-        # One component, so the construction config is the TensorFS table's own document.
+        # The checkpoint owns the architecture identity and learned normalization.
         if config.mapping().get("architecture") != ARCHITECTURE:
             raise ValueError("the latent upscaler requires LBH-123-AI's 3D-conv v1 checkpoint")
+        self.normalization = _normalization(config)
         self.components = {"upscaler": LatentResizer3D().eval().bfloat16()}
 
 
@@ -52,7 +74,9 @@ class H3LatentUpscaler(Model[UpscalerGraph]):
             raise ValueError("learned latent upscaling supports spatial factors from 1 to 4")
         model = self.graph.components["upscaler"]
         device = next(model.parameters()).device
-        mean, std = MEAN.to(device), STD.to(device)
+        stats = self.graph.normalization
+        mean = torch.tensor(stats.mean, dtype=torch.float32, device=device).view(1, -1, 1, 1, 1)
+        std = torch.tensor(stats.std, dtype=torch.float32, device=device).view(1, -1, 1, 1, 1)
         scale = (height / in_height + width / in_width) / 2.0
         with torch.inference_mode():
             normalized = ((latents.to(device, torch.float32) - mean) / std).to(torch.bfloat16)
