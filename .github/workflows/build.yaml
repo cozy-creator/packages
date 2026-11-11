@@ -192,9 +192,11 @@ jobs:
           import json, os, tomllib
           from pathlib import Path
           root = Path(os.environ['RUNNER_TEMP']) / 'model-data'
+          torch_source = next(line for line in Path('scripts/typecheck-requirements.txt').read_text().splitlines() if line.startswith('torch @ '))
           common = (
               'tensorfs @ ' + Path(os.environ['SDK_WHEEL']).as_uri() + '\n' +
               'cozy-runtime @ ' + Path(os.environ['RUNTIME_WHEEL']).as_uri() + '\n' +
+              torch_source + '\n' +
               'torchvision @ https://download-r2.pytorch.org/whl/cpu/torchvision-0.29.1%2Bcpu-cp312-cp312-manylinux_2_28_x86_64.whl#sha256=ef220d4b21878c58947851beb7337382897159105f012f0c9c07bf7e84174d7e\n'
           )
           selected = {}
@@ -204,12 +206,13 @@ jobs:
                       if row['name'] in ['diffusers', 'transformers', 'tokenizers']}
               assert len(pins) == 3, (package, pins)
               selected[package] = pins
-              (root / f'overrides-{package}.txt').write_text(common + ''.join(f'{name}=={version}\n' for name, version in sorted(pins.items())))
+              (root / f'overrides-{package}.txt').write_text(common)
           Path('proof/library-pins.json').write_text(json.dumps(selected, indent=2) + '\n')
           PY
           for package in minimax-h3 sdxl; do
+            uv export --project "$package" --frozen --no-dev --no-emit-project --no-hashes --no-header --format requirements-txt > "proof/requirements-$package.txt"
             uv venv --python 3.12 "$RUNNER_TEMP/model-data/env-$package"
-            uv pip install --python "$RUNNER_TEMP/model-data/env-$package/bin/python" -r scripts/typecheck-requirements.txt --override "$RUNNER_TEMP/model-data/overrides-$package.txt" 'torchvision>=0.29.1' 2>&1 | tee "proof/install-$package.log"
+            uv pip install --python "$RUNNER_TEMP/model-data/env-$package/bin/python" -r "proof/requirements-$package.txt" --override "$RUNNER_TEMP/model-data/overrides-$package.txt" torch torchvision 2>&1 | tee "proof/install-$package.log"
             uv pip freeze --python "$RUNNER_TEMP/model-data/env-$package/bin/python" > "proof/environment-$package.txt"
           done
       - name: Native checkpoint processor and pre-write guard fixtures
