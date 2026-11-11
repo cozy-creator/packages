@@ -226,8 +226,8 @@ qwen-image-2 = { index = "tensorhub" }
 ```
 
 Creator writes the `tensorhub` index (`<hub>/v1/index/<account>/simple/`, explicit)
-for the command's Hub and account, so lock with `cozy package lock`, not raw
-`uv lock`. uv resolves this distribution only from that index. Run its functions as managed
+for the command's Hub and account, so lock with `task lock -- <package>` (or any `cozy run` of it),
+not raw `uv lock`. uv resolves this distribution only from that index. Run its functions as managed
 calls:
 
 ```python

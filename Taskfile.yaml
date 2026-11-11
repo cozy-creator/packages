@@ -6,13 +6,17 @@ vars:
   HUBS: https://tensorhub.com http://127.0.0.1:8819
   IMAGE_TORCH: torch==2.15.0 torchvision==0.29.2 # what the Hub's current worker image carries (its tag): a lock carries none (cl-715)
   YANKED: --yanked # `YANKED=` publishes live: a release proven before its publish (0.22.1's hard cut)
-  UV_LOCK: uvx -q uv@0.12.24 lock # the uv `cozy package publish` locks with (cozy-creator platform::tools::UV_VERSION)
 
 tasks:
   typecheck:
     desc: mypy --strict against the real Runtime and libraries; only errors missing from .mypy-baseline.txt fail (prune drops fixed ones)
     cmds:
       - scripts/typecheck.sh {{.CLI_ARGS}}
+
+  lock:
+    desc: "Lock a package as its publish will (root index of LOCK_HUB, Torch left to the machine): task lock -- qwen-image-2 [--upgrade-package=sdxl]"
+    cmds:
+      - LOCK_HUB={{.LOCK_HUB}} scripts/lock.sh {{.CLI_ARGS}}
 
   # First-party packages publish at the root namespace (`--root`, Hub admins). Locks pin first-party callees exactly, so each release of X is followed by one of every package
   # whose pyproject takes X from the Hub (`{ index = "tensorhub" }`): relocked to it, patch-bumped, pushed to master, then published.
@@ -72,15 +76,9 @@ tasks:
         for r in $roots; do on=$(held "$r")
           [ -z "$on" ] || { echo "$r $(ver "$r") already exists on $on: bump its version on master; nothing published" >&2; exit 1; }
         done
-        # The lock `cozy package publish` makes (cozy-creator crates/calcifer/src/hub/author.rs, `Stage`): uv in a copy whose
-        # Torch layer is the machine's and whose `tensorhub` sources take the root index. A root relocks with no upgrade, so
-        # master holds the lock it publishes; a package with none gets one.
-        index={{.LOCK_HUB}}/v1/index/_/simple/
-        relock() { p=$1 s=$work/.lock/$1; shift; rm -rf "$s"; mkdir -p "$s"; cp "$p/pyproject.toml" "$s/"; [ ! -f "$p/uv.lock" ] || cp "$p/uv.lock" "$s/"
-          grep -qx '\[tool\.uv\]' "$s/pyproject.toml" || printf '\n[tool.uv]\n' >> "$s/pyproject.toml"
-          sed -i '/^\[tool\.uv\]$/a exclude-dependencies = ["torch", "torchvision", "torchaudio", "triton"]' "$s/pyproject.toml"
-          [ -z "$(deps "$p")" ] || printf '\n[[tool.uv.index]]\nname = "tensorhub"\nurl = "%s"\nexplicit = true\n' "$index" >> "$s/pyproject.toml"
-          (cd "$s" && {{.UV_LOCK}} --python 3.12 "$@"); cp "$s/uv.lock" "$p/uv.lock"; }
+        # The lock `cozy package publish` makes (scripts/lock.sh). A root relocks with no upgrade, so master holds the lock it
+        # publishes; a package with none gets one.
+        relock() { LOCK_HUB={{.LOCK_HUB}} scripts/lock.sh "$@"; }
         pairs() { awk -F'"' '/^name = /{n=$2} /^version = /{print n, $2}'; }
         # The Triton sets the package's import declares, compiled on this CPU for every card row, ship in the release: each
         # into `_triton` beside the top-level module that declares it (its home, where machines look), which need not be the
@@ -106,7 +104,7 @@ tasks:
             if rows and not said["kernels"]:
                 sys.exit(home + ": its Triton sets compiled for no card row")'
         kernels() { m=$(sed -n '/cozy\.application/,/^\[/s/^default = "\([A-Za-z0-9_.]*\):.*/\1/p' "$1/pyproject.toml"); e=$work/.env-$1
-          bind=; [ -z "$(deps "$1")" ] || bind="--index tensorhub=$index"
+          bind=; [ -z "$(deps "$1")" ] || bind="--index tensorhub={{.LOCK_HUB}}/v1/index/_/simple/"
           (cd "$1" && UV_PROJECT_ENVIRONMENT=$e uv sync -q --frozen --no-dev --python 3.12 $bind)
           VIRTUAL_ENV=$e uv pip install -q {{.IMAGE_TORCH}}
           (cd "$1" && CUDA_VISIBLE_DEVICES= nice -n 19 "$e/bin/python" -I -c "$prebuild" "$m" "$work/.kernels/$1") >/dev/null; }
