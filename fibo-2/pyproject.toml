@@ -4,7 +4,7 @@ version = "0.7.0"
 description = "Cozy text-to-image and image editing with Bria Fibo 2.0, Dev and Edit Turbo"
 requires-python = ">=3.12"
 dependencies = [
-    "cozy-runtime[adapters,media]>=0.44.0,<0.45",
+    "cozy-runtime[adapters,media]>=0.45.0,<0.46",
     # BriaFibo2Pipeline is in Diffusers main only (#14991, merged 2026-10-20).
     "diffusers @ git+https://github.com/huggingface/diffusers@48cdbaef5ee3d718aaee392b44f2099ae511c4a5",
     "msgspec>=0.19",
@@ -47,6 +47,3 @@ explicit = true
 [tool.uv.sources]
 torch = { index = "pytorch-cu130", marker = "sys_platform == 'win32'" }
 torchvision = { index = "pytorch-cu130", marker = "sys_platform == 'win32'" }
-# The Runtime with the simplified author API (xs-161) by git rev until it publishes: the release
-# relocks to PyPI.
-cozy-runtime = { git = "https://github.com/cozy-creator/cozy-runtime", rev = "8ad575e66647dc29bf3217f496497de69b5e07e7" }

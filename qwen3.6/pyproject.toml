@@ -1,10 +1,10 @@
 [project]
 name = "qwen3.6"
-version = "0.5.0"
+version = "0.6.0"
 description = "Qwen3.6: single-turn questions about text, images and videos"
 requires-python = ">=3.12"
 dependencies = [
-    "cozy-runtime[media]>=0.44.0,<0.45",
+    "cozy-runtime[media]>=0.45.0,<0.46",
     "msgspec>=0.19",
     "numpy>=1.26",
     "pillow>=12",

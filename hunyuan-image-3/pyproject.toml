@@ -4,7 +4,7 @@ version = "0.8.0"
 description = "Cozy text-to-image and reference editing with Tencent's HunyuanImage 3.0 Instruct and Instruct-Distil"
 requires-python = ">=3.12"
 dependencies = [
-    "cozy-runtime[media]>=0.44.0,<0.45",
+    "cozy-runtime[media]>=0.45.0,<0.46",
     "einops>=0.8",
     "msgspec>=0.19",
     "numpy>=1.26",
@@ -45,6 +45,3 @@ explicit = true
 [tool.uv.sources]
 torch = { index = "pytorch-cu130", marker = "sys_platform == 'win32'" }
 torchvision = { index = "pytorch-cu130", marker = "sys_platform == 'win32'" }
-# The Runtime with the simplified author API (xs-161) by git rev until it publishes: the release
-# relocks to PyPI.
-cozy-runtime = { git = "https://github.com/cozy-creator/cozy-runtime", rev = "8ad575e66647dc29bf3217f496497de69b5e07e7" }

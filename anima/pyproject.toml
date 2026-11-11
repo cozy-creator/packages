@@ -4,7 +4,7 @@ version = "0.8.0"
 description = "Anima anime text-to-image package for Cozy"
 requires-python = ">=3.12,<3.15"
 dependencies = [
-    "cozy-runtime[media]>=0.44.0,<0.45",
+    "cozy-runtime[media]>=0.45.0,<0.46",
     "diffusers>=0.40.0",
     "hf-xet>=1.6.0",
     "msgspec>=0.19",
@@ -57,6 +57,3 @@ disallow_untyped_calls = false
 [tool.uv.sources]
 torch = { index = "pytorch-cu130", marker = "sys_platform == 'win32'" }
 torchvision = { index = "pytorch-cu130", marker = "sys_platform == 'win32'" }
-# The Runtime with the simplified author API (xs-161) by git rev until it publishes: the release
-# relocks to PyPI.
-cozy-runtime = { git = "https://github.com/cozy-creator/cozy-runtime", rev = "8ad575e66647dc29bf3217f496497de69b5e07e7" }
