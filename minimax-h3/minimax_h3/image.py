@@ -69,8 +69,9 @@ HIDDEN_STATES = (13, 19, 25, 31, 36)
 #: Rotary time of every token of the image decoder's one frame (`PH3ImageViTDecoder`).
 FRAME_POSITION = 2.0 * (0.5 / 7) - 1.0
 
-#: The DiT's attention holds at 8 bits, the VAE decoder's too; the text encoder keeps exact attention.
-ATTENTION_BITS: dict[str, Literal[16, 8, 4]] = {"transformer": 8, "vae": 8}
+#: The DiT's attention holds at 8 bits. The VAE decoder's stays exact: its tiles are 261-token sequences, where
+#: Kitchen INT8 decoded 8 MP in 41 s on a 4090 against SDPA's 4.3 s (crona runs 7, 11).
+ATTENTION_BITS: dict[str, Literal[16, 8, 4]] = {"transformer": 8}
 #: The model's components and the upsampler's, by slot.
 IMAGE_COMPONENTS = ("processor", "text_connector", "text_encoder", "transformer", "vae")
 UPSAMPLER_COMPONENTS = ("prompt_upsampler", "prompt_upsampler_processor")
