@@ -25,7 +25,7 @@ from cozy_runtime import vlm
 from anima.model import _tokenizer
 from minimax_h3.official import checkpoint_processor
 from minimax_h3.latent_upscaler import H3LatentUpscaler, _normalization
-from minimax_h3.preparation.job import _produce_lane, _validate_lane_config, retable
+from minimax_h3.preparation.job import _produce_lane, _require_processor_assets, _validate_lane_config, retable
 
 
 @contextmanager
@@ -162,6 +162,45 @@ class H3PreparationConfigTests(unittest.TestCase):
                 self.assertEqual(failure.exception.code, "h3_lane_config")
                 self.assertIn(f"{component}.{field}", str(failure.exception))
                 output.assert_not_called()
+
+    def processor_assets(self):
+        folder = ROOT / "minimax-h3/minimax_h3/processor"
+        return {f"processor/{path.name}": path.read_bytes() for path in folder.iterdir() if path.is_file()}
+
+    def test_complete_source_processor_assets_are_accepted(self):
+        config = self.sections()
+        components = {name: {} for name in config}
+        components["text_encoder"] = self.processor_assets()
+        with checkpoint_data(components, config) as (_, checkpoint):
+            _require_processor_assets(checkpoint)
+
+    def test_missing_processor_asset_refuses_lane_production_before_a_writer(self):
+        config = self.sections()
+        components = {name: {} for name in config}
+        components["text_encoder"] = self.processor_assets()
+        del components["text_encoder"]["processor/vocab.json"]
+        with checkpoint_data(components, config) as (_, checkpoint):
+            output = Mock(side_effect=AssertionError("an incomplete source opened a writer"))
+            context = SimpleNamespace(tensorfs_source=lambda _: checkpoint, output=output)
+            with self.assertRaises(UnsupportedInput) as failure:
+                _produce_lane(context, None, None, "bf16-full")
+            self.assertEqual(failure.exception.code, "h3_processor_assets")
+            self.assertIn("text_encoder/processor/vocab.json", str(failure.exception))
+            output.assert_not_called()
+
+    def test_missing_pruned_processor_refuses_retable_before_a_writer(self):
+        config = self.sections()
+        components = {name: {} for name in config}
+        components["text_encoder"] = self.processor_assets()
+        del components["text_encoder"]["processor/merges.txt"]
+        with checkpoint_data(components, config) as (_, checkpoint):
+            output = Mock(side_effect=AssertionError("an incomplete retable opened a writer"))
+            context = SimpleNamespace(tensorfs_source=lambda _: checkpoint, output=output)
+            with self.assertRaises(UnsupportedInput) as failure:
+                asyncio.run(retable(context, pruned="pruned", full="full", tel=None))
+            self.assertEqual(failure.exception.code, "h3_processor_assets")
+            self.assertIn("text_encoder/processor/merges.txt", str(failure.exception))
+            output.assert_not_called()
 
     def test_retable_refuses_drift_in_either_source_before_opening_a_writer(self):
         valid = self.sections()

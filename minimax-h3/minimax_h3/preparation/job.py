@@ -116,6 +116,22 @@ def _validate_lane_config(source: Checkpoint, *, curve: bool) -> None:
             )
 
 
+def _require_processor_assets(source: Checkpoint) -> None:
+    """A full-model derivation must retain the checkpoint's own processor data."""
+    required = (
+        "processor/merges.txt", "processor/vocab.json", "processor/preprocessor_config.json",
+        "processor/video_preprocessor_config.json", "processor/tokenizer_config.json",
+    )
+    encoder = source.components.get("text_encoder")
+    missing = [name for name in required if encoder is None or name not in encoder.assets]
+    if missing:
+        more = f" and {len(missing) - 1} other processor files" if len(missing) > 1 else ""
+        raise UnsupportedInput(
+            f"H3 source has no text_encoder/{missing[0]}{more}; use an updated H3 checkpoint",
+            code="h3_processor_assets",
+        )
+
+
 def _production_plan(source: Checkpoint, task: Task) -> TimestepPlan:
     return timestep_plan(source, task)
 
@@ -391,6 +407,7 @@ def _produce_lane(
     committed one replays."""
     source = open_source(ctx, weights)
     _validate_lane_config(source, curve=curve)
+    _require_processor_assets(source)
     plans = {task: _production_plan(source, task) for task in DIT_COMPONENT}
     _check_table_budget(plans, MAX_TABLE_BYTES)
     order, carried, computed, widened = lane_rows(name, rows(source), plans, curve)
@@ -762,6 +779,7 @@ async def retable(
     pruned_source, full_source = open_source(ctx, pruned), open_source(ctx, full)
     _validate_lane_config(pruned_source, curve=False)
     _validate_lane_config(full_source, curve=False)
+    _require_processor_assets(pruned_source)
     for task in DIT_COMPONENT:
         _production_plan(pruned_source, task)
     plans = {task: _production_plan(full_source, task) for task in DIT_COMPONENT}

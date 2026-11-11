@@ -25,3 +25,10 @@ H3 lane production and retabling validate all source construction facts before
 opening an output writer. Library version labels and intentional AdaLN/conditioner
 stamps may change; learned VAE and audio normalization values may not be silently
 replaced by the package's supported-constructor reference.
+
+Lane production requires the source's five processor files. Retabling requires them
+on its pruned base, whose assets are retained; its full generating model supplies
+DiT weights and plans, so unused processor data is not required there. Assetless old
+inputs refuse before an output writer opens. Runtime's `Output.inherit` preserves
+all source component assets for fresh lanes; a retable Writer preserves its base
+assets and replaces only the requested timestep plans.
