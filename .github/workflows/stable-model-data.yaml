@@ -64,6 +64,7 @@ jobs:
           cat > "$RUNNER_TEMP/locks/cpu-overrides.txt" <<'CPU'
           torch==2.15.0+cpu
           torchvision==0.29.1+cpu
+          minimax-h3-tools @ https://tensorhub.com/v1/index/_/minimax-h3-tools/0.4.1/minimax_h3_tools-0.4.1-py3-none-any.whl#sha256=5de29a4c8d6be8cff53f757c3a059acfd29b276a513f3708faba38f4bcd6aaec
           CPU
           uv pip install --python .venv-stable/bin/python --index https://download.pytorch.org/whl/cpu --index-strategy unsafe-best-match -r "$RUNNER_TEMP/locks/frozen-requirements.txt" --override "$RUNNER_TEMP/locks/cpu-overrides.txt" torch torchvision
           uv pip freeze --python .venv-stable/bin/python > "$RUNNER_TEMP/locks/environment.txt"
