@@ -26,7 +26,7 @@ dependencies or qualifying a worker image.
 | `qwen3.6/` | Qwen3.6-35B-A3B and 27B: questions about text, images and videos, on Runtime's shared Qwen-VL code (Apache-2.0) |
 | `examples/` | private `main()` scripts for conversions, uploads and diagnostics; run directly with `cozy run` |
 | `*/pyproject.toml` | release metadata; its one `cozy.application` entry point names the package's App |
-| `Taskfile.yaml` | `task publish -- <package>` (release with its dependents) |
+| `Taskfile.yaml` | `task publish -- [--dry-run] <package>` (release with its dependents), `task lock -- <package>` |
 
 ## Boundaries
 

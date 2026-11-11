@@ -10,3 +10,6 @@ __pycache__/
 .task-owner*.md
 .worktree-owner*.md
 .owner-agent/
+
+# `task publish -- --dry-run` wheels
+/dist/

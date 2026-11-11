@@ -6,14 +6,17 @@ Publish a merged package, and everything that locks it, to both Hubs:
 task publish -- qwen-image-2
 ```
 
-It fast-forwards the checkout to `origin/master` and publishes a `git archive` of the package to each of `HUBS`,
-with the Triton sets its import declares compiled on this CPU for every card row into `_triton` beside the module that declares each, against
-the newest Runtime (`RUNTIME`), so a fresh machine's first request runs its fused plans.
-Then, in dependency order, each package whose `uv.lock` holds a republished package is
-relocked to it (`cozy package lock --upgrade-package <it>` against production, plus
+It fast-forwards the checkout to `origin/master`, relocks each named package as its publish will (`task lock`, no
+upgrade, so master holds the lock it publishes) and publishes a `git archive` of it to each of `HUBS`, with the
+Triton sets its import declares compiled on this CPU for every card row into `_triton` beside the module that declares
+each, by the Runtime its lock pins, so a fresh machine's first request runs its fused plans without compiling.
+Then, in dependency order, each package whose pyproject takes a republished package from `tensorhub` is
+relocked to it (`task lock -- <dependent> --upgrade-package=<it>`, plus
 `cozy-runtime` or `tensorfs` when its floor is above the dependent's lock),
 patch-bumped, pushed to master and published the same way. A dependent whose
 master version is unpublished stops it too: its merged changes are not released yet.
+`task publish -- --dry-run qwen-image-2` does all of it but the push and the Hub publish, builds each wheel into
+`dist/` and leaves the checkout as it was; CI runs it as `build.yaml`'s `publish-dry-run` scope.
 Bump the package's version on master first: a version any Hub already holds is refused before
 anything is published, and nothing is ever yanked but what that run just published. A dependent
 takes the next patch version no Hub holds. After a failed run, bump and run again.
@@ -29,10 +32,10 @@ runs `cozy package publish --root` on each Hub, which only Hub admins may do. Mo
 models in their authors' orgs (`minimaxai/minimax-h3@1.0.0-rc.4`); a default with no org names a model we make. First-party package dependencies name the
 `tensorhub` index (`qwen-image-2 = { index = "tensorhub" }`), which is the root's (`/v1/index/_/simple/`).
 
-Commit locks bound to production. After changing dependencies, as a tensorhub.com admin:
+Commit locks bound to production. After changing dependencies:
 
 ```sh
-cozy package lock --root
+task lock -- qwen-image-2
 ```
 
 A published release runs exactly the dependency versions in its `uv.lock`, including

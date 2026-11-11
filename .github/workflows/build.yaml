@@ -10,10 +10,14 @@ on:
   workflow_dispatch:
     inputs:
       scope:
-        description: Standard source checks, or the bounded checkpoint-data qualification
+        description: Standard source checks, the bounded checkpoint-data qualification, or a publish dry run
         type: choice
-        options: [standard, model-data]
+        options: [standard, model-data, publish-dry-run]
         default: standard
+      packages:
+        description: "publish-dry-run: the packages `task publish -- --dry-run` releases, then its cascade"
+        type: string
+        default: ''
       tensorfs_sha256:
         description: Reviewed SHA256 of the TensorFS candidate wheel
         type: string
@@ -53,7 +57,7 @@ permissions:
 
 jobs:
   build:
-    if: github.event_name != 'pull_request' && inputs.scope != 'model-data'
+    if: github.event_name != 'pull_request' && (inputs.scope || 'standard') == 'standard'
     runs-on: ubuntu-24.04
     # Hang bound, not a work budget.
     timeout-minutes: 15
@@ -256,4 +260,38 @@ jobs:
         with:
           name: model-data-${{ github.sha }}
           path: proof
+          retention-days: 14
+
+  # `task publish -- --dry-run`: the release of the named packages and their cascade (relocks, Triton prebuild, wheels)
+  # on this ref, short of the push to master and the Hub publish; the wheels are the artifact.
+  publish-dry-run:
+    name: publish dry run
+    if: github.event_name == 'workflow_dispatch' && inputs.scope == 'publish-dry-run'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v5
+      - uses: astral-sh/setup-uv@v7
+      - uses: arduino/setup-task@v2
+        with:
+          repo-token: ${{ github.token }}
+      - name: cozy (released), which reads the Hub's releases
+        run: |
+          curl -LsSf https://tensorhub.com/install.sh | sh
+          echo "$HOME/.cozy/bin" >> "$GITHUB_PATH"
+      - name: task publish -- --dry-run
+        env:
+          PACKAGES: ${{ inputs.packages }}
+        run: |
+          sudo loginctl enable-linger "$(id -un)"
+          export XDG_RUNTIME_DIR=/run/user/$(id -u)
+          until [ -S "$XDG_RUNTIME_DIR/bus" ]; do sleep 1; done
+          export DBUS_SESSION_BUS_ADDRESS=unix:path=$XDG_RUNTIME_DIR/bus
+          git config user.name "github-actions[bot]"; git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          task publish HUBS=https://tensorhub.com -- --dry-run $PACKAGES
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: publish-dry-run-${{ github.sha }}
+          path: dist
           retention-days: 14
