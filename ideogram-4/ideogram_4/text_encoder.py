@@ -10,8 +10,8 @@ from __future__ import annotations
 
 import json
 import math
-from collections.abc import Sequence
-from typing import Any
+from collections.abc import Callable, Sequence
+from typing import Protocol, cast
 
 import torch
 from cozy_runtime import lm
@@ -34,7 +34,13 @@ from diffusers.pipelines.ideogram4.prompt_enhancer import (
 )
 from tokenizers import Tokenizer
 from torch import nn
-from transformers import AutoConfig, AutoModelForImageTextToText, PreTrainedTokenizerFast
+from transformers import (
+    AutoConfig,
+    AutoModelForImageTextToText,
+    BatchEncoding,
+    PreTrainedTokenizerFast,
+    Qwen3VLForConditionalGeneration,
+)
 from transformers import initialization as transformer_init
 
 COMPONENT = "model"
@@ -49,24 +55,27 @@ def tokenizer(assets: ModelAssets) -> PreTrainedTokenizerFast:
                 "chat_template", "auto_map"):
         config.pop(key, None)
     template = json.loads(assets.read("chat_template.json"))["chat_template"]
-    return PreTrainedTokenizerFast(
+    return PreTrainedTokenizerFast(  # type: ignore[no-untyped-call]  # Transformers' tokenizer __init__ is unannotated
         tokenizer_object=Tokenizer.from_str(assets.read("tokenizer.json").decode()), chat_template=template, **config
     )
 
 
-def language_model(config: Config) -> nn.Module:
+def language_model(config: Config) -> Qwen3VLForConditionalGeneration:
     """Qwen3-VL as Qwen stores it (`model.language_model`, `lm_head`), without its vision tower."""
     with transformer_init.no_init_weights():
-        model = AutoModelForImageTextToText.from_config(AutoConfig.for_model(**config.mapping()), dtype=torch.bfloat16)
+        model: Qwen3VLForConditionalGeneration = AutoModelForImageTextToText.from_config(  # type: ignore[no-untyped-call]  # Transformers' Auto classes are unannotated
+            AutoConfig.for_model(**config.mapping()), dtype=torch.bfloat16
+        )
     model.model.visual = None
-    return model.eval()
+    model.eval()  # type: ignore[no-untyped-call]  # Transformers' eval is unannotated
+    return model
 
 
 def _conditioning_only(model: nn.Module) -> None:
     """Ideogram reads every decoder layer's output up to the last (layer 35, before the final
     norm): the norm and the head are never run, so they are not built."""
-    model.model.language_model.norm = nn.Identity()
-    model.lm_head = nn.Identity()
+    model.set_submodule("model.language_model.norm", nn.Identity())
+    model.set_submodule("lm_head", nn.Identity())
 
 
 class EncoderGraph:
@@ -93,8 +102,11 @@ class QwenEncoder(Model[EncoderGraph]):
         Ideogram's 13 layers concatenated per token, `[tokens, 53248]` in bf16."""
         model = self.graph.components[COMPONENT]
         device = torch.device(str(self.device))
-        messages = [{"role": "user", "content": [{"type": "text", "text": caption}]}]
-        text = self.tokenizer.apply_chat_template(messages, add_generation_prompt=True, tokenize=False)
+        content = [{"type": "text", "text": caption}]
+        # Transformers types a message's content as text; Qwen-VL's template takes these lists.
+        text = self.tokenizer.apply_chat_template(
+            [{"role": "user", "content": content}], add_generation_prompt=True, tokenize=False  # type: ignore[arg-type]
+        )
         ids = self.tokenizer(text, return_tensors="pt", add_special_tokens=False)["input_ids"]
         count = int(ids.shape[1])
         if count > MAX_TOKENS:
@@ -114,14 +126,35 @@ class UpsamplerGraph:
         self.components: dict[str, nn.Module] = {COMPONENT: language_model(config)}
 
 
+class Index(Protocol):
+    """outlines-core's `Index` (it ships no types): a schema compiled over a vocabulary, as states
+    and the token transitions between them. `None` is a token or state outside the schema."""
+
+    def get_initial_state(self) -> int: ...
+
+    def get_next_state(self, state: int, token_id: int) -> int | None: ...
+
+    def get_allowed_tokens(self, state: int) -> list[int] | None: ...
+
+
+class _Processor(Protocol):
+    """outlines' logits processor for a schema; its `index` is what `Schema` steps through."""
+
+    index: Index
+
+
+#: Diffusers' `build_caption_logits_processor`, which is unannotated.
+_caption_processor: Callable[[nn.Module, PreTrainedTokenizerFast], _Processor] = build_caption_logits_processor
+
+
 class Schema:
     """The caption's JSON schema as `lm.generate`'s constraint: the tokens its JSON may take after
     `tokens`, from outlines-core's index of the schema over the tokenizer's vocabulary. It keeps the
     state of the last prefix it was asked about, so a decode's next token costs one transition."""
 
-    def __init__(self, index: Any) -> None:
+    def __init__(self, index: Index) -> None:
         self.index = index
-        self.last: tuple[tuple[int, ...], Any] = ((), index.get_initial_state())
+        self.last: tuple[tuple[int, ...], int] = ((), index.get_initial_state())
 
     def allowed(self, tokens: Sequence[int]) -> Sequence[int]:
         tokens = tuple(tokens)
@@ -129,9 +162,15 @@ class Schema:
         if tokens[: len(done)] != done:
             done, state = (), self.index.get_initial_state()
         for token in tokens[len(done) :]:
-            state = self.index.get_next_state(state, token)
+            following = self.index.get_next_state(state, token)
+            if following is None:
+                raise ValueError(f"token {token} is outside the caption's JSON schema")
+            state = following
         self.last = (tokens, state)
-        return self.index.get_allowed_tokens(state)  # type: ignore[no-any-return]
+        allowed = self.index.get_allowed_tokens(state)
+        if allowed is None:
+            raise ValueError(f"state {state} is outside the caption's JSON schema")
+        return allowed
 
 
 class QwenUpsampler(Model[UpsamplerGraph]):
@@ -141,13 +180,13 @@ class QwenUpsampler(Model[UpsamplerGraph]):
 
     graph: UpsamplerGraph
     tokenizer: PreTrainedTokenizerFast
-    index: Any = None
+    index: Index
 
     def load(self, loader: Loader) -> None:
         self.graph = loader.construct(UpsamplerGraph)
         self.tokenizer = tokenizer(loader.assets)
         # The caption schema's index over the vocabulary, compiled once (Diffusers' schema, outlines-core).
-        self.index = build_caption_logits_processor(self.graph.components[COMPONENT], self.tokenizer).index
+        self.index = _caption_processor(self.graph.components[COMPONENT], self.tokenizer).index
 
     @memoize
     @uses_components(COMPONENT)
@@ -162,9 +201,11 @@ class QwenUpsampler(Model[UpsamplerGraph]):
             {"role": "user", "content": CAPTION_USER_TEMPLATE.format(
                 aspect_ratio=f"{width // divisor}:{height // divisor}", original_prompt=prompt)},
         ]
-        inputs = self.tokenizer.apply_chat_template(
+        encoded = self.tokenizer.apply_chat_template(
             messages, add_generation_prompt=True, tokenize=True, return_tensors="pt", return_dict=True
-        ).to(torch.device(str(self.device)))
+        )
+        # cast: tokenized with return_dict, the template returns the encoding.
+        inputs = cast("BatchEncoding[torch.Tensor]", encoded).to(torch.device(str(self.device)))
         stop = self.tokenizer.eos_token_id
         # Transformers' default top-k (50), which Diffusers' `generate_captions` sampled under.
         out = lm.generate(model, inputs, max_new_tokens=MAX_TOKENS, stop=[stop], pad=stop,  # type: ignore[arg-type]  # Qwen3-VL's PreTrainedModel

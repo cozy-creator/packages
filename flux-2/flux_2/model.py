@@ -117,18 +117,20 @@ def text_encoder(config: Mapping[str, Any]) -> nn.Module:  # type: ignore[explic
     return model
 
 
-def _conditioning_only(encoder: Any, depth: int) -> None:  # type: ignore[explicit-any]  # Mistral3's or Qwen3's causal LM, by family
+def _conditioning_only(encoder: nn.Module, depth: int) -> None:
     """FLUX.2 reads its text encoder's hidden states up to `depth`: the later layers, the final norm
     and the head are never run, so they are not built (their stored bytes are skipped). With the norm
     an identity, hidden state `depth` stays the pre-norm output. [dev]'s prompts are text only, so
-    Mistral3's vision tower and projector are not built either."""
-    inner = encoder.model
-    language = inner.language_model if hasattr(inner, "language_model") else inner
-    language.layers = nn.ModuleList(list(language.layers)[:depth])
-    language.norm = nn.Identity()
-    encoder.lm_head = nn.Identity()
+    Mistral3's vision tower and projector are not built either. `encoder` is Mistral3's or Qwen3's
+    causal LM, by family."""
+    inner = encoder.get_submodule("model")
+    language = inner.get_submodule("language_model") if hasattr(inner, "language_model") else inner
+    language.set_submodule("layers", nn.ModuleList(list(language.get_submodule("layers").children())[:depth]))
+    language.set_submodule("norm", nn.Identity())
+    encoder.set_submodule("lm_head", nn.Identity())
     if language is not inner:
-        inner.vision_tower = inner.multi_modal_projector = None
+        setattr(inner, "vision_tower", None)  # noqa: B010  # a module slot emptied: nn.Module's __setattr__ types no None
+        setattr(inner, "multi_modal_projector", None)  # noqa: B010
 
 
 def _armed(transformer: nn.Module, path: str) -> lora.Factors | None:
