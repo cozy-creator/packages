@@ -1,0 +1,15 @@
+RelayVSR inference: kopperx/RelayVSR e856773350f53036d825404c9ea9228e6dffadca (Apache-2.0).
+https://github.com/kopperx/RelayVSR
+Its Wan implementation: Copyright 2025 The Wan Team and The HuggingFace Team (Apache-2.0).
+Changes: `relayvsr/wan.py`, `relayvsr/flash.py` and `relayvsr/kernels.py` re-implement the
+streaming inference path of `refvsr_inference/models/wan/{transformer,lq_proj,spatial_attention}.py`,
+`refvsr_inference/models/flash/{model,_flashvsr_ops,_local_attention,_local_attention_triton}.py`
+and `refvsr_inference/runtime/streaming.py` with the checkpoints' module names: training, block-causal
+and FlexAttention paths, gradient checkpointing, Diffusers mixins and checkpoint loading are removed;
+the one-step flow-matching update is written out (t=1000, sigma 1 to 0); the timestep and text
+conditioning are recomputed per keyframe instead of cached; keyframe K/V are held by the Runtime's
+memory; RoPE tables are built per call instead of held as buffers. Both Triton kernels take shapes,
+strides and windows as arguments instead of compile-time constants, and the Flash kernel serves only
+its forward with no plane mask or relative RoPE. Masked SDPA over row bands replaces upstream's
+reference paths. Noise comes from the request's CPU generator. Output frames are rounded from F32
+rather than truncated from bf16, and are area-scaled to the requested size.

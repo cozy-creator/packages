@@ -70,6 +70,7 @@ from .source import (
 )
 
 from ..application import app
+from ..model import H3Model
 
 
 def _asset(name: str) -> bytes:
@@ -708,12 +709,12 @@ def quantize_lane(
 #: plan, since what a lane encodes depends on what the source still holds plain. `--lane bf16|bf16-full`
 #: on such a plain lane writes its normalisations alone (the lane functions write those lanes from the
 #: converted source).
-BF16 = Recipe(lane="bf16", model=Model, plan=DerivationHook(quantize_lane))
-BF16_FULL = Recipe(lane="bf16-full", model=Model, plan=DerivationHook(quantize_lane))
-FP8 = Recipe(lane="fp8", model=Model, plan=DerivationHook(quantize_lane))
-INT8 = Recipe(lane="int8", model=Model, plan=DerivationHook(quantize_lane))
-NVFP4 = Recipe(lane="nvfp4", model=Model, plan=DerivationHook(quantize_lane))
-W4A8 = Recipe(lane="w4a8", model=Model, plan=DerivationHook(quantize_lane))
+BF16 = Recipe(lane="bf16", model=H3Model, plan=DerivationHook(quantize_lane))
+BF16_FULL = Recipe(lane="bf16-full", model=H3Model, plan=DerivationHook(quantize_lane))
+FP8 = Recipe(lane="fp8", model=H3Model, plan=DerivationHook(quantize_lane))
+INT8 = Recipe(lane="int8", model=H3Model, plan=DerivationHook(quantize_lane))
+NVFP4 = Recipe(lane="nvfp4", model=H3Model, plan=DerivationHook(quantize_lane))
+W4A8 = Recipe(lane="w4a8", model=H3Model, plan=DerivationHook(quantize_lane))
 
 
 #: The function that writes each lane: the pruned lanes' functions keep their operation names.
@@ -863,3 +864,6 @@ from .regenerate import regenerate_lora  # noqa: E402
 
 # New bytes: the rank-576 factors cast to bf16 (6.2 GB) and the refine tables.
 app.entrypoint(regenerate_lora, name="regenerate-lora", weights=(WeightsOutput("bf16", 7 << 30),))
+
+# P-H3-Image's pruned lane function and quantized recipes.
+from . import image as _image_lanes  # noqa: E402, F401
