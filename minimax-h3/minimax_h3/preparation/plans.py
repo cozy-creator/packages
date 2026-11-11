@@ -11,7 +11,8 @@ import math
 import struct
 from dataclasses import dataclass
 from itertools import pairwise
-from typing import Any, Literal, cast
+from collections.abc import Mapping
+from typing import Literal, TypedDict, cast
 
 from cozy_runtime.author import canonical_json
 
@@ -38,6 +39,35 @@ _SCHEDULE = {"transformer_evaluations", "sigma_grid_points", "evaluations", "ter
 REFINE = "refine"
 
 
+class ModulationClass(TypedDict):
+    """One evaluation's row class, as the plan declares it."""
+
+    name: str
+    timestep: str
+    modality: str
+    modality_tag: int
+    presence: str
+
+
+class BlockKey(TypedDict):
+    index: int
+    timestep: str
+    modality: str
+    modality_tag: int
+
+
+class FinalKey(TypedDict):
+    index: int
+    timestep: str
+
+
+class TableKeys(TypedDict):
+    """The plan's table row labels: each block-modulation and final-normalization row."""
+
+    block_modulation: list[BlockKey]
+    final_normalization: list[FinalKey]
+
+
 @dataclass(frozen=True, slots=True)
 class TimestepPlan:
     task: Task
@@ -51,8 +81,9 @@ class TimestepPlan:
     refine: bool = False
 
     @property
-    def table_keys(self) -> dict[str, Any]:
-        return cast(dict[str, Any], canonical_json.decode(self.canonical_bytes)["table_keys"])
+    def table_keys(self) -> TableKeys:
+        keys: TableKeys = canonical_json.decode(self.canonical_bytes)["table_keys"]
+        return keys
 
     @property
     def shifts(self) -> tuple[float, float]:
@@ -77,14 +108,14 @@ def _hex_f32(value: object, field: str) -> float:
     return parsed
 
 
-def _closed(value: object, keys: set[str], field: str) -> dict[str, Any]:
+def _closed(value: object, keys: set[str], field: str) -> dict[str, object]:
     if not isinstance(value, dict) or set(value) != keys:
         actual = sorted(value) if isinstance(value, dict) else type(value).__name__
         raise ValueError(f"{field} has fields {actual}, expected {sorted(keys)}")
-    return cast(dict[str, Any], value)
+    return cast(dict[str, object], value)
 
 
-def _canonical(document: dict[str, Any]) -> bytes:
+def _canonical(document: Mapping[str, object]) -> bytes:
     return canonical_json.encode(document)
 
 
@@ -98,7 +129,7 @@ _EXPECTED_CLASSES = (
 
 
 def _parse_schedule(
-    value: object, field: str, class_rows: list[dict[str, Any]], *, refine: bool = False
+    value: object, field: str, class_rows: list[ModulationClass], *, refine: bool = False
 ) -> tuple[int, float]:
     """Validate one schedule, append its row classes in order, return its step count and first
     video sigma."""
@@ -163,7 +194,7 @@ def _parse_schedule(
                 raise ValueError(f"{name} row class {position} changed meaning")
             if _hex_f32(item["timestep"], f"{name} timestep") != timestep:
                 raise ValueError(f"{name} row class {position} has the wrong timestep")
-            class_rows.append(item)
+            class_rows.append(cast(ModulationClass, item))  # every field checked above
     if refine:
         if not 0.0 < video_sigmas[0] <= 1.0 or any(a <= b or b <= 0.0 for a, b in pairwise(video_sigmas)):
             raise ValueError(f"{field} video sigmas are not strictly descending within (0, 1]")
@@ -213,7 +244,7 @@ def parse_plan(raw: bytes, *, task: str) -> TimestepPlan:
     schedules = document["schedules"]
     if not isinstance(schedules, list) or not schedules:
         raise ValueError("the plan must list at least one schedule")
-    class_rows: list[dict[str, Any]] = []
+    class_rows: list[ModulationClass] = []
     parsed = [
         _parse_schedule(value, f"schedules[{index}]", class_rows, refine=refine)
         for index, value in enumerate(schedules)
@@ -229,8 +260,8 @@ def parse_plan(raw: bytes, *, task: str) -> TimestepPlan:
         {"block_modulation", "final_normalization"},
         "table_keys",
     )
-    block_expected: list[dict[str, Any]] = []
-    final_expected: list[dict[str, Any]] = []
+    block_expected: list[BlockKey] = []
+    final_expected: list[FinalKey] = []
     seen_blocks: set[tuple[str, int]] = set()
     seen_final: set[str] = set()
     for item in class_rows:
@@ -273,11 +304,13 @@ def refine_plan(task: Task, schedules: list[tuple[float, ...]], *, shift: float)
     def hexf(value: float) -> str:
         return _f32(value).hex()
 
-    def modulation(name: str, timestep: float, modality: str, tag: int, presence: str) -> dict[str, Any]:
+    def modulation(name: str, timestep: float, modality: str, tag: int, presence: str) -> ModulationClass:
         return {"name": name, "timestep": hexf(timestep), "modality": modality,
                 "modality_tag": tag, "presence": presence}  # fmt: skip
 
-    document_schedules, blocks, finals = [], [], []
+    document_schedules: list[dict[str, object]] = []
+    blocks: list[BlockKey] = []
+    finals: list[FinalKey] = []
     seen_blocks: set[tuple[str, int]] = set()
     seen_final: set[str] = set()
     for sigmas in schedules:

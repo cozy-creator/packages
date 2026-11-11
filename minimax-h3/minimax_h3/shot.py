@@ -7,12 +7,14 @@ import hashlib
 import math
 import re
 from collections.abc import Iterable, Iterator, Mapping, Sequence
+from contextlib import AbstractContextManager
 from fractions import Fraction
 from itertools import accumulate, pairwise
 from typing import Annotated, Literal, NamedTuple
 
 import msgspec
 import numpy as np
+import numpy.typing as npt
 import torch
 from cozy_runtime.author import InvalidRequest, OutputError, Outputs, Seed
 from cozy_runtime.fields import (
@@ -76,10 +78,10 @@ class Beat(msgspec.Struct, kw_only=True):
     """What happens, and for how long."""
 
     duration: Annotated[int, Range(1, MAX_DURATION_S, unit="s"), Total()] = MAX_DURATION_S
-    description: Prompt = Prompt()
+    description: Prompt[Image | Video | Audio] = Prompt()
 
 
-class ShotVideo(Video, kw_only=True):
+class ShotVideo(Video, frozen=True, kw_only=True):
     """A take, and its latents when H3 made it and its machine still has them."""
 
     latents: Latents | None = None
@@ -87,7 +89,7 @@ class ShotVideo(Video, kw_only=True):
     own: bool = False
 
 
-class ShotPickup(Pickup, kw_only=True):
+class ShotPickup(Pickup, frozen=True, kw_only=True):
     """Pick up from here: the take, the frame the new part starts on (H3's `17k + 5` join grid, past its shortest
     piece: `shot_latents.nearest_join`), and the seconds into this shot's beats it starts at."""
 
@@ -101,10 +103,10 @@ class Shot(msgspec.Struct, kw_only=True):
     """One continuous shot of any length, with sound: a summary every segment reads, then what happens, beat by beat.
     An empty soundscape or music goes as N/A."""
 
-    summary: Prompt = Prompt()
+    summary: Prompt[Image | Video | Audio] = Prompt()
     beats: Annotated[list[Beat], Count(min=1)]
-    soundscape: Annotated[Prompt, Placeholder("N/A (silent)")] = Prompt()
-    music: Annotated[Prompt, Placeholder("N/A (silent)")] = Prompt()
+    soundscape: Annotated[Prompt[Image | Video | Audio], Placeholder("N/A (silent)")] = Prompt()
+    music: Annotated[Prompt[Image | Video | Audio], Placeholder("N/A (silent)")] = Prompt()
     aspect_ratio: Annotated[AspectRatio, Ratios("16:9")] | None = None
     first_frame: ShotImage | None = None
     last_frame: ShotImage | None = None
@@ -537,9 +539,11 @@ def unusable(take: ShotVideo) -> str:
     return ""
 
 
-def sound_chunks(stream: Iterable[DecodedMediaEvent]) -> list[np.ndarray]:
+def sound_chunks(
+    stream: AbstractContextManager[Iterable[DecodedMediaEvent]],
+) -> list[npt.NDArray[np.float32]]:
     """A decoded video's sound, `(channels, samples)` per chunk, none of its pictures."""
-    with stream as events:  # type: ignore[attr-defined]
+    with stream as events:
         return [np.stack([np.frombuffer(pcm, dtype=np.float32) for pcm in event.pcm_f32le])
                 for event in events if isinstance(event, DecodedAudioChunk)]  # fmt: skip
 

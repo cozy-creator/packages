@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 import json
-from typing import Annotated, Any, Literal
+from typing import TYPE_CHECKING, Annotated, Literal
 
 import msgspec
 import numpy as np
-from cozy_runtime.author import Adjustments, App, Context, Memoize, Outputs, Seed, Telemetry, UnsupportedInput
+from cozy_runtime.author import Adjustments, App, Context, Outputs, Seed, Telemetry, UnsupportedInput
 from cozy_runtime.fields import AspectRatio, Ratios
 from cozy_runtime.image import (
     Guidance,
@@ -24,6 +24,9 @@ from cozy_runtime.image import (
 from . import quantize as quantize  # its recipes
 from .model import PATCH, Ideogram4, guidance_schedule
 from .text_encoder import QwenEncoder, QwenUpsampler
+
+if TYPE_CHECKING:
+    from PIL import Image as PILImage
 
 app = App()
 
@@ -42,7 +45,7 @@ class GenerateInput(ImageRequest):
     regions: list[Region] = msgspec.field(default_factory=list)
 
 
-def element(region: Region, index: int) -> dict[str, Any]:
+def element(region: Region, index: int) -> dict[str, object]:
     """A region as Ideogram's caption element: `bbox` is `[y_min, x_min, y_max, x_max]` on its
     0-1000 grid, keys in the order it was trained on."""
     x0, y0, x1, y1 = corners(region.box, f"regions.{index}.box")
@@ -52,7 +55,7 @@ def element(region: Region, index: int) -> dict[str, Any]:
     return {"type": "text", "bbox": bbox, "text": region.text, "desc": region.prompt}
 
 
-def _json_object(prompt: str) -> dict[str, Any] | None:
+def _json_object(prompt: str) -> dict[str, object] | None:
     try:
         value = json.loads(prompt)
     except json.JSONDecodeError:
@@ -60,7 +63,7 @@ def _json_object(prompt: str) -> dict[str, Any] | None:
     return value if isinstance(value, dict) else None
 
 
-def _with_regions(caption: dict[str, Any], regions: list[Region]) -> str:
+def _with_regions(caption: dict[str, object], regions: list[Region]) -> str:
     composition = caption.setdefault("compositional_deconstruction", {"background": "", "elements": []})
     if not isinstance(composition, dict):
         raise UnsupportedInput("the caption's compositional_deconstruction is not an object: give it a background and elements",
@@ -87,12 +90,12 @@ def caption(payload: GenerateInput, prompt: str, upsampler: QwenUpsampler, *, wi
             "leave prompt_upsampling on (the default) to have the upsampler write it, or pass the caption "
             "itself as the prompt (high_level_description, and compositional_deconstruction with its "
             "background and elements)", code="prompt", fields=("prompt", "prompt_upsampling"))
-    with tel.stage("upsampling prompt", overall_range=(0.0, 0.15)):
+    with tel.stage("upsampling prompt"):
         written = json.loads(upsampler.caption(prompt, width=width, height=height, seed=seed))
     return _with_regions(written, payload.regions)
 
 
-def refusal_card(image: Any) -> bool:
+def refusal_card(image: PILImage.Image) -> bool:
     """Whether `image` looks like Ideogram 4's own refusal, the flat grey "Image blocked by safety
     filter" card its weights draw for some captions and seeds (RGB about 114 with one line of light
     text): every pixel grey, and nearly all of them the field's one shade. A flat grey design can
@@ -112,7 +115,7 @@ _COMPONENTS = {"model": ("transformer", "unconditional_transformer", "vae"), "te
 
 # The upsampler is built and fetched only for a plain prompt with `prompt_upsampling` on. Model
 # parameters are in name order: Runtime refuses a binding set whose paths are not sorted.
-@app.entrypoint(defaults=_DEFAULTS, components=_COMPONENTS, on_demand=("upsampler",), memoize=Memoize(requires=["seed"]))
+@app.entrypoint(defaults=_DEFAULTS, components=_COMPONENTS, on_demand=("upsampler",), memoize=True)
 def generate(ctx: Context, payload: GenerateInput, model: Ideogram4, text_encoder: QwenEncoder,
              upsampler: QwenUpsampler, out: Outputs, tel: Telemetry, adj: Adjustments) -> ImageResult:
     """Ideogram 4, 48 steps at guidance 7: a JSON caption or a prompt, with `regions` placed by box.
@@ -128,21 +131,21 @@ def generate(ctx: Context, payload: GenerateInput, model: Ideogram4, text_encode
     if written != prompt:
         tel.log("caption", caption=written[:4000])
     ctx.raise_if_cancelled()
-    with tel.stage("encoding prompt", overall_range=(0.15, 0.2)):
+    with tel.stage("encoding prompt"):
         features = text_encoder.encode(written)
     ctx.raise_if_cancelled()
-    with tel.stage("generating image", overall_range=(0.2, 0.96)):
+    with tel.stage("generating image"):
         latents = model.denoise(
             features, width=width, height=height, guidance=guidance_schedule(steps, weight), seed=seed,
             progress=ctx.progress,
         )
-    with tel.stage("decoding image", overall_range=(0.96, 0.99)):
+    with tel.stage("decoding image"):
         image = model.decode(latents, width=width, height=height)
     if refusal_card(image):
         tel.log("the image looks like Ideogram 4's own refusal card (\"Image blocked by safety filter\"): "
                 "its weights draw it for some captions and seeds, harmless ones included; a more detailed "
                 "prompt or another seed usually renders", level="warning", seed=seed)
-    with tel.stage("saving image", overall_range=(0.99, 1.0)):
+    with tel.stage("saving image"):
         asset = out.save_image(image, format="png")
     return ImageResult(asset, width, height, seed, written)
 
@@ -161,7 +164,7 @@ class ImageBox(msgspec.Struct, kw_only=True):
 
 # A plain prompt is always upsampled into Ideogram's caption (`caption`); a JSON caption goes as given.
 @app.tool(label="Image", named="image", defaults=_DEFAULTS, components=_COMPONENTS, on_demand=("upsampler",),
-          memoize=Memoize(requires=["seed"]))  # fmt: skip
+          memoize=True)  # fmt: skip
 def image(ctx: Context, payload: ImageBox, model: Ideogram4, text_encoder: QwenEncoder, upsampler: QwenUpsampler,
           out: Outputs, tel: Telemetry, adj: Adjustments) -> ImageResult:
     """Ideogram 4 on a canvas: Turbo's 12 steps, or 48."""

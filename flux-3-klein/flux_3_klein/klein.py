@@ -14,7 +14,7 @@ import itertools
 import math
 from collections.abc import Callable, Mapping
 from contextlib import ExitStack
-from typing import Any, NamedTuple
+from typing import NamedTuple, TypedDict, cast
 
 import numpy as np
 import torch
@@ -33,9 +33,11 @@ from cozy_runtime.author import (
     uses_components,
 )
 from cozy_runtime.accel.kernels import Plan
-from diffusers import AutoencoderKLFlux2, Flux3Transformer2DModel
+from diffusers.configuration_utils import ConfigMixin
+from diffusers.models.autoencoders.autoencoder_kl_flux2 import AutoencoderKLFlux2
 from diffusers.models.transformers.transformer_flux3 import (
     Flux3ModeTransformerBlock,
+    Flux3Transformer2DModel,
     Flux3SingleTransformerBlock,
 )
 from diffusers.modular_pipelines.flux3.encoders import Flux3TextEncoderStep
@@ -43,6 +45,7 @@ from PIL import Image, ImageOps
 from transformers import (
     AutoModelForImageTextToText,
     Qwen3VLConfig,
+    Qwen3VLForConditionalGeneration,
     Qwen3VLProcessor,
 )
 from transformers import initialization as transformer_init
@@ -61,9 +64,11 @@ MIN_SIDE, MAX_SIDE = 64, 4096
 COMPONENTS = ("transformer", "text_encoder", "vae")
 #: The VAE's dtype on a GPU, as ComfyUI runs FLUX.2's VAE: its activations fit fp16 (dtype audit M1).
 VAE_DTYPE = torch.float16
+#: A token sequence's rotary tables, one tensor an axis (`pos_embed`).
+Rope = tuple[torch.Tensor, ...]
 
 
-def _conditioning_only(encoder: Any) -> None:
+def _conditioning_only(encoder: Qwen3VLForConditionalGeneration) -> None:
     """Klein reads hidden states 4..32 of Qwen3-VL's text stack: the vision tower, the last four
     layers, the final norm and the head are never run, so they are not built (their stored bytes
     are skipped). With the norm an identity, hidden state 32 stays the pre-norm output."""
@@ -78,7 +83,7 @@ class Rows(NamedTuple):
     """A block call's adaLN: each mode's (shift, scale, gate) row and each token's row index."""
 
     table: torch.Tensor
-    index: torch.Tensor
+    index: torch.Tensor  # type: ignore[assignment]  # the row index, in place of tuple.index
 
 
 class KleinBlock(Flux3ModeTransformerBlock):
@@ -87,16 +92,17 @@ class KleinBlock(Flux3ModeTransformerBlock):
     layout) instead of Diffusers' two streams; each token reads its mode's row."""
 
     def forward(  # type: ignore[override]
-        self, hidden_states: torch.Tensor, temb_mod: Rows, image_rotary_emb: Any
+        self, hidden_states: torch.Tensor, temb_mod: Rows, image_rotary_emb: Rope
     ) -> torch.Tensor:
         shift, scale, gate = temb_mod.table[temb_mod.index].chunk(3, dim=-1)
         normed = (1 + scale) * self.norm(hidden_states) + shift
         attended = self.attn(hidden_states=normed, image_rotary_emb=image_rotary_emb)
-        return hidden_states + gate * (attended + self.ff(normed))
+        out: torch.Tensor = hidden_states + gate * (attended + self.ff(normed))
+        return out
 
 
-def _rows(block: KleinBlock, arguments: Mapping[str, Any]) -> fusion.Modulation:
-    rows: Rows = arguments["temb_mod"]
+def _rows(block: torch.nn.Module, arguments: Mapping[str, object]) -> fusion.Modulation:
+    rows = cast(Rows, arguments["temb_mod"])  # the block's adaLN rows
     shift, scale, gate = rows.table.chunk(3, dim=-1)
     return fusion.Modulation(rows.index, scale, gate, shift_msa=shift)
 
@@ -122,9 +128,9 @@ class Transformer(Flux3Transformer2DModel):
     """`Flux3Transformer2DModel` whose forward is one step past the conditions: BFL's layout, the image's
     early blocks, then the joint blocks over [image, text, references]."""
 
-    def forward(  # type: ignore[override]
+    def forward(
         self, x: torch.Tensor, temb: torch.Tensor, conditions: list[torch.Tensor], cond_rows: torch.Tensor,
-        image_rope: Any, joints: list[tuple[Any, tuple[int, ...]]],
+        image_rope: Rope, joints: list[tuple[Rope, tuple[int, ...]]],
     ) -> list[torch.Tensor]:
         """The velocity of `x` for each of `conditions` (`_conditions`: a prompt's tokens after their
         early blocks, `cond_rows` their modes' rows), with that prompt's joint rope and mode sizes."""
@@ -146,21 +152,37 @@ class Transformer(Flux3Transformer2DModel):
 class KleinGraph:
     def __init__(self, config: Config) -> None:
         with transformer_init.no_init_weights():
-            transformer: Any = Flux3Transformer2DModel.from_config(config.section("transformer").mapping())
-            text_encoder = AutoModelForImageTextToText.from_config(
+            transformer = construct(Flux3Transformer2DModel, config.section("transformer").mapping())
+            text_encoder: Qwen3VLForConditionalGeneration = AutoModelForImageTextToText.from_config(  # type: ignore[no-untyped-call]  # Transformers' auto classes are unannotated
                 Qwen3VLConfig(**config.section("text_encoder").mapping()), dtype=torch.bfloat16
             )
-            vae = AutoencoderKLFlux2.from_config(config.section("vae").mapping())
+            vae = construct(AutoencoderKLFlux2, config.section("vae").mapping())
         _conditioning_only(text_encoder)
         transformer.__class__ = Transformer
         for block in transformer.modules():
             if type(block) in (Flux3ModeTransformerBlock, Flux3SingleTransformerBlock):
                 block.__class__ = KleinBlock
-        self.components: dict[str, Any] = {
-            "transformer": transformer.to(dtype=torch.bfloat16),
+        self.components: Components = {
+            "transformer": _to(cast(Transformer, transformer), torch.bfloat16),  # its class, set above
             "text_encoder": text_encoder,
-            "vae": vae.to(dtype=torch.float32),
+            "vae": _to(vae, torch.float32),
         }
+
+
+class Components(TypedDict):
+    transformer: Transformer
+    text_encoder: Qwen3VLForConditionalGeneration
+    vae: AutoencoderKLFlux2
+
+
+def construct[M: ConfigMixin](cls: type[M], config: dict[str, object]) -> M:
+    """`cls.from_config(config)`, typed: it returns a tuple only with `return_unused_kwargs=True`."""
+    return cast(M, cls.from_config(config))
+
+
+def _to[M: torch.nn.Module](module: M, dtype: torch.dtype) -> M:
+    """`module.to(dtype=dtype)`, typed: Diffusers' `to` is `functools.wraps`'d, which the checkers bind without `self`."""
+    return module.to(dtype=dtype)
 
 
 def _ceil16(value: int) -> int:
@@ -228,33 +250,34 @@ def schedule(steps: int) -> list[float]:
     return [float(v) for v in ALPHA * t / (1.0 + (ALPHA - 1.0) * t)]
 
 
-def _bn(vae: Any, like: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-    mean = vae.bn.running_mean.view(1, -1, 1, 1).to(like)
-    std = torch.sqrt(vae.bn.running_var.view(1, -1, 1, 1) + vae.config.batch_norm_eps).to(like)
+def _bn(vae: AutoencoderKLFlux2, like: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    mean = vae.bn.running_mean.view(1, -1, 1, 1).to(like)  # type: ignore[union-attr]  # tracked: it keeps its statistics
+    std = torch.sqrt(vae.bn.running_var.view(1, -1, 1, 1) + vae.config["batch_norm_eps"]).to(like)  # type: ignore[union-attr]  # tracked
     return mean, std
 
 
-def _embed(tf: Any, embedder: Any, now: torch.Tensor) -> torch.Tensor:
+def _embed(tf: Transformer, embedder: torch.nn.Module, now: torch.Tensor) -> torch.Tensor:
     """Diffusers' embedding of the bf16 time `now` [1], scaled in bf16 as it does."""
-    return embedder(tf.time_proj(now * 1000).to(torch.bfloat16))
+    out: torch.Tensor = embedder(tf.time_proj(now * 1000).to(torch.bfloat16))
+    return out
 
 
-def _joint(*ropes: Any) -> tuple[Any, tuple[int, ...]]:
+def _joint(*ropes: Rope | None) -> tuple[Rope, tuple[int, ...]]:
     """A joint sequence's rotary tables, and each mode's token count, in order."""
     present = [rope for rope in ropes if rope is not None]
     return tuple(torch.cat(axis) for axis in zip(*present, strict=True)), tuple(len(rope[0]) for rope in present)
 
 
-def _early(blocks: Any, tokens: torch.Tensor, modulation: Any, act: torch.Tensor, rope: Any,
+def _early(blocks: torch.nn.Module, tokens: torch.Tensor, modulation: torch.nn.Module, act: torch.Tensor, rope: Rope,
            zero: torch.Tensor) -> torch.Tensor:
     rows = Rows(modulation(act), zero)
-    for block in blocks:
+    for block in cast(torch.nn.ModuleList, blocks):  # a mode's blocks
         tokens = block(tokens, rows, rope)
     return tokens
 
 
 def _conditions(
-    tf: Any, texts: list[torch.Tensor], text_ropes: list[Any], refs: torch.Tensor | None, ref_rope: Any,
+    tf: Transformer, texts: list[torch.Tensor], text_ropes: list[Rope], refs: torch.Tensor | None, ref_rope: Rope | None,
     act: torch.Tensor, zero: torch.Tensor,
 ) -> tuple[list[torch.Tensor], torch.Tensor]:
     """Each text's [text, references] tokens after their early blocks, and the joint rows of
@@ -264,7 +287,7 @@ def _conditions(
     if refs is not None:
         modes.append("image_cond")
         ref = _early(tf.mode_blocks["image_cond"], tf.x_embedders["image_cond"](refs),
-                     tf.early_stream_modulations["image_cond"], act, ref_rope, zero)
+                     tf.early_stream_modulations["image_cond"], act, ref_rope, zero)  # type: ignore[arg-type]  # with references, their rope
     tokens = []
     for text, rope in zip(texts, text_ropes, strict=True):
         txt = _early(tf.txt_mode_blocks, tf.context_embedder(text), tf.early_stream_modulations["txt"],
@@ -289,20 +312,20 @@ class Klein(Model[KleinGraph]):
 
     def load(self, loader: Loader) -> None:
         self.graph = loader.construct(KleinGraph)
-        self.processor = vlm.processor(loader.assets, "text_encoder/")
+        self.processor = cast(Qwen3VLProcessor, vlm.processor(loader.assets, "text_encoder/"))  # Qwen3-VL's own
 
     @property
     def flow_map(self) -> bool:
-        return bool(self.graph.components["transformer"].config.flow_map)
+        return bool(self.graph.components["transformer"].config["flow_map"])
 
     @memoize
     @uses_components("text_encoder")
     def encode(self, prompt: str) -> torch.Tensor:
         encoder = self.graph.components["text_encoder"]
         with torch.inference_mode():
-            embeds = Flux3TextEncoderStep._get_qwen3_vl_prompt_embeds(
+            embeds: torch.Tensor = Flux3TextEncoderStep._get_qwen3_vl_prompt_embeds(
                 encoder,
-                self.processor,
+                self.processor,  # type: ignore[arg-type]  # Diffusers annotates the AutoProcessor factory
                 prompt,
                 device=torch.device(str(self.device)),
                 max_sequence_length=MAX_TOKENS,
@@ -368,7 +391,7 @@ class Klein(Model[KleinGraph]):
         rows, columns = height // PATCH, width // PATCH
         timesteps = schedule(steps)
         with torch.no_grad():
-            noise = rng.noise((rows * columns, tf.config.in_channels), seed)
+            noise = rng.noise((rows * columns, tf.config["in_channels"]), seed)
             x = noise[None].to(torch.bfloat16).float().to(device)  # bf16 values, an fp32 state across steps
             texts = [embeds] if negative is None else [negative, embeds]
             texts = [t.to(device=device, dtype=torch.bfloat16) for t in texts]
@@ -393,7 +416,7 @@ class Klein(Model[KleinGraph]):
                     if held is not None:
                         *tokens, cond_rows = held.get()
                     else:
-                        target = _embed(tf, tf.target_timestep_embedder, times[i + 1 : i + 2])
+                        target = _embed(tf, tf.target_timestep_embedder, times[i + 1 : i + 2])  # type: ignore[arg-type]  # a flow map's own
                         temb = temb + target
                         tokens, cond_rows = _conditions(tf, texts, text_ropes, refs, ref_rope,
                                                         F.silu(at_zero + target), zero)

@@ -9,7 +9,7 @@ vars:
 
 tasks:
   typecheck:
-    desc: basedpyright against the real Runtime and libraries; only errors missing from .basedpyright/baseline.json fail
+    desc: mypy --strict against the real Runtime and libraries; only errors missing from .mypy-baseline.txt fail (prune drops fixed ones)
     cmds:
       - scripts/typecheck.sh {{.CLI_ARGS}}
 

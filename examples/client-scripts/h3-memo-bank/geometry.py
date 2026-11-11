@@ -5,8 +5,8 @@ from pathlib import Path
 import tensorfs
 import math
 import torch
-from h3_tables.adaln_operations import _plan, _topology
-from h3_tables.kernel import source_shapes, table_shapes
+from minimax_h3.preparation.adaln_operations import _plan, _topology
+from minimax_h3.preparation.kernel import source_shapes, table_shapes
 
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument("checkpoint", type=Path, help="local migrated full model checkpoint")

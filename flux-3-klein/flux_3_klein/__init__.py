@@ -7,7 +7,7 @@ from collections.abc import Callable
 from typing import Annotated, Literal
 
 import msgspec
-from cozy_runtime.author import Adjustments, App, Context, Memoize, Outputs, Seed, Telemetry
+from cozy_runtime.author import Adjustments, App, Context, Outputs, Seed, Telemetry
 from cozy_runtime.fields import Advanced, AspectRatio, Image, Prompt, Ratios, name_key
 from cozy_runtime.image import (
     Box,
@@ -54,7 +54,7 @@ Corners = tuple[float, float, float, float]
 
 class TurboInput(ImageRequest):
     #: Its text, and the pictures it mentions, in the order it first mentions them: up to ten.
-    prompt: Prompt[Image] = Prompt()
+    prompt: Prompt[Image] = Prompt()  # type: ignore[assignment]  # a prompt with pictures, in place of the base's text
     #: Where a mentioned picture goes in the output, by its key. Placed, the pictures are elements, not the canvas.
     boxes: dict[str, Box] = msgspec.field(default_factory=dict)
     steps: Steps = None
@@ -99,7 +99,7 @@ def _render(
     caption = with_table(prompt, rows) if rows else prompt
     if upsample and (rows or not is_finished(prompt)):
         table = json.dumps(rows, ensure_ascii=False) if rows else ""
-        with tel.stage("upsampling prompt", overall_range=(0.0, 0.15)):
+        with tel.stage("upsampling prompt"):
             def run() -> str:
                 return upsampler.upsample(prompt, images, canvas, table)
             written = drafter.drafting(run) if draft else run()
@@ -111,23 +111,23 @@ def _render(
     ctx.raise_if_cancelled()
     references = None
     if prepared:
-        with tel.stage("encoding reference images", overall_range=(0.15, 0.2)):
+        with tel.stage("encoding reference images"):
             references = model.encode_references(prepared)
-    with tel.stage("encoding prompt", overall_range=(0.2, 0.25)):
+    with tel.stage("encoding prompt"):
         embeds = model.encode(caption)
         negatives = model.encode(negative) if guidance is not None else None
     ctx.raise_if_cancelled()
-    with tel.stage("generating image", overall_range=(0.25, 0.95)):
+    with tel.stage("generating image"):
         tokens = model.denoise(
             embeds, negatives, references,
             width=width, height=height, steps=steps, guidance=guidance, seed=seed,
             progress=ctx.progress,
         )
-    with tel.stage("decoding image", overall_range=(0.95, 0.99)):
+    with tel.stage("decoding image"):
         image = model.decode(tokens, width=width, height=height)
         if crop is not None:
             image = image.crop(crop)
-    with tel.stage("saving image", overall_range=(0.99, 1.0)):
+    with tel.stage("saving image"):
         asset = out.save_image(image, format="png")
     return ImageResult(asset, image.width, image.height, seed, caption)
 
@@ -257,7 +257,7 @@ _ON_DEMAND = ("upsampler", "drafter")
 
 
 @app.entrypoint(defaults={"model": _BASE, "upsampler": _UPSAMPLER, "drafter": _DRAFTER}, components=_COMPONENTS,
-                on_demand=_ON_DEMAND, memoize=Memoize(requires=["seed"]))
+                on_demand=_ON_DEMAND, memoize=True)
 def generate(ctx: Context, payload: GenerateInput, drafter: Drafter, model: Klein, upsampler: Upsampler,
              out: Outputs, tel: Telemetry, adj: Adjustments) -> ImageResult:
     """Klein Base, 50 steps with CFG 4: text to image, or an edit of up to ten ordered pictures."""
@@ -265,7 +265,7 @@ def generate(ctx: Context, payload: GenerateInput, drafter: Drafter, model: Klei
 
 
 @app.entrypoint(defaults={"model": _DISTILLED, "upsampler": _UPSAMPLER, "drafter": _DRAFTER}, components=_COMPONENTS,
-                on_demand=_ON_DEMAND, memoize=Memoize(requires=["seed"]))
+                on_demand=_ON_DEMAND, memoize=True)
 def generate_turbo(ctx: Context, payload: TurboInput, drafter: Drafter, model: Klein, upsampler: Upsampler,
                    out: Outputs, tel: Telemetry, adj: Adjustments) -> ImageResult:
     """The distilled Klein, 16 steps, no guidance: text to image, or an edit of up to ten ordered pictures."""
@@ -291,7 +291,7 @@ class ImageBox(msgspec.Struct, kw_only=True):
 @app.tool(label="Image", named="image",
           defaults={"drafter": _DRAFTER, "full": _BASE, "model": _DISTILLED, "upsampler": _UPSAMPLER},
           components={"drafter": ("model",), "full": _KLEIN, "model": _KLEIN, "upsampler": ("model",)},
-          on_demand=("drafter", "full", "model", "upsampler"), memoize=Memoize(requires=["seed"]))  # fmt: skip
+          on_demand=("drafter", "full", "model", "upsampler"), memoize=True)  # fmt: skip
 def image(ctx: Context, payload: ImageBox, drafter: Drafter, full: Klein, model: Klein, upsampler: Upsampler,
           out: Outputs, tel: Telemetry, adj: Adjustments) -> ImageResult:
     """FLUX.3 Image Klein on a canvas, upsampled: the distilled model, or Base, which loads only when asked for."""

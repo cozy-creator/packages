@@ -25,20 +25,21 @@ from functools import partial
 from itertools import pairwise
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Literal, NotRequired, Protocol, TypedDict, cast
 
 import msgspec
 import numpy as np
+import numpy.typing as npt
 import torch
-from diffusers import (
-    AutoencoderKLMiniMaxH3Audio,
-    MiniMaxH3Blocks,
-    MiniMaxH3ModularPipeline,
-    MiniMaxH3Scheduler,
-)
-from diffusers.modular_pipelines.minimax_h3 import (
+from diffusers.models.autoencoders.autoencoder_kl_minimax_h3_audio import AutoencoderKLMiniMaxH3Audio
+from diffusers.models.transformers.transformer_minimax_h3 import MiniMaxH3Transformer3DModel
+from diffusers.modular_pipelines.minimax_h3.modular_blocks_minimax_h3 import MiniMaxH3Blocks
+from diffusers.modular_pipelines.minimax_h3.modular_pipeline import MiniMaxH3ModularPipeline
+from diffusers.schedulers.scheduling_minimax_h3 import MiniMaxH3Scheduler
+from diffusers.modular_pipelines.minimax_h3.references import (
     MiniMaxH3AudioReference,
     MiniMaxH3ImageReference,
+    MiniMaxH3Reference,
     MiniMaxH3VideoReference,
 )
 from diffusers.modular_pipelines.minimax_h3.before_denoise import patchify_video_latents
@@ -65,9 +66,8 @@ from cozy_runtime.author import (
     ModelAssets,
     ThreadPoolExecutor,
 )
-from cozy_runtime.fields import Image
-from cozy_runtime.media import DecodedAudio, DecodedAudioChunk, DecodedVideoFrame
-from h3_tables.table_layout import TableLayout
+from cozy_runtime.media import DecodedAudio, DecodedAudioChunk, DecodedMediaEvent, DecodedVideoFrame
+from minimax_h3.preparation.table_layout import TableLayout
 
 from .adaln_pruned import H3Transformer, build_transformer
 from .cell_texture import CellEqualizer
@@ -82,10 +82,15 @@ from .continuation import (
     export_context,
 )
 from .guide_rows import ANCHOR_LATENTS, ANCHORS, GUIDE, GUIDE_LATENTS, GuideClip, anchor_rows, guide_rows
-from .reference_rows import ClipRows, motion_size, public_video
+from .reference_rows import ClipRows, LoopState, motion_size, public_video
 from .steps import denoise_official
 from .overlay import ATTENTION_KWARG, OVERLAY_KWARG, REGENERATE_BANK, TURBO_BANK, Overlay, TurboSchedule
 from .vae_tiles import TileBatchedVideoVAE, encode_condition
+
+if TYPE_CHECKING:
+    from diffusers.models.autoencoders.autoencoder_kl_minimax_h3 import AutoencoderKLMiniMaxH3
+    from PIL import Image as PILImage
+    from transformers.models.qwen3_vl.modeling_qwen3_vl import Qwen3VLForConditionalGeneration
 
 #: A trunk is one DiT and its conditioning workflow; a task is one served function — the
 #: trunk's official plan, or the trunk under the turbo bank's fixed 8-evaluation plan.
@@ -145,7 +150,9 @@ REFERENCE_IMAGE_SHORT_EDGE = 2048
 _WEIGHTED_CONFIG_SECTIONS = {"audio_vae", "text_encoder", "transformer", "transformer_ref", "vae"}
 #: The independent turbo LoRA checkpoint always carries both overlay components.
 _OVERLAY_CONFIG_SECTIONS = {"fl2va_turbo", "ref2va_turbo"}
-_DIT_COMPONENT: dict[Trunk, str] = {"fl2va": "transformer", "ref2va": "transformer_ref"}
+_DIT_COMPONENT: dict[Trunk, Literal["transformer", "transformer_ref"]] = {
+    "fl2va": "transformer", "ref2va": "transformer_ref"
+}
 _OVERLAY_COMPONENT: dict[Trunk, str] = {"fl2va": "fl2va_turbo", "ref2va": "ref2va_turbo"}
 #: The Regenerate refine overlay: one component, over the FL2VA DiT (NVlabs' refine trunk).
 REGENERATE_COMPONENT = "fl2va_regenerate"
@@ -172,7 +179,7 @@ def _validate_sol_dense_steps(value: int) -> None:
 
 
 def _attention_layout(
-    state: Any, step: int, *, sol_dense_steps: int = 10, tau: float = 1.0
+    state: LoopState, step: int, *, sol_dense_steps: int = 10, tau: float = 1.0
 ) -> AttentionLayout:
     fields = state.denoiser_input_fields
     # NVIDIA's H3 policy protects every row before target video, including target
@@ -453,16 +460,16 @@ class TimestepPlan:
         )
         return timesteps, block_rows
 
-    def _document(self) -> dict[str, Any]:
+    def _document(self) -> _PlanDocument:
         clean_video = _as_float32(0.999)
         condition_audio = _as_float32(1.0)
-        schedules: list[dict[str, Any]] = []
-        block_keys: list[dict[str, Any]] = []
-        final_keys: list[dict[str, Any]] = []
+        schedules: list[_ScheduleDocument] = []
+        block_keys: list[_BlockKey] = []
+        final_keys: list[_FinalKey] = []
         seen_blocks: set[tuple[str, int]] = set()
         seen_final: set[str] = set()
         for schedule in self.schedules:
-            evaluations: list[dict[str, Any]] = []
+            evaluations: list[_Evaluation] = []
             for index, (video_timestep, audio_timestep) in enumerate(
                 zip(schedule.video_timesteps, schedule.audio_timesteps, strict=True)
             ):
@@ -521,9 +528,8 @@ class TimestepPlan:
                     },
                 }
             )
-        return {
+        document: _PlanDocument = {
             "task": self.task,
-            **({"kind": "refine"} if self.refine else {}),
             "scalar_encoding": "ieee754-binary32-hex",
             "scheduler_semantics": "minimax-h3-data-ward-rf-euler/1",
             "row_timestep_reduction": "unique-sorted-return-inverse",
@@ -543,6 +549,72 @@ class TimestepPlan:
                 "final_normalization": final_keys,
             },
         }
+        if self.refine:
+            document["kind"] = "refine"
+        return document
+
+
+class _ModulationClass(TypedDict):
+    name: str
+    timestep: str
+    modality: str
+    modality_tag: int
+    presence: str
+
+
+class _Evaluation(TypedDict):
+    index: int
+    video_sigma: str
+    audio_sigma: str
+    modulation_classes: list[_ModulationClass]
+
+
+class _Terminal(TypedDict):
+    video_sigma: str
+    audio_sigma: str
+    transformer_evaluation: bool
+
+
+class _ScheduleDocument(TypedDict):
+    transformer_evaluations: int
+    sigma_grid_points: int
+    evaluations: list[_Evaluation]
+    terminal: _Terminal
+
+
+class _BlockKey(TypedDict):
+    index: int
+    timestep: str
+    modality: str
+    modality_tag: int
+
+
+class _FinalKey(TypedDict):
+    index: int
+    timestep: str
+
+
+class _TableKeys(TypedDict):
+    block_modulation: list[_BlockKey]
+    final_normalization: list[_FinalKey]
+
+
+class _PlanDocument(TypedDict):
+    """A timestep plan's canonical document (`TimestepPlan.canonical_bytes`)."""
+
+    task: str
+    kind: NotRequired[str]
+    scalar_encoding: str
+    scheduler_semantics: str
+    row_timestep_reduction: str
+    adaln_row_index: str
+    final_norm_row_index: str
+    table_order: str
+    fps: int
+    video_shift: str
+    audio_shift: str
+    schedules: list[_ScheduleDocument]
+    table_keys: _TableKeys
 
 
 def timestep_plan_digest(raw: bytes) -> str:
@@ -718,15 +790,17 @@ class ReferenceMemo:
     identity: str
 
 
-def _unreachable() -> Any:
+def _unreachable() -> torch.Tensor:
     raise AssertionError("a memo hit was just checked")
 
 
-def _returning(value: Any) -> Callable[[], Any]:
+def _returning(value: torch.Tensor) -> Callable[[], torch.Tensor]:
     return lambda: value
 
 
-def _encode_identity(view: Any, memo: ReferenceMemo | None) -> tuple[Any, ...]:
+def _encode_identity(
+    view: _ScopedPipeline, memo: ReferenceMemo | None
+) -> tuple[str, str, str, tuple[float, ...], tuple[float, ...], int]:
     """What, beside the pixels, decides a condition encode's latents."""
     return (
         memo.identity if memo is not None else "",
@@ -738,7 +812,7 @@ def _encode_identity(view: Any, memo: ReferenceMemo | None) -> tuple[Any, ...]:
     )
 
 
-def _fitted(image: Any, height: int, width: int) -> np.ndarray:
+def _fitted(image: PILImage.Image, height: int, width: int) -> npt.NDArray[np.uint8]:
     """An image center-cropped to the canvas's aspect and resized to it, as uint8 `(H, W, 3)`."""
     image = image.convert("RGB")
     scale = max(width / image.width, height / image.height)
@@ -758,17 +832,17 @@ def _clip_latent_frames(frames: int) -> int:
     return video_latent_num_frames(_snapped(frames), FRAMES_PER_CHUNK, LATENTS_PER_CHUNK)
 
 
-def _soundtrack_rows(audio_vae: Any, waveform: torch.Tensor) -> torch.Tensor:
+def _soundtrack_rows(audio_vae: AutoencoderKLMiniMaxH3Audio, waveform: torch.Tensor) -> torch.Tensor:
     """A stereo soundtrack's normalized latents, `(channels, latents, width)`: the channels are
     batch items of the mono audio VAE, at the posterior mean, never sampled."""
     posterior = audio_vae.encode(waveform[:, None], return_dict=False)[0]
-    rows = posterior.mode().float().cpu().transpose(1, 2)
-    mean = torch.tensor(audio_vae.config.latents_mean).view(1, 1, -1)
-    std = torch.tensor(audio_vae.config.latents_std).view(1, 1, -1)
+    rows: torch.Tensor = posterior.mode().float().cpu().transpose(1, 2)
+    mean = torch.tensor(audio_vae.config["latents_mean"]).view(1, 1, -1)
+    std = torch.tensor(audio_vae.config["latents_std"]).view(1, 1, -1)
     return (rows - mean) / std
 
 
-def reference_digest(pixels: Any) -> tuple[str, tuple[int, ...], str]:
+def reference_digest(pixels: npt.NDArray[np.uint8]) -> tuple[str, tuple[int, ...], str]:
     """The exact encoder input: dtype, shape and the SHA-256 of the pixel bytes."""
     contiguous = np.ascontiguousarray(pixels)
     return (
@@ -778,40 +852,70 @@ def reference_digest(pixels: Any) -> tuple[str, tuple[int, ...], str]:
     )
 
 
+class _Placed(Protocol):
+    @property
+    def device(self) -> torch.device: ...
+
+
+class H3Components(TypedDict):
+    """The weighted roots Runtime fills, under Diffusers' component names."""
+
+    transformer: H3Transformer
+    transformer_ref: H3Transformer
+    text_encoder: Qwen3VLForConditionalGeneration
+    vae: TileBatchedVideoVAE
+    audio_vae: AutoencoderKLMiniMaxH3Audio
+
+
 class _ScopedPipeline:
     """A request-local view whose execution device follows the admitted component.
 
     Diffusers normally finds a device by scanning every registered module. Runtime stages
     one weighted root at a time, so that scan can see an inactive sibling first. The view
     changes no placement; it merely reports the device of the root whose Runtime scope is
-    already active.
+    already active. What H3's own code reads through it is declared below; `__getattr__` serves
+    those, and everything else the Diffusers blocks read.
     """
+
+    vae: AutoencoderKLMiniMaxH3
+    audio_vae: AutoencoderKLMiniMaxH3Audio
+    scheduler: MiniMaxH3Scheduler
+    audio_scheduler: MiniMaxH3Scheduler
+    pixel_mean: Sequence[float]
+    pixel_std: Sequence[float]
+    keyframe_encode_seed: int
+    keyframe_noise_aug: float
+    audio_latent_channels: int
+    patch_size: tuple[int, int, int]
 
     def __init__(
         self,
-        pipe: Any,
-        component: Any = None,
+        pipe: MiniMaxH3ModularPipeline,
+        component: _Placed | None = None,
         *,
-        overrides: Mapping[str, Any] | None = None,
+        overrides: Mapping[str, object] | None = None,
     ) -> None:
         self._pipe = pipe
         self._component = component
         self._overrides = {} if overrides is None else dict(overrides)
 
     @property
-    def _execution_device(self) -> Any:
-        return self._pipe._execution_device if self._component is None else self._component.device
+    def _execution_device(self) -> torch.device:
+        device: torch.device = (
+            self._pipe._execution_device if self._component is None else self._component.device
+        )
+        return device
 
     @property
-    def device(self) -> Any:
+    def device(self) -> torch.device:
         return self._pipe.device if self._component is None else self._component.device
 
-    def __getattr__(self, name: str) -> Any:
+    def __getattr__(self, name: str) -> object:
         if name in self._overrides:
             return self._overrides[name]
         return getattr(self._pipe, name)
 
-    def __setattr__(self, name: str, value: Any) -> None:
+    def __setattr__(self, name: str, value: object) -> None:
         # Blocks communicate through PipelineState. A write landing on this per-call view
         # would evaporate silently, and forwarding it would mutate the shared pipeline
         # across requests — so a non-private write is a typed refusal, never a silent one.
@@ -832,12 +936,12 @@ class _ImageEdges:
     A read count that differs from the image count is upstream drift and refuses typed.
     """
 
-    def __init__(self, config: Mapping[str, Any], edges: Sequence[int]) -> None:
+    def __init__(self, config: Mapping[str, object], edges: Sequence[int]) -> None:
         self._config = config
         self._edges = iter(edges)
         self._count = len(edges)
 
-    def __getattr__(self, name: str) -> Any:
+    def __getattr__(self, name: str) -> object:
         if name != "reference_image_short_edge":
             return getattr(self._config, name)
         edge = next(self._edges, None)
@@ -892,10 +996,10 @@ class _IntakeLengths:
         self._pool.shutdown(wait=True, cancel_futures=True)
 
 
-def _settle_intake(state: Any) -> None:
+def _settle_intake(state: PipelineState) -> None:
     """Wait for this request's statement, if it made one, to finish or be cancelled. Not
     `concurrent.futures.wait`: a future `shutdown` cancels from the queue never notifies it."""
-    statement = state.get(_INTAKE)
+    statement: Future[None] | None = state.values.get(_INTAKE)
     if statement is not None:
         state.set(_INTAKE, None)
         with suppress(CancelledError):
@@ -903,7 +1007,7 @@ def _settle_intake(state: Any) -> None:
 
 
 @contextmanager
-def _audio_weight_norm_scope(audio_vae: Any) -> Iterator[None]:
+def _audio_weight_norm_scope(audio_vae: torch.nn.Module) -> Iterator[None]:
     """Release only legacy WeightNorm's recomputable, unregistered attributes."""
     try:
         yield
@@ -922,7 +1026,7 @@ class OfficialH3Pipeline:
         for trunk, (_upstream, layout) in dit_specs.items():
             _validate_plan(plans[trunk], trunk, layout)
         blocks = {
-            name: MiniMaxH3Blocks().get_workflow(_diffusers_workflow(name))
+            name: MiniMaxH3Blocks().get_workflow(_diffusers_workflow(name))  # type: ignore[no-untyped-call]  # Diffusers' blocks take no arguments, unannotated
             for name in _WORKFLOW_TASKS
         }
         pipes = {name: MiniMaxH3ModularPipeline(blocks=block) for name, block in blocks.items()}
@@ -933,14 +1037,14 @@ class OfficialH3Pipeline:
             TileBatchedVideoVAE.from_config(config.section("vae").mapping()), config
         )
         audio = config.section("audio_vae").mapping()
-        audio_vae = AutoencoderKLMiniMaxH3Audio.from_config(audio).eval()
+        audio_vae: AutoencoderKLMiniMaxH3Audio = AutoencoderKLMiniMaxH3Audio.from_config(audio).eval()
         for trunk in _TRUNKS:
             _validate_model_contract(pipes[trunk], dits[trunk], video_vae, audio_vae)
         processor = vlm.processor(_ASSETS / "processor")
         tokenizer = processor.tokenizer
 
         for workflow, task in _WORKFLOW_TASKS.items():
-            pipes[workflow].register_components(
+            pipes[workflow].register_components(  # type: ignore[no-untyped-call]  # Diffusers' register_components is unannotated
                 text_encoder=text_encoder,
                 tokenizer=tokenizer,
                 processor=processor,
@@ -954,7 +1058,7 @@ class OfficialH3Pipeline:
         # checkpoint destinations, under Diffusers' component names. Config-only processors
         # and schedulers are deliberately absent. LoRA roots belong to their own separately
         # bound construction.
-        self.components: dict[str, Any] = {
+        self.components: H3Components = {
             "transformer": dits["fl2va"],
             "transformer_ref": dits["ref2va"],
             "text_encoder": text_encoder,
@@ -963,7 +1067,7 @@ class OfficialH3Pipeline:
         }
         # The one release audio clock, read off the contract-checked artifact config
         # rather than respelled by callers.
-        self.sample_rate = int(audio_vae.config.sampling_rate)
+        self.sample_rate = int(audio_vae.config["sampling_rate"])
         self._blocks = blocks
         self._pipes = pipes
         self.plans: dict[Trunk, TimestepPlan] = {trunk: plans[trunk] for trunk in _TRUNKS}
@@ -975,7 +1079,7 @@ class OfficialH3Pipeline:
         running one is waited for. Requests after this state nothing early."""
         self._intake.close()
 
-    def generator(self, source: object) -> Any:
+    def generator(self, source: object) -> torch.Generator:
         """Adapt Runtime's public request generator to Diffusers' torch generator."""
         if isinstance(source, torch.Generator):
             return source
@@ -985,14 +1089,14 @@ class OfficialH3Pipeline:
             )
         return rng.generator(source.getrandbits(63))
 
-    def image_reference(self, image: Image) -> Any:
+    def image_reference(self, image: PILImage.Image) -> MiniMaxH3ImageReference:
         return MiniMaxH3ImageReference(image=image if image.mode == "RGB" else image.convert("RGB"))
 
-    def audio_reference(self, audio: DecodedAudio) -> Any:
+    def audio_reference(self, audio: DecodedAudio) -> MiniMaxH3AudioReference:
         waveform = _resample(_audio_tensor(audio), audio.sample_rate, self.sample_rate)
         return MiniMaxH3AudioReference(audio=waveform, sample_rate=self.sample_rate)
 
-    def video_reference(self, clip: ReferenceClip) -> Any:
+    def video_reference(self, clip: ReferenceClip) -> MotionVideo:
         """A clip already at the size it is used at (`read_reference_video`). The official
         normalization sees a free canvas-sized stand-in it leaves as it is, and `start_ref2va`
         puts the real frames in its place, so nothing is resized twice."""
@@ -1024,15 +1128,15 @@ class OfficialH3Pipeline:
         self,
         *,
         prompt: str,
-        first_frame: Any | None,
-        last_frame: Any | None,
-        generator: Any,
+        first_frame: PILImage.Image | None,
+        last_frame: PILImage.Image | None,
+        generator: torch.Generator,
         steps: int,
         frames: int,
         task: Task = "fl2va",
         plan: TimestepPlan | None = None,
         delivery: ContinuationPlan | None = None,
-    ) -> Any:
+    ) -> PipelineState:
         """`delivery` is the segment's clock when its successor carries a picture or sound
         (`export_context`); an FL2VA segment carries nothing in itself."""
         if delivery is not None and (delivery.carried or frames != delivery.sample_frames):
@@ -1061,8 +1165,8 @@ class OfficialH3Pipeline:
         self,
         *,
         prompt: str,
-        references: Sequence[Any],
-        generator: Any,
+        references: Sequence[MiniMaxH3Reference],
+        generator: torch.Generator,
         steps: int,
         frames: int,
         reference_image_short_edges: Sequence[int],
@@ -1071,8 +1175,8 @@ class OfficialH3Pipeline:
         context: AVContext | None = None,
         delivery: ContinuationPlan | None = None,
         guide: GuideClip | None = None,
-        anchors: Sequence[tuple[Any, Literal["first", "last"]]] = (),
-    ) -> Any:
+        anchors: Sequence[tuple[PILImage.Image, Literal["first", "last"]]] = (),
+    ) -> PipelineState:
         """``reference_image_short_edges`` is one resolved edge per image reference, in
         packed order; the official setup step resizes each image to its own. A `guide` sets
         the render's canvas (`guide_rows`), else the carried picture does, else the first
@@ -1088,6 +1192,7 @@ class OfficialH3Pipeline:
             )
         if delivery is not None and frames != delivery.sample_frames:
             raise InvalidRequest("sample frames differ from delivery plan", code="h3_continuation")
+        canvas: dict[str, int]
         if guide is not None:
             canvas = dict(zip(("height", "width"), map(int, guide.frames.shape[1:3]), strict=True))
         elif context is not None and context.canvas is not None:
@@ -1130,13 +1235,13 @@ class OfficialH3Pipeline:
         task: Task,
         *,
         prompt: str,
-        generator: Any,
+        generator: torch.Generator,
         steps: int,
         frames: int,
         image_short_edges: Sequence[int] = (),
         plan: TimestepPlan | None = None,
-        **values: Any,
-    ) -> Any:
+        **values: object,
+    ) -> PipelineState:
         # The plan, not the request, spells the official grid: `steps` transformer
         # evaluations are the schedule's grid points less the terminal zero. A turbo task's
         # plan is its turbo LoRA's, which the caller passes.
@@ -1150,7 +1255,7 @@ class OfficialH3Pipeline:
             raise ValueError("timestep plan belongs to a different trunk")
         schedule = plan.schedule(steps)
         state = PipelineState()
-        fixed = {
+        fixed: dict[str, object] = {
             _PLAN: plan,
             "prompt": prompt,
             "generator": generator,
@@ -1168,23 +1273,23 @@ class OfficialH3Pipeline:
             state.set(name, value)
         workflow = self._workflow(task, state)
         if "before_encode" in self._blocks[workflow].sub_blocks:
-            pipe = self._pipes[workflow]
+            pipe: MiniMaxH3ModularPipeline | _ScopedPipeline = self._pipes[workflow]
             edges = None
             if _TRUNK[task] == "ref2va":
                 # Only setup uses this per-request geometry. A view leaves the shared
                 # pipeline unchanged, even if preprocessing raises or calls overlap.
                 # `ref2va` setup is the one before-encode block that also gates on the
                 # seconds ceiling, so it is scoped here as well as at denoise.
-                edges = _ImageEdges(pipe.config, image_short_edges)
+                edges = _ImageEdges(self._pipes[workflow].config, image_short_edges)
                 pipe = _ScopedPipeline(
-                    pipe, overrides={"config": edges, "max_duration": _CEILING_S}
+                    self._pipes[workflow], overrides={"config": edges, "max_duration": _CEILING_S}
                 )
             self._run_with(task, pipe, "before_encode", state)
             if edges is not None:
                 edges.settle()
         return state
 
-    def expected_live_tokens(self, task: Task, state: Any) -> int | None:
+    def expected_live_tokens(self, task: Task, state: PipelineState) -> int | None:
         """The packed length this request's sparse steps will attend over, read at intake
         (h3a-087): a clip's latent rows have left the sequence by then (`ClipRows.release`).
 
@@ -1205,11 +1310,11 @@ class OfficialH3Pipeline:
             _ScopedPipeline(pipe, shell, overrides={"text_encoder": counted}), scratch
         )
         if _TRUNK[task] == "ref2va":
-            references = list(scratch.get("normalized_references"))
+            references = list(scratch.normalized_references)
             if any(reference.has_audio for reference in references):
                 return None
-            video: list[Any] = []
-            audio: list[Any] = []
+            video: list[torch.Tensor] = []
+            audio: list[torch.Tensor] = []
             released = 0
             for reference in references:
                 if reference.kind == "image":
@@ -1230,7 +1335,7 @@ class OfficialH3Pipeline:
                         device="meta",
                     )
                 )
-            context = scratch.get("continuation_context")
+            context: AVContext | None = scratch.values.get("continuation_context")
             if context is not None:
                 # `condition_media` appends the carried latents after the public references.
                 video.extend(t for t in (context.video,) if t is not None)
@@ -1245,12 +1350,13 @@ class OfficialH3Pipeline:
         blocks["denoise.prepare_layout"](
             _ScopedPipeline(pipe, shell, overrides={"max_duration": _CEILING_S}), scratch
         )
-        tokens = int(scratch.get("token_tags").numel())
-        for pixels, _ in scratch.get(ANCHORS) or ():
+        tokens = int(cast(torch.Tensor, scratch.get("token_tags")).numel())
+        anchors: Sequence[tuple[npt.NDArray[np.uint8], str]] = scratch.values.get(ANCHORS) or ()
+        for pixels, _ in anchors:
             tokens += (pixels.shape[0] // VAE_SPATIAL_RATIO // PATCH_SIZE[1]) * (
                 pixels.shape[1] // VAE_SPATIAL_RATIO // PATCH_SIZE[2]
             )
-        guide = scratch.get(GUIDE)
+        guide: GuideClip | None = scratch.values.get(GUIDE)
         if guide is not None:
             if guide.audio is not None:
                 return None
@@ -1260,9 +1366,9 @@ class OfficialH3Pipeline:
                 * (height // VAE_SPATIAL_RATIO // PATCH_SIZE[1])
                 * (width // VAE_SPATIAL_RATIO // PATCH_SIZE[2])
             )
-        return tokens - released if _TRUNK[task] == "ref2va" else tokens
+        return tokens - released if _TRUNK[task] == "ref2va" else tokens  # type: ignore[possibly-undefined]  # counted for ref2va
 
-    def _expect(self, task: Task, state: Any) -> None:
+    def _expect(self, task: Task, state: PipelineState) -> None:
         """Tell the runtime this request's attention length while conditioning runs, so a
         length-specialized kernel starts preparing now. Off the request's thread (tokenizing
         the references' vision blocks is ~0.4 s at their 2048-pixel edge) and advisory: a
@@ -1284,20 +1390,20 @@ class OfficialH3Pipeline:
 
         state.set(_INTAKE, self._intake.submit(state_length))
 
-    def text_state(self, state: Any) -> Any:
+    def text_state(self, state: PipelineState) -> PipelineState:
         """A copy of `state` for the text block alone: it reads the prompt and the references
         as they stand now, whatever the media block appends meanwhile (`adopt_text`)."""
         return PipelineState(
             dict(state.values), {k: list(v) for k, v in state.kwargs_mapping.items()}
         )
 
-    def adopt_text(self, task: Task, state: Any, text: Any) -> None:
+    def adopt_text(self, task: Task, state: PipelineState, text: PipelineState) -> None:
         """The text block's outputs, from its copy into `state`, as the block writes them."""
         block = self._blocks[self._workflow(task, state)].sub_blocks["text_encoder"]
         for output in block.intermediate_outputs:
             state.set(output.name, text.get(output.name), output.kwargs_type)
 
-    def condition_text(self, task: Task, state: Any, device: Device) -> None:
+    def condition_text(self, task: Task, state: PipelineState, device: Device) -> None:
         conditioner = FinalHiddenState(self.components["text_encoder"], torch.device(str(device)))
         view = _ScopedPipeline(
             self._pipes[self._workflow(task, state)],
@@ -1309,7 +1415,7 @@ class OfficialH3Pipeline:
     def condition_media(
         self,
         task: Task,
-        state: Any,
+        state: PipelineState,
         *,
         memo: ReferenceMemo | None = None,
     ) -> tuple[int, int]:
@@ -1328,7 +1434,7 @@ class OfficialH3Pipeline:
                 self._encode_guide(task, state, memo)
         if state.get(ANCHORS):
             self._encode_anchors(task, state)
-        context = state.get("continuation_context")
+        context: AVContext | None = state.values.get("continuation_context")
         if context is not None:
             if context.video is not None:
                 state.set("condition_latents", [*state.condition_latents, context.video])
@@ -1342,7 +1448,7 @@ class OfficialH3Pipeline:
         return counts
 
     def _encode_references(
-        self, task: Task, state: Any, memo: ReferenceMemo | None
+        self, task: Task, state: PipelineState, memo: ReferenceMemo | None
     ) -> tuple[int, int]:
         """Diffusers' `MiniMaxH3Ref2VAReferenceEncoderStep`, one reference at a time.
 
@@ -1365,11 +1471,11 @@ class OfficialH3Pipeline:
             vae, audio_vae = view.vae, view.audio_vae
             pixel_mean, pixel_std = tuple(view.pixel_mean), tuple(view.pixel_std)
             seed = int(view.keyframe_encode_seed)
-            latents_mean = torch.tensor(vae.config.latents_mean).view(1, -1, 1, 1, 1)
-            latents_std = torch.tensor(vae.config.latents_std).view(1, -1, 1, 1, 1)
+            latents_mean = torch.tensor(vae.config["latents_mean"]).view(1, -1, 1, 1, 1)
+            latents_std = torch.tensor(vae.config["latents_std"]).view(1, -1, 1, 1, 1)
             identity = _encode_identity(view, memo)
             references = state.normalized_references
-            visual: dict[int, tuple[Any, tuple[Any, ...]]] = {}
+            visual: dict[int, tuple[npt.NDArray[np.uint8], tuple[object, ...]]] = {}
             for index, reference in enumerate(references):
                 if reference.kind == "image":
                     pixels = np.array(reference.image)
@@ -1377,9 +1483,9 @@ class OfficialH3Pipeline:
                     pixels = reference.frames[: _snapped(reference.frames.shape[0])].copy()
                 else:
                     continue
-                key = () if memo is None else (*identity, *reference_digest(pixels))
+                key: tuple[object, ...] = () if memo is None else (*identity, *reference_digest(pixels))
                 visual[index] = (pixels, key)
-            latents: dict[int, Any] = {}
+            latents: dict[int, torch.Tensor] = {}
             if memo is not None:
                 for index, (_, key) in visual.items():
                     if key in memo.cache:
@@ -1422,9 +1528,9 @@ class OfficialH3Pipeline:
             state.set("audio_condition_latents", audio_condition_latents)
             return len(visual) - len(missing), len(missing)
 
-    def _encode_guide(self, task: Task, state: Any, memo: ReferenceMemo | None) -> None:
+    def _encode_guide(self, task: Task, state: PipelineState, memo: ReferenceMemo | None) -> None:
         """The guide's latents and soundtrack rows, encoded as a reference video's are."""
-        guide: GuideClip = state.get(GUIDE)
+        guide = cast(GuideClip, state.get(GUIDE))
         with torch.no_grad():
             view = _ScopedPipeline(self._pipes[self._workflow(task, state)], self.components["vae"])
             vae = view.vae
@@ -1432,7 +1538,7 @@ class OfficialH3Pipeline:
             key = None
             if memo is not None:
                 key = (*_encode_identity(view, memo), *reference_digest(pixels))
-            if key is not None and key in memo.cache:
+            if key is not None and memo is not None and key in memo.cache:
                 latents = memo.cache.get(key, build=_unreachable).clone()
             else:
                 raw = encode_condition(
@@ -1442,25 +1548,25 @@ class OfficialH3Pipeline:
                     tuple(view.pixel_std),
                     int(view.keyframe_encode_seed),
                 )
-                mean = torch.tensor(vae.config.latents_mean).view(1, -1, 1, 1, 1)
-                std = torch.tensor(vae.config.latents_std).view(1, -1, 1, 1, 1)
+                mean = torch.tensor(vae.config["latents_mean"]).view(1, -1, 1, 1, 1)
+                std = torch.tensor(vae.config["latents_std"]).view(1, -1, 1, 1, 1)
                 latents = (raw.cpu() - mean) / std
-                if key is not None:
+                if key is not None and memo is not None:
                     latents = memo.cache.get(key, build=_returning(latents)).clone()
             audio = None
             if guide.audio is not None:
                 audio = _soundtrack_rows(view.audio_vae, guide.audio.to(view._execution_device))
         state.set(GUIDE_LATENTS, (latents, audio))
 
-    def _encode_anchors(self, task: Task, state: Any) -> None:
+    def _encode_anchors(self, task: Task, state: PipelineState) -> None:
         """Each keyframe anchor as one latent frame, encoded as FL2VA's keyframes are."""
         with torch.no_grad():
             view = _ScopedPipeline(self._pipes[self._workflow(task, state)], self.components["vae"])
             vae = view.vae
-            mean = torch.tensor(vae.config.latents_mean).view(1, -1, 1, 1, 1)
-            std = torch.tensor(vae.config.latents_std).view(1, -1, 1, 1, 1)
+            mean = torch.tensor(vae.config["latents_mean"]).view(1, -1, 1, 1, 1)
+            std = torch.tensor(vae.config["latents_std"]).view(1, -1, 1, 1, 1)
             encoded = []
-            for pixels, at in state.get(ANCHORS):
+            for pixels, at in cast("list[tuple[npt.NDArray[np.uint8], str]]", state.get(ANCHORS)):
                 raw = encode_condition(
                     vae, torch.from_numpy(pixels), tuple(view.pixel_mean), tuple(view.pixel_std),
                     int(view.keyframe_encode_seed),
@@ -1471,7 +1577,7 @@ class OfficialH3Pipeline:
     def denoise(
         self,
         task: Task,
-        state: Any,
+        state: PipelineState,
         *,
         on_step: Callable[[int], None],
         cancel: Callable[[], None],
@@ -1486,7 +1592,7 @@ class OfficialH3Pipeline:
             self._pipes[self._workflow(task, state)],
             self.components[_DIT_COMPONENT[_TRUNK[task]]],
             overrides={
-                **_schedulers(state.get(_PLAN)),
+                **_schedulers(cast(TimestepPlan, state.get(_PLAN))),
                 "max_duration": _CEILING_S,
             },
         )
@@ -1504,13 +1610,13 @@ class OfficialH3Pipeline:
                 guided += self._pack_anchors(scoped, state)
             self._run_with(task, scoped, name, state)
 
-        context = state.get("continuation_context")
+        context: AVContext | None = state.values.get("continuation_context")
         if context is not None:
             align_context_rows(state, context, tuple(scoped.patch_size))
 
         # The receipt names the schedule the official blocks actually built, proven
         # against the plan by exact float32 equality of both modality vectors.
-        plan = state.get(_PLAN)
+        plan = cast(TimestepPlan, state.get(_PLAN))
         schedule = plan.executed(_float_tuple(state.timesteps), _float_tuple(state.audio_timesteps))
         if _BANK[task] is None:
             layout = self._dit_specs[_TRUNK[task]][1]
@@ -1518,7 +1624,7 @@ class OfficialH3Pipeline:
                 layout.require(schedule.video_timesteps, schedule.audio_timesteps)
         facts = ScheduleFacts.of(plan, schedule)
         loop = blocks["denoise.denoise"]
-        block_state = loop.get_block_state(state)
+        block_state: LoopState = loop.get_block_state(state)
         clips = None
         if _TRUNK[task] == "ref2va":
             references, latents = state.normalized_references, state.condition_latents
@@ -1534,7 +1640,7 @@ class OfficialH3Pipeline:
             lambda step: _attention_layout(block_state, step, sol_dense_steps=sol_dense_steps, tau=tau),
             sol_dense_steps,
             on_step,
-            overlay=(block_state.attention_kwargs or {}).get(OVERLAY_KWARG),
+            overlay=cast("Overlay | None", (block_state.attention_kwargs or {}).get(OVERLAY_KWARG)),  # stored there only
             cache=cache,
         )
         count = len(block_state.timesteps)
@@ -1552,59 +1658,65 @@ class OfficialH3Pipeline:
         return facts
 
     @staticmethod
-    def _pack_guide(scoped: Any, state: Any) -> int:
+    def _pack_guide(scoped: _ScopedPipeline, state: PipelineState) -> int:
         """The guide as its rows (`guide_rows`), noised as FL2VA's keyframes are, after every
         other draw of the request's generator; its video row count."""
-        latents, audio = state.get(GUIDE_LATENTS)
+        rows = cast("tuple[torch.Tensor, torch.Tensor | None]", state.get(GUIDE_LATENTS))
+        latents, audio = rows
         device = state.latents.device
         noise = randn_tensor(
             latents.shape, generator=state.generator, device=device, dtype=torch.float32
         )
-        noised = scoped.scheduler.scale_noise(latents.to(device), scoped.keyframe_noise_aug, noise)
-        video = patchify_video_latents(noised, tuple(scoped.patch_size))
+        noised = scoped.scheduler.scale_noise(latents.to(device), scoped.keyframe_noise_aug, noise)  # type: ignore[arg-type]  # Diffusers annotates the legacy FloatTensor
+        video = patchify_video_latents(noised, tuple(scoped.patch_size))  # type: ignore[arg-type]  # the DiT's (t, h, w) patch
         if audio is not None:
             audio = audio[:, : state.num_audio_latents]
         guide_rows(state, video, audio)
         return int(video.shape[0])
 
     @staticmethod
-    def _pack_anchors(scoped: Any, state: Any) -> int:
+    def _pack_anchors(scoped: _ScopedPipeline, state: PipelineState) -> int:
         """Each keyframe anchor as its rows (`anchor_rows`), noised as FL2VA's keyframes are,
         after the guide's draws; their video row count."""
         count = 0
         device = state.latents.device
-        for latents, at in state.get(ANCHOR_LATENTS):
+        anchors = cast("list[tuple[torch.Tensor, str]]", state.get(ANCHOR_LATENTS))
+        for latents, at in anchors:
             noise = randn_tensor(
                 latents.shape, generator=state.generator, device=device, dtype=torch.float32
             )
-            noised = scoped.scheduler.scale_noise(latents.to(device), scoped.keyframe_noise_aug, noise)
-            video = patchify_video_latents(noised, tuple(scoped.patch_size))
+            noised = scoped.scheduler.scale_noise(latents.to(device), scoped.keyframe_noise_aug, noise)  # type: ignore[arg-type]  # Diffusers annotates the legacy FloatTensor
+            video = patchify_video_latents(noised, tuple(scoped.patch_size))  # type: ignore[arg-type]  # the DiT's (t, h, w) patch
             anchor_rows(state, video, last=at == "last")
             count += int(video.shape[0])
         return count
 
-    def decode_audio(self, task: Task, state: Any) -> Any:
+    def decode_audio(self, task: Task, state: PipelineState) -> torch.Tensor:
         """The soundtrack, under its caller's deterministic scope (`H3Model.decode_audio`)."""
         self._run(task, "decode.audio", state, component="audio_vae")
-        delivery = state.get("continuation_delivery")
+        delivery: ContinuationPlan | None = state.values.get("continuation_delivery")
+        audio: torch.Tensor = state.audio
         if delivery is None:
-            return state.audio
-        context = state.get("continuation_context")
+            return audio
+        context: AVContext | None = state.values.get("continuation_context")
         entry = context.audio_offset if context is not None else Fraction(0)
         start, end = delivery.audio_samples(entry, int(state.sampling_rate))
-        delivered = state.audio[..., start:end]
+        delivered = audio[..., start:end]
         # Only a picture end the grid rounds the sound short of: at most a third of a tick.
         return torch.nn.functional.pad(delivered, (0, end - start - delivered.shape[-1]))
 
-    def decode_video(self, task: Task, state: Any) -> Any:
+    def decode_video(self, task: Task, state: PipelineState) -> torch.Tensor:
         if state.get("continuation_delivery") is not None:
             raise InvalidRequest(
                 "continuation requires streaming video decode", code="h3_continuation"
             )
         self._run(task, "decode.video", state, component="vae")
-        return state.videos
+        videos: torch.Tensor = state.videos
+        return videos
 
-    def decode_video_chunks(self, task: Task, state: Any, on_chunk: Callable[[Any], None]) -> int:
+    def decode_video_chunks(
+        self, task: Task, state: PipelineState, on_chunk: Callable[[torch.Tensor], None]
+    ) -> int:
         """`decode.video` with the VAE's temporal chunks handed out as they finish (h3a-017).
 
         Upstream's `MiniMaxH3VideoDecodeStep` denormalizes the latents, decodes under
@@ -1618,12 +1730,12 @@ class OfficialH3Pipeline:
         components = _ScopedPipeline(self._pipes[workflow], self.components["vae"])
         device = components._execution_device
         vae = components.vae
-        latents_mean = torch.tensor(vae.config.latents_mean, device=device).view(1, -1, 1, 1, 1)
-        latents_std = torch.tensor(vae.config.latents_std, device=device).view(1, -1, 1, 1, 1)
+        latents_mean = torch.tensor(vae.config["latents_mean"], device=device).view(1, -1, 1, 1, 1)
+        latents_std = torch.tensor(vae.config["latents_std"], device=device).view(1, -1, 1, 1, 1)
         pixel_mean = torch.tensor(components.pixel_mean, device=device).view(1, -1, 1, 1, 1)
         pixel_std = torch.tensor(components.pixel_std, device=device).view(1, -1, 1, 1, 1)
         frames = 0
-        delivery = state.get("continuation_delivery")
+        delivery: ContinuationPlan | None = state.values.get("continuation_delivery")
         tail = DeliveredFrames(delivery) if delivery is not None else None
         equalize = CellEqualizer(VAE_SPATIAL_RATIO)
         with torch.no_grad():
@@ -1643,24 +1755,24 @@ class OfficialH3Pipeline:
                 if selected.shape[0]:
                     on_chunk(selected)
 
-    def decode_latents(self, latents: Any, on_chunk: Callable[[Any], None]) -> int:
+    def decode_latents(self, latents: torch.Tensor, on_chunk: Callable[[torch.Tensor], None]) -> int:
         """`decode_video_chunks` of normalized `(1, 24, T, H, W)` latents at any canvas."""
         state = PipelineState()
         state.set("latents", latents)
         return self.decode_video_chunks("fl2va", state, on_chunk)
 
-    def encode_clip(self, pixels: Any, seed: int) -> Any:
+    def encode_clip(self, pixels: torch.Tensor, seed: int) -> torch.Tensor:
         """A `(T, H, W, 3)` uint8 clip's normalized `(1, 24, T', H/16, W/16)` latents: the
         official keyframe encode (`encode_condition`) over the whole clip, posterior sampled
         under `seed`, as `open_h3` encodes a draft video."""
         components = _ScopedPipeline(self._pipes["t2va"], self.components["vae"])
         vae = components.vae
         raw = encode_condition(vae, pixels, components.pixel_mean, components.pixel_std, seed)
-        mean = torch.tensor(vae.config.latents_mean, device=raw.device).view(1, -1, 1, 1, 1)
-        std = torch.tensor(vae.config.latents_std, device=raw.device).view(1, -1, 1, 1, 1)
+        mean = torch.tensor(vae.config["latents_mean"], device=raw.device).view(1, -1, 1, 1, 1)
+        std = torch.tensor(vae.config["latents_std"], device=raw.device).view(1, -1, 1, 1, 1)
         return (raw - mean) / std
 
-    def _sound_rows(self, waveform: Any) -> Any:
+    def _sound_rows(self, waveform: torch.Tensor) -> torch.Tensor:
         """A stereo waveform's `(2, latents, 32)` rows at the posterior mean, on the audio VAE's device."""
         audio_vae = self.components["audio_vae"]
         device = next(audio_vae.parameters()).device
@@ -1670,27 +1782,34 @@ class OfficialH3Pipeline:
         with torch.no_grad(), _audio_weight_norm_scope(audio_vae):
             return _soundtrack_rows(audio_vae, waveform.to(device))
 
-    def silence_rows(self, frames: int) -> Any:
+    def silence_rows(self, frames: int) -> torch.Tensor:
         """Packed `(2 * latents, 32)` rows of stereo silence covering `frames` video frames,
         at the posterior mean (`open_h3/pipeline.py` encode_silence)."""
         rows = self._sound_rows(torch.zeros(AUDIO_CHANNELS, round(frames / FPS * self.sample_rate)))
         return rows.reshape(-1, rows.shape[-1])
 
-    def carried_sound(self, waveform: Any) -> Any:
+    def carried_sound(self, waveform: torch.Tensor) -> torch.Tensor:
         """Packed rows of a kept soundtrack's last second, encoded with what leads up to it, as a carry holds them."""
         rows = self._sound_rows(waveform[:, -_SOUND_LEAD_S * self.sample_rate :])
         return rows[:, -AUDIO_TICKS:].reshape(-1, rows.shape[-1])
 
-    def export_context(self, state: Any, *, provenance: str) -> AVContext | None:
+    def export_context(self, state: PipelineState, *, provenance: str) -> AVContext | None:
         """The successor's carry from this request's denoised latents; None if it carries
         nothing."""
         return export_context(
             state.latents, state.audio_latents, state.continuation_delivery, provenance
         )
 
-    def _run(self, task: Task, name: str, state: Any, *, component: str | None = None) -> None:
+    def _run(
+        self,
+        task: Task,
+        name: str,
+        state: PipelineState,
+        *,
+        component: Literal["vae", "audio_vae"] | None = None,
+    ) -> None:
         workflow = self._workflow(task, state)
-        pipe = (
+        pipe: MiniMaxH3ModularPipeline | _ScopedPipeline = (
             self._pipes[workflow]
             if component is None
             else _ScopedPipeline(self._pipes[workflow], self.components[component])
@@ -1704,12 +1823,14 @@ class OfficialH3Pipeline:
         else:
             self._run_with(task, pipe, name, state)
 
-    def _run_with(self, task: Task, pipe: Any, name: str, state: Any) -> None:
+    def _run_with(
+        self, task: Task, pipe: MiniMaxH3ModularPipeline | _ScopedPipeline, name: str, state: PipelineState
+    ) -> None:
         block = self._blocks[self._workflow(task, state)].sub_blocks[name]
         block(pipe, state)
 
     @staticmethod
-    def _workflow(task: Task, state: Any) -> str:
+    def _workflow(task: Task, state: PipelineState) -> str:
         if (
             _TRUNK[task] == "fl2va"
             and state.get("image") is None
@@ -1773,7 +1894,7 @@ def build_h3_turbo_lora(config: Config, plans: Mapping[Trunk, TimestepPlan]) -> 
 
 class OfficialH3RegenerateLoRA:
     """Open-H3-Regenerate-2K's refine overlay: the merged rank-576 LoRA and its refine plan's
-    AdaLN tables (LMS Sharp's curve folded in by `minimax-h3-tools/regenerate-lora`), served
+    AdaLN tables (LMS Sharp's curve folded in by `minimax-h3/regenerate-lora`), served
     over the FL2VA DiT with its own heads."""
 
     def __init__(self, config: Config, plan: TimestepPlan) -> None:
@@ -1839,7 +1960,7 @@ def _artifact_sections(config: Config) -> Config:
     return config
 
 
-def _dit_spec(config: Config, task: Trunk) -> tuple[dict[str, Any], TableLayout | None]:
+def _dit_spec(config: Config, task: Trunk) -> tuple[dict[str, object], TableLayout | None]:
     """A DiT's upstream config and, AdaLN-pruned, its table layout; FULL has none."""
     component = _DIT_COMPONENT[task]
     upstream = config.section(component).mapping()
@@ -1860,7 +1981,7 @@ def _dit_spec(config: Config, task: Trunk) -> tuple[dict[str, Any], TableLayout 
         if "table_keys" not in extension:
             raise ValueError(
                 f"model component {component!r} is missing its modulation table row labels; "
-                "regenerate the lane with minimax-h3-tools/bf16-pruned or fp8-pruned",
+                "regenerate the lane with minimax-h3/bf16-pruned or fp8-pruned",
             )
         fields.add("table_keys")
     if structure == "adaln-pruned" and "generating_projection_digest" in extension:
@@ -1889,7 +2010,7 @@ def _dit_spec(config: Config, task: Trunk) -> tuple[dict[str, Any], TableLayout 
     return upstream, layout
 
 
-def _dit_specs(config: Config) -> dict[Trunk, tuple[dict[str, Any], TableLayout | None]]:
+def _dit_specs(config: Config) -> dict[Trunk, tuple[dict[str, object], TableLayout | None]]:
     specs = {trunk: _dit_spec(config, trunk) for trunk in _TRUNKS}
     if len({spec[1] is None for spec in specs.values()}) != 1:
         raise ValueError(
@@ -1902,7 +2023,7 @@ def _dit_specs(config: Config) -> dict[Trunk, tuple[dict[str, Any], TableLayout 
     return specs
 
 
-def _build_dit(config: Mapping[str, Any], layout: TableLayout | None) -> H3Transformer:
+def _build_dit(config: Mapping[str, object], layout: TableLayout | None) -> H3Transformer:
     """FULL without a layout, else AdaLN-pruned over its tables."""
     tables = None if layout is None else (layout.timesteps, layout.block_keys)
     transformer = build_transformer(config, tables)
@@ -1912,7 +2033,7 @@ def _build_dit(config: Mapping[str, Any], layout: TableLayout | None) -> H3Trans
 
 def _overlay_spec(
     config: Config, trunk: Trunk, plan: TimestepPlan
-) -> tuple[dict[str, Any], TableLayout]:
+) -> tuple[dict[str, object], TableLayout]:
     """Only the released rank-64 PDD-8 adapter is supported."""
     component = _OVERLAY_COMPONENT[trunk]
     section = config.section(component).mapping()
@@ -1944,7 +2065,7 @@ def _overlay_spec(
 
 
 def _build_overlay(
-    config: Mapping[str, Any], plan: TimestepPlan, layout: TableLayout
+    config: Mapping[str, object], plan: TimestepPlan, layout: TableLayout
 ) -> Overlay:
     (schedule,) = plan.schedules
     timesteps, block_keys = layout.timesteps, layout.block_keys
@@ -1963,7 +2084,7 @@ def _build_overlay(
     return overlay
 
 
-def _validate_dual_topology(members: Mapping[Trunk, Any], names: Mapping[Trunk, str]) -> None:
+def _validate_dual_topology(members: Mapping[Trunk, torch.nn.Module], names: Mapping[Trunk, str]) -> None:
     """Prove one architecture instantiated twice for two independent weight identities."""
     fl2va, ref2va = members["fl2va"], members["ref2va"]
     if fl2va is ref2va:
@@ -1971,7 +2092,7 @@ def _validate_dual_topology(members: Mapping[Trunk, Any], names: Mapping[Trunk, 
             "FL2VA and Ref2VA component names alias one module instance",
         )
 
-    def topology(module: Any) -> tuple[tuple[str, tuple[int, ...], str], ...]:
+    def topology(module: torch.nn.Module) -> tuple[tuple[str, tuple[int, ...], str], ...]:
         return tuple(
             # Row count follows each checkpoint's labels, independently per trunk.
             # The remaining axes still prove the same modulation architecture.
@@ -1996,11 +2117,11 @@ def _validate_dual_topology(members: Mapping[Trunk, Any], names: Mapping[Trunk, 
         )
 
 
-def _validate_dual_dit_topology(dits: Mapping[Trunk, Any]) -> None:
+def _validate_dual_dit_topology(dits: Mapping[Trunk, torch.nn.Module]) -> None:
     _validate_dual_topology(dits, _DIT_COMPONENT)
 
 
-def _apply_transformer_dtype(transformer: Any) -> Any:
+def _apply_transformer_dtype[M: MiniMaxH3Transformer3DModel](transformer: M) -> M:
     """Reproduce Diffusers' mixed FULL compute policy on Runtime destinations."""
     # Cast each root directly to its final dtype. In particular, RoPE frequencies
     # are real config-derived buffers: BF16 followed by FP32 cannot restore them.
@@ -2010,18 +2131,18 @@ def _apply_transformer_dtype(transformer: Any) -> Any:
     return transformer.eval()
 
 
-def _apply_video_vae_dtype(vae: Any, config: Config | None = None) -> Any:
+def _apply_video_vae_dtype(vae: TileBatchedVideoVAE, config: Config | None = None) -> TileBatchedVideoVAE:
     """Construct the encoder and the decode operands in their checkpoint dtype before Runtime's census.
 
     Both original FP32 and pre-rounded FP16 matrix weights run under the same FP16
     decode autocast. The encoder and `quant_conv` compute in the dtype they are stored
-    in, FP16 in every lane (`h3_tables.lanes.vae_operand`): `encode` aligns its pixels to
+    in, FP16 in every lane (`minimax_h3.preparation.lanes.vae_operand`): `encode` aligns its pixels to
     it. Loading must preserve their supplied logical dtype and price the actual residency.
     The decoder's norms, biases, register tokens and config-derived RoPE retain their FP32
     contract. Config-only construction defaults to the original FP32 architecture.
     """
     config = config or Config({})
-    weights = [
+    weights: list[tuple[str, torch.Tensor]] = [
         (f"decoder.{name}", parameter)
         for name, parameter in vae.decoder.named_parameters()
         if name.rsplit(".", 1)[-1] == "weight" and parameter.dim() >= 2
@@ -2041,7 +2162,12 @@ def _apply_video_vae_dtype(vae: Any, config: Config | None = None) -> Any:
     return vae.eval()
 
 
-def _validate_model_contract(pipe: Any, transformer: Any, video_vae: Any, audio_vae: Any) -> None:
+def _validate_model_contract(
+    pipe: MiniMaxH3ModularPipeline,
+    transformer: MiniMaxH3Transformer3DModel,
+    video_vae: TileBatchedVideoVAE,
+    audio_vae: AutoencoderKLMiniMaxH3Audio,
+) -> None:
     """Refuse shape-preserving scalar drift in the one official release geometry."""
     contracts = (
         (
@@ -2132,14 +2258,14 @@ def _validate_model_contract(pipe: Any, transformer: Any, video_vae: Any, audio_
         )
 
 
-def _audio_tensor(audio: DecodedAudio) -> Any:
+def _audio_tensor(audio: DecodedAudio) -> torch.Tensor:
     """`(channels, samples)` float32, one copy of the PCM."""
     return torch.from_numpy(
         np.stack([np.frombuffer(channel, dtype="<f4") for channel in audio.pcm_f32le])
     )
 
 
-def _resample(waveform: Any, rate: int, target: int) -> Any:
+def _resample(waveform: torch.Tensor, rate: int, target: int) -> torch.Tensor:
     """Bit-identical port of `torchaudio.transforms.Resample(rate, target)` defaults.
 
     The official pipeline resamples reference audio with torchaudio, which has no release for
@@ -2167,10 +2293,10 @@ def _resample(waveform: Any, rate: int, target: int) -> Any:
 
 
 @dataclass
-class MotionVideo(MiniMaxH3VideoReference):
+class MotionVideo(MiniMaxH3VideoReference):  # type: ignore[explicit-any]  # the base's fields: Diffusers' bare np.ndarray
     """A reference clip whose real frames, `motion`, are already at the size the call uses."""
 
-    motion: Any = None
+    motion: npt.NDArray[np.uint8] = None  # type: ignore[assignment]  # after the base's defaults; `video_reference` sets it
 
 
 @dataclass(frozen=True, slots=True)
@@ -2178,11 +2304,11 @@ class ReferenceClip:
     """A clip as the call uses it: `(T, H, W, 3)` uint8 frames on the 24-fps clock at its
     `clip_size`, the source geometry its canvas follows, and its soundtrack if kept."""
 
-    frames: Any
+    frames: npt.NDArray[np.uint8]
     width: int
     height: int
     duration: Fraction
-    soundtrack: Any | None = None
+    soundtrack: torch.Tensor | None = None
     sample_rate: int = 0
 
 
@@ -2191,7 +2317,7 @@ def clip_size(width: int, height: int, *, guide: bool) -> tuple[int, int]:
     target shares, or for a motion clip that canvas's `motion_size`."""
     width, height = within_ratio(width, height)
     canvas = tuple(int(value) for value in resolve_canvas_size(width, height, *CANVAS))
-    return canvas if guide else motion_size(*canvas)
+    return canvas if guide else motion_size(*canvas)  # type: ignore[return-value]  # (height, width)
 
 
 #: The widest a canvas goes either way: past it a clip or keyframe keeps its middle.
@@ -2209,7 +2335,7 @@ def shown_width(width: int, pixel_aspect_ratio: Fraction) -> int:
 
 
 def read_reference_video(
-    events: Iterable[Any], *, frames: int, audio: bool, guide: bool = False
+    events: Iterable[DecodedMediaEvent], *, frames: int, audio: bool, guide: bool = False
 ) -> ReferenceClip:
     """Decode a reference clip once, straight to the size the call uses.
 
@@ -2219,16 +2345,16 @@ def read_reference_video(
     and no source-resolution frame outlives its event. With `audio`, the soundtrack is kept on
     the video's origin, to the nearest sample of its own clock.
     """
-    out: np.ndarray | None = None
+    out: npt.NDArray[np.uint8] | None = None
     kept = 0
     origin = end = Fraction(0)
-    held: tuple[Fraction, np.ndarray | None] | None = None
+    held: tuple[Fraction, npt.NDArray[np.uint8] | None] | None = None
     first: DecodedVideoFrame | None = None
     pcm: list[list[bytes]] = []
     audio_start: Fraction | None = None
     rate = 0
 
-    def place(picture: np.ndarray | None, stop: Fraction) -> None:
+    def place(picture: npt.NDArray[np.uint8] | None, stop: Fraction) -> None:
         nonlocal kept
         assert out is not None
         upto = min(_round_fraction((stop - origin) * FPS), frames)
@@ -2265,7 +2391,7 @@ def read_reference_video(
         if _round_fraction((start - origin) * FPS) < frames:
             assert out is not None
             rgb = torch.frombuffer(bytearray(event.rgb), dtype=torch.uint8).view(event.height, event.width, 3)
-            rgb = rgb[top : top + cut_height, left : left + cut_width]
+            rgb = rgb[top : top + cut_height, left : left + cut_width]  # type: ignore[possibly-undefined]  # set with the first frame
             if rgb.shape[:2] != out.shape[1:3]:
                 chw = rgb.permute(2, 0, 1)[None]
                 rgb = torch.nn.functional.interpolate(chw, size=out.shape[1:3], mode="bicubic", antialias=True)
@@ -2290,14 +2416,14 @@ def read_reference_video(
                                    code="reference_policy")
         soundtrack = torch.zeros((len(pcm), target), dtype=torch.float32)
         soundtrack[:, lo:hi] = waveform[:, lo - offset : hi - offset]
-    return ReferenceClip(out[:kept], *within_ratio(shown, first.height), end - origin, soundtrack, rate)
+    return ReferenceClip(out[:kept], *within_ratio(shown, first.height), end - origin, soundtrack, rate)  # type: ignore[possibly-undefined]  # set with the first frame
 
 
 def _round_fraction(value: Fraction) -> int:
     return math.floor(value + Fraction(1, 2))
 
 
-def _float_tuple(tensor: Any) -> tuple[float, ...]:
+def _float_tuple(tensor: torch.Tensor) -> tuple[float, ...]:
     return tuple(float(value) for value in tensor.detach().float().cpu())
 
 
@@ -2320,7 +2446,7 @@ def _modulation_class(
     modality: str,
     tag: int,
     presence: str,
-) -> dict[str, Any]:
+) -> _ModulationClass:
     return {
         "name": name,
         "timestep": _float_hex(timestep),

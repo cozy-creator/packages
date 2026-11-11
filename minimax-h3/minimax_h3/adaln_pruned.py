@@ -22,15 +22,15 @@ from contextvars import ContextVar
 from typing import Any, ClassVar, cast
 
 import torch
-from diffusers import MiniMaxH3Transformer3DModel
 from diffusers.models.modeling_utils import get_parameter_dtype
 from diffusers.models.transformers.transformer_minimax_h3 import (
     MINIMAX_H3_MODALITY_NUM,
     MiniMaxH3AdaLayerNormModulation,
     MiniMaxH3AdaLayerNormOut,
+    MiniMaxH3Transformer3DModel,
     MiniMaxH3TransformerOutput,
 )
-from diffusers.utils import apply_lora_scale
+from diffusers.utils.peft_utils import apply_lora_scale
 from torch import nn
 from torch.nn import functional as F
 
@@ -68,19 +68,21 @@ def checked_loop() -> Iterator[None]:
         _CHECKED.reset(token)
 
 
-class _Armed:
+class _Armed[S]:
     """One module's turbo source for the forward in flight; a plain object, so placing it
     on a module registers nothing and the DiT's state dict is what it was."""
 
     __slots__ = ("source", "step")
 
-    def __init__(self, source: Any, step: int = 0) -> None:
+    def __init__(self, source: S, step: int = 0) -> None:
         self.source = source
         self.step = step
 
 
-class _AdaLNPrunedTimestepLookup(nn.Module):  # type: ignore[misc]
+class _AdaLNPrunedTimestepLookup(nn.Module):
     """Map exact float32 timestep values to the checkpoint's labelled rows."""
+
+    timesteps: torch.Tensor
 
     def __init__(self, timesteps: Sequence[float]) -> None:
         super().__init__()
@@ -106,7 +108,7 @@ class _AdaLNPrunedTimestepLookup(nn.Module):  # type: ignore[misc]
         return matches.to(dtype=torch.int64).argmax(dim=1)
 
 
-class _AdaLNPrunedTimestepRows(nn.Module):  # type: ignore[misc]
+class _AdaLNPrunedTimestepRows(nn.Module):
     """The removed timestep MLP's place: the rows pass through."""
 
     def __init__(self) -> None:
@@ -121,7 +123,7 @@ class _AdaLNPrunedTimestepRows(nn.Module):  # type: ignore[misc]
         return rows
 
 
-class _AdaLNPrunedBlockTable(nn.Module):  # type: ignore[misc]
+class _AdaLNPrunedBlockTable(nn.Module):
     """Sparse exact table with the dense local shape Diffusers blocks already consume."""
 
     table_index: torch.Tensor
@@ -140,7 +142,7 @@ class _AdaLNPrunedBlockTable(nn.Module):  # type: ignore[misc]
         for table_row, (timestep_row, modality_tag) in enumerate(keys):
             index[timestep_row, modality_tag] = table_row
         self.register_buffer("table_index", index, persistent=False)
-        self._armed: _Armed | None = None
+        self._armed: _Armed[OverlayTables] | None = None
 
     def forward(self, timestep_rows: torch.Tensor) -> tuple[torch.Tensor, ...]:
         if self._armed is not None:
@@ -158,11 +160,11 @@ def _present(table_index: torch.Tensor, timestep_rows: torch.Tensor) -> torch.Te
 
 def _block_chunks(rows: torch.Tensor, hidden_size: int) -> tuple[torch.Tensor, ...]:
     """A block's six modulation chunks in the dense local shape Diffusers' blocks consume."""
-    return cast("tuple[torch.Tensor, ...]", rows.reshape(-1, 6 * hidden_size).chunk(6, dim=-1))
+    return rows.reshape(-1, 6 * hidden_size).chunk(6, dim=-1)
 
 
 def _overlay_block(
-    armed: _Armed, timestep_rows: torch.Tensor, hidden_size: int
+    armed: _Armed[OverlayTables], timestep_rows: torch.Tensor, hidden_size: int
 ) -> tuple[torch.Tensor, ...]:
     """An armed overlay's block table, read through its own forward: a piece of its overlay."""
     source = armed.source
@@ -175,23 +177,23 @@ def _modulate(normed: torch.Tensor, rows: torch.Tensor, indices: torch.Tensor) -
     return normed * (1.0 + scale.index_select(0, indices)) + shift.index_select(0, indices)
 
 
-class _BlockModulation(MiniMaxH3AdaLayerNormModulation):  # type: ignore[misc]
+class _BlockModulation(MiniMaxH3AdaLayerNormModulation):
     """FULL: the official AdaLN projection, or an armed overlay's table. Diffusers' module with
     this class (`H3Transformer.__init__`): its parameters and their paths are the checkpoint's."""
 
-    _armed: _Armed | None = None
+    _armed: _Armed[OverlayTables] | None = None
 
     def forward(self, temb: torch.Tensor) -> tuple[torch.Tensor, ...]:
         if self._armed is not None:
             return _overlay_block(self._armed, temb, self.hidden_size)
-        return cast("tuple[torch.Tensor, ...]", super().forward(temb))
+        return super().forward(temb)
 
 
-class _OutputModulation(MiniMaxH3AdaLayerNormOut):  # type: ignore[misc]
+class _OutputModulation(MiniMaxH3AdaLayerNormOut):
     """FULL: the official final norm and its projection, or an armed overlay's table (as
     `_BlockModulation`, Diffusers' module with this class)."""
 
-    _armed: _Armed | None = None
+    _armed: _Armed[OverlayTables] | None = None
 
     def forward(
         self,
@@ -200,18 +202,18 @@ class _OutputModulation(MiniMaxH3AdaLayerNormOut):  # type: ignore[misc]
         timestep_indices: torch.Tensor,
     ) -> torch.Tensor:
         if self._armed is None:
-            return cast(torch.Tensor, super().forward(hidden_states, temb, timestep_indices))
+            return super().forward(hidden_states, temb, timestep_indices)
         return _modulate(self.norm(hidden_states), self._armed.source(temb), timestep_indices)
 
 
-class _AdaLNPrunedOutputTable(nn.Module):  # type: ignore[misc]
+class _AdaLNPrunedOutputTable(nn.Module):
     """Official final RMSNorm with exact precomputed shift/scale rows."""
 
     def __init__(self, norm: nn.Module, *, hidden_size: int, timestep_count: int) -> None:
         super().__init__()
         self.norm = norm
         self.table = nn.Parameter(torch.empty(timestep_count, 2, hidden_size))
-        self._armed: _Armed | None = None
+        self._armed: _Armed[OverlayTables] | None = None
 
     def forward(
         self,
@@ -226,12 +228,12 @@ class _AdaLNPrunedOutputTable(nn.Module):  # type: ignore[misc]
         return _modulate(self.norm(hidden_states), rows, timestep_indices)
 
 
-class _SelectableHead(nn.Linear):  # type: ignore[misc]
+class _SelectableHead(nn.Linear):
     """The official output head, or the turbo evaluation's collapsed head when armed."""
 
     def __init__(self, in_features: int, out_features: int) -> None:
         super().__init__(in_features, out_features, bias=True)
-        self._armed: _Armed | None = None
+        self._armed: _Armed[nn.Module] | None = None
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         if self._armed is None:
@@ -245,17 +247,22 @@ def _projection_base(module: object) -> object:
     return get_base() if callable(get_base) else module
 
 
-class H3Transformer(MiniMaxH3Transformer3DModel):  # type: ignore[misc]
+class H3Transformer(MiniMaxH3Transformer3DModel):
     """The official MiniMax-H3 transformer with FULL modulation, as H3's loops serve it: the
     forward's packing scoped, a loop's rotary and text rows taken, an overlay armed per forward."""
 
-    def __init__(self, **config: Any) -> None:
+    # FULL's armable modulation modules, or the pruned class's tables (each `__init__`).
+    time_proj: nn.Module  # type: ignore[assignment]
+    time_embedder: nn.Module  # type: ignore[assignment]
+    norm_out: _OutputModulation | _AdaLNPrunedOutputTable  # type: ignore[assignment]
+
+    def __init__(self, **config: Any) -> None:  # type: ignore[explicit-any]  # **config into Diffusers' typed keywords
         super().__init__(**config)
         # Armable in place: no module is built or dropped, so the construction (its random draws
         # included) and the state dict are Diffusers' own.
         for block in self.transformer_blocks:
-            cast(nn.Module, block.adaln_proj).__class__ = _BlockModulation
-        cast(nn.Module, self.norm_out).__class__ = _OutputModulation
+            block.adaln_proj.__class__ = _BlockModulation
+        self.norm_out.__class__ = _OutputModulation
         for name in ("proj_out", "audio_proj_out"):
             head = cast(nn.Linear, getattr(self, name))
             setattr(self, name, _SelectableHead(head.in_features, head.out_features))
@@ -263,7 +270,7 @@ class H3Transformer(MiniMaxH3Transformer3DModel):  # type: ignore[misc]
         self._lora_hooks_installed = False
 
     @apply_lora_scale("attention_kwargs")  # type: ignore[untyped-decorator]
-    def forward(
+    def forward(  # type: ignore[misc]  # untyped after Diffusers' unannotated `apply_lora_scale`
         self,
         hidden_states: torch.Tensor,
         audio_hidden_states: torch.Tensor,
@@ -275,7 +282,7 @@ class H3Transformer(MiniMaxH3Transformer3DModel):  # type: ignore[misc]
         video_indices: torch.Tensor,
         audio_indices: torch.Tensor,
         text_indices: torch.Tensor,
-        attention_kwargs: dict[str, Any] | None = None,
+        attention_kwargs: dict[str, object] | None = None,
         return_dict: bool = True,
         rotary: tuple[torch.Tensor, torch.Tensor] | None = None,
         text: torch.Tensor | None = None,
@@ -326,7 +333,7 @@ class H3Transformer(MiniMaxH3Transformer3DModel):  # type: ignore[misc]
             adaln_indices = timestep_indices * MINIMAX_H3_MODALITY_NUM + token_tags
             for block in self.transformer_blocks:
                 if torch.is_grad_enabled() and self.gradient_checkpointing:
-                    rows = self._gradient_checkpointing_func(block, rows, temb, adaln_indices, rotary_emb)
+                    rows = self._gradient_checkpointing_func(block, rows, temb, adaln_indices, rotary_emb)  # type: ignore[misc]  # set by enable_gradient_checkpointing
                 else:
                     rows = block(rows, temb, adaln_indices, rotary_emb)
             dtype = get_parameter_dtype(self.proj_out)
@@ -377,10 +384,10 @@ class H3Transformer(MiniMaxH3Transformer3DModel):  # type: ignore[misc]
 
     def _arm(
         self,
-        timestep: Any,
-        timestep_indices: Any,
-        token_tags: Any,
-        selector: Any,
+        timestep: object,
+        timestep_indices: object,
+        token_tags: object,
+        selector: object,
     ) -> None:
         """Check one forward's rows against the tables it reads: the turbo overlay's, engaged
         here, when `selector` (its `attention_kwargs`) names the bank; else the base's, if it
@@ -415,7 +422,7 @@ class H3Transformer(MiniMaxH3Transformer3DModel):  # type: ignore[misc]
                         f"bank {bank!r} requires an overlay-capable base and that bank's "
                         "prepared overlay component",
                     )
-                step = overlay.schedule.step(timestep) if overlay.heads else 0
+                step = overlay.schedule.step(timestep) if overlay.heads else 0  # type: ignore[union-attr]  # `heads`: it has a schedule
                 self._engage(overlay, step)
                 covered = overlay.rows(timestep), _overlay_tables(overlay, 0).table_index
             else:
@@ -442,7 +449,7 @@ class H3Transformer(MiniMaxH3Transformer3DModel):  # type: ignore[misc]
         self._arming = OverlayArming(overlay, step)
         for index, block in enumerate(self.transformer_blocks):
             _modulation(block)._armed = _Armed(_overlay_tables(overlay, index))
-        _output(self)._armed = _Armed(overlay.norm_out)
+        self.norm_out._armed = _Armed(overlay.norm_out)
         for name in ("proj_out", "audio_proj_out") if overlay.heads else ():
             head = _projection_base(getattr(self, name))
             if not isinstance(head, _SelectableHead):
@@ -456,7 +463,7 @@ class H3Transformer(MiniMaxH3Transformer3DModel):  # type: ignore[misc]
         self._arming = None
         for block in self.transformer_blocks:
             _modulation(block)._armed = None
-        _output(self)._armed = None
+        self.norm_out._armed = None
         for name in ("proj_out", "audio_proj_out"):
             head = _projection_base(getattr(self, name))
             if isinstance(head, _SelectableHead):
@@ -468,25 +475,22 @@ def _modulation(block: nn.Module) -> _BlockModulation | _AdaLNPrunedBlockTable:
     return cast("_BlockModulation | _AdaLNPrunedBlockTable", block.adaln_proj)
 
 
-def _output(dit: H3Transformer) -> _OutputModulation | _AdaLNPrunedOutputTable:
-    """The final norm as `H3Transformer` installs it: FULL's projection or the table."""
-    return cast("_OutputModulation | _AdaLNPrunedOutputTable", dit.norm_out)
-
-
 def _overlay_tables(overlay: Overlay, block: int) -> OverlayTables:
     """An overlay's block table (`Overlay.__init__` places one in every block)."""
     return cast(OverlayTables, overlay.transformer_blocks[block].adaln_proj)
 
 
-class AdaLNPrunedMiniMaxH3Transformer(H3Transformer):  # type: ignore[misc]
+class AdaLNPrunedMiniMaxH3Transformer(H3Transformer):
     """H3's DiT with its modulation the checkpoint's exact tables in place of the projections."""
 
-    _keep_in_fp32_modules: ClassVar[list[str]] = [
+    time_proj: _AdaLNPrunedTimestepLookup
+    time_embedder: _AdaLNPrunedTimestepRows
+    _keep_in_fp32_modules: ClassVar[list[str]] = [  # type: ignore[assignment, misc]  # Diffusers declares it per instance; ModelMixin types it None
         *MiniMaxH3Transformer3DModel._keep_in_fp32_modules,
         "time_proj",
     ]
 
-    def __init__(
+    def __init__(  # type: ignore[explicit-any]  # **config into Diffusers' typed keywords
         self,
         *,
         table_timesteps: Sequence[float],
@@ -514,7 +518,7 @@ class AdaLNPrunedMiniMaxH3Transformer(H3Transformer):  # type: ignore[misc]
 
 
 def build_transformer(
-    config: Mapping[str, Any],
+    config: Mapping[str, object],
     tables: tuple[Sequence[float], Sequence[tuple[int, int]]] | None = None,
 ) -> H3Transformer:
     """The DiT of an artifact's upstream config: FULL, or AdaLN-pruned over `tables` (the

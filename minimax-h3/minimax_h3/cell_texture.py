@@ -15,7 +15,7 @@ the period is exact and the phase is zero; a later resize or crop only moves the
 
 from __future__ import annotations
 
-from typing import Any
+from typing import cast
 
 import torch
 import torch.nn.functional as F
@@ -41,9 +41,10 @@ class CellEqualizer:
 
     def __init__(self, period: int) -> None:
         self._period = period
-        self._energy: Any = 0.0
-        self._tile: Any = 0.0
-        self._weight: Any = 0.0
+        # Zero until the first piece's sums broadcast them to the tile's (p, p).
+        self._energy: torch.Tensor | float = 0.0
+        self._tile: torch.Tensor | float = 0.0
+        self._weight: torch.Tensor | float = 0.0
 
     def __call__(self, frames: torch.Tensor) -> torch.Tensor:
         """`frames`, in place, without the pattern; a piece with non-finite values passes
@@ -75,10 +76,11 @@ class CellEqualizer:
     def _tables(self, frames: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         p = self._period
         count = frames.shape[-2] // p, frames.shape[-1] // p
-        rows = self._energy.mean(1, keepdim=True).clamp_min(1e-6)
-        columns = self._energy.mean(0, keepdim=True).clamp_min(1e-6)
+        energy = cast(torch.Tensor, self._energy)  # `__call__` measured this piece first
+        rows = energy.mean(1, keepdim=True).clamp_min(1e-6)
+        columns = energy.mean(0, keepdim=True).clamp_min(1e-6)
         gain = (rows.mean() / rows * (columns.mean() / columns)).clamp(*_GAIN)
-        tile = self._tile / self._weight.clamp_min(1e-12)
+        tile = self._tile / cast(torch.Tensor, self._weight).clamp_min(1e-12)
         tile = tile - tile.mean()
         return tile.repeat(count), gain.repeat(count)
 

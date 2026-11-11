@@ -1,13 +1,13 @@
 # H3 preparation from a client script
 
-`h3_tables.operations.precompute_adaln` is an ordinary async Python helper.
+`minimax_h3.preparation.operations.precompute_adaln` is an ordinary async Python helper.
 It composes managed operations alongside `quantize` in an unpublished client script:
 
 ```python
-from h3_tables.operations import precompute_adaln, quantize
+from minimax_h3.preparation.operations import precompute_adaln, quantize
 
 async def main(ctx):
-    # full is a `bf16-full` lane, e.g. from `cozy run minimax-h3-tools/bf16-full`.
+    # full is a `bf16-full` lane, e.g. from `cozy run minimax-h3/bf16-full`.
     pruned = await precompute_adaln(model=full, timesteps=50)
     fp8 = await quantize(source=pruned, encoding="fp8.rowwise")
 ```

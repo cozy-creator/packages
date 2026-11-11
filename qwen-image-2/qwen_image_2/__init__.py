@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from functools import partial
-from typing import Annotated, Any, Literal
+from typing import Annotated, Literal
 
 import msgspec
 import torch
-from cozy_runtime.author import Adjustments, App, Context, Memoize, OutputError, Outputs, Seed, Telemetry
+from cozy_runtime.author import Adjustments, App, Context, OutputError, Outputs, Seed, Telemetry
 from cozy_runtime.fields import Advanced, AspectRatio, Image, MENTION, Prompt, Ratios
 from cozy_runtime.image import ImageRequest, ImageResult, Sizes, ratio_of
 from PIL import Image as PILImage
@@ -36,9 +37,9 @@ MAX_PICTURES = 10
 
 class GenerateInput(ImageRequest):
     #: Its text, and the pictures it mentions, in the order it first mentions them.
-    prompt: Prompt[Image] = Prompt()
+    prompt: Prompt[Image] = Prompt()  # type: ignore[assignment]  # a prompt with pictures, in place of the base's text
     #: Qwen Image 2.1 renders at 1, 2 or 4 MP (its native 2K); 2 by default (Paul, 11-06).
-    megapixels: Literal[1, 2, 4] = DEFAULT_MEGAPIXELS
+    megapixels: Literal[1, 2, 4] = DEFAULT_MEGAPIXELS  # type: ignore[assignment]  # 2, a Literal member
     #: Qwen's prompt enhancer rewrites the request first (`rewriter`): an edit from its pictures, else the words.
     prompt_upsampling: bool = True
     #: How far the rewrite goes beyond the words; `balanced` is Qwen's own.
@@ -57,7 +58,7 @@ def label(n: int, key: str, count: int) -> str:
 _ALPHA_NOISE = 4
 
 
-def decoded_image(decoded: Any) -> PILImage.Image:
+def decoded_image(decoded: torch.Tensor) -> PILImage.Image:
     """The decoder's pixels: RGBA when its alpha has any transparency, else RGB. Quantized on the
     decoder's device, NumPy's arithmetic in Torch: a 4 MP canvas sends 16 MB of bytes to the host,
     not 67 MB of floats for six host passes."""
@@ -100,14 +101,14 @@ def _upsampled(
     images: list[PILImage.Image],
     seed: int,
     enhancer: Enhancer,
+    progress: Callable[[int, int], None],
     tel: Telemetry,
     adj: Adjustments,
 ) -> tuple[GenerateInput, str]:
     """The request as Qwen's enhancer rewrites it, sampled from the render's `seed`, and the canvas it chose
     when the request names none (upstream passes `wh_ratio` and `ratio_follow` to the renderer)."""
-    with tel.stage("upsampling prompt", overall_range=(0.0, 0.3)):
-        found, answer, thought, said = rewrite(enhancer, prompt, images, payload.creativity, seed,
-                                               lambda done: tel.progress(done, stage="upsampling prompt"))
+    with tel.stage("upsampling prompt"):
+        found, answer, thought, said = rewrite(enhancer, prompt, images, payload.creativity, seed, progress)
     if found is None:
         adj.warn("prompt_upsampling", "Qwen's prompt enhancer gave no rewrite, so the prompt goes as written")
         tel.log("upsampled prompt", parsed=False, answer=answer[:2000], thought_tokens=thought, answer_tokens=said)
@@ -146,25 +147,24 @@ def _generate(
     reference_images = [picture.file.read(mode="RGBA") for picture in pictures] or None
     if payload.prompt_upsampling:
         enhancer = rewriter if reference_images else expander
-        payload, prompt = _upsampled(payload, prompt, reference_images or [], seed, enhancer, tel, adj)
+        payload, prompt = _upsampled(payload, prompt, reference_images or [], seed, enhancer, ctx.progress, tel, adj)
     model.hold_vae(tel)
     ctx.raise_if_cancelled()
-    begin = 0.3 if payload.prompt_upsampling else 0.0
     reference_latents, image_pad_mask = None, None
     if reference_images:
-        with tel.stage("encoding reference images", overall_range=(begin, begin + 0.05)):
+        with tel.stage("encoding reference images"):
             conditioning_images, reference_latents = model.encode_reference_images(reference_images)
         ctx.raise_if_cancelled()
     # What is not given is the first reference's (upstream takes the LAST reference's; every Cozy
     # image package takes the first, the image being edited).
     first = reference_images[0].size if reference_images else None
     width, height = payload.size(adj, first, SIZES, megapixels=DEFAULT_MEGAPIXELS)
-    with tel.stage("encoding prompt", overall_range=(begin + 0.05, begin + 0.1)):
+    with tel.stage("encoding prompt"):
         if reference_images is None:
             embeds, mask = text_encoder.encode(prompt)
         else:
-            embeds, mask, image_pad_mask = text_encoder.encode_image_prompt(prompt, conditioning_images)
-    with tel.stage("generating image", overall_range=(begin + 0.1, 0.9)):
+            embeds, mask, image_pad_mask = text_encoder.encode_image_prompt(prompt, conditioning_images)  # type: ignore[possibly-undefined]  # read with the pictures
+    with tel.stage("generating image"):
         denoise = model.denoise if turbo is None else partial(turbo.denoise, model)
         latents = denoise(
             embeds,
@@ -179,10 +179,10 @@ def _generate(
             image_pad_mask=image_pad_mask,
         )
     ctx.raise_if_cancelled()
-    with tel.stage("decoding image", overall_range=(0.9, 0.98)):
+    with tel.stage("decoding image"):
         decoded = model.decode(latents, width=width, height=height)
         image = decoded_image(decoded)
-    with tel.stage("saving image", overall_range=(0.98, 1.0)):
+    with tel.stage("saving image"):
         # WebP cannot represent a side of 16384 pixels; retain every supported canvas.
         output_format = "webp" if max(width, height) < 16384 else "png"
         asset = out.save_image(image, format=output_format)
@@ -207,7 +207,7 @@ _COMPONENTS = {"expander": ("model",), "model": ("transformer", "vae"), "rewrite
 _ON_DEMAND = ("rewriter", "expander")
 
 
-@app.entrypoint(defaults=_FULL, components=_COMPONENTS, on_demand=_ON_DEMAND, memoize=Memoize(requires=["seed"]))  # fmt: skip
+@app.entrypoint(defaults=_FULL, components=_COMPONENTS, on_demand=_ON_DEMAND, memoize=True)  # fmt: skip
 def generate(
     ctx: Context,
     payload: GenerateInput,
@@ -223,7 +223,7 @@ def generate(
     return _generate(ctx, payload, expander, model, rewriter, text_encoder, out, tel, adj, None)
 
 
-@app.entrypoint(defaults=_TURBO, components=_COMPONENTS, on_demand=_ON_DEMAND, memoize=Memoize(requires=["seed"]))  # fmt: skip
+@app.entrypoint(defaults=_TURBO, components=_COMPONENTS, on_demand=_ON_DEMAND, memoize=True)  # fmt: skip
 def generate_turbo(
     ctx: Context,
     payload: GenerateInput,
@@ -248,7 +248,7 @@ class ImageBox(msgspec.Struct, kw_only=True):
     #: `ImageRequest.target`; Qwen's rotary range holds it to 1:16 through 16:1 (`SIZES.fit`).
     aspect_ratio: Annotated[AspectRatio, Ratios(min=1 / 16, max=16)] | None = None
     #: `SIZES.pixels`: Qwen Image 2.1 renders at 1, 2 or 4 MP, by default 2 (Paul, 11-06).
-    megapixels: Literal[1, 2, 4] = DEFAULT_MEGAPIXELS
+    megapixels: Literal[1, 2, 4] = DEFAULT_MEGAPIXELS  # type: ignore[assignment]  # 2, a Literal member
     seed: Seed | None = None
     #: Qwen's prompt enhancer rewrites the request first (`_upsampled`).
     prompt_upsampling: Annotated[bool, Advanced()] = True
@@ -259,7 +259,7 @@ class ImageBox(msgspec.Struct, kw_only=True):
 # The Turbo overlay is built, and its weights fetched, only when a box asks for it, and an enhancer only when the
 # box upsamples; a LoRA dropped on the box adapts the base model either way.
 @app.tool(label="Image", named="image", defaults=_TURBO, components=_COMPONENTS,
-          on_demand=("rewriter", "expander", "turbo_lora"), memoize=Memoize(requires=["seed"]))  # fmt: skip
+          on_demand=("rewriter", "expander", "turbo_lora"), memoize=True)  # fmt: skip
 def image(
     ctx: Context,
     payload: ImageBox,

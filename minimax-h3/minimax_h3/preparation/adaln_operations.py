@@ -2,19 +2,20 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from importlib.resources import files
-from typing import Any
+from typing import Any, cast
 
 import msgspec
 import torch
 from cozy_runtime.author import (
     Context,
+    Model,
     ModelArtifact,
     Telemetry,
     UnsupportedInput,
     Weights,
     canonical_json,
-    invocable,
 )
 from cozy_runtime.weights_store import Checkpoint, Derivation
 
@@ -56,7 +57,7 @@ def _plan(source: Checkpoint, task: Task) -> TimestepPlan:
     return timestep_plan(source, task)
 
 
-def _sections() -> dict[str, dict[str, Any]]:
+def _sections() -> dict[str, dict[str, object]]:
     return parse_full_config(_asset("model-config.json"))
 
 
@@ -94,12 +95,12 @@ def _body_kind(present: Rows) -> bool:
         return False
     raise UnsupportedInput(
         "this takes a whole H3 lane, full or pruned, and this model is neither: make one with "
-        "`minimax-h3-tools/bf16-full`, then use that",
+        "`minimax-h3/bf16-full`, then use that",
         code="adaln_source",
     )
 
 
-def _bindings(document: dict[str, Any]) -> dict[Task, str]:
+def _bindings(document: Mapping[str, object]) -> dict[Task, str]:
     result: dict[Task, str] = {}
     for task, component in DIT_COMPONENT.items():
         row = document.get(component)
@@ -120,13 +121,13 @@ def _bindings(document: dict[str, Any]) -> dict[Task, str]:
     return result
 
 
-def _validate_body_config(raw: bytes, pruned: bool) -> dict[str, Any]:
+def _validate_body_config(raw: bytes, pruned: bool) -> dict[str, dict[str, object]]:
     """The body's `{component: config}` document, checked against its supported constructor."""
     if not pruned:
         if raw != dual_full_config(_sections()):
             raise UnsupportedInput(
                 "this model's config isn't the H3 release's: make a full lane from the release "
-                "with `minimax-h3-tools/bf16-full`, then use that",
+                "with `minimax-h3/bf16-full`, then use that",
                 code="adaln_config",
             )
         return {}
@@ -136,7 +137,7 @@ def _validate_body_config(raw: bytes, pruned: bool) -> dict[str, Any]:
         raise UnsupportedInput(
             "H3 pruned config has an unexpected component set", code="adaln_config"
         )
-    document: dict[str, Any] = canonical_json.decode(raw)
+    document: dict[str, dict[str, object]] = canonical_json.decode(raw)
     for task, component in DIT_COMPONENT.items():
         row = value.get(component)
         stamp = row.get("cozy_h3") if isinstance(row, dict) else None
@@ -194,8 +195,7 @@ def _project(ctx: Context, source: Checkpoint, task: Task, output: str) -> Model
         return ctx.adopt_model(out)
 
 
-@invocable
-async def select_adaln_weights(ctx: Context, *, source: Weights[Any], task: Task) -> Selection:
+async def select_adaln_weights(ctx: Context, *, source: Weights, task: Task) -> Selection:
     """One DiT's AdaLN generating weights, selected from a full or pruned checkpoint."""
     ctx.raise_if_cancelled()
     opened = open_source(ctx, source)
@@ -206,7 +206,7 @@ async def select_adaln_weights(ctx: Context, *, source: Weights[Any], task: Task
     if not pruned:
         return Selection(_project(ctx, opened, task, "model"), False, plan.digest, list(plan.steps))
     _bindings(document)
-    layout = document[DIT_COMPONENT[task]]["cozy_h3"]["table_keys"]
+    layout = cast(dict[str, object], document[DIT_COMPONENT[task]]["cozy_h3"])["table_keys"]  # checked by _validate_body_config
     if layout != plan.table_keys:
         raise UnsupportedInput(
             "retabling a previous schedule requires the full generating_model",
@@ -231,11 +231,10 @@ def _bank_config(task: Task, projection: str, plan: TimestepPlan) -> bytes:
     )
 
 
-@invocable
 async def compute_adaln_tables(
     ctx: Context,
     *,
-    source: Weights[Any],
+    source: Weights,
     task: Task,
     plan_digest: str,
     tel: Telemetry,
@@ -263,11 +262,12 @@ async def compute_adaln_tables(
         if out.done is None:
             copy_assets(out, opened, component, omit=(METADATA,))
             out.component(component).asset(METADATA, _bank_config(task, source.checkpoint_ref, plan))
-        read, _, reused = write_tables(
-            ctx, plan=plan, topology=topology, source=opened, component=component,
-            outputs=(out,),
-            progress=lambda done, total: tel.progress(done / total, stage=f"timestep-table-{task}"),
-        )  # fmt: skip
+        with tel.stage(f"timestep-table-{task}"):
+            read, _, reused = write_tables(
+                ctx, plan=plan, topology=topology, source=opened, component=component,
+                outputs=(out,),
+                progress=lambda done, total: ctx.progress(done - 1, total),
+            )  # fmt: skip
         artifact = ctx.adopt_model(out)
     tel.metric("h3.adaln.source_bytes", float(read), unit="bytes")
     tel.metric("h3.adaln.reused_tables", float(reused), unit="tables")
@@ -311,9 +311,9 @@ def _bank_projection(bank: Checkpoint, task: Task, plan: TimestepPlan) -> str:
 def _apply_adaln(
     ctx: Context,
     *,
-    source: Weights[Any],
-    fl2va: Weights[Any],
-    ref2va: Weights[Any],
+    source: Weights[Model[object]],
+    fl2va: Weights[Model[object]],
+    ref2va: Weights[Model[object]],
     require_pruned: bool,
 ) -> ModelArtifact:
     ctx.raise_if_cancelled()
@@ -371,25 +371,23 @@ def _apply_adaln(
         return ctx.adopt_model(out)
 
 
-@invocable
 async def apply_adaln(
     ctx: Context,
     *,
-    source: Weights[Any],
-    fl2va: Weights[Any],
-    ref2va: Weights[Any],
+    source: Weights,
+    fl2va: Weights,
+    ref2va: Weights,
 ) -> ModelArtifact:
     """A full checkpoint AdaLN-pruned: both DiTs' modulation rows replaced by their tables."""
     return _apply_adaln(ctx, source=source, fl2va=fl2va, ref2va=ref2va, require_pruned=False)
 
 
-@invocable
 async def retable_adaln(
     ctx: Context,
     *,
-    source: Weights[Any],
-    fl2va: Weights[Any],
-    ref2va: Weights[Any],
+    source: Weights,
+    fl2va: Weights,
+    ref2va: Weights,
 ) -> ModelArtifact:
     """An AdaLN-pruned checkpoint with both DiTs' tables replaced."""
     return _apply_adaln(ctx, source=source, fl2va=fl2va, ref2va=ref2va, require_pruned=True)

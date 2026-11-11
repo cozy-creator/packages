@@ -7,7 +7,7 @@ held frames near the join, the picture jump (cut), and luma/chroma/sharpness ste
 Per segment: the same picture/sound levels, so drift down a chain shows as a trend.
 
     minimax-h3/.venv/bin/python scripts/h3-seam-probe.py ~/.cozy/outputs/paul-minimax-h3/5430-video.mp4
-    ... VIDEO --run 5430          joins from `cozy run show 5430 --json --full` (default: <run>-video.mp4)
+    ... VIDEO --run 5430          joins from `cozy run watch 5430 --once --json --full` (default: <run>-video.mp4)
     ... VIDEO --joins 192,480     frame index of each segment's first frame
     ... VIDEO --untrimmed A.mp4 B.mp4   per join: the next segment's output before its context
                                   replay is trimmed; scores replay fidelity of the context audio
@@ -43,6 +43,7 @@ from typing import cast
 
 import av
 import numpy as np
+from numpy.typing import NDArray
 from PIL import Image
 
 STAT_NAMES = ("y", "cb", "cr", "y_sd", "cb_sd", "cr_sd", "sharp", "motion")
@@ -60,8 +61,8 @@ K_STAGES = (
 @dataclass
 class Media:
     fps: float
-    stats: np.ndarray  # [frames, len(STAT_NAMES)]
-    audio: np.ndarray  # [channels, samples] float32
+    stats: NDArray[np.float64]  # [frames, len(STAT_NAMES)]
+    audio: NDArray[np.float32]  # [channels, samples]
     sample_rate: int
     stills: dict[int, Image.Image] = field(default_factory=dict)
 
@@ -69,7 +70,7 @@ class Media:
     def frames(self) -> int:
         return len(self.stats)
 
-    def col(self, name: str) -> np.ndarray:
+    def col(self, name: str) -> NDArray[np.float64]:
         return self.stats[:, STAT_NAMES.index(name)]
 
 
@@ -134,7 +135,7 @@ class Report:
 def read_media(path: Path, keep: frozenset[int] | set[int] = frozenset()) -> Media:
     rows: list[tuple[float, ...]] = []
     stills: dict[int, Image.Image] = {}
-    prev: np.ndarray | None = None
+    prev: NDArray[np.float32] | None = None
     with av.open(str(path)) as box:
         video_stream = box.streams.video[0]
         video_stream.codec_context.thread_count = 1
@@ -157,7 +158,7 @@ def read_media(path: Path, keep: frozenset[int] | set[int] = frozenset()) -> Med
     with av.open(str(path)) as box:
         audio_stream = box.streams.audio[0]
         rate = audio_stream.codec_context.sample_rate
-        chunks: list[np.ndarray] = []
+        chunks: list[NDArray[np.float32]] = []
         start: int | None = None
         for audio_frame in box.decode(audio_stream):
             pcm = audio_frame.to_ndarray().astype(np.float32)
@@ -180,7 +181,7 @@ def read_media(path: Path, keep: frozenset[int] | set[int] = frozenset()) -> Med
 
 def run_joins(run: int, fps: float) -> list[int]:
     shown = subprocess.run(
-        ["cozy", "run", "show", str(run), "--json", "--full"], check=True, capture_output=True, text=True
+        ["cozy", "run", "watch", str(run), "--once", "--json", "--full"], check=True, capture_output=True, text=True
     )
     ends = sorted(
         {
@@ -196,7 +197,7 @@ def run_joins(run: int, fps: float) -> list[int]:
     return ends[:-1]
 
 
-def k_weighted(audio: np.ndarray, rate: int) -> np.ndarray:
+def k_weighted(audio: NDArray[np.float32], rate: int) -> NDArray[np.float32]:
     n = audio.shape[1]
     z = np.exp(1j * 2 * np.pi * np.fft.rfftfreq(n, 1 / rate) / 48000)
     response = np.ones_like(z)
@@ -205,30 +206,32 @@ def k_weighted(audio: np.ndarray, rate: int) -> np.ndarray:
     return np.fft.irfft(np.fft.rfft(audio, axis=1) * response, n, axis=1).astype(np.float32)
 
 
-def lufs(kw: np.ndarray) -> float:
+def lufs(kw: NDArray[np.float32]) -> float:
     power = float((kw.astype(np.float64) ** 2).mean(axis=1).sum()) if kw.size else 0.0
     return -0.691 + 10 * math.log10(power) if power > 0 else -math.inf
 
 
-def gated_lufs(kw: np.ndarray, rate: int) -> float:
+def gated_lufs(kw: NDArray[np.float32], rate: int) -> float:
     block, hop = int(0.4 * rate), int(0.1 * rate)
     levels = np.array([lufs(kw[:, s : s + block]) for s in range(0, kw.shape[1] - block + 1, hop)])
     levels = levels[levels > -70]
     if not len(levels):
         return -math.inf
-    def mean(v: np.ndarray) -> float:
+    def mean(v: NDArray[np.float64]) -> float:
         return -0.691 + 10 * math.log10(float(np.mean(10 ** ((v + 0.691) / 10))))
 
     return mean(levels[levels > mean(levels) - 10])
 
 
-def floor_db(kw: np.ndarray, rate: int) -> float:
+def floor_db(kw: NDArray[np.float32], rate: int) -> float:
     block = int(0.05 * rate)
     levels = [lufs(kw[:, s : s + block]) for s in range(0, kw.shape[1] - block + 1, block)]
     return float(np.percentile(levels, 5)) if levels else math.nan
 
 
-def ncc(pre: np.ndarray, post: np.ndarray, max_lag: int) -> tuple[float, int]:
+def ncc(
+    pre: NDArray[np.float32 | np.float64], post: NDArray[np.float32 | np.float64], max_lag: int
+) -> tuple[float, int]:
     """Peak of the normalized cross-correlation; lag > 0: post repeats pre that many samples later."""
     pre, post = pre - pre.mean(), post - post.mean()
     norm = math.sqrt(float((pre**2).sum() * (post**2).sum()))
@@ -241,7 +244,7 @@ def ncc(pre: np.ndarray, post: np.ndarray, max_lag: int) -> tuple[float, int]:
     return float(c[k]), k - max_lag
 
 
-def continuity(mono: np.ndarray, s: int, w: int) -> tuple[float, float, int]:
+def continuity(mono: NDArray[np.float32], s: int, w: int) -> tuple[float, float, int]:
     """NCC across s, divided by the mean NCC at s-w and s+w (same material, no join): ~1 continuous."""
     if s - 2 * w < 0 or s + 2 * w > len(mono):
         return math.nan, math.nan, 0
@@ -251,7 +254,7 @@ def continuity(mono: np.ndarray, s: int, w: int) -> tuple[float, float, int]:
     return peak / max(float(control), 0.05), peak, lag
 
 
-def longest_hold(motion: np.ndarray, lo: int, hi: int, threshold: float) -> tuple[int, int]:
+def longest_hold(motion: NDArray[np.float64], lo: int, hi: int, threshold: float) -> tuple[int, int]:
     best, best_at, run = 0, 0, 0
     for i in range(lo, hi):
         run = run + 1 if motion[i] < threshold else 0
@@ -260,7 +263,7 @@ def longest_hold(motion: np.ndarray, lo: int, hi: int, threshold: float) -> tupl
     return best, best_at
 
 
-def window_mean(x: np.ndarray, lo: int, hi: int) -> float:
+def window_mean(x: NDArray[np.float64], lo: int, hi: int) -> float:
     return float(np.nanmean(x[max(lo, 0) : min(hi, len(x))]))
 
 
@@ -346,7 +349,9 @@ def analyse(
     )
 
 
-def calibrate(mono: np.ndarray, kw: np.ndarray, bounds: list[int], rate: int, fps: float) -> dict[str, float]:
+def calibrate(
+    mono: NDArray[np.float32], kw: NDArray[np.float32], bounds: list[int], rate: int, fps: float
+) -> dict[str, float]:
     """The file's own material: points inside segments (true continuation) and tails spliced
     onto non-adjacent segment heads (same piece, not a continuation)."""
     result: dict[str, float] = {}
@@ -456,7 +461,7 @@ def still_frames(j: int, total: int) -> list[int]:
     return [f for f in (j - VISUAL_WINDOW, j - 1, j, j + 1, j + VISUAL_WINDOW) if 0 <= f < total]
 
 
-def encode(path: Path, pictures: list[np.ndarray], audio: np.ndarray, fps: int, rate: int) -> None:
+def encode(path: Path, pictures: list[NDArray[np.uint8]], audio: NDArray[np.float32], fps: int, rate: int) -> None:
     with av.open(str(path), "w") as box:
         video = box.add_stream("libx264", rate=fps)
         video.width, video.height, video.pix_fmt = pictures[0].shape[1], pictures[0].shape[0], "yuv420p"
@@ -471,7 +476,7 @@ def encode(path: Path, pictures: list[np.ndarray], audio: np.ndarray, fps: int, 
         box.mux(sound.encode())
 
 
-def synthetic(seed: int, frames: int, fps: int, rate: int) -> tuple[list[np.ndarray], np.ndarray]:
+def synthetic(seed: int, frames: int, fps: int, rate: int) -> tuple[list[NDArray[np.uint8]], NDArray[np.float32]]:
     rng = np.random.default_rng(seed)
     coarse = Image.fromarray(rng.integers(0, 256, (12, 40, 3), dtype=np.uint8))
     texture = np.asarray(coarse.resize((640, 192), Image.Resampling.BICUBIC))

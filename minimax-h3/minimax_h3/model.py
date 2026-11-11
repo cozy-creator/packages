@@ -6,14 +6,15 @@ import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from functools import partial
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Literal, TypedDict, cast
 
 import torch
+from torch import nn
 from diffusers.models.autoencoders.autoencoder_kl_minimax_h3 import MiniMaxH3VideoTransformerBlock
 
 from cozy_runtime import rng
 from cozy_runtime.accel import fusion, stepcache
-from diffusers import MiniMaxH3Transformer3DModel
+from diffusers.models.transformers.transformer_minimax_h3 import MiniMaxH3Transformer3DModel
 from cozy_runtime.accel import concurrently, placeable, sequence_parallel
 from cozy_runtime.author import (
     Serving,
@@ -47,15 +48,19 @@ from .official import (
 )
 from .overlay import ATTENTION_KWARG, OVERLAY_KWARG, TURBO_BANK
 
+if TYPE_CHECKING:
+    from diffusers.modular_pipelines.modular_pipeline import PipelineState
+
 #: Reference latents one generation keeps (`ReferenceMemo`), least recently used first out; the
 #: Runtime sheds them sooner when memory is short.
 REFERENCE_MEMO_ENTRIES = 256
 
 
-def _layer_scales(block: Any, arguments: Mapping[str, Any]) -> fusion.Modulation:
+def _layer_scales(block: nn.Module, arguments: Mapping[str, object]) -> fusion.Modulation:
     """A video decoder block's layer scales: the gates of one row every token reads."""
-    row = block.scale1.new_zeros(1, dtype=torch.long)
-    return fusion.Modulation(row, gate_msa=block.scale1[None], gate_mlp=block.scale2[None])
+    layer = cast(MiniMaxH3VideoTransformerBlock, block)  # `VAE_BLOCK` fuses this class alone
+    row = layer.scale1.new_zeros(1, dtype=torch.long)
+    return fusion.Modulation(row, gate_msa=layer.scale1[None], gate_mlp=layer.scale2[None])
 
 
 #: The video VAE's ViT decoder block as Runtime fuses it: fp16 autocast over an fp32 residual
@@ -81,7 +86,7 @@ VAE_BLOCK = fusion.DiTBlock(
 )
 
 
-def condition_references(model: H3Model, task: Task, state: Any, *, tel: Telemetry) -> None:
+def condition_references(model: H3Model, task: Task, state: PipelineState, *, tel: Telemetry) -> None:
     """`condition_text` and `condition_ref2va_media` of one `ref2va` request, overlapped where
     the group keeps the text encoder on a follower (`accel.concurrently`): rank 0 encodes
     the references while the follower runs the conditioner.
@@ -105,6 +110,12 @@ def condition_references(model: H3Model, task: Task, state: Any, *, tel: Telemet
 STACK = stepcache.Stack(MiniMaxH3Transformer3DModel, blocks="transformer_blocks", carried=(0,))
 
 
+class DenoiseOptions(TypedDict):
+    sol_dense_steps: int
+    tau: float
+    cache: stepcache.Policy | None
+
+
 @dataclass(frozen=True)
 class FullRecipe:
     """The full model's sampling for a `quality` (h3.py `FULL_RECIPES`): its first `dense_steps`
@@ -114,7 +125,7 @@ class FullRecipe:
     tau: float = 1.0
     cache: stepcache.Policy | None = None
 
-    def denoise(self) -> dict[str, Any]:
+    def denoise(self) -> DenoiseOptions:
         return {"sol_dense_steps": self.dense_steps, "tau": self.tau, "cache": self.cache}
 
 
@@ -141,11 +152,11 @@ class H3Model(Model[OfficialH3Pipeline]):
     have not yet run on GPUs (h3a-019).
     """
 
-    # The DiTs' attention holds at 4 bits (fp4 where the GPU has it), the video VAE decoder's at 8
-    # (Kitchen INT8 on consumer cards, as ComfyUI's int8 decoder); the audio VAE and the text
-    # encoder keep exact attention.
+    # The DiTs' and the video VAE decoder's attention hold at 8 bits (Kitchen INT8 on consumer
+    # cards, as ComfyUI's); never 4 (Paul, 11-11: 4-bit attention loses small details, the
+    # seagulls, for little speed). The audio VAE and the text encoder keep exact attention.
     serving = Serving(
-        attention_bits={"transformer": 4, "transformer_ref": 4, "vae": 8},
+        attention_bits={"transformer": 8, "transformer_ref": 8, "vae": 8},
         loras=("transformer", "transformer_ref"),
     )
 
@@ -178,39 +189,39 @@ class H3Model(Model[OfficialH3Pipeline]):
         return "+".join(identity for identity in plans if identity)
 
     @uses_components("text_encoder")
-    def condition_text(self, task: Task, state: Any) -> None:
+    def condition_text(self, task: Task, state: PipelineState) -> None:
         self.pipe.condition_text(task, state, self.device)
 
     # Repeated BigVGAN decodes of one input differ under cuDNN's nondeterministic algorithms.
     @uses_components("audio_vae", deterministic=True)
-    def decode_audio(self, task: Task, state: Any) -> tuple[Any, int]:
+    def decode_audio(self, task: Task, state: PipelineState) -> tuple[torch.Tensor, int]:
         return self.pipe.decode_audio(task, state), int(state.sampling_rate)
 
     @uses_components("vae")
     def decode_video(
         self,
         task: Task,
-        state: Any,
+        state: PipelineState,
         *,
-        on_chunk: Callable[[Any], None],
+        on_chunk: Callable[[torch.Tensor], None],
     ) -> int:
         """Hand every decoded temporal chunk to `on_chunk` inside the VAE's component scope;
         a generator would run its body after the scope had closed."""
         return self.pipe.decode_video_chunks(task, state, on_chunk)
 
     @uses_components("vae")
-    def condition_fl2va_media(self, task: Task, state: Any) -> None:
+    def condition_fl2va_media(self, task: Task, state: PipelineState) -> None:
         self.pipe.condition_media(task, state)
 
     @uses_components("vae", "audio_vae")
-    def condition_ref2va_media(self, task: Task, state: Any, *, tel: Telemetry) -> None:
+    def condition_ref2va_media(self, task: Task, state: PipelineState, *, tel: Telemetry) -> None:
         cache: DerivedCache | None = getattr(self, "reference_latents", None)
         memo = None if cache is None else ReferenceMemo(cache, self.checkpoint_ref)
         reused, encoded = self.pipe.condition_media(task, state, memo=memo)
         tel.log("h3 reference latents", reused=reused, encoded=encoded)
 
     @uses_components("text_encoder")
-    def encode_prompt(self, prompt: str, frames: int) -> tuple[Any, Any]:
+    def encode_prompt(self, prompt: str, frames: int) -> tuple[torch.Tensor, torch.Tensor]:
         """A text-only (T2VA) prompt's `(prompt_embeds, text_token_tags)`: the official FL2VA
         text block without keyframes."""
         plan = self.pipe.plans["fl2va"]
@@ -227,30 +238,30 @@ class H3Model(Model[OfficialH3Pipeline]):
         return shot_latents.vae_space(self.pipe.components["vae"])
 
     @uses_components("vae")
-    def encode_clip(self, pixels: Any) -> Any:
+    def encode_clip(self, pixels: torch.Tensor) -> torch.Tensor:
         return self.pipe.encode_clip(pixels, regenerate.POSTERIOR_SEED)
 
     @uses_components("vae")
-    def decode_latents(self, latents: Any, *, on_chunk: Callable[[Any], None]) -> int:
+    def decode_latents(self, latents: torch.Tensor, *, on_chunk: Callable[[torch.Tensor], None]) -> int:
         return self.pipe.decode_latents(latents, on_chunk)
 
     @uses_components("audio_vae")
-    def silence(self, frames: int) -> Any:
+    def silence(self, frames: int) -> torch.Tensor:
         return self.pipe.silence_rows(frames).cpu()
 
     @uses_components("audio_vae")
-    def carried_sound(self, waveform: Any) -> Any:
+    def carried_sound(self, waveform: torch.Tensor) -> torch.Tensor:
         return self.pipe.carried_sound(waveform).cpu()
 
     @uses_components("transformer")
     def sample_fl2va(
-        self, state: Any, *, on_step: Any, cancel: Any, recipe: FullRecipe = FULL_BALANCED
+        self, state: PipelineState, *, on_step: Callable[[int], None], cancel: Callable[[], None], recipe: FullRecipe = FULL_BALANCED
     ) -> ScheduleFacts:
         return self.pipe.denoise("fl2va", state, on_step=on_step, cancel=cancel, **recipe.denoise())
 
     @uses_components("transformer_ref")
     def sample_ref2va(
-        self, state: Any, *, on_step: Any, cancel: Any, recipe: FullRecipe = FULL_BALANCED
+        self, state: PipelineState, *, on_step: Callable[[int], None], cancel: Callable[[], None], recipe: FullRecipe = FULL_BALANCED
     ) -> ScheduleFacts:
         return self.pipe.denoise("ref2va", state, on_step=on_step, cancel=cancel, **recipe.denoise())
 
@@ -273,11 +284,11 @@ class H3TurboBase(H3Model):
     @uses_components("transformer")
     def sample_fl2va_turbo(
         self,
-        state: Any,
+        state: PipelineState,
         *,
         turbo_lora: H3TurboLoRA,
-        on_step: Any,
-        cancel: Any,
+        on_step: Callable[[int], None],
+        cancel: Callable[[], None],
         sol_dense_steps: int = 4,
     ) -> ScheduleFacts:
         return turbo_lora.sample_fl2va(
@@ -291,18 +302,18 @@ class H3TurboBase(H3Model):
     @uses_components("transformer")
     def refine(
         self,
-        latents: Any,
+        latents: torch.Tensor,
         *,
         overlay: H3RegenerateLoRA,
-        prompt_embeds: Any,
-        text_tags: Any,
+        prompt_embeds: torch.Tensor,
+        text_tags: torch.Tensor,
         layout: Windows,
-        audio: Any,
+        audio: torch.Tensor,
         schedule: Schedule,
         seed: int,
         quality: str,
-        on_step: Any,
-    ) -> Any:
+        on_step: Callable[[int], None],
+    ) -> torch.Tensor:
         """The Regenerate refine of normalized latents at their canvas, on the FL2VA DiT."""
         return overlay.refine(
             self, latents, prompt_embeds=prompt_embeds, text_tags=text_tags, layout=layout,
@@ -312,11 +323,11 @@ class H3TurboBase(H3Model):
     @uses_components("transformer_ref")
     def sample_ref2va_turbo(
         self,
-        state: Any,
+        state: PipelineState,
         *,
         turbo_lora: H3TurboLoRA,
-        on_step: Any,
-        cancel: Any,
+        on_step: Callable[[int], None],
+        cancel: Callable[[], None],
         sol_dense_steps: int = 4,
     ) -> ScheduleFacts:
         return turbo_lora.sample_ref2va(
@@ -345,10 +356,10 @@ class H3TurboLoRA(Model[OfficialH3TurboLoRA]):
     def sample_fl2va(
         self,
         base: H3Model,
-        state: Any,
+        state: PipelineState,
         *,
-        on_step: Any,
-        cancel: Any,
+        on_step: Callable[[int], None],
+        cancel: Callable[[], None],
         sol_dense_steps: int = 4,
     ) -> ScheduleFacts:
         return self._sample(
@@ -364,10 +375,10 @@ class H3TurboLoRA(Model[OfficialH3TurboLoRA]):
     def sample_ref2va(
         self,
         base: H3Model,
-        state: Any,
+        state: PipelineState,
         *,
-        on_step: Any,
-        cancel: Any,
+        on_step: Callable[[int], None],
+        cancel: Callable[[], None],
         sol_dense_steps: int = 4,
     ) -> ScheduleFacts:
         return self._sample(
@@ -383,10 +394,10 @@ class H3TurboLoRA(Model[OfficialH3TurboLoRA]):
         self,
         base: H3Model,
         trunk: Literal["fl2va", "ref2va"],
-        state: Any,
+        state: PipelineState,
         *,
-        on_step: Any,
-        cancel: Any,
+        on_step: Callable[[int], None],
+        cancel: Callable[[], None],
         sol_dense_steps: int,
     ) -> ScheduleFacts:
         _validate_sol_dense_steps(sol_dense_steps)
@@ -426,17 +437,17 @@ class H3RegenerateLoRA(Model[OfficialH3RegenerateLoRA]):
     def refine(
         self,
         base: H3Model,
-        latents: Any,
+        latents: torch.Tensor,
         *,
-        prompt_embeds: Any,
-        text_tags: Any,
+        prompt_embeds: torch.Tensor,
+        text_tags: torch.Tensor,
         layout: Windows,
-        audio: Any,
+        audio: torch.Tensor,
         schedule: Schedule,
         seed: int,
         quality: str,
-        on_step: Any,
-    ) -> Any:
+        on_step: Callable[[int], None],
+    ) -> torch.Tensor:
         return regenerate.refine(
             base.pipe.components["transformer"],
             self.pipe.overlay(base.pipe),

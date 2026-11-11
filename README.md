@@ -12,10 +12,9 @@ dependencies or qualifying a worker image.
 
 | path | responsibility |
 |---|---|
-| `minimax-h3/` | MiniMax H3 video with sound: `shot` (one continuous take of any length) and `upscale` |
+| `minimax-h3/` | MiniMax H3 generation, editing, upscaling and checkpoint preparation |
 | `sdxl/` | SDXL text-to-image package plus the family's `int8`/`fp8`/`w4a8` recipes (se-008, cr-073, se-023) |
 | `anima/` | Anima text-to-image package for local development and benchmarking (se-009; model license is non-commercial) |
-| `minimax-h3-tools/` | H3 timestep-table and structural precompute functions (cr-071) |
 | `qwen-image-2/` | Qwen-Image-2.1 image generation and reference editing with native Runtime execution (research model licence) |
 | `qwen-image/` | Qwen-Image-2512 text-to-image and Qwen-Image-Edit-2511 editing on one shared text encoder and VAE (Apache-2.0) |
 | `fibo-2/` | Bria Fibo 2.0 text-to-image and editing, Dev and Edit Turbo (CC BY-NC 4.0 model licence) |
@@ -95,7 +94,7 @@ recipe for that lane and model on the machine holding the checkpoint; the packag
 named, since packages that serve the same model can each declare one. The written lane's header
 records its provenance: package, release, recipe, fingerprint (the digest of its plan), the
 source checkpoint and the plan. A lane that needs code is a `DerivationHook` (H3's,
-`h3_tables.job`). SDXL's fp8 encodes the UNet's block-aligned rank-2 weights, Anima's its
+`minimax_h3.preparation.job`). SDXL's fp8 encodes the UNet's block-aligned rank-2 weights, Anima's its
 transformer's; every other component inherits unchanged.
 
 ## MiniMax H3

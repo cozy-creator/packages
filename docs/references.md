@@ -26,7 +26,7 @@ and checks every mention names something, so a package only replaces `<key>` wit
 | qwen-image | `Picture N` | Edit-2511's template writes `Picture N:` before each image |
 | qwen-image-2 | `<imageN>`; one picture reads as its name | 2.1's template writes `<imageN>`, and Qwen's rewriter tags only two or more |
 | fibo-2 | `<image_N>`; one picture reads as its name | the pipeline's `image_N` keys and Bria's instructions |
-| flux-3-klein | "the first image", …; `ref_image_N-1` with boxes or regions; `<ref_image_N-1>` with `prompt_upsampling: false` | BFL's upsampler scaffold and Diffusers' Flux3 docs |
+| flux.3 | "the first image", …; `ref_image_N-1` with boxes or regions; `<ref_image_N-1>` with `prompt_upsampling: false` | BFL's upsampler scaffold and Diffusers' Flux3 docs |
 | flux-2 | `image N` | BFL's prompting guide |
 | hunyuan-image-3 | `图N` | Tencent's documented prompts |
 | hidream-o1 | its name | no convention upstream |

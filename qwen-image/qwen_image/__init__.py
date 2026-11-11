@@ -7,7 +7,7 @@ from functools import partial
 from typing import Annotated
 
 import msgspec
-from cozy_runtime.author import Adjustments, App, Context, Memoize, Outputs, Seed, Telemetry
+from cozy_runtime.author import Adjustments, App, Context, Outputs, Seed, Telemetry
 from cozy_runtime.fields import AspectRatio, Image, Prompt, Ratios
 from cozy_runtime.image import (
     Guidance,
@@ -46,7 +46,7 @@ MAX_PICTURES = 10
 class TurboInput(ImageRequest):
     #: Its text, and the pictures it mentions in order of first mention: given, Qwen-Image-Edit-2511
     #: edits or composes them; else Qwen-Image-2512 generates from the text.
-    prompt: Prompt[Image] = Prompt()
+    prompt: Prompt[Image] = Prompt()  # type: ignore[assignment]  # a prompt with pictures, in place of the base's text
     steps: Steps = None
 
 
@@ -93,9 +93,9 @@ def _render(
     ctx.raise_if_cancelled()
     references = None
     if images:
-        with tel.stage("encoding reference images", overall_range=(0.0, 0.05)):
+        with tel.stage("encoding reference images"):
             references = model.encode_references(images)
-    with tel.stage("encoding prompt", overall_range=(0.05, 0.1)):
+    with tel.stage("encoding prompt"):
         embeds, mask = model.encode(prompt, images)
         unconditional = model.encode(negative, images) if guidance > 1 else None
     ctx.raise_if_cancelled()
@@ -103,16 +103,16 @@ def _render(
         # The edit DiT and its LoRA build on their first read: here, so step 1 holds only a step.
         with tel.stage("loading the edit model"):
             _ = dit.graph, lora and lora.graph
-    with tel.stage("generating image", overall_range=(0.1, 0.95)):
+    with tel.stage("generating image"):
         denoise = dit.denoise if lora is None else partial(lora.denoise, dit)
         latents = denoise(
             embeds, mask, unconditional, references, width=width, height=height, steps=steps,
             guidance=guidance, seed=seed, progress=ctx.progress,
         )
     ctx.raise_if_cancelled()
-    with tel.stage("decoding image", overall_range=(0.95, 0.99)):
+    with tel.stage("decoding image"):
         image = model.decode(latents, width=width, height=height)
-    with tel.stage("saving image", overall_range=(0.99, 1.0)):
+    with tel.stage("saving image"):
         asset = out.save_image(image, format="png")
     return ImageResult(asset, width, height, seed, prompt)
 
@@ -149,7 +149,7 @@ _COMPONENTS = {"edit_model": ("transformer",)}
 # The edit DiT is all `edit_model` binds: the text encoder, VAE and tokenizer are `model`'s. It, and
 # its LoRA, are fetched and built by the first request with references.
 @app.entrypoint(defaults={"model": _BASE, "edit_model": _EDIT}, components=_COMPONENTS, on_demand=("edit_model",),
-                memoize=Memoize(requires=["seed"]))
+                memoize=True)
 def generate(ctx: Context, payload: GenerateInput, edit_model: QwenImageTransformer, model: QwenImage, out: Outputs,
              tel: Telemetry, adj: Adjustments) -> ImageResult:
     """Qwen-Image-2512 from text (50 steps), or Qwen-Image-Edit-2511 with pictures (40 steps).
@@ -159,7 +159,7 @@ def generate(ctx: Context, payload: GenerateInput, edit_model: QwenImageTransfor
 
 
 @app.entrypoint(defaults=_TURBO_DEFAULTS, components=_COMPONENTS, on_demand=("edit_model", "edit_turbo_lora"),
-                memoize=Memoize(requires=["seed"]))
+                memoize=True)
 def generate_turbo(ctx: Context, payload: TurboInput, edit_model: QwenImageTransformer, edit_turbo_lora: QwenImageLoRA,
                    model: QwenImage, turbo_lora: QwenImageLoRA, out: Outputs, tel: Telemetry,
                    adj: Adjustments) -> ImageResult:
@@ -181,7 +181,7 @@ class ImageBox(msgspec.Struct, kw_only=True):
 # `model` holds the text encoder and VAE every render reads; each other DiT and LoRA is built, and its
 # weights fetched, only when a render asks for it.
 @app.tool(label="Image", named="image", defaults=_TURBO_DEFAULTS, components=_COMPONENTS,
-          on_demand=("edit_model", "edit_turbo_lora", "turbo_lora"), memoize=Memoize(requires=["seed"]))  # fmt: skip
+          on_demand=("edit_model", "edit_turbo_lora", "turbo_lora"), memoize=True)  # fmt: skip
 def image(ctx: Context, payload: ImageBox, edit_model: QwenImageTransformer, edit_turbo_lora: QwenImageLoRA,
           model: QwenImage, turbo_lora: QwenImageLoRA, out: Outputs, tel: Telemetry, adj: Adjustments) -> ImageResult:
     """Qwen Image on a canvas: Lightning, or the full models."""

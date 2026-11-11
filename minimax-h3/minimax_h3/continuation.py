@@ -19,15 +19,19 @@ import json
 import math
 import re
 import struct
+from collections.abc import Sequence
 from dataclasses import dataclass
 from fractions import Fraction
-from typing import Any, NoReturn, cast
+from typing import TYPE_CHECKING, NoReturn
 
 import msgspec
 import torch
 from safetensors.torch import load, save
 
 from cozy_runtime.author import InvalidRequest
+
+if TYPE_CHECKING:
+    from diffusers.modular_pipelines.modular_pipeline import PipelineState
 
 FPS = 24
 #: Audio latents run at 40 Hz: a video frame is 5/3 of an audio tick.
@@ -278,7 +282,7 @@ def encode_context(context: AVContext) -> bytes:
     data = save(tensors, metadata=metadata)
     if len(data) > MAX_CONTEXT_BYTES:
         _refuse("encoded context exceeds its 16 MiB bound")
-    return cast(bytes, data)
+    return data
 
 
 def decode_context(data: bytes) -> AVContext:
@@ -311,7 +315,7 @@ def decode_context(data: bytes) -> AVContext:
         ) from exc
 
 
-def align_context_rows(state: Any, context: AVContext, patch_size: tuple[int, int, int]) -> None:
+def align_context_rows(state: PipelineState, context: AVContext, patch_size: Sequence[int]) -> None:
     """Put the carried rows, the last condition rows, on this clip's timeline.
 
     The picture tokens sit on the target head they condition, in phase. The sound ends at
