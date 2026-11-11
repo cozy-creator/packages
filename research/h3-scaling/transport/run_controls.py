@@ -81,7 +81,7 @@ def submit(mode, index, rental, host):
     number = result.get('number',result.get('run'))
     if number is None:
         raise RuntimeError('Accepted identity missing; retain the claim and investigate, never resubmit')
-    show = read_command(['cozy','run','show',str(number),'--json','--full'],folder/'accepted-show.json')
+    show = read_command(['cozy','run','watch',str(number),'--once','--json','--full'],folder/'accepted-show.json')
     accepted = {'number':show['number'],'request_id':show['request_id'],'mode':mode,'index':index,'at':now()}
     save(folder/'accepted.json',accepted)
     print(json.dumps({'event':'accepted',**accepted}),flush=True)
@@ -93,7 +93,7 @@ def observe(record, folder, warm=None):
         with (folder/'watch.jsonl').open('w') as out, (folder/'watch.stderr').open('w') as err:
             result = subprocess.run(['cozy','run','watch',str(record['number']),'--json','--full'],stdout=out,stderr=err)
         save(folder/'watch-exit.json',{'exit_code':result.returncode,'at':now()})
-    show = read_command(['cozy','run','show',str(record['number']),'--json','--full'],folder/'show-final.json')
+    show = read_command(['cozy','run','watch',str(record['number']),'--once','--json','--full'],folder/'show-final.json')
     facts = receipt_facts(show)
     if warm is not None:
         for field in ('pid_by_uuid','attention_by_uuid'):

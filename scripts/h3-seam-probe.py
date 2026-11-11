@@ -7,7 +7,7 @@ held frames near the join, the picture jump (cut), and luma/chroma/sharpness ste
 Per segment: the same picture/sound levels, so drift down a chain shows as a trend.
 
     minimax-h3/.venv/bin/python scripts/h3-seam-probe.py ~/.cozy/outputs/paul-minimax-h3/5430-video.mp4
-    ... VIDEO --run 5430          joins from `cozy run show 5430 --json --full` (default: <run>-video.mp4)
+    ... VIDEO --run 5430          joins from `cozy run watch 5430 --once --json --full` (default: <run>-video.mp4)
     ... VIDEO --joins 192,480     frame index of each segment's first frame
     ... VIDEO --untrimmed A.mp4 B.mp4   per join: the next segment's output before its context
                                   replay is trimmed; scores replay fidelity of the context audio
@@ -180,7 +180,7 @@ def read_media(path: Path, keep: frozenset[int] | set[int] = frozenset()) -> Med
 
 def run_joins(run: int, fps: float) -> list[int]:
     shown = subprocess.run(
-        ["cozy", "run", "show", str(run), "--json", "--full"], check=True, capture_output=True, text=True
+        ["cozy", "run", "watch", str(run), "--once", "--json", "--full"], check=True, capture_output=True, text=True
     )
     ends = sorted(
         {
