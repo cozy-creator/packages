@@ -187,6 +187,7 @@ jobs:
           }, indent=2) + '\n')
           PY
       - name: Install the qualification environment with explicit candidate overrides
+        id: environments
         run: |
           python3 - <<'PY'
           import json, os, tomllib
@@ -215,7 +216,8 @@ jobs:
             uv pip install --python "$RUNNER_TEMP/model-data/env-$package/bin/python" -r "proof/requirements-$package.txt" --override "$RUNNER_TEMP/model-data/overrides-$package.txt" torch torchvision 2>&1 | tee "proof/install-$package.log"
             uv pip freeze --python "$RUNNER_TEMP/model-data/env-$package/bin/python" > "proof/environment-$package.txt"
           done
-      - name: Native checkpoint processor and pre-write guard fixtures
+      - name: Verify the installed native candidate payloads
+        id: loaded
         run: |
           for package in minimax-h3 sdxl; do
             QUALIFICATION_PACKAGE="$package" "$RUNNER_TEMP/model-data/env-$package/bin/python" - <<'PY'
@@ -233,9 +235,15 @@ jobs:
           }, indent=2) + '\n')
           PY
           done
+      - name: H3 and Anima checkpoint processor and pre-write guard fixtures
+        run: |
           "$RUNNER_TEMP/model-data/env-minimax-h3/bin/python" checks/test_checkpoint_model_data.py 2>&1 | tee proof/checkpoint-model-data.log
+      - name: SDXL checkpoint tokenizer fixtures
+        if: always() && steps.loaded.outcome == 'success'
+        run: |
           "$RUNNER_TEMP/model-data/env-sdxl/bin/python" checks/test_sdxl_checkpoint_assets.py 2>&1 | tee proof/sdxl-checkpoint-assets.log
       - name: Describe and verify the current RC interfaces without running package code
+        if: always() && steps.loaded.outcome == 'success'
         run: |
           for package in anima sdxl minimax-h3; do
             environment=sdxl
