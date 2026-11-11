@@ -9,6 +9,9 @@ Video with sound from MiniMax H3, as three tools. Each is a box on a canvas and 
   guide-edit LoRAs: character swap, head swap, style transfer, VFX edit or motion transfer.
 - **`upscale`** (MiniMax H3 Upscale) re-renders a take at 1080p, 1440p or 2160p with NVIDIA's Regenerate-2K ([UPSCALE.md](UPSCALE.md)).
 
+For other packages, **`render_shot`** is `generate` with their LoRAs on every segment (`{shot, loras: [{model,
+strength}]}`), returning only the video, as [orbit](../orbit/README.md) puts ORB360 on its shot.
+
 And one image function, **`image`**: PrunaAI's [P-H3-Image](https://huggingface.co/PrunaAI/P-H3-Image), a fine-tune of
 H3's FL2VA DiT ([P-H3-Image](#p-h3-image)).
 
@@ -104,7 +107,8 @@ The result is `video` (768p mp4), `latents` (its own, which a pickup resumes and
   beats.
 - **Models.** `minimaxai/minimax-h3@1.0.0-rc.8` and `alibaba-pai/minimax-h3-turbo-lora@1.0.1`.
   `model.base_model=<checkpoint>` and `--lora <org/lora>[,strength]` serve every segment; a
-  LoRA trained on the other transformer than a segment runs is applied to it, with a warning. Edit's LoRAs are
+  LoRA trained on the other transformer than a segment runs is applied to it, and the machine warns when its
+  record says which it was trained on (`--trained-on`, or its trainer's metadata). Edit's LoRAs are
   Alissonerdx's ([Minimax-H3-ComfyUI](https://huggingface.co/Alissonerdx/Minimax-H3-ComfyUI)), each at strength 1.0.
 
 GPU: one RTX 4090 works (int8, streaming); an 80 GB card is faster. Measured on one H100 at

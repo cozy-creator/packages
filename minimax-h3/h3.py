@@ -22,7 +22,7 @@ from fractions import Fraction
 from functools import partial
 from itertools import accumulate
 from types import ModuleType
-from typing import TYPE_CHECKING, Annotated, Literal, NamedTuple, Protocol, cast
+from typing import TYPE_CHECKING, Annotated, Literal, NamedTuple, cast
 
 import msgspec
 import numpy as np
@@ -971,7 +971,7 @@ def _render_keyframes(
     steps = plan.schedule(steps).transformer_evaluations
     ctx.raise_if_cancelled()
     view = model.for_request(ctx, seed=seed)
-    notes = _retargeted(view.adapters, "transformer")
+    notes: list[str] = []
     log_prompt(tel, "h3 encoder prompt", prompt)
     with tel.stage("prepare"):
         state = model.pipe.start_fl2va(
@@ -1034,7 +1034,7 @@ def _references_to_video(
     # A cut video's sound is encoded first: what the segment carries starts from it.
     ctx.raise_if_cancelled()
     view = model.for_request(ctx, seed=payload.seed)
-    notes = _retargeted(view.adapters, "transformer_ref")
+    notes: list[str] = []
     if context is not None and context.provenance != expected_context_provenance:
         # The carry is latents, the same for every lane and release that share the VAE (`shot_latents.vae_space`).
         notes.append("this continues a video made with another model release, lane or turbo setting; the join may show")
@@ -1355,28 +1355,6 @@ def _frame(asset: ImageFile | None, shape: tuple[int, ...]) -> PILImage.Image | 
     return ImageOps.fit(asset.read(), shape, method=PILImage.Resampling.BICUBIC)  # type: ignore[arg-type]  # the canvas: (width, height)
 
 
-class _Applied(Protocol):
-    """An applied LoRA, as a request's view lists it."""
-
-    @property
-    def ref(self) -> str: ...
-
-    @property
-    def source_component(self) -> str: ...
-
-
-def _retargeted(adapters: Sequence[_Applied], dit: str) -> list[str]:
-    """A line for each caller LoRA trained on the other transformer: Runtime applies it to this
-    one (as ComfyUI would load it), and says so once per LoRA (`shot` keeps one)."""
-    other = {"transformer": "FL2VA", "transformer_ref": "Ref2VA"}
-    return [
-        f"LoRA {adapter.ref} was trained on {adapter.source_component} ({other.get(adapter.source_component, '?')}) "
-        f"and is applied to {dit} ({other[dit]})"
-        for adapter in adapters
-        if adapter.source_component in other and adapter.source_component != dit
-    ]
-
-
 @app.entrypoint(
     private=True,
     defaults={"base_model": _MODEL, "turbo_lora": _TURBO_LORA},
@@ -1532,11 +1510,11 @@ def _anchor(name: str, people: bool) -> StoryReference:
 
 
 async def _render(ctx: Context, shot: Shot, out: Outputs, tel: Telemetry, *, plate: VideoFile | None = None,
-                  lora: ModelChoice | None = None) -> ShotResult:  # fmt: skip
+                  lora: ModelChoice | None = None, keep_latents: bool = True) -> ShotResult:  # fmt: skip
     """A shot's segments, rendered in order, each going on from the last from its carried latents, decoded as one video
     and published as it grows. A pickup goes on from its take at its frame: from the take's latents, else as a new video
     opening on that frame, joined after the take's kept start. A `plate` is followed frame by frame, and its length is
-    the shot's. `lora` serves every segment."""
+    the shot's. `lora` serves every segment. Without `keep_latents`, the video's latents aren't kept."""
     ctx.raise_if_cancelled()
     warnings: list[str] = []
     # Asking for steps asks for the full model, the only one that has a choice of them.
@@ -1714,7 +1692,7 @@ async def _render(ctx: Context, shot: Shot, out: Outputs, tel: Telemetry, *, pla
         video, said = join_kept(out, take.file, done, video)
         warnings += said
         out.publish("video", video, label="Video")
-    else:
+    elif keep_latents:
         kept = shot_latents_file(out, [*before[0], *(r.latents for r in returned)], total, returned[-1].context, upscale_prompt(script))
     ctx.release_gpus()
     tel.log("h3 shot", segments=count, delivered_frames=total, turbo=turbo, quality=shot.quality)
@@ -1728,6 +1706,33 @@ async def generate(ctx: Context, payload: Shot, out: Outputs, tel: Telemetry) ->
     with the references it mentions; an optional first and last frame; and Pick up from here, which goes on from a take
     at a frame. Returns the video and its latents, which a pickup of it resumes and an upscale starts from."""
     return await _render(ctx, payload, out, tel)
+
+
+class ShotLoRA(msgspec.Struct, frozen=True, kw_only=True):
+    #: `[org/]name@release`.
+    model: str
+    strength: float = 1.0
+
+
+class PackageShot(msgspec.Struct, kw_only=True):
+    """A shot another package makes, with its LoRAs."""
+
+    shot: Shot
+    loras: list[ShotLoRA] = msgspec.field(default_factory=list)
+
+
+class PackageShotResult(msgspec.Struct):
+    video: Annotated[VideoFile, FileBound(max_bytes=ANY_SIZE, media_types=("video/mp4",))]
+    warnings: list[str]
+
+
+@app.entrypoint(accelerator=False)
+async def render_shot(ctx: Context, payload: PackageShot, out: Outputs, tel: Telemetry) -> PackageShotResult:
+    """`generate` for another package (`orbit`): its LoRAs on every segment after Turbo's, as `edit` puts its edit LoRA
+    on, and only the video back."""
+    choice = ModelChoice(lora=tuple(Lora(lora.model, lora.strength) for lora in payload.loras)) if payload.loras else None
+    made = await _render(ctx, payload.shot, out, tel, lora=choice, keep_latents=False)
+    return PackageShotResult(made.video, made.warnings)
 
 
 class EditLoRA(NamedTuple):
