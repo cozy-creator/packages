@@ -1,7 +1,8 @@
 # Orbit
 
 A picture's subject seen from all the way round: one clockwise camera turn around it, frozen in time, as a video that
-loops. On a canvas, put **Orbit** on a picture box; the picture goes in its `picture` slot.
+loops. **Orbit** is a video tool: on a canvas it goes on a video node and makes that node's video; the picture goes in
+its `picture` field.
 
 `orbit` takes:
 
@@ -14,7 +15,7 @@ It returns `video`: one turn, no sound, frame 0 at 0 degrees. Frame `n` would be
 
 ## How
 
-MiniMax H3 renders the turn on Ref2VA with MATLOWAI's ORB360 LoRA (`matlowai/orb360@0.1.0`, a mirror of
+MiniMax H3 renders the turn on Ref2VA with MATLOWAI's ORB360 LoRA (`matlowai/orb360@0.1.1`, a mirror of
 [MiniMax-H3-ORB360-CardSpin](https://huggingface.co/MATLOWAI/MiniMax-H3-ORB360-CardSpin)'s step 1500), Turbo, through
 `minimax-h3/render_shot`. ORB360 turns only clockwise, and only from the caption it was trained on, which
 `caption()` writes: the subject, its picture, and the angle every third of the turn at its frame. Plain words make a
