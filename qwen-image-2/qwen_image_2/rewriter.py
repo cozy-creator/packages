@@ -153,9 +153,10 @@ class Enhancer(VisionLM):
     @uses_components(COMPONENT)
     def answer(
         self, question: Question, *, system: str, think: int, presence_penalty: float, seed: int,
-        progress: Callable[[float], None],
+        progress: Callable[[int, int], None],
     ) -> tuple[str, int, int]:
-        """The answer, and the tokens its thought and the answer took."""
+        """The answer, and the tokens its thought and the answer took; `progress(step, total)` is told
+        the tokens decoded of its budget."""
         content = [*({"type": "image"} for _ in question.images), {"type": "text", "text": question.text}]
         chat: str = self.processor.apply_chat_template(
             [{"role": "system", "content": system}, {"role": "user", "content": content}],
@@ -166,17 +167,21 @@ class Enhancer(VisionLM):
         ends = [tokenizer.eos_token_id, *(configured if isinstance(configured, list) else [configured])]
         ends = [token for token in dict.fromkeys(ends) if isinstance(token, int)]
         budget = think + MAX_ANSWER
+
+        def decoded(count: int) -> None:
+            progress(min(count, budget) - 1, budget)
+
         thought, thought_tokens = "", 0
         if think:
             tokens = self._decode(chat, question.images, ends + [tokenizer.convert_tokens_to_ids("</think>")], think,
-                                  presence_penalty, seed, lambda n: progress(n / budget))
+                                  presence_penalty, seed, decoded)
             thought_tokens = tokens.shape[1]
             thought = str(self.processor.batch_decode(tokens, skip_special_tokens=True)[0])
         # No thought is the template's own empty one; one that stopped short of its budget ended itself.
         thought, ended, _ = thought.partition("</think>")
         closed = chat + thought.rstrip() + (CLOSE if think and not ended and thought_tokens >= think else "\n</think>\n\n")
         tokens = self._decode(closed, question.images, ends, MAX_ANSWER, presence_penalty, seed,
-                              lambda n: progress((thought_tokens + n) / budget))
+                              lambda n: decoded(thought_tokens + n))
         return str(self.processor.batch_decode(tokens, skip_special_tokens=True)[0]), thought_tokens, tokens.shape[1]
 
     def _decode(self, text: str, images: list[Image.Image], stop: list[int], most: int, presence_penalty: float,
@@ -191,10 +196,11 @@ class Enhancer(VisionLM):
 
 def rewrite(
     enhancer: Enhancer, prompt: str, images: list[Image.Image], creativity: Creativity, seed: int,
-    progress: Callable[[float], None],
+    progress: Callable[[int, int], None],
 ) -> tuple[Rewrite | None, str, int, int]:
     """The enhancer's rewrite of `prompt` (`<imageN>` for two or more pictures, as its system prompt asks), its raw
-    answer and the tokens its thought and its answer took; `progress` is told the share of its budget decoded."""
+    answer and the tokens its thought and its answer took; `progress(step, total)` is told the tokens of its budget
+    decoded."""
     task = "edit" if images else "t2i"
     profile = PROFILES[task]
     steer = _STEER[task].get(creativity, "")
@@ -202,6 +208,6 @@ def rewrite(
                         [reference(image) for image in images])
     answer, thought_tokens, answer_tokens = enhancer.answer(
         question, system=profile.system, think=THINK_TOKENS, presence_penalty=profile.presence_penalty, seed=seed,
-        progress=lambda done: progress(min(done, 1.0)),
+        progress=progress,
     )
     return parse(answer, len(images)), answer, thought_tokens, answer_tokens

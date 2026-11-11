@@ -116,31 +116,32 @@ def assemble(ctx: Context, payload: Assemble, gguf: Weights, stock: Weights, tel
     report: dict[str, Any] = {}
     directions, orders = [], set()
     with ctx.output("bf16", Derivation(base=ck, sources=(gg,))) as out:
-        for n, (key, name) in enumerate(edited.items()):
-            new, old, shape = read(theirs, name), read(held, key), tuple(held[key].shape)
-            if name.endswith("ssm_out.weight"):
-                # Back to stock's head order: GGUF column block j is stock head order[j].
-                order = head_order(bf16(new, shape).astype(np.float64), bf16(old, shape).astype(np.float64))
-                tiled = np.frombuffer(new, np.uint16).reshape(shape[0], V_HEADS, V_DIM)
-                stock_order = np.empty_like(tiled)
-                stock_order[:, order] = tiled
-                new = stock_order.tobytes()
-                orders.add(tuple(order))
-                out.put(component, key, "BF16", shape, new)
-            else:
-                out.copy(component, key, gg, from_component=named, from_key=name)
-            entry: dict[str, float] = {"changed": float((np.frombuffer(new, np.uint16) != np.frombuffer(old, np.uint16)).mean())}
-            if "embed" not in key and (n % 6 == 1 or name.endswith("ssm_out.weight")):
-                d = (bf16(new, shape) - bf16(old, shape)).astype(np.float64)
-                u = np.random.default_rng(0).standard_normal(d.shape[0])
-                for _ in range(30):
-                    u = d @ (d.T @ u)
-                    u /= np.linalg.norm(u)
-                entry["rank1"] = float(np.linalg.norm(d.T @ u) ** 2 / (d * d).sum())
-                entry["relative"] = float(np.linalg.norm(d) / np.linalg.norm(bf16(old, shape)))
-                directions.append(u)
-            report[key] = entry
-            tel.progress((n + 1) / len(edited), stage="copying edited tensors")
+        with tel.stage("copying edited tensors"):
+            for n, (key, name) in enumerate(edited.items()):
+                new, old, shape = read(theirs, name), read(held, key), tuple(held[key].shape)
+                if name.endswith("ssm_out.weight"):
+                    # Back to stock's head order: GGUF column block j is stock head order[j].
+                    order = head_order(bf16(new, shape).astype(np.float64), bf16(old, shape).astype(np.float64))
+                    tiled = np.frombuffer(new, np.uint16).reshape(shape[0], V_HEADS, V_DIM)
+                    stock_order = np.empty_like(tiled)
+                    stock_order[:, order] = tiled
+                    new = stock_order.tobytes()
+                    orders.add(tuple(order))
+                    out.put(component, key, "BF16", shape, new)
+                else:
+                    out.copy(component, key, gg, from_component=named, from_key=name)
+                entry: dict[str, float] = {"changed": float((np.frombuffer(new, np.uint16) != np.frombuffer(old, np.uint16)).mean())}
+                if "embed" not in key and (n % 6 == 1 or name.endswith("ssm_out.weight")):
+                    d = (bf16(new, shape) - bf16(old, shape)).astype(np.float64)
+                    u = np.random.default_rng(0).standard_normal(d.shape[0])
+                    for _ in range(30):
+                        u = d @ (d.T @ u)
+                        u /= np.linalg.norm(u)
+                    entry["rank1"] = float(np.linalg.norm(d.T @ u) ** 2 / (d * d).sum())
+                    entry["relative"] = float(np.linalg.norm(d) / np.linalg.norm(bf16(old, shape)))
+                    directions.append(u)
+                report[key] = entry
+                ctx.progress(n, len(edited))
         cosines = [abs(float(directions[0] @ u)) for u in directions[1:]]
         if min(e.get("rank1", 1.0) for e in report.values()) < 0.95 or min(cosines) < 0.999:
             raise ValueError(f"the edit is not one shared rank-1 direction: {report}")

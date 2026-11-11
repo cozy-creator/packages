@@ -1,6 +1,6 @@
 [project]
 name = "krea-2"
-version = "0.7.0"
+version = "0.8.0"
 description = "Cozy text-to-image with Krea 2: Raw, the full model, and Turbo, its 8-step distillation"
 requires-python = ">=3.12"
 dependencies = [
@@ -42,3 +42,6 @@ explicit = true
 
 [tool.uv.sources]
 torch = { index = "pytorch-cu130", marker = "sys_platform == 'win32'" }
+# The Runtime with the simplified author API (xs-161) by git rev until it publishes: the release
+# relocks to PyPI.
+cozy-runtime = { git = "https://github.com/cozy-creator/cozy-runtime", rev = "8ad575e66647dc29bf3217f496497de69b5e07e7" }

@@ -13,7 +13,7 @@ import hashlib
 import math
 import queue
 import re
-from collections.abc import Awaitable, Callable, Iterator, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from concurrent.futures import Future
 from contextlib import suppress
 from dataclasses import dataclass
@@ -29,10 +29,10 @@ import torch
 from cozy_runtime.accel import stepcache
 from cozy_runtime.author import (
     App,
+    call,
     ChildCallError,
     Context,
     InvalidRequest,
-    invocable,
     Lora,
     ModelChoice,
     OutputError,
@@ -458,6 +458,7 @@ def _finish(
     duration_s: int,
     out: Outputs,
     tel: Telemetry,
+    progress: Callable[[int, int], None],
     cancel: Any,
     completed: Callable[[Any], None] | None = None,
     delivered_frames: int | None = None,
@@ -483,7 +484,7 @@ def _finish(
 
     # The encoder runs under the decode (h3a-017): each chunk is quantized on its device
     # and landed in the host buffer while a worker feeds the runtime's streaming MP4 sink.
-    with tel.stage("decode_video", overall_range=(0.90, 0.97)):
+    with tel.stage("decode_video"):
         stream = _VideoStream(
             torch,
             out,
@@ -491,7 +492,7 @@ def _finish(
             waveform=waveform,
             sample_rate=sample_rate,
             cancel=cancel,
-            progress=tel.step_callback(frames, stage="decode_video", overall_range=(0.90, 0.97)),
+            progress=progress,
         )
         try:
             decode(on_chunk=stream.push)
@@ -499,7 +500,8 @@ def _finish(
             stream.abandon()
             raise
     try:
-        saved = stream.finish(lambda share: tel.progress(share, stage="encode_video"))
+        with tel.stage("encode_video"):
+            saved = stream.finish(progress)
     except BaseException:
         stream.abandon()
         raise
@@ -555,7 +557,7 @@ def _soundtrack(
     model: H3Model, task: Task, state: Any, *, frames: int, tel: Telemetry, cancel: Any
 ) -> tuple[Any, int]:
     """The render's decoded `(channels, samples)` soundtrack, checked against its clock."""
-    with tel.stage("decode_audio", overall_range=(0.85, 0.90)):
+    with tel.stage("decode_audio"):
         audio, sample_rate = model.decode_audio(task, state)
         release_rate = model.pipe.sample_rate
         if audio.ndim != 3 or int(audio.shape[0]) != 1 or sample_rate != release_rate:
@@ -607,7 +609,7 @@ class _VideoStream:
         waveform: Any | None,
         sample_rate: int,
         cancel: Any,
-        progress: Callable[[int], None],
+        progress: Callable[[int, int], None],
     ) -> None:
         """`waveform` is the `(channels, samples)` soundtrack, or None for a silent video."""
         self._torch = torch
@@ -663,11 +665,11 @@ class _VideoStream:
             _land(torch, chunk[start : start + len(landed)], landed)
             self._slices.put((self.landed, self.landed + len(landed)))
             self.landed += len(landed)
-        self._progress(self.landed - 1)
+        self._progress(self.landed - 1, self._frames)
 
-    def finish(self, progress: Callable[[float], None]) -> SavedVideo:
+    def finish(self, progress: Callable[[int, int], None]) -> SavedVideo:
         """Close the stream once every requested frame has landed; the sink's probed asset,
-        `progress` told the share of frames it took meanwhile. A sink that wrote fewer frames
+        `progress(step, total)` told the frames it took meanwhile. A sink that wrote fewer frames
         fails the run."""
         if self.landed != self._frames or self._encode is None:
             raise OutputError(
@@ -680,7 +682,7 @@ class _VideoStream:
         try:
             while (index := self._taken.get()) is not None:
                 if self._taken.empty():  # the newest only
-                    progress((index + 1) / self._frames)
+                    progress(index, self._frames)
             saved = self._encode.result()
         finally:
             self._pool.shutdown(wait=False)
@@ -959,7 +961,7 @@ def _render_keyframes(
     view = model.for_request(ctx, seed=seed)
     notes = _retargeted(view.adapters, "transformer")
     log_prompt(tel, "h3 encoder prompt", prompt)
-    with tel.stage("prepare", overall_range=(0.00, 0.03)):
+    with tel.stage("prepare"):
         state = model.pipe.start_fl2va(
             prompt=prompt,
             first_frame=first,
@@ -971,24 +973,24 @@ def _render_keyframes(
             plan=plan,
             delivery=delivery,
         )
-    with tel.stage("condition_text", overall_range=(0.03, 0.08)):
+    with tel.stage("condition_text"):
         model.condition_text(task, state)
     if first is not None or last is not None:
-        with tel.stage("condition_media", overall_range=(0.08, 0.15)):
+        with tel.stage("condition_media"):
             model.condition_fl2va_media(task, state)
     if turbo_lora is None:
         sample = partial(model.sample_fl2va, recipe=FULL_RECIPES[quality])
     else:
         assert isinstance(model, H3TurboBase)
         sample = partial(model.sample_fl2va_turbo, turbo_lora=turbo_lora, sol_dense_steps=TURBO_DENSE_STEPS[quality])
-    with tel.stage("denoise", overall_range=(0.15, 0.85)):
+    with tel.stage("denoise"):
         schedule = sample(
             state,
-            on_step=tel.step_callback(steps, stage="denoise", overall_range=(0.15, 0.85)),
+            on_step=lambda step: ctx.progress(step, steps),
             cancel=ctx.raise_if_cancelled,
         )
     result = _finish(
-        model, task, state, schedule, duration_s=duration_s, out=out, tel=tel,
+        model, task, state, schedule, duration_s=duration_s, out=out, tel=tel, progress=ctx.progress,
         cancel=ctx.raise_if_cancelled, completed=completed, ended=ended,
         delivered_frames=None if delivery is None else delivery.delivered_frames,
         sampled_frames=None if delivery is None else delivery.sample_frames,
@@ -1031,7 +1033,7 @@ def _references_to_video(
             fields=["payload.frames"],
         )
     frames = delivery.sample_frames
-    with tel.stage("prepare", overall_range=(0.00, 0.03)):
+    with tel.stage("prepare"):
         if sound is not None:
             assert context is not None
             context = context.with_sound(model.carried_sound(sound[0]), sound[1])
@@ -1077,21 +1079,21 @@ def _references_to_video(
                     height=height,
                 )
     # Text and references at once where the text encoder lives on another GPU.
-    with tel.stage("condition", overall_range=(0.03, 0.15)):
+    with tel.stage("condition"):
         condition_references(model, task, state, tel=tel)
     if turbo_lora is None:
         sample = partial(model.sample_ref2va, recipe=FULL_RECIPES[payload.quality])
     else:
         assert isinstance(model, H3TurboBase)
         sample = partial(model.sample_ref2va_turbo, turbo_lora=turbo_lora, sol_dense_steps=TURBO_DENSE_STEPS[payload.quality])
-    with tel.stage("denoise", overall_range=(0.15, 0.85)):
+    with tel.stage("denoise"):
         schedule = sample(
             state,
-            on_step=tel.step_callback(steps, stage="denoise", overall_range=(0.15, 0.85)),
+            on_step=lambda step: ctx.progress(step, steps),
             cancel=ctx.raise_if_cancelled,
         )
     result = _finish(
-        model, task, state, schedule, duration_s=payload.duration_s, out=out, tel=tel,
+        model, task, state, schedule, duration_s=payload.duration_s, out=out, tel=tel, progress=ctx.progress,
         cancel=ctx.raise_if_cancelled, completed=completed, ended=ended,
         delivered_frames=delivery.delivered_frames, sampled_frames=delivery.sample_frames, earlier=earlier,
     )  # fmt: skip
@@ -1253,7 +1255,8 @@ def _sampling(payload: FL2VAInput | Ref2VAInput, turbo_lora: H3TurboLoRA) -> H3T
     return turbo_lora if payload.turbo else None
 
 
-@invocable(
+@app.entrypoint(
+    private=True,
     defaults={"base_model": _MODEL, "turbo_lora": _TURBO_LORA},
     components={"base_model": _REF2VA, "turbo_lora": ("ref2va_turbo",)},
     memoize=True,
@@ -1300,9 +1303,6 @@ async def ref2va_segment(
         earlier=earlier, sound=sound,
     )  # fmt: skip
     return SegmentOutput(segment.video, [*segment.warnings, *handed.warnings], observed, handed.file("context"), ended[0], handed.file("latents"))
-
-
-app.entrypoint(ref2va_segment, private=True)
 
 
 def log_prompt(tel: Telemetry, event: str, prompt: str, **fields: str | int) -> None:
@@ -1355,7 +1355,8 @@ def _retargeted(adapters: Sequence[Any], dit: str) -> list[str]:
     ]
 
 
-@invocable(
+@app.entrypoint(
+    private=True,
     defaults={"base_model": _MODEL, "turbo_lora": _TURBO_LORA},
     components={"base_model": _FL2VA, "turbo_lora": ("fl2va_turbo",)},
     memoize=True,
@@ -1390,10 +1391,8 @@ async def fl2va_segment(
     return SegmentOutput(shot.video, [*shot.warnings, *handed.warnings], observed, handed.file("context"), ended[0], handed.file("latents"))
 
 
-app.entrypoint(fl2va_segment, private=True)
-
-
-@invocable(
+@app.entrypoint(
+    private=True,
     defaults={"base_model": _MODEL, "regenerate_lora": _REGENERATE_LORA, "latent_upscaler": _LATENT_UPSCALER},
     components={"base_model": _FL2VA, "regenerate_lora": ("fl2va_regenerate",), "latent_upscaler": ("upscaler",)},
     memoize=True,
@@ -1424,18 +1423,18 @@ async def regenerate_shot(
             warnings.append(f"these latents can't be used, so it works from the video: {refused.message}")
     cancel = ctx.raise_if_cancelled
     if latents is None:
-        with tel.stage("read_video", overall_range=(0.00, 0.03)):
+        with tel.stage("read_video"):
             pixels, waveform, sample_rate, frames, read = _read_draft(payload.video)
             warnings += read
-        with tel.stage("encode_video", overall_range=(0.03, 0.08)):
+        with tel.stage("encode_video"):
             latents = base_model.encode_clip(pixels)
         del pixels
     resolution = payload.resolution.value
-    with tel.stage("upscale_latent", overall_range=(0.08, 0.10)):
+    with tel.stage("upscale_latent"):
         for height, width in refine_math.upscale_passes(resolution):
             latents = latent_upscaler.upscale(latents, height=height, width=width)
     cancel()
-    with tel.stage("condition_text", overall_range=(0.10, 0.14)):
+    with tel.stage("condition_text"):
         text = base_model.encode_prompt(encoder_prompt("fl2va", payload.prompt), frames_for(MIN_DURATION_S))
     layout = refine_math.plan_windows(tuple(int(value) for value in latents.shape))
     (first, stop), *_ = layout.spans
@@ -1445,20 +1444,20 @@ async def regenerate_shot(
     tel.log("h3 regenerate", resolution=resolution, strength=payload.strength, quality=payload.quality, start_sigma=schedule.start,
             transformer_evaluations=steps, latent="x".join(str(int(value)) for value in latents.shape[2:]),
             windows=len(layout), window_latent_frames=stop - first)  # fmt: skip
-    with tel.stage("refine", overall_range=(0.14, 0.85)):
+    with tel.stage("refine"):
         refined = base_model.refine(
             latents, overlay=regenerate_lora, prompt_embeds=text[0], text_tags=text[1], layout=layout,
             audio=base_model.silence(refine_math.frames_of(stop - first)), schedule=schedule, seed=seed,
             quality=payload.quality,
-            on_step=tel.step_callback(steps, stage="refine", overall_range=(0.14, 0.85)),
+            on_step=lambda step: ctx.progress(step, steps),
         )  # fmt: skip
     cancel()
     height, _, keep = refine_math.TARGETS[resolution]
     top = (height - keep) // 2
-    with tel.stage("decode_video", overall_range=(0.85, 0.97)):
+    with tel.stage("decode_video"):
         stream = _VideoStream(
             torch, out, frames=frames, waveform=waveform, sample_rate=sample_rate, cancel=cancel,
-            progress=tel.step_callback(frames, stage="decode_video", overall_range=(0.85, 0.97)),
+            progress=ctx.progress,
         )  # fmt: skip
         delivered = 0
 
@@ -1475,7 +1474,8 @@ async def regenerate_shot(
             stream.abandon()
             raise
     try:
-        saved = stream.finish(lambda share: tel.progress(share, stage="encode_video"))
+        with tel.stage("encode_video"):
+            saved = stream.finish(ctx.progress)
     except BaseException:
         stream.abandon()
         raise
@@ -1483,9 +1483,6 @@ async def regenerate_shot(
             frame_rate=str(saved.frame_rate), video_bytes=saved.video.size_bytes)  # fmt: skip
     ctx.release_gpus()
     return RegenerateOutput(saved.video, warnings)
-
-
-app.entrypoint(regenerate_shot, private=True)
 
 
 # --- the three tools ---------------------------------------------------------------------
@@ -1611,28 +1608,27 @@ async def _render(ctx: Context, shot: Shot, out: Outputs, tel: Telemetry, *, pla
         refs, added = [*own, *anchor, *([followed] if followed else [])], frozenset(ref.name for ref in anchor)
         forced = added | ({"Plate"} if followed else set())
         role = {"keyframes": bool(index == 0 and opening or index + 1 == count and ending), "continues": index == 0 and carried}
-        call = segment_call(text, refs, soundscape=script.soundscape, music=script.music, index=index, retained=retained,
-                            added=added, forced=forced, **role)  # fmt: skip
-        if index == 0 and (plate is not None or carried) and not any(FILE[ref.kind] == "image" for ref in call.references):
+        segment = segment_call(text, refs, soundscape=script.soundscape, music=script.music, index=index,
+                               retained=retained, added=added, forced=forced, **role)  # fmt: skip
+        if index == 0 and (plate is not None or carried) and not any(FILE[ref.kind] == "image" for ref in segment.references):
             # Ref2VA needs a picture: a plate's own first frame (se-101), or the frame the take goes on from (h3a-098,
             # run 25881), as the same world state.
             begin = _anchor("Plate opening" if plate is not None else "Segment 0 end", script.people)
             if plate is not None:
                 warnings.append("a plate with no picture beside it uses its own first frame as the picture")
             files[begin.name] = frame_at(plate, 1, out) if plate is not None else frame_at(cast(ShotVideo, take).file, done, out)
-            call = segment_call(text, [*refs, begin], soundscape=script.soundscape, music=script.music, index=index,
-                                retained=retained, added=added | {begin.name}, forced=forced | {begin.name}, **role)  # fmt: skip
-        files |= {ref.name: file for ref in call.references if (file := getattr(ref, FILE[ref.kind])) is not None}
-        calls.append(call if call.references else SegmentCall(fl2va_text(text, script.soundscape, script.music), [], call.warnings))
-        warnings += call.warnings
+            segment = segment_call(text, [*refs, begin], soundscape=script.soundscape, music=script.music, index=index,
+                                   retained=retained, added=added | {begin.name}, forced=forced | {begin.name}, **role)  # fmt: skip
+        files |= {ref.name: file for ref in segment.references if (file := getattr(ref, FILE[ref.kind])) is not None}
+        calls.append(segment if segment.references else SegmentCall(fl2va_text(text, script.soundscape, script.music), [], segment.warnings))
+        warnings += segment.warnings
     tel.log("h3 shot segments", segments=count, seconds=",".join(map(str, segments)), resumed_at=done,
             boundaries_s=",".join(f"{start / FPS:.2f}" for start in starts[1:]), delivered_frames=total,
             clip_windows=";".join(",".join(f"{name}@{a}-{b}" for name, (a, b) in w.items()) for w in windows))  # fmt: skip
-    if not calls[0].references and any(call.references for call in calls[1:]):
+    if not calls[0].references and any(later.references for later in calls[1:]):
         # Only a text-only first segment (FL2VA) runs ahead of a Ref2VA one. A hint the shot never uses loads on after
         # it ends and holds the GPU from the next run (0.2.0 gate 41159884913: h3-5s, then upscale waited 3 h 50 min).
         prefetch(ref2va_segment)
-    work = [plan.sample_frames for plan in plans]
     seeds = [segment_seed(shot.seed, ctx.request_id, index) for index in range(count)]
     # A take's latents and its video join this one's at its last segment, decoded as one; a trimmed take's sound is in its latents.
     before = ((latents,), () if trimmed else (cast(ShotVideo, take).file,)) if latents is not None else ((), ())
@@ -1641,22 +1637,22 @@ async def _render(ctx: Context, shot: Shot, out: Outputs, tel: Telemetry, *, pla
     expected = None
     models = {} if lora is None else {"base_model": lora}
     returned: list[SegmentOutput] = []
-    for index, (call, plan) in enumerate(zip(calls, plans, strict=True)):
+    for index, (segment, plan) in enumerate(zip(calls, plans, strict=True)):
         ctx.raise_if_cancelled()
         first = opening if index == 0 else None
         last = ending if index + 1 == count else None
         end_segment = joined and index + 1 == count
-        span = (sum(work[:index]) / sum(work), sum(work[: index + 1]) / sum(work))
         try:
-            with tel.scope(f"Segment {index + 1} of {count}", overall_range=span):
-                log_prompt(tel, "h3 segment prompt", call.prompt, segment=index + 1,
-                           references=", ".join(ref.name for ref in call.references))  # fmt: skip
-                if call.references:
-                    uses = video_uses(call.references, windows[index])
-                    pictures = [ref for ref in call.references if FILE[ref.kind] == "image"]
-                    result = await ref2va_segment(  # type: ignore[call-arg]
+            with tel.scope(f"Segment {index + 1} of {count}"):
+                log_prompt(tel, "h3 segment prompt", segment.prompt, segment=index + 1,
+                           references=", ".join(ref.name for ref in segment.references))  # fmt: skip
+                if segment.references:
+                    uses = video_uses(segment.references, windows[index])
+                    pictures = [ref for ref in segment.references if FILE[ref.kind] == "image"]
+                    result = await call(
+                        ref2va_segment,
                         payload=Ref2VAInput(
-                            prompt=call.prompt, seed=seeds[index], duration_s=segments[index], steps=steps,
+                            prompt=segment.prompt, seed=seeds[index], duration_s=segments[index], steps=steps,
                             turbo=turbo, quality=shot.quality, frames=held_frames(plan, uses), videos=uses,
                             previous_provenance=expected, context=context if plan.carried else None,
                             context_frames=cast(ContextFrames, plan.carried.frames),
@@ -1668,12 +1664,13 @@ async def _render(ctx: Context, shot: Shot, out: Outputs, tel: Telemetry, *, pla
                             earlier_videos=(*before[1], *(r.video for r in returned)) if end_segment else (),
                             picture_edges=tuple(_LOOSE_EDGE if ref.kind == "world_state" else 0 for ref in pictures),
                             characters=tuple(ref.name if ref.kind == "character" else "" for ref in pictures),
-                        ), assets=_call_assets(files, call.references), **models,
+                        ), assets=_call_assets(files, segment.references), **models,
                     )  # fmt: skip
                 else:
-                    result = await fl2va_segment(  # type: ignore[call-arg]
+                    result = await call(
+                        fl2va_segment,
                         payload=FL2VAInput(
-                            prompt=call.prompt, seed=seeds[index], duration_s=segments[index], steps=steps,
+                            prompt=segment.prompt, seed=seeds[index], duration_s=segments[index], steps=steps,
                             turbo=turbo, quality=shot.quality, first_frame=first, last_frame=last, canvas=shape,
                             next_context_frames=cast(ContextFrames, plan.successor.frames),
                             next_context_audio=plan.successor.audio, latents=True,
@@ -1803,10 +1800,10 @@ async def upscale(ctx: Context, payload: Upscale, out: Outputs, tel: Telemetry) 
     if round(payload.strength, 3) != strength:
         warnings.append(f"strength {payload.strength} runs at {strength}, the nearest served")
     seed = int.from_bytes(hashlib.sha256(f"{video.file.digest or video.file.ref}/h3/upscale".encode()).digest()[:4], "big")
-    call = RegenerateInput(video=video.file, latents=video.latents, prompt=prompt, resolution=Resolution(payload.to),
-                           strength=strength, seed=seed)  # fmt: skip
+    request = RegenerateInput(video=video.file, latents=video.latents, prompt=prompt, resolution=Resolution(payload.to),
+                              strength=strength, seed=seed)  # fmt: skip
     with tel.scope(f"Regenerate at {payload.to}"):
-        result = await cast(Callable[..., Awaitable[RegenerateOutput]], regenerate_shot)(payload=call)
+        result = await call(regenerate_shot, payload=request)
     warnings += result.warnings
     tel.log("h3 upscale", to=payload.to, strength=strength, warnings="; ".join(warnings))
     return UpscaleOutput(result.video, warnings)
