@@ -5,7 +5,7 @@ the ComfyUI node does to the already-normalized latents it receives."""
 from __future__ import annotations
 
 import math
-from typing import Literal, cast
+from typing import cast
 
 import msgspec
 import torch
@@ -18,13 +18,18 @@ ARCHITECTURE = "minimax-h3-latent-upscaler-3d-conv-v1"
 
 
 class _Normalization(msgspec.Struct, frozen=True):
-    enabled: Literal[True]
+    enabled: bool
     mean: tuple[float, ...]
     std: tuple[float, ...]
 
 
 def _normalization(config: Config) -> _Normalization:
     stats = config.section("latent_normalization").typed(_Normalization)
+    if not stats.enabled:
+        raise InvalidRequest(
+            "latent_normalization.enabled must be true", code="config_invalid",
+            fields=["latent_normalization.enabled"],
+        )
     for name, values in (("mean", stats.mean), ("std", stats.std)):
         if len(values) != 24 or any(
             not math.isfinite(value) or (name == "std" and value <= 0) for value in values
