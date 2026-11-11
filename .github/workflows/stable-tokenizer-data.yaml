@@ -1,0 +1,88 @@
+name: stable tokenizer data
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/stable-tokenizer-data.yaml'
+      - 'checks/*stable_tokenizer*'
+      - 'anima/**'
+      - 'sdxl/**'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  tokenizer-data:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      HF_HUB_OFFLINE: '1'
+      TRANSFORMERS_OFFLINE: '1'
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+      - name: Refresh root versions with the existing publication exclusions
+        run: |
+          mkdir -p "$RUNNER_TEMP/locks" "$RUNNER_TEMP/baseline"
+          git archive 456706fc793cf41e493343fc57214af720982e01 anima sdxl | tar -x -C "$RUNNER_TEMP/baseline"
+          for package in anima sdxl; do
+            cp -r "$package" "$RUNNER_TEMP/locks/$package"
+            python - "$RUNNER_TEMP/locks/$package/pyproject.toml" <<'PY'
+          from pathlib import Path
+          import sys
+          path = Path(sys.argv[1])
+          path.write_text(path.read_text().replace('[tool.uv]\n', '[tool.uv]\nexclude-dependencies = ["torch", "torchaudio", "torchvision", "triton"]\n'))
+          PY
+            uv lock --project "$RUNNER_TEMP/locks/$package" --python 3.12
+            uv export --project "$RUNNER_TEMP/locks/$package" --frozen --no-dev --no-emit-project --no-hashes -o "$RUNNER_TEMP/$package-requirements.txt"
+          done
+      - name: Install the exact locked public CPU dependencies
+        run: |
+          uv venv --python 3.12 .venv-tokenizer
+          uv pip install --python .venv-tokenizer/bin/python --index https://download.pytorch.org/whl/cpu --index-strategy unsafe-best-match \
+            -r "$RUNNER_TEMP/anima-requirements.txt" -r "$RUNNER_TEMP/sdxl-requirements.txt" \
+            'torch==2.15.0+cpu' 'torchvision==0.29.1+cpu'
+      - name: Build and install candidate wheels
+        run: |
+          uv build --wheel --sdist --out-dir "$RUNNER_TEMP/wheels" anima
+          uv build --wheel --sdist --out-dir "$RUNNER_TEMP/wheels" sdxl
+          uv pip install --python .venv-tokenizer/bin/python --no-deps "$RUNNER_TEMP/wheels/"*.whl
+      - name: Reproduce the old fallback and verify native checkpoint consumers
+        run: |
+          .venv-tokenizer/bin/python -I checks/verify_stable_tokenizer_data.py --out "$RUNNER_TEMP/proof" --baseline "$RUNNER_TEMP/baseline" --baseline-control
+          .venv-tokenizer/bin/python -I checks/verify_stable_tokenizer_data.py --out "$RUNNER_TEMP/proof" --baseline "$RUNNER_TEMP/baseline"
+      - name: Verify lock changes are confined to root package versions
+        run: |
+          python - "$RUNNER_TEMP/locks" <<'PY'
+          from pathlib import Path
+          import json, sys, tomllib
+          root = Path(sys.argv[1])
+          results = {}
+          for name, expected in [('anima','0.7.1'),('sdxl','0.8.1')]:
+              before = tomllib.loads(Path(name,'uv.lock').read_text())
+              after = tomllib.loads((root/name/'uv.lock').read_text())
+              def dependencies(lock):
+                  return [package for package in lock['package'] if package['name'] != name]
+              assert dependencies(before) == dependencies(after), name
+              package = next(package for package in after['package'] if package['name'] == name)
+              assert package['version'] == expected, name
+              versions = {package['name']:package['version'] for package in after['package']}
+              assert versions['cozy-runtime'] == '0.44.0' and versions['tensorfs'] == '0.23.0', name
+              results[name] = {'root_version':expected,'all_other_locked_dependencies_unchanged':True}
+          (root/'lock-receipt.json').write_text(json.dumps(results,indent=2)+'\n')
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: stable-tokenizer-data
+          path: |
+            ${{ runner.temp }}/proof
+            ${{ runner.temp }}/wheels
+            ${{ runner.temp }}/locks/*/uv.lock
+            ${{ runner.temp }}/locks/lock-receipt.json
+          if-no-files-found: warn
