@@ -22,10 +22,11 @@ dependencies or qualifying a worker image.
 | `moss-image/` | OpenMOSS MOSS-Image text-to-image with layout boxes for objects and text (Apache-2.0) |
 | `krea-2/` | Krea 2 text-to-image: Raw (`generate`) and its 8-step Turbo (`generate_turbo`), with caller LoRAs (Krea 2 Community License) |
 | `relayvsr/` | RelayVSR streaming 4x video upscaling, a fast alternative to SeedVR2 (Apache-2.0) |
+| `orbit/` | Orbit: a picture's subject seen from all the way round, one clockwise turn by `minimax-h3` under ORB360 |
 | `qwen3.6/` | Qwen3.6-35B-A3B and 27B: questions about text, images and videos, on Runtime's shared Qwen-VL code (Apache-2.0) |
 | `examples/` | private `main()` scripts for conversions, uploads and diagnostics; run directly with `cozy run` |
 | `*/pyproject.toml` | release metadata; its one `cozy.application` entry point names the package's App |
-| `Taskfile.yaml` | `task publish -- <package>` (release with its dependents) |
+| `Taskfile.yaml` | `task publish -- [--dry-run] <package>` (release with its dependents), `task lock -- <package>` |
 
 ## Boundaries
 
