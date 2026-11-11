@@ -40,7 +40,7 @@ class ImageBox(msgspec.Struct, kw_only=True):
     #: `ImageRequest.target`, held to 1:4 through 4:1 (`SIZES.fit`). Unset: an edit's Picture 1's, else 1:1.
     aspect_ratio: Annotated[AspectRatio, Ratios(min=1 / 4, max=4)] | None = None
     #: `SIZES.pixels`, 1-16 MP. Unset: 8, or an edit's Picture 1's held to 4-8 MP.
-    megapixels: Annotated[float, Range(1, 16)] | None = None
+    megapixels: Annotated[float, Range(1, 16, step=1, unit="MP")] | None = None
     seed: Seed | None = None
     #: Pruna's upsampler writes the full prompt from it first, as P-H3-Image renders best.
     prompt_upsampling: Annotated[bool, Advanced()] = True
