@@ -24,7 +24,7 @@ from fractions import Fraction
 from functools import partial
 from itertools import pairwise
 from types import SimpleNamespace
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 import msgspec
 import numpy as np

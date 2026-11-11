@@ -1,0 +1,54 @@
+name: stable model data
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/stable-model-data.yaml'
+      - 'checks/**'
+      - 'minimax-h3/**'
+      - 'minimax-h3-tools/**'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  checkpoint-data:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+      - name: Install the published CPU SDK pair
+        run: |
+          uv venv --python 3.12 .venv-stable
+          uv pip install --python .venv-stable/bin/python --index https://download.pytorch.org/whl/cpu --index-strategy unsafe-best-match -r checks/stable-model-data-requirements.txt
+      - name: Build and install candidate wheels
+        run: |
+          uv build --wheel --sdist --out-dir "$RUNNER_TEMP/wheels" minimax-h3-tools
+          uv build --wheel --sdist --out-dir "$RUNNER_TEMP/wheels" minimax-h3
+          uv pip install --python .venv-stable/bin/python --no-deps "$RUNNER_TEMP/wheels/"*.whl
+      - name: Check native data consumers and derivation preservation
+        run: |
+          .venv-stable/bin/python -I checks/verify_stable_model_data.py --out "$RUNNER_TEMP/proof"
+          .venv-stable/bin/python -I checks/prove_stable_derived_assets.py --package-root "$PWD" --out "$RUNNER_TEMP/proof/derived-assets.json"
+      - name: Check the tools lock using the publication exclusions
+        run: |
+          cp -r minimax-h3-tools "$RUNNER_TEMP/locked-tools"
+          python - "$RUNNER_TEMP/locked-tools/pyproject.toml" <<'PY'
+          from pathlib import Path
+          import sys
+          path = Path(sys.argv[1])
+          path.write_text(path.read_text().replace('[tool.uv]\n', '[tool.uv]\nexclude-dependencies = ["torch", "torchaudio", "torchvision", "triton"]\n'))
+          PY
+          uv lock --check --project "$RUNNER_TEMP/locked-tools" --python 3.12
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: stable-model-data
+          path: |
+            ${{ runner.temp }}/proof
+            ${{ runner.temp }}/wheels
+          if-no-files-found: warn

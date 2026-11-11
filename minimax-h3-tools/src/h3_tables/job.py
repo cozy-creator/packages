@@ -77,6 +77,63 @@ def _asset(name: str) -> bytes:
     return files(__package__).joinpath("assets", name).read_bytes()
 
 
+def _validate_lane_config(source: Checkpoint, *, curve: bool) -> None:
+    """Refuse constructor drift before a lane replaces its intentional modulation metadata."""
+    sections = parse_full_config(_asset("model-config.json"))
+    variant = "curve-form" if curve else "full"
+    missing = object()
+    for component in COMPONENTS:
+        held = source.components.get(component)
+        if held is None:
+            raise UnsupportedInput(
+                f"H3 source has no {component} construction config", code="h3_lane_config"
+            )
+        actual, expected = dict(held.config), dict(sections[component])
+        for key in ("_diffusers_version", "transformers_version"):
+            actual.pop(key, None)
+            expected.pop(key, None)
+        if component in DIT_COMPONENT.values():
+            # Full/curve rows are checked by lane_rows; the producer replaces the
+            # corresponding task/modulation/table labels in the output config.
+            actual.pop("cozy_h3", None)
+            expected.pop("cozy_h3", None)
+        elif component == "text_encoder":
+            # The raw upstream model has all 64 layers. This producer retains the
+            # reviewed 50-layer conditioner and adds this exact construction stamp.
+            if "cozy_h3" in actual and actual["cozy_h3"] != expected.get("cozy_h3"):
+                raise UnsupportedInput(
+                    "text_encoder.cozy_h3 is not the supported H3 conditioner", code="h3_lane_config"
+                )
+            actual.pop("cozy_h3", None)
+            expected.pop("cozy_h3", None)
+        if actual != expected:
+            field = next(
+                key for key in sorted(actual.keys() | expected.keys())
+                if actual.get(key, missing) != expected.get(key, missing)
+            )
+            raise UnsupportedInput(
+                f"{component}.{field} differs from the supported {variant} H3 construction config",
+                code="h3_lane_config",
+            )
+
+
+def _require_processor_assets(source: Checkpoint) -> None:
+    """A full-model derivation must retain the checkpoint's own processor data."""
+    required = (
+        "processor/merges.txt", "processor/vocab.json", "processor/preprocessor_config.json",
+        "processor/video_preprocessor_config.json", "processor/tokenizer_config.json",
+    )
+    encoder = source.components.get("text_encoder")
+    missing = [name for name in required if encoder is None or name not in encoder.assets]
+    if missing:
+        more = f" and {len(missing) - 1} other processor files" if len(missing) > 1 else ""
+        raise UnsupportedInput(
+            f"H3 source has no text_encoder/{missing[0]}{more}; use an updated H3 checkpoint",
+            code="h3_processor_assets",
+        )
+
+
+
 def _production_plan(source: Checkpoint, task: Task) -> TimestepPlan:
     return timestep_plan(source, task)
 
@@ -356,6 +413,8 @@ def _produce_lane(
     is copied, keeping the source's objects; an interrupted attempt resumes what it wrote, a
     committed one replays."""
     source = open_source(ctx, weights)
+    _validate_lane_config(source, curve=curve)
+    _require_processor_assets(source)
     plans = {task: _production_plan(source, task) for task in DIT_COMPONENT}
     _check_table_budget(plans, MAX_TABLE_BYTES)
     order, carried, computed, widened = lane_rows(name, rows(source), plans, curve)
@@ -727,6 +786,9 @@ async def retable(
     table bytes, never a requantization. The same rows also commit as a two-DiT table bank.
     """
     pruned_source, full_source = open_source(ctx, pruned), open_source(ctx, full)
+    _validate_lane_config(pruned_source, curve=False)
+    _validate_lane_config(full_source, curve=False)
+    _require_processor_assets(pruned_source)
     for task in DIT_COMPONENT:
         _production_plan(pruned_source, task)
     plans = {task: _production_plan(full_source, task) for task in DIT_COMPONENT}
