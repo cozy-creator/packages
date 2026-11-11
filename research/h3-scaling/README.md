@@ -44,7 +44,7 @@ and a unique idempotency key. The input is the full 15-second request. Turbo use
 8 steps (4 initial dense, 4 sparse); regular uses 30 (10 dense, 20 sparse).
 
 An accepted request is not a degree proof. Before accepting a timing, retain
-`cozy run show <id> --json` and verify the reported degree, each participating
+`cozy run watch <id> --once --json` and verify the reported degree, each participating
 GPU UUID and rank, attention recipe and Sol counts, all denoising steps, and the
 362-frame 1344×768 24-fps video with audio. Record compile/download warmup separately
 from repeated steady runs. Do not overlap Cozy and Comfy inference.
