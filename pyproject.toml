@@ -61,12 +61,12 @@ python_version = "3.12"
 files = [
     "anima", "birefnet", "qwen3.5", "seedvr2", "minimax-h3", "sdxl", "qwen-image-2", "qwen-image", "flux-2",
     "flux-3-klein", "fibo-2", "hidream-o1", "hunyuan-image-3", "ideogram-4", "moss-image", "qwen3.6", "krea-2",
-    "scripts", "examples",
+    "relayvsr", "scripts", "examples",
 ]
 mypy_path = [
     "typings", "anima", "birefnet", "fibo-2", "flux-2", "flux-3-klein", "hidream-o1", "hunyuan-image-3", "ideogram-4",
     "krea-2", "minimax-h3", "moss-image", "qwen3.5", "qwen3.6", "qwen-image", "qwen-image-2",
-    "sdxl", "seedvr2",
+    "relayvsr", "sdxl", "seedvr2",
 ]
 strict = true
 warn_unreachable = true
@@ -96,7 +96,7 @@ ignore_missing_imports = true
 # annotating one misses every prebuilt kernel. So the codes an untyped kernel def raises are off in the modules
 # holding kernels, for the whole module (mypy has no per-function setting); every other check applies there.
 [[tool.mypy.overrides]]
-module = ["minimax_h3.glue"]
+module = ["minimax_h3.glue", "relayvsr.kernels"]
 disable_error_code = ["no-untyped-def", "no-any-unimported", "untyped-decorator"]
 disallow_any_decorated = false
 # A def line's own `# type: ignore` is part of its cache key too, so one these settings make unused stays.
