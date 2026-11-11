@@ -1,0 +1,2506 @@
+{
+  "application": "h3:app",
+  "entrypoints": [
+    {
+      "accelerator": false,
+      "calls": [
+        {
+          "accelerator": true,
+          "function": "fl2va_segment",
+          "gpus": [
+            1,
+            2,
+            4,
+            7,
+            8
+          ],
+          "models": [
+            {
+              "class": "H3TurboBase",
+              "component_use": {
+                "carried_sound": [
+                  "audio_vae"
+                ],
+                "condition_fl2va_media": [
+                  "vae"
+                ],
+                "condition_ref2va_media": [
+                  "audio_vae",
+                  "vae"
+                ],
+                "condition_text": [
+                  "text_encoder"
+                ],
+                "decode_audio": [
+                  "audio_vae"
+                ],
+                "decode_latents": [
+                  "vae"
+                ],
+                "decode_video": [
+                  "vae"
+                ],
+                "encode_clip": [
+                  "vae"
+                ],
+                "encode_prompt": [
+                  "text_encoder"
+                ],
+                "refine": [
+                  "transformer"
+                ],
+                "sample_fl2va": [
+                  "transformer"
+                ],
+                "sample_fl2va_turbo": [
+                  "transformer"
+                ],
+                "sample_ref2va": [
+                  "transformer_ref"
+                ],
+                "sample_ref2va_turbo": [
+                  "transformer_ref"
+                ],
+                "silence": [
+                  "audio_vae"
+                ]
+              },
+              "components": [
+                "audio_vae",
+                "text_encoder",
+                "transformer",
+                "vae"
+              ],
+              "default": "minimaxai/minimax-h3@1.0.0-rc.7",
+              "encoded_leaves": "accept",
+              "path": "fl2va_segment.models.base_model",
+              "placeable": [
+                "text_encoder"
+              ],
+              "sequence_parallel": {
+                "degrees": [
+                  2,
+                  4,
+                  7,
+                  8
+                ]
+              }
+            },
+            {
+              "class": "H3TurboLoRA",
+              "component_use": {
+                "sample_fl2va": [
+                  "fl2va_turbo"
+                ],
+                "sample_ref2va": [
+                  "ref2va_turbo"
+                ]
+              },
+              "components": [
+                "fl2va_turbo"
+              ],
+              "default": "alibaba-pai/minimax-h3-turbo-lora@1.0.1",
+              "encoded_leaves": "accept",
+              "path": "fl2va_segment.models.turbo_lora",
+              "sequence_parallel": {
+                "degrees": [
+                  2,
+                  4,
+                  7,
+                  8
+                ]
+              }
+            }
+          ],
+          "package": "minimax-h3"
+        },
+        {
+          "accelerator": true,
+          "function": "ref2va_segment",
+          "gpus": [
+            1,
+            2,
+            4,
+            7,
+            8
+          ],
+          "models": [
+            {
+              "class": "H3TurboBase",
+              "component_use": {
+                "carried_sound": [
+                  "audio_vae"
+                ],
+                "condition_fl2va_media": [
+                  "vae"
+                ],
+                "condition_ref2va_media": [
+                  "audio_vae",
+                  "vae"
+                ],
+                "condition_text": [
+                  "text_encoder"
+                ],
+                "decode_audio": [
+                  "audio_vae"
+                ],
+                "decode_latents": [
+                  "vae"
+                ],
+                "decode_video": [
+                  "vae"
+                ],
+                "encode_clip": [
+                  "vae"
+                ],
+                "encode_prompt": [
+                  "text_encoder"
+                ],
+                "refine": [
+                  "transformer"
+                ],
+                "sample_fl2va": [
+                  "transformer"
+                ],
+                "sample_fl2va_turbo": [
+                  "transformer"
+                ],
+                "sample_ref2va": [
+                  "transformer_ref"
+                ],
+                "sample_ref2va_turbo": [
+                  "transformer_ref"
+                ],
+                "silence": [
+                  "audio_vae"
+                ]
+              },
+              "components": [
+                "audio_vae",
+                "text_encoder",
+                "transformer_ref",
+                "vae"
+              ],
+              "default": "minimaxai/minimax-h3@1.0.0-rc.7",
+              "encoded_leaves": "accept",
+              "path": "ref2va_segment.models.base_model",
+              "placeable": [
+                "text_encoder"
+              ],
+              "sequence_parallel": {
+                "degrees": [
+                  2,
+                  4,
+                  7,
+                  8
+                ]
+              }
+            },
+            {
+              "class": "H3TurboLoRA",
+              "component_use": {
+                "sample_fl2va": [
+                  "fl2va_turbo"
+                ],
+                "sample_ref2va": [
+                  "ref2va_turbo"
+                ]
+              },
+              "components": [
+                "ref2va_turbo"
+              ],
+              "default": "alibaba-pai/minimax-h3-turbo-lora@1.0.1",
+              "encoded_leaves": "accept",
+              "path": "ref2va_segment.models.turbo_lora",
+              "sequence_parallel": {
+                "degrees": [
+                  2,
+                  4,
+                  7,
+                  8
+                ]
+              }
+            }
+          ],
+          "package": "minimax-h3"
+        }
+      ],
+      "description": "A plate edited by its beats, on Ref2VA under the chosen edit LoRA, its trigger opening each beat. With no picture in a beat, the plate's own first frame is the picture.",
+      "invocable": {
+        "capabilities": [
+          "media_decode",
+          "save",
+          "telemetry"
+        ],
+        "context": "ctx",
+        "defaults": {
+          "request/beats/[]/description": {
+            "references": [],
+            "text": ""
+          },
+          "request/beats/[]/duration": 15,
+          "request/quality": "standard",
+          "request/seed": null,
+          "request/turbo": true,
+          "result/kept_s": null,
+          "result/latents": null
+        },
+        "enum_members": {},
+        "export": "edit",
+        "memoize": false,
+        "module": "h3",
+        "parameters": [
+          "plate",
+          "edit",
+          "beats",
+          "turbo",
+          "quality",
+          "seed"
+        ],
+        "type_names": {
+          "request": "Edit",
+          "request/beats/[]": "Beat",
+          "result": "ShotResult"
+        }
+      },
+      "name": "edit",
+      "request": {
+        "fields": [
+          {
+            "extra": {
+              "spans": "beats"
+            },
+            "name": "plate",
+            "type": {
+              "asset": "video"
+            }
+          },
+          {
+            "extra": {
+              "label": "Edit",
+              "options": {
+                "character_swap": {
+                  "description": "Replace the main guide subject with the character in a reference image while following the guide performance",
+                  "words": "Character swap"
+                },
+                "head_swap": {
+                  "description": "Experimental reference-image head replacement over an aligned source video",
+                  "words": "Head swap"
+                },
+                "motion_transfer": {
+                  "description": "The character in the reference performs the guide video's motion",
+                  "words": "Motion transfer"
+                },
+                "style_transfer": {
+                  "description": "Transfer a visual style from an image or text description onto a video",
+                  "words": "Style transfer"
+                },
+                "vfx_edit": {
+                  "description": "General prompt-directed VFX editing with an aligned source video",
+                  "words": "VFX edit"
+                }
+              }
+            },
+            "name": "edit",
+            "type": {
+              "literal": [
+                "character_swap",
+                "head_swap",
+                "motion_transfer",
+                "style_transfer",
+                "vfx_edit"
+              ]
+            }
+          },
+          {
+            "constraints": {
+              "min_length": 1
+            },
+            "name": "beats",
+            "type": {
+              "list": {
+                "fields": [
+                  {
+                    "constraints": {
+                      "ge": 1,
+                      "le": 15
+                    },
+                    "default": 15,
+                    "extra": {
+                      "total": true,
+                      "unit": "s"
+                    },
+                    "name": "duration",
+                    "type": "int",
+                    "wire": "optional"
+                  },
+                  {
+                    "default": {
+                      "references": [],
+                      "text": ""
+                    },
+                    "name": "description",
+                    "type": {
+                      "prompt": [
+                        "audio",
+                        "image",
+                        "video"
+                      ]
+                    },
+                    "wire": "optional"
+                  }
+                ]
+              }
+            }
+          },
+          {
+            "default": true,
+            "name": "turbo",
+            "type": "bool",
+            "wire": "optional"
+          },
+          {
+            "default": "standard",
+            "name": "quality",
+            "type": {
+              "literal": [
+                "draft",
+                "full",
+                "standard"
+              ]
+            },
+            "wire": "optional"
+          },
+          {
+            "default": null,
+            "name": "seed",
+            "type": {
+              "union": [
+                "null",
+                {
+                  "input": "seed"
+                }
+              ]
+            },
+            "wire": "optional"
+          }
+        ]
+      },
+      "result": {
+        "fields": [
+          {
+            "asset_bound": {
+              "max_bytes": 1099511627776,
+              "media_types": [
+                "video/mp4"
+              ]
+            },
+            "name": "video",
+            "type": {
+              "asset": "video"
+            }
+          },
+          {
+            "name": "warnings",
+            "type": {
+              "list": "str"
+            }
+          },
+          {
+            "name": "latents",
+            "type": {
+              "union": [
+                "null",
+                {
+                  "asset": "latents"
+                }
+              ]
+            },
+            "wire": "optional"
+          },
+          {
+            "name": "kept_s",
+            "type": {
+              "union": [
+                "float",
+                "null"
+              ]
+            },
+            "wire": "optional"
+          }
+        ]
+      },
+      "tool": {
+        "label": "Edit",
+        "named": "edit",
+        "reserved": [
+          "d",
+          "scenetrans",
+          "cutoff",
+          "english",
+          "chinese",
+          "mandarin",
+          "cantonese",
+          "japanese",
+          "korean",
+          "spanish",
+          "french",
+          "german",
+          "italian",
+          "portuguese",
+          "russian",
+          "arabic",
+          "hindi",
+          "bengali",
+          "urdu",
+          "punjabi",
+          "tamil",
+          "telugu",
+          "indonesian",
+          "malay",
+          "vietnamese",
+          "thai",
+          "filipino",
+          "tagalog",
+          "turkish",
+          "persian",
+          "hebrew",
+          "greek",
+          "dutch",
+          "swedish",
+          "norwegian",
+          "danish",
+          "finnish",
+          "polish",
+          "czech",
+          "ukrainian",
+          "romanian",
+          "hungarian",
+          "swahili"
+        ]
+      }
+    },
+    {
+      "description": "A segment on FL2VA: its text and its first and/or last keyframe, or text alone.",
+      "internal": true,
+      "invocable": {
+        "capabilities": [
+          "media_decode",
+          "save",
+          "telemetry"
+        ],
+        "context": "ctx",
+        "defaults": {
+          "request/payload/first_frame": null,
+          "request/payload/last_frame": null,
+          "request/payload/latents": false,
+          "request/payload/next_context_audio": false,
+          "request/payload/next_context_frames": 0,
+          "request/payload/quality": "standard",
+          "result/provenance/turbo_lora_manifest": ""
+        },
+        "enum_members": {},
+        "export": "fl2va_segment",
+        "memoize": true,
+        "module": "h3",
+        "parameters": [
+          "payload"
+        ],
+        "type_names": {
+          "request": "fl2va_segmentRequest",
+          "request/payload": "FL2VAInput",
+          "result": "SegmentOutput",
+          "result/provenance": "RenderProvenance"
+        }
+      },
+      "models": [
+        {
+          "class": "H3TurboBase",
+          "component_use": {
+            "carried_sound": [
+              "audio_vae"
+            ],
+            "condition_fl2va_media": [
+              "vae"
+            ],
+            "condition_ref2va_media": [
+              "audio_vae",
+              "vae"
+            ],
+            "condition_text": [
+              "text_encoder"
+            ],
+            "decode_audio": [
+              "audio_vae"
+            ],
+            "decode_latents": [
+              "vae"
+            ],
+            "decode_video": [
+              "vae"
+            ],
+            "encode_clip": [
+              "vae"
+            ],
+            "encode_prompt": [
+              "text_encoder"
+            ],
+            "refine": [
+              "transformer"
+            ],
+            "sample_fl2va": [
+              "transformer"
+            ],
+            "sample_fl2va_turbo": [
+              "transformer"
+            ],
+            "sample_ref2va": [
+              "transformer_ref"
+            ],
+            "sample_ref2va_turbo": [
+              "transformer_ref"
+            ],
+            "silence": [
+              "audio_vae"
+            ]
+          },
+          "components": [
+            "audio_vae",
+            "text_encoder",
+            "transformer",
+            "vae"
+          ],
+          "default": "minimaxai/minimax-h3@1.0.0-rc.7",
+          "encoded_leaves": "accept",
+          "path": "fl2va_segment.models.base_model",
+          "placeable": [
+            "text_encoder"
+          ],
+          "sequence_parallel": {
+            "degrees": [
+              2,
+              4,
+              7,
+              8
+            ]
+          }
+        },
+        {
+          "class": "H3TurboLoRA",
+          "component_use": {
+            "sample_fl2va": [
+              "fl2va_turbo"
+            ],
+            "sample_ref2va": [
+              "ref2va_turbo"
+            ]
+          },
+          "components": [
+            "fl2va_turbo"
+          ],
+          "default": "alibaba-pai/minimax-h3-turbo-lora@1.0.1",
+          "encoded_leaves": "accept",
+          "path": "fl2va_segment.models.turbo_lora",
+          "sequence_parallel": {
+            "degrees": [
+              2,
+              4,
+              7,
+              8
+            ]
+          }
+        }
+      ],
+      "name": "fl2va_segment",
+      "request": {
+        "fields": [
+          {
+            "name": "payload",
+            "type": {
+              "fields": [
+                {
+                  "name": "prompt",
+                  "type": "str"
+                },
+                {
+                  "name": "seed",
+                  "type": "int"
+                },
+                {
+                  "constraints": {
+                    "ge": 5,
+                    "le": 15
+                  },
+                  "name": "duration_s",
+                  "type": "int"
+                },
+                {
+                  "name": "steps",
+                  "type": {
+                    "union": [
+                      "int",
+                      "null"
+                    ]
+                  }
+                },
+                {
+                  "name": "turbo",
+                  "type": "bool"
+                },
+                {
+                  "default": "standard",
+                  "name": "quality",
+                  "type": {
+                    "literal": [
+                      "draft",
+                      "full",
+                      "standard"
+                    ]
+                  },
+                  "wire": "optional"
+                },
+                {
+                  "default": null,
+                  "name": "first_frame",
+                  "type": {
+                    "union": [
+                      "null",
+                      {
+                        "asset": "image"
+                      }
+                    ]
+                  },
+                  "wire": "optional"
+                },
+                {
+                  "default": null,
+                  "name": "last_frame",
+                  "type": {
+                    "union": [
+                      "null",
+                      {
+                        "asset": "image"
+                      }
+                    ]
+                  },
+                  "wire": "optional"
+                },
+                {
+                  "name": "canvas",
+                  "type": {
+                    "list": "int"
+                  }
+                },
+                {
+                  "default": 0,
+                  "name": "next_context_frames",
+                  "type": {
+                    "literal": [
+                      0,
+                      22,
+                      39,
+                      56
+                    ]
+                  },
+                  "wire": "optional"
+                },
+                {
+                  "default": false,
+                  "name": "next_context_audio",
+                  "type": "bool",
+                  "wire": "optional"
+                },
+                {
+                  "default": false,
+                  "name": "latents",
+                  "type": "bool",
+                  "wire": "optional"
+                }
+              ]
+            }
+          }
+        ]
+      },
+      "result": {
+        "fields": [
+          {
+            "asset_bound": {
+              "max_bytes": 1099511627776,
+              "max_decoded_bytes": 33554432,
+              "media_types": [
+                "video/mp4"
+              ]
+            },
+            "name": "video",
+            "type": {
+              "asset": "video"
+            }
+          },
+          {
+            "name": "warnings",
+            "type": {
+              "list": "str"
+            }
+          },
+          {
+            "name": "provenance",
+            "type": {
+              "fields": [
+                {
+                  "name": "model_manifest",
+                  "type": "str"
+                },
+                {
+                  "name": "turbo_lora_manifest",
+                  "type": "str",
+                  "wire": "optional"
+                }
+              ]
+            }
+          },
+          {
+            "asset_bound": {
+              "max_bytes": 1099511627776,
+              "media_types": [
+                "application/octet-stream"
+              ]
+            },
+            "name": "context",
+            "type": {
+              "asset": "file"
+            }
+          },
+          {
+            "name": "last_frame",
+            "type": {
+              "asset": "image"
+            }
+          },
+          {
+            "asset_bound": {
+              "max_bytes": 1099511627776,
+              "media_types": [
+                "application/octet-stream"
+              ]
+            },
+            "name": "latents",
+            "type": {
+              "asset": "file"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "accelerator": false,
+      "calls": [
+        {
+          "accelerator": true,
+          "function": "fl2va_segment",
+          "gpus": [
+            1,
+            2,
+            4,
+            7,
+            8
+          ],
+          "models": [
+            {
+              "class": "H3TurboBase",
+              "component_use": {
+                "carried_sound": [
+                  "audio_vae"
+                ],
+                "condition_fl2va_media": [
+                  "vae"
+                ],
+                "condition_ref2va_media": [
+                  "audio_vae",
+                  "vae"
+                ],
+                "condition_text": [
+                  "text_encoder"
+                ],
+                "decode_audio": [
+                  "audio_vae"
+                ],
+                "decode_latents": [
+                  "vae"
+                ],
+                "decode_video": [
+                  "vae"
+                ],
+                "encode_clip": [
+                  "vae"
+                ],
+                "encode_prompt": [
+                  "text_encoder"
+                ],
+                "refine": [
+                  "transformer"
+                ],
+                "sample_fl2va": [
+                  "transformer"
+                ],
+                "sample_fl2va_turbo": [
+                  "transformer"
+                ],
+                "sample_ref2va": [
+                  "transformer_ref"
+                ],
+                "sample_ref2va_turbo": [
+                  "transformer_ref"
+                ],
+                "silence": [
+                  "audio_vae"
+                ]
+              },
+              "components": [
+                "audio_vae",
+                "text_encoder",
+                "transformer",
+                "vae"
+              ],
+              "default": "minimaxai/minimax-h3@1.0.0-rc.7",
+              "encoded_leaves": "accept",
+              "path": "fl2va_segment.models.base_model",
+              "placeable": [
+                "text_encoder"
+              ],
+              "sequence_parallel": {
+                "degrees": [
+                  2,
+                  4,
+                  7,
+                  8
+                ]
+              }
+            },
+            {
+              "class": "H3TurboLoRA",
+              "component_use": {
+                "sample_fl2va": [
+                  "fl2va_turbo"
+                ],
+                "sample_ref2va": [
+                  "ref2va_turbo"
+                ]
+              },
+              "components": [
+                "fl2va_turbo"
+              ],
+              "default": "alibaba-pai/minimax-h3-turbo-lora@1.0.1",
+              "encoded_leaves": "accept",
+              "path": "fl2va_segment.models.turbo_lora",
+              "sequence_parallel": {
+                "degrees": [
+                  2,
+                  4,
+                  7,
+                  8
+                ]
+              }
+            }
+          ],
+          "package": "minimax-h3"
+        },
+        {
+          "accelerator": true,
+          "function": "ref2va_segment",
+          "gpus": [
+            1,
+            2,
+            4,
+            7,
+            8
+          ],
+          "models": [
+            {
+              "class": "H3TurboBase",
+              "component_use": {
+                "carried_sound": [
+                  "audio_vae"
+                ],
+                "condition_fl2va_media": [
+                  "vae"
+                ],
+                "condition_ref2va_media": [
+                  "audio_vae",
+                  "vae"
+                ],
+                "condition_text": [
+                  "text_encoder"
+                ],
+                "decode_audio": [
+                  "audio_vae"
+                ],
+                "decode_latents": [
+                  "vae"
+                ],
+                "decode_video": [
+                  "vae"
+                ],
+                "encode_clip": [
+                  "vae"
+                ],
+                "encode_prompt": [
+                  "text_encoder"
+                ],
+                "refine": [
+                  "transformer"
+                ],
+                "sample_fl2va": [
+                  "transformer"
+                ],
+                "sample_fl2va_turbo": [
+                  "transformer"
+                ],
+                "sample_ref2va": [
+                  "transformer_ref"
+                ],
+                "sample_ref2va_turbo": [
+                  "transformer_ref"
+                ],
+                "silence": [
+                  "audio_vae"
+                ]
+              },
+              "components": [
+                "audio_vae",
+                "text_encoder",
+                "transformer_ref",
+                "vae"
+              ],
+              "default": "minimaxai/minimax-h3@1.0.0-rc.7",
+              "encoded_leaves": "accept",
+              "path": "ref2va_segment.models.base_model",
+              "placeable": [
+                "text_encoder"
+              ],
+              "sequence_parallel": {
+                "degrees": [
+                  2,
+                  4,
+                  7,
+                  8
+                ]
+              }
+            },
+            {
+              "class": "H3TurboLoRA",
+              "component_use": {
+                "sample_fl2va": [
+                  "fl2va_turbo"
+                ],
+                "sample_ref2va": [
+                  "ref2va_turbo"
+                ]
+              },
+              "components": [
+                "ref2va_turbo"
+              ],
+              "default": "alibaba-pai/minimax-h3-turbo-lora@1.0.1",
+              "encoded_leaves": "accept",
+              "path": "ref2va_segment.models.turbo_lora",
+              "sequence_parallel": {
+                "degrees": [
+                  2,
+                  4,
+                  7,
+                  8
+                ]
+              }
+            }
+          ],
+          "package": "minimax-h3"
+        }
+      ],
+      "description": "One continuous shot of any length, with sound (README.md): a summary, then what happens, beat by beat, each text with the references it mentions; an optional first and last frame; and Pick up from here, which goes on from a take at a frame. Returns the video and its latents, which a pickup of it resumes and an upscale starts from.",
+      "invocable": {
+        "capabilities": [
+          "media_decode",
+          "save",
+          "telemetry"
+        ],
+        "context": "ctx",
+        "defaults": {
+          "request/aspect_ratio": null,
+          "request/beats/[]/description": {
+            "references": [],
+            "text": ""
+          },
+          "request/beats/[]/duration": 15,
+          "request/carried_frames": 22,
+          "request/first_frame": null,
+          "request/last_frame": null,
+          "request/music": {
+            "references": [],
+            "text": ""
+          },
+          "request/pickup": null,
+          "request/pickup/union/1/beats_from": null,
+          "request/pickup/union/1/take/description": "",
+          "request/pickup/union/1/take/latents": null,
+          "request/pickup/union/1/take/own": false,
+          "request/quality": "standard",
+          "request/seed": null,
+          "request/soundscape": {
+            "references": [],
+            "text": ""
+          },
+          "request/steps": null,
+          "request/summary": {
+            "references": [],
+            "text": ""
+          },
+          "request/turbo": true,
+          "result/kept_s": null,
+          "result/latents": null
+        },
+        "enum_members": {},
+        "export": "generate",
+        "memoize": false,
+        "module": "h3",
+        "parameters": [
+          "summary",
+          "beats",
+          "soundscape",
+          "music",
+          "aspect_ratio",
+          "first_frame",
+          "last_frame",
+          "turbo",
+          "quality",
+          "steps",
+          "carried_frames",
+          "seed",
+          "pickup"
+        ],
+        "type_names": {
+          "request": "Shot",
+          "request/beats/[]": "Beat",
+          "request/pickup/union/1": "ShotPickup",
+          "request/pickup/union/1/take": "ShotVideo",
+          "result": "ShotResult"
+        }
+      },
+      "name": "generate",
+      "request": {
+        "fields": [
+          {
+            "default": {
+              "references": [],
+              "text": ""
+            },
+            "name": "summary",
+            "type": {
+              "prompt": [
+                "audio",
+                "image",
+                "video"
+              ]
+            },
+            "wire": "optional"
+          },
+          {
+            "constraints": {
+              "min_length": 1
+            },
+            "name": "beats",
+            "type": {
+              "list": {
+                "fields": [
+                  {
+                    "constraints": {
+                      "ge": 1,
+                      "le": 15
+                    },
+                    "default": 15,
+                    "extra": {
+                      "total": true,
+                      "unit": "s"
+                    },
+                    "name": "duration",
+                    "type": "int",
+                    "wire": "optional"
+                  },
+                  {
+                    "default": {
+                      "references": [],
+                      "text": ""
+                    },
+                    "name": "description",
+                    "type": {
+                      "prompt": [
+                        "audio",
+                        "image",
+                        "video"
+                      ]
+                    },
+                    "wire": "optional"
+                  }
+                ]
+              }
+            }
+          },
+          {
+            "default": {
+              "references": [],
+              "text": ""
+            },
+            "extra": {
+              "placeholder": "N/A (silent)"
+            },
+            "name": "soundscape",
+            "type": {
+              "prompt": [
+                "audio",
+                "image",
+                "video"
+              ]
+            },
+            "wire": "optional"
+          },
+          {
+            "default": {
+              "references": [],
+              "text": ""
+            },
+            "extra": {
+              "placeholder": "N/A (silent)"
+            },
+            "name": "music",
+            "type": {
+              "prompt": [
+                "audio",
+                "image",
+                "video"
+              ]
+            },
+            "wire": "optional"
+          },
+          {
+            "default": null,
+            "extra": {
+              "ratios": {
+                "allowed": [
+                  "16:9"
+                ]
+              }
+            },
+            "name": "aspect_ratio",
+            "type": {
+              "union": [
+                "null",
+                {
+                  "input": "aspect_ratio"
+                }
+              ]
+            },
+            "wire": "optional"
+          },
+          {
+            "default": null,
+            "name": "first_frame",
+            "type": {
+              "union": [
+                "null",
+                {
+                  "asset": "image"
+                }
+              ]
+            },
+            "wire": "optional"
+          },
+          {
+            "default": null,
+            "name": "last_frame",
+            "type": {
+              "union": [
+                "null",
+                {
+                  "asset": "image"
+                }
+              ]
+            },
+            "wire": "optional"
+          },
+          {
+            "default": true,
+            "name": "turbo",
+            "type": "bool",
+            "wire": "optional"
+          },
+          {
+            "default": "standard",
+            "name": "quality",
+            "type": {
+              "literal": [
+                "draft",
+                "full",
+                "standard"
+              ]
+            },
+            "wire": "optional"
+          },
+          {
+            "default": null,
+            "extra": {
+              "advanced": true
+            },
+            "name": "steps",
+            "type": {
+              "union": [
+                "null",
+                {
+                  "literal": [
+                    30,
+                    40,
+                    50
+                  ]
+                }
+              ]
+            },
+            "wire": "optional"
+          },
+          {
+            "default": 22,
+            "name": "carried_frames",
+            "type": {
+              "literal": [
+                22,
+                39,
+                56
+              ]
+            },
+            "wire": "optional"
+          },
+          {
+            "default": null,
+            "name": "seed",
+            "type": {
+              "union": [
+                "null",
+                {
+                  "input": "seed"
+                }
+              ]
+            },
+            "wire": "optional"
+          },
+          {
+            "default": null,
+            "name": "pickup",
+            "type": {
+              "union": [
+                "null",
+                {
+                  "pickup": {
+                    "fields": [
+                      {
+                        "name": "take",
+                        "type": {
+                          "fields": [
+                            {
+                              "default": null,
+                              "name": "latents",
+                              "type": {
+                                "union": [
+                                  "null",
+                                  {
+                                    "asset": "latents"
+                                  }
+                                ]
+                              },
+                              "wire": "optional"
+                            },
+                            {
+                              "default": false,
+                              "name": "own",
+                              "type": "bool",
+                              "wire": "optional"
+                            }
+                          ],
+                          "media": "video"
+                        }
+                      },
+                      {
+                        "extra": {
+                          "snap": {
+                            "every": 17,
+                            "first": 124,
+                            "offset": 5
+                          }
+                        },
+                        "name": "out_frame",
+                        "type": "int"
+                      },
+                      {
+                        "default": null,
+                        "name": "beats_from",
+                        "type": {
+                          "union": [
+                            "float",
+                            "null"
+                          ]
+                        },
+                        "wire": "optional"
+                      }
+                    ]
+                  }
+                }
+              ]
+            },
+            "wire": "optional"
+          }
+        ]
+      },
+      "result": {
+        "fields": [
+          {
+            "asset_bound": {
+              "max_bytes": 1099511627776,
+              "media_types": [
+                "video/mp4"
+              ]
+            },
+            "name": "video",
+            "type": {
+              "asset": "video"
+            }
+          },
+          {
+            "name": "warnings",
+            "type": {
+              "list": "str"
+            }
+          },
+          {
+            "name": "latents",
+            "type": {
+              "union": [
+                "null",
+                {
+                  "asset": "latents"
+                }
+              ]
+            },
+            "wire": "optional"
+          },
+          {
+            "name": "kept_s",
+            "type": {
+              "union": [
+                "float",
+                "null"
+              ]
+            },
+            "wire": "optional"
+          }
+        ]
+      },
+      "tool": {
+        "label": "Shot",
+        "named": "shot",
+        "reserved": [
+          "d",
+          "scenetrans",
+          "cutoff",
+          "english",
+          "chinese",
+          "mandarin",
+          "cantonese",
+          "japanese",
+          "korean",
+          "spanish",
+          "french",
+          "german",
+          "italian",
+          "portuguese",
+          "russian",
+          "arabic",
+          "hindi",
+          "bengali",
+          "urdu",
+          "punjabi",
+          "tamil",
+          "telugu",
+          "indonesian",
+          "malay",
+          "vietnamese",
+          "thai",
+          "filipino",
+          "tagalog",
+          "turkish",
+          "persian",
+          "hebrew",
+          "greek",
+          "dutch",
+          "swedish",
+          "norwegian",
+          "danish",
+          "finnish",
+          "polish",
+          "czech",
+          "ukrainian",
+          "romanian",
+          "hungarian",
+          "swahili"
+        ]
+      }
+    },
+    {
+      "assets": {
+        "kinds": [
+          {
+            "kind": "audio",
+            "max_count": 3,
+            "max_decoded_bytes": 67108864,
+            "media_types": [
+              "audio/wav",
+              "audio/ogg",
+              "audio/flac",
+              "audio/mpeg",
+              "audio/m4a",
+              "audio/aac",
+              "audio/opus",
+              "audio/x-aiff",
+              "audio/amr",
+              "audio/x-ape"
+            ],
+            "prepare": {
+              "excess": "truncate",
+              "max_seconds": 15,
+              "profile": "audio-trim/1"
+            }
+          },
+          {
+            "kind": "image",
+            "max_count": 9,
+            "max_decoded_bytes": 67108864,
+            "media_types": [
+              "image/png",
+              "image/jpeg",
+              "image/gif",
+              "image/bmp",
+              "image/tiff",
+              "image/webp",
+              "image/avif",
+              "image/jp2",
+              "image/vnd.adobe.photoshop",
+              "image/vnd.microsoft.icon"
+            ],
+            "prepare": {
+              "max_edge": 8192,
+              "max_pixels": 16777216,
+              "profile": "image-fit/1"
+            }
+          },
+          {
+            "kind": "video",
+            "max_count": 3,
+            "max_decoded_bytes": 17179869184,
+            "media_types": [
+              "video/mp4",
+              "video/webm",
+              "video/quicktime",
+              "video/x-matroska",
+              "video/x-msvideo",
+              "video/x-m4v",
+              "video/mpeg",
+              "video/x-flv",
+              "video/x-ms-wmv"
+            ]
+          }
+        ],
+        "parameter": "assets"
+      },
+      "description": "A segment on Ref2VA: its references, the context it carries in, and its successor's.",
+      "internal": true,
+      "invocable": {
+        "capabilities": [
+          "media_decode",
+          "save",
+          "telemetry"
+        ],
+        "context": "ctx",
+        "defaults": {
+          "request/assets/[]/fidelity": "auto",
+          "request/assets/[]/label": "",
+          "request/payload/characters": [],
+          "request/payload/context": null,
+          "request/payload/context_audio": false,
+          "request/payload/context_frames": 0,
+          "request/payload/earlier_latents": [],
+          "request/payload/earlier_videos": [],
+          "request/payload/first_frame": null,
+          "request/payload/last_frame": null,
+          "request/payload/latents": false,
+          "request/payload/next_context_audio": false,
+          "request/payload/next_context_frames": 0,
+          "request/payload/picture_edges": [],
+          "request/payload/previous_provenance": null,
+          "request/payload/previous_provenance/union/1/turbo_lora_manifest": "",
+          "request/payload/quality": "standard",
+          "request/payload/videos/[]/anchor": false,
+          "request/payload/videos/[]/start": 0,
+          "request/payload/videos/[]/stop": 0,
+          "result/provenance/turbo_lora_manifest": ""
+        },
+        "enum_members": {},
+        "export": "ref2va_segment",
+        "memoize": true,
+        "module": "h3",
+        "parameters": [
+          "payload",
+          "assets"
+        ],
+        "type_names": {
+          "request": "ref2va_segmentRequest",
+          "request/assets/[]": "AssetInputValue",
+          "request/payload": "Ref2VAInput",
+          "request/payload/previous_provenance/union/1": "RenderProvenance",
+          "request/payload/videos/[]": "VideoUse",
+          "result": "SegmentOutput",
+          "result/provenance": "RenderProvenance"
+        }
+      },
+      "models": [
+        {
+          "class": "H3TurboBase",
+          "component_use": {
+            "carried_sound": [
+              "audio_vae"
+            ],
+            "condition_fl2va_media": [
+              "vae"
+            ],
+            "condition_ref2va_media": [
+              "audio_vae",
+              "vae"
+            ],
+            "condition_text": [
+              "text_encoder"
+            ],
+            "decode_audio": [
+              "audio_vae"
+            ],
+            "decode_latents": [
+              "vae"
+            ],
+            "decode_video": [
+              "vae"
+            ],
+            "encode_clip": [
+              "vae"
+            ],
+            "encode_prompt": [
+              "text_encoder"
+            ],
+            "refine": [
+              "transformer"
+            ],
+            "sample_fl2va": [
+              "transformer"
+            ],
+            "sample_fl2va_turbo": [
+              "transformer"
+            ],
+            "sample_ref2va": [
+              "transformer_ref"
+            ],
+            "sample_ref2va_turbo": [
+              "transformer_ref"
+            ],
+            "silence": [
+              "audio_vae"
+            ]
+          },
+          "components": [
+            "audio_vae",
+            "text_encoder",
+            "transformer_ref",
+            "vae"
+          ],
+          "default": "minimaxai/minimax-h3@1.0.0-rc.7",
+          "encoded_leaves": "accept",
+          "path": "ref2va_segment.models.base_model",
+          "placeable": [
+            "text_encoder"
+          ],
+          "sequence_parallel": {
+            "degrees": [
+              2,
+              4,
+              7,
+              8
+            ]
+          }
+        },
+        {
+          "class": "H3TurboLoRA",
+          "component_use": {
+            "sample_fl2va": [
+              "fl2va_turbo"
+            ],
+            "sample_ref2va": [
+              "ref2va_turbo"
+            ]
+          },
+          "components": [
+            "ref2va_turbo"
+          ],
+          "default": "alibaba-pai/minimax-h3-turbo-lora@1.0.1",
+          "encoded_leaves": "accept",
+          "path": "ref2va_segment.models.turbo_lora",
+          "sequence_parallel": {
+            "degrees": [
+              2,
+              4,
+              7,
+              8
+            ]
+          }
+        }
+      ],
+      "name": "ref2va_segment",
+      "request": {
+        "fields": [
+          {
+            "name": "payload",
+            "type": {
+              "fields": [
+                {
+                  "name": "prompt",
+                  "type": "str"
+                },
+                {
+                  "name": "seed",
+                  "type": "int"
+                },
+                {
+                  "constraints": {
+                    "ge": 5,
+                    "le": 15
+                  },
+                  "name": "duration_s",
+                  "type": "int"
+                },
+                {
+                  "name": "steps",
+                  "type": {
+                    "union": [
+                      "int",
+                      "null"
+                    ]
+                  }
+                },
+                {
+                  "name": "turbo",
+                  "type": "bool"
+                },
+                {
+                  "name": "frames",
+                  "type": "int"
+                },
+                {
+                  "name": "videos",
+                  "type": {
+                    "list": {
+                      "fields": [
+                        {
+                          "name": "anchor",
+                          "type": "bool",
+                          "wire": "optional"
+                        },
+                        {
+                          "constraints": {
+                            "ge": 0
+                          },
+                          "name": "start",
+                          "type": "int",
+                          "wire": "optional"
+                        },
+                        {
+                          "constraints": {
+                            "ge": 0
+                          },
+                          "name": "stop",
+                          "type": "int",
+                          "wire": "optional"
+                        }
+                      ]
+                    }
+                  }
+                },
+                {
+                  "name": "canvas",
+                  "type": {
+                    "list": "int"
+                  }
+                },
+                {
+                  "default": 0,
+                  "name": "context_frames",
+                  "type": {
+                    "literal": [
+                      0,
+                      22,
+                      39,
+                      56
+                    ]
+                  },
+                  "wire": "optional"
+                },
+                {
+                  "default": false,
+                  "name": "context_audio",
+                  "type": "bool",
+                  "wire": "optional"
+                },
+                {
+                  "default": 0,
+                  "name": "next_context_frames",
+                  "type": {
+                    "literal": [
+                      0,
+                      22,
+                      39,
+                      56
+                    ]
+                  },
+                  "wire": "optional"
+                },
+                {
+                  "default": false,
+                  "name": "next_context_audio",
+                  "type": "bool",
+                  "wire": "optional"
+                },
+                {
+                  "default": null,
+                  "name": "previous_provenance",
+                  "type": {
+                    "union": [
+                      "null",
+                      {
+                        "fields": [
+                          {
+                            "name": "model_manifest",
+                            "type": "str"
+                          },
+                          {
+                            "default": "",
+                            "name": "turbo_lora_manifest",
+                            "type": "str",
+                            "wire": "optional"
+                          }
+                        ]
+                      }
+                    ]
+                  },
+                  "wire": "optional"
+                },
+                {
+                  "default": null,
+                  "name": "context",
+                  "type": {
+                    "union": [
+                      "null",
+                      {
+                        "asset": "file"
+                      }
+                    ]
+                  },
+                  "wire": "optional"
+                },
+                {
+                  "default": null,
+                  "name": "first_frame",
+                  "type": {
+                    "union": [
+                      "null",
+                      {
+                        "asset": "image"
+                      }
+                    ]
+                  },
+                  "wire": "optional"
+                },
+                {
+                  "default": null,
+                  "name": "last_frame",
+                  "type": {
+                    "union": [
+                      "null",
+                      {
+                        "asset": "image"
+                      }
+                    ]
+                  },
+                  "wire": "optional"
+                },
+                {
+                  "default": [],
+                  "name": "picture_edges",
+                  "type": {
+                    "list": "int"
+                  },
+                  "wire": "optional"
+                },
+                {
+                  "default": [],
+                  "name": "characters",
+                  "type": {
+                    "list": "str"
+                  },
+                  "wire": "optional"
+                },
+                {
+                  "default": false,
+                  "name": "latents",
+                  "type": "bool",
+                  "wire": "optional"
+                },
+                {
+                  "default": [],
+                  "name": "earlier_latents",
+                  "type": {
+                    "list": {
+                      "asset": "file"
+                    }
+                  },
+                  "wire": "optional"
+                },
+                {
+                  "default": [],
+                  "name": "earlier_videos",
+                  "type": {
+                    "list": {
+                      "asset": "video"
+                    }
+                  },
+                  "wire": "optional"
+                },
+                {
+                  "default": "standard",
+                  "name": "quality",
+                  "type": {
+                    "literal": [
+                      "draft",
+                      "full",
+                      "standard"
+                    ]
+                  },
+                  "wire": "optional"
+                }
+              ]
+            }
+          },
+          {
+            "constraints": {
+              "max_length": 12,
+              "min_length": 1
+            },
+            "name": "assets",
+            "type": {
+              "list": {
+                "fields": [
+                  {
+                    "name": "asset",
+                    "type": {
+                      "asset": "file"
+                    }
+                  },
+                  {
+                    "name": "label",
+                    "type": "str",
+                    "wire": "optional"
+                  },
+                  {
+                    "name": "fidelity",
+                    "type": {
+                      "literal": [
+                        "auto",
+                        "high",
+                        "low",
+                        "medium"
+                      ]
+                    },
+                    "wire": "optional"
+                  }
+                ]
+              }
+            }
+          }
+        ]
+      },
+      "result": {
+        "fields": [
+          {
+            "asset_bound": {
+              "max_bytes": 1099511627776,
+              "max_decoded_bytes": 33554432,
+              "media_types": [
+                "video/mp4"
+              ]
+            },
+            "name": "video",
+            "type": {
+              "asset": "video"
+            }
+          },
+          {
+            "name": "warnings",
+            "type": {
+              "list": "str"
+            }
+          },
+          {
+            "name": "provenance",
+            "type": {
+              "fields": [
+                {
+                  "name": "model_manifest",
+                  "type": "str"
+                },
+                {
+                  "name": "turbo_lora_manifest",
+                  "type": "str",
+                  "wire": "optional"
+                }
+              ]
+            }
+          },
+          {
+            "asset_bound": {
+              "max_bytes": 1099511627776,
+              "media_types": [
+                "application/octet-stream"
+              ]
+            },
+            "name": "context",
+            "type": {
+              "asset": "file"
+            }
+          },
+          {
+            "name": "last_frame",
+            "type": {
+              "asset": "image"
+            }
+          },
+          {
+            "asset_bound": {
+              "max_bytes": 1099511627776,
+              "media_types": [
+                "application/octet-stream"
+              ]
+            },
+            "name": "latents",
+            "type": {
+              "asset": "file"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "description": "Regenerate-2K over a whole shot: its 768p latent upscaled, refined at `resolution` in overlapping windows where the card needs them, and decoded with its soundtrack.",
+      "internal": true,
+      "invocable": {
+        "capabilities": [
+          "media_decode",
+          "save",
+          "telemetry"
+        ],
+        "context": "ctx",
+        "defaults": {
+          "request/payload/latents": null,
+          "request/payload/quality": "standard",
+          "request/payload/resolution": "1440p",
+          "request/payload/strength": 0.7
+        },
+        "enum_members": {
+          "request/payload/resolution": [
+            "FULL_HD",
+            "QHD",
+            "UHD",
+            "NATIVE"
+          ]
+        },
+        "export": "regenerate_shot",
+        "memoize": true,
+        "module": "h3",
+        "parameters": [
+          "payload"
+        ],
+        "type_names": {
+          "request": "regenerate_shotRequest",
+          "request/payload": "RegenerateInput",
+          "request/payload/resolution": "Resolution",
+          "result": "RegenerateOutput"
+        }
+      },
+      "models": [
+        {
+          "class": "H3TurboBase",
+          "component_use": {
+            "carried_sound": [
+              "audio_vae"
+            ],
+            "condition_fl2va_media": [
+              "vae"
+            ],
+            "condition_ref2va_media": [
+              "audio_vae",
+              "vae"
+            ],
+            "condition_text": [
+              "text_encoder"
+            ],
+            "decode_audio": [
+              "audio_vae"
+            ],
+            "decode_latents": [
+              "vae"
+            ],
+            "decode_video": [
+              "vae"
+            ],
+            "encode_clip": [
+              "vae"
+            ],
+            "encode_prompt": [
+              "text_encoder"
+            ],
+            "refine": [
+              "transformer"
+            ],
+            "sample_fl2va": [
+              "transformer"
+            ],
+            "sample_fl2va_turbo": [
+              "transformer"
+            ],
+            "sample_ref2va": [
+              "transformer_ref"
+            ],
+            "sample_ref2va_turbo": [
+              "transformer_ref"
+            ],
+            "silence": [
+              "audio_vae"
+            ]
+          },
+          "components": [
+            "audio_vae",
+            "text_encoder",
+            "transformer",
+            "vae"
+          ],
+          "default": "minimaxai/minimax-h3@1.0.0-rc.7",
+          "encoded_leaves": "accept",
+          "path": "regenerate_shot.models.base_model",
+          "placeable": [
+            "text_encoder"
+          ],
+          "sequence_parallel": {
+            "degrees": [
+              2,
+              4,
+              7,
+              8
+            ]
+          }
+        },
+        {
+          "class": "H3RegenerateLoRA",
+          "component_use": {
+            "refine": [
+              "fl2va_regenerate"
+            ]
+          },
+          "components": [
+            "fl2va_regenerate"
+          ],
+          "default": "efficient-large-model/open-h3-regenerate-2k@0.1.0",
+          "encoded_leaves": "accept",
+          "path": "regenerate_shot.models.regenerate_lora",
+          "sequence_parallel": {
+            "degrees": [
+              2,
+              4,
+              7,
+              8
+            ]
+          }
+        },
+        {
+          "class": "H3LatentUpscaler",
+          "component_use": {
+            "upscale": [
+              "upscaler"
+            ]
+          },
+          "components": [
+            "upscaler"
+          ],
+          "default": "lbh-123-ai/h3-latent-upscaler@0.1.0",
+          "encoded_leaves": "accept",
+          "path": "regenerate_shot.models.latent_upscaler",
+          "sequence_parallel": {
+            "degrees": [
+              2,
+              4,
+              7,
+              8
+            ]
+          }
+        }
+      ],
+      "name": "regenerate_shot",
+      "request": {
+        "fields": [
+          {
+            "name": "payload",
+            "type": {
+              "fields": [
+                {
+                  "name": "video",
+                  "type": {
+                    "asset": "video"
+                  }
+                },
+                {
+                  "default": null,
+                  "name": "latents",
+                  "type": {
+                    "union": [
+                      "null",
+                      {
+                        "asset": "latents"
+                      }
+                    ]
+                  },
+                  "wire": "optional"
+                },
+                {
+                  "name": "prompt",
+                  "type": "str"
+                },
+                {
+                  "default": "1440p",
+                  "name": "resolution",
+                  "type": {
+                    "literal": [
+                      "1080p",
+                      "1440p",
+                      "2160p",
+                      "768p"
+                    ]
+                  },
+                  "wire": "optional"
+                },
+                {
+                  "default": 0.7,
+                  "name": "strength",
+                  "type": "float",
+                  "wire": "optional"
+                },
+                {
+                  "name": "seed",
+                  "type": "int"
+                },
+                {
+                  "default": "standard",
+                  "name": "quality",
+                  "type": {
+                    "literal": [
+                      "draft",
+                      "full",
+                      "standard"
+                    ]
+                  },
+                  "wire": "optional"
+                }
+              ]
+            }
+          }
+        ]
+      },
+      "result": {
+        "fields": [
+          {
+            "asset_bound": {
+              "max_bytes": 1099511627776,
+              "media_types": [
+                "video/mp4"
+              ]
+            },
+            "name": "video",
+            "type": {
+              "asset": "video"
+            }
+          },
+          {
+            "name": "warnings",
+            "type": {
+              "list": "str"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "accelerator": false,
+      "calls": [
+        {
+          "accelerator": true,
+          "function": "regenerate_shot",
+          "gpus": [
+            1,
+            2,
+            4,
+            7,
+            8
+          ],
+          "models": [
+            {
+              "class": "H3TurboBase",
+              "component_use": {
+                "carried_sound": [
+                  "audio_vae"
+                ],
+                "condition_fl2va_media": [
+                  "vae"
+                ],
+                "condition_ref2va_media": [
+                  "audio_vae",
+                  "vae"
+                ],
+                "condition_text": [
+                  "text_encoder"
+                ],
+                "decode_audio": [
+                  "audio_vae"
+                ],
+                "decode_latents": [
+                  "vae"
+                ],
+                "decode_video": [
+                  "vae"
+                ],
+                "encode_clip": [
+                  "vae"
+                ],
+                "encode_prompt": [
+                  "text_encoder"
+                ],
+                "refine": [
+                  "transformer"
+                ],
+                "sample_fl2va": [
+                  "transformer"
+                ],
+                "sample_fl2va_turbo": [
+                  "transformer"
+                ],
+                "sample_ref2va": [
+                  "transformer_ref"
+                ],
+                "sample_ref2va_turbo": [
+                  "transformer_ref"
+                ],
+                "silence": [
+                  "audio_vae"
+                ]
+              },
+              "components": [
+                "audio_vae",
+                "text_encoder",
+                "transformer",
+                "vae"
+              ],
+              "default": "minimaxai/minimax-h3@1.0.0-rc.7",
+              "encoded_leaves": "accept",
+              "path": "regenerate_shot.models.base_model",
+              "placeable": [
+                "text_encoder"
+              ],
+              "sequence_parallel": {
+                "degrees": [
+                  2,
+                  4,
+                  7,
+                  8
+                ]
+              }
+            },
+            {
+              "class": "H3RegenerateLoRA",
+              "component_use": {
+                "refine": [
+                  "fl2va_regenerate"
+                ]
+              },
+              "components": [
+                "fl2va_regenerate"
+              ],
+              "default": "efficient-large-model/open-h3-regenerate-2k@0.1.0",
+              "encoded_leaves": "accept",
+              "path": "regenerate_shot.models.regenerate_lora",
+              "sequence_parallel": {
+                "degrees": [
+                  2,
+                  4,
+                  7,
+                  8
+                ]
+              }
+            },
+            {
+              "class": "H3LatentUpscaler",
+              "component_use": {
+                "upscale": [
+                  "upscaler"
+                ]
+              },
+              "components": [
+                "upscaler"
+              ],
+              "default": "lbh-123-ai/h3-latent-upscaler@0.1.0",
+              "encoded_leaves": "accept",
+              "path": "regenerate_shot.models.latent_upscaler",
+              "sequence_parallel": {
+                "degrees": [
+                  2,
+                  4,
+                  7,
+                  8
+                ]
+              }
+            }
+          ],
+          "package": "minimax-h3"
+        }
+      ],
+      "description": "A take at 1080p, 1440p or 2160p, its sound kept (UPSCALE.md): its 768p latents upscaled and refined by H3 under the Regenerate LoRA, from the text they carry, else its frames from its description. A video already that big comes back as it is.",
+      "invocable": {
+        "capabilities": [
+          "media_decode",
+          "save",
+          "telemetry"
+        ],
+        "context": "ctx",
+        "defaults": {
+          "request/strength": 0.7,
+          "request/to": "1440p",
+          "request/video/description": "",
+          "request/video/latents": null,
+          "request/video/own": false,
+          "result/warnings": []
+        },
+        "enum_members": {},
+        "export": "upscale",
+        "memoize": false,
+        "module": "h3",
+        "parameters": [
+          "video",
+          "to",
+          "strength"
+        ],
+        "type_names": {
+          "request": "Upscale",
+          "request/video": "ShotVideo",
+          "result": "UpscaleOutput"
+        }
+      },
+      "name": "upscale",
+      "request": {
+        "fields": [
+          {
+            "name": "video",
+            "type": {
+              "fields": [
+                {
+                  "default": null,
+                  "name": "latents",
+                  "type": {
+                    "union": [
+                      "null",
+                      {
+                        "asset": "latents"
+                      }
+                    ]
+                  },
+                  "wire": "optional"
+                },
+                {
+                  "default": false,
+                  "name": "own",
+                  "type": "bool",
+                  "wire": "optional"
+                }
+              ],
+              "media": "video"
+            }
+          },
+          {
+            "default": "1440p",
+            "name": "to",
+            "type": {
+              "literal": [
+                "1080p",
+                "1440p",
+                "2160p"
+              ]
+            },
+            "wire": "optional"
+          },
+          {
+            "constraints": {
+              "ge": 0.7,
+              "le": 0.909
+            },
+            "default": 0.7,
+            "extra": {
+              "advanced": true
+            },
+            "name": "strength",
+            "type": "float",
+            "wire": "optional"
+          }
+        ]
+      },
+      "result": {
+        "fields": [
+          {
+            "asset_bound": {
+              "max_bytes": 1099511627776,
+              "media_types": [
+                "video/mp4"
+              ]
+            },
+            "name": "video",
+            "type": {
+              "asset": "video"
+            }
+          },
+          {
+            "name": "warnings",
+            "type": {
+              "list": "str"
+            },
+            "wire": "optional"
+          }
+        ]
+      },
+      "tool": {
+        "label": "Upscale",
+        "named": "upscale"
+      }
+    }
+  ],
+  "format": "cozy.package.interface/1"
+}

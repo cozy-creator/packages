@@ -352,7 +352,7 @@ wheels = [
 
 [[package]]
 name = "minimax-h3"
-version = "0.9.3"
+version = "0.9.4"
 source = { editable = "." }
 dependencies = [
     { name = "cozy-runtime", extra = ["adapters", "media"] },
@@ -376,7 +376,7 @@ requires-dist = [
     { name = "cozy-runtime", extras = ["adapters", "media"], specifier = ">=0.44.2,<0.45" },
     { name = "diffusers", specifier = ">=0.41,<0.42" },
     { name = "hf-xet", specifier = ">=1.6.0" },
-    { name = "minimax-h3-tools", specifier = ">=0.3.2", index = "https://tensorhub.com/v1/index/_/simple/" },
+    { name = "minimax-h3-tools", specifier = ">=0.4.1", index = "https://tensorhub.com/v1/index/_/simple/" },
     { name = "msgspec", specifier = ">=0.19" },
     { name = "numpy", specifier = ">=1.26" },
     { name = "pydantic-core", specifier = ">=2.46.4" },
@@ -395,7 +395,7 @@ requires-dist = [
 
 [[package]]
 name = "minimax-h3-tools"
-version = "0.3.2"
+version = "0.4.1"
 source = { registry = "https://tensorhub.com/v1/index/_/simple/" }
 dependencies = [
     { name = "cozy-runtime" },
@@ -404,7 +404,7 @@ dependencies = [
     { name = "tensorfs" },
 ]
 wheels = [
-    { url = "https://tensorhub.com/v1/index/_/minimax-h3-tools/0.3.2/minimax_h3_tools-0.3.2-py3-none-any.whl", hash = "sha256:dcb4596c082ef022f6204f23b972c21b5cee25b52aa2bee205af2079a9e8a640" },
+    { url = "https://tensorhub.com/v1/index/_/minimax-h3-tools/0.4.1/minimax_h3_tools-0.4.1-py3-none-any.whl", hash = "sha256:5de29a4c8d6be8cff53f757c3a059acfd29b276a513f3708faba38f4bcd6aaec" },
 ]
 
 [[package]]

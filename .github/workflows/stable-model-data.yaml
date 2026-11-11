@@ -1,0 +1,90 @@
+name: stable model data
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/stable-model-data.yaml'
+      - 'checks/**'
+      - 'minimax-h3/**'
+      - 'minimax-h3-tools/**'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  checkpoint-data:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+      - name: Resolve the main lock from the admitted tools release
+        run: |
+          mkdir -p "$RUNNER_TEMP/locks"
+          cp -r minimax-h3 "$RUNNER_TEMP/locks/minimax-h3"
+          python - "$RUNNER_TEMP/locks/minimax-h3/pyproject.toml" <<'PY'
+          from pathlib import Path
+          import sys
+          path = Path(sys.argv[1])
+          text = path.read_text().replace('[tool.uv]\n', '[tool.uv]\nexclude-dependencies = ["torch", "torchaudio", "torchvision", "triton"]\n')
+          text += '\n[[tool.uv.index]]\nname = "tensorhub"\nurl = "https://tensorhub.com/v1/index/_/simple/"\nexplicit = true\n'
+          path.write_text(text)
+          PY
+          uv lock --project "$RUNNER_TEMP/locks/minimax-h3" --python 3.12
+          uv lock --check --project "$RUNNER_TEMP/locks/minimax-h3" --python 3.12
+          python - "$RUNNER_TEMP/locks/minimax-h3/uv.lock" "$RUNNER_TEMP/locks/main-lock-receipt.json" <<'PY'
+          from collections import Counter
+          from pathlib import Path
+          import hashlib, json, sys, tomllib
+          before = tomllib.loads(Path('minimax-h3/uv.lock').read_text())
+          lock_path = Path(sys.argv[1])
+          after = tomllib.loads(lock_path.read_text())
+          changed = {'minimax-h3', 'minimax-h3-tools'}
+          def untouched(lock):
+              return Counter(json.dumps(package, sort_keys=True) for package in lock['package'] if package['name'] not in changed)
+          assert untouched(before) == untouched(after), 'an unrelated dependency pin or artifact moved'
+          packages = {package['name']: package for package in after['package']}
+          assert packages['minimax-h3']['version'] == '0.9.4'
+          tools = packages['minimax-h3-tools']
+          assert tools['version'] == '0.4.1'
+          assert tools['source'] == {'registry': 'https://tensorhub.com/v1/index/_/simple/'}
+          assert any(wheel['url'] == 'https://tensorhub.com/v1/index/_/minimax-h3-tools/0.4.1/minimax_h3_tools-0.4.1-py3-none-any.whl' and wheel['hash'] == 'sha256:5de29a4c8d6be8cff53f757c3a059acfd29b276a513f3708faba38f4bcd6aaec' for wheel in tools['wheels'])
+          assert packages['cozy-runtime']['version'] == '0.44.2'
+          assert packages['tensorfs']['version'] == '0.23.1'
+          Path(sys.argv[2]).write_text(json.dumps({'root': '0.9.4', 'tools': '0.4.1', 'runtime': '0.44.2', 'tensorfs': '0.23.1', 'other_package_records_unchanged': True, 'lock_sha256': hashlib.sha256(lock_path.read_bytes()).hexdigest()}, indent=2) + '\n')
+          PY
+      - name: Install the published CPU SDK pair
+        run: |
+          uv venv --python 3.12 .venv-stable
+          uv pip install --python .venv-stable/bin/python --index https://download.pytorch.org/whl/cpu --index-strategy unsafe-best-match -r checks/stable-model-data-requirements.txt
+      - name: Build and install candidate wheels
+        run: |
+          uv build --wheel --sdist --out-dir "$RUNNER_TEMP/wheels" minimax-h3-tools
+          uv build --wheel --sdist --out-dir "$RUNNER_TEMP/wheels" minimax-h3
+          uv pip install --python .venv-stable/bin/python --no-deps "$RUNNER_TEMP/wheels/"*.whl
+      - name: Check native data consumers and derivation preservation
+        run: |
+          .venv-stable/bin/python -I checks/verify_stable_model_data.py --out "$RUNNER_TEMP/proof"
+          .venv-stable/bin/python -I checks/prove_stable_derived_assets.py --package-root "$PWD" --out "$RUNNER_TEMP/proof/derived-assets.json"
+      - name: Check the tools lock using the publication exclusions
+        run: |
+          cp -r minimax-h3-tools "$RUNNER_TEMP/locked-tools"
+          python - "$RUNNER_TEMP/locked-tools/pyproject.toml" <<'PY'
+          from pathlib import Path
+          import sys
+          path = Path(sys.argv[1])
+          path.write_text(path.read_text().replace('[tool.uv]\n', '[tool.uv]\nexclude-dependencies = ["torch", "torchaudio", "torchvision", "triton"]\n'))
+          PY
+          uv lock --check --project "$RUNNER_TEMP/locked-tools" --python 3.12
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: stable-model-data
+          path: |
+            ${{ runner.temp }}/proof
+            ${{ runner.temp }}/wheels
+            ${{ runner.temp }}/locks
+          if-no-files-found: warn
