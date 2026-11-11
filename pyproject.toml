@@ -16,7 +16,6 @@ include = [
     "ideogram-4",
     "krea-2",
     "minimax-h3",
-    "minimax-h3-tools/src",
     "moss-image",
     "qwen3.5",
     "qwen3.6",
@@ -39,7 +38,6 @@ extraPaths = [
     "ideogram-4",
     "krea-2",
     "minimax-h3",
-    "minimax-h3-tools/src",
     "moss-image",
     "qwen3.5",
     "qwen3.6",
@@ -63,11 +61,11 @@ python_version = "3.12"
 files = [
     "anima", "birefnet", "qwen3.5", "seedvr2", "minimax-h3", "sdxl", "qwen-image-2", "qwen-image", "flux-2",
     "flux-3-klein", "fibo-2", "hidream-o1", "hunyuan-image-3", "ideogram-4", "moss-image", "qwen3.6", "krea-2",
-    "scripts", "examples", "minimax-h3-tools/src",
+    "scripts", "examples",
 ]
 mypy_path = [
     "typings", "anima", "birefnet", "fibo-2", "flux-2", "flux-3-klein", "hidream-o1", "hunyuan-image-3", "ideogram-4",
-    "krea-2", "minimax-h3", "minimax-h3-tools/src", "moss-image", "qwen3.5", "qwen3.6", "qwen-image", "qwen-image-2",
+    "krea-2", "minimax-h3", "moss-image", "qwen3.5", "qwen3.6", "qwen-image", "qwen-image-2",
     "sdxl", "seedvr2",
 ]
 strict = true
@@ -114,7 +112,6 @@ ignore_errors = true
 line-length = 100
 src = [
     "anima", "minimax-h3", "sdxl", "qwen-image-2", "qwen-image", "flux-3-klein", "fibo-2", "moss-image", "scripts", "examples",
-    "minimax-h3-tools",
 ]
 exclude = [".venv", "birefnet/birefnet/upstream", "seedvr2/seedvr2/upstream", "hunyuan-image-3/hunyuan_image_3/tencent"]
 

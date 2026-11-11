@@ -95,7 +95,7 @@ def _body_kind(present: Rows) -> bool:
         return False
     raise UnsupportedInput(
         "this takes a whole H3 lane, full or pruned, and this model is neither: make one with "
-        "`minimax-h3-tools/bf16-full`, then use that",
+        "`minimax-h3/bf16-full`, then use that",
         code="adaln_source",
     )
 
@@ -127,7 +127,7 @@ def _validate_body_config(raw: bytes, pruned: bool) -> dict[str, dict[str, objec
         if raw != dual_full_config(_sections()):
             raise UnsupportedInput(
                 "this model's config isn't the H3 release's: make a full lane from the release "
-                "with `minimax-h3-tools/bf16-full`, then use that",
+                "with `minimax-h3/bf16-full`, then use that",
                 code="adaln_config",
             )
         return {}

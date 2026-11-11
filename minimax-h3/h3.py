@@ -30,7 +30,6 @@ import numpy.typing as npt
 import torch
 from cozy_runtime.accel import stepcache
 from cozy_runtime.author import (
-    App,
     call,
     ChildCallError,
     Context,
@@ -79,6 +78,7 @@ from safetensors.torch import save as save_tensors
 from torch import Tensor
 
 from gates import MediaFacts, refuse_before_encode
+from minimax_h3.application import app
 from minimax_h3 import regenerate as refine_math
 from minimax_h3 import shot_latents
 from minimax_h3.continuation import (
@@ -183,7 +183,8 @@ if TYPE_CHECKING:
     from diffusers.modular_pipelines.minimax_h3.references import MiniMaxH3Reference
     from diffusers.modular_pipelines.modular_pipeline import PipelineState
 
-app = App()
+# Register preparation functions on the same App before the media entrypoints below.
+from minimax_h3.preparation import job as _preparation  # noqa: F401
 
 _MIB = 1 << 20
 #: Standalone audio references share one 15-second budget in a call; past it each is cut to its share.

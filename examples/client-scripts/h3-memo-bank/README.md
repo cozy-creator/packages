@@ -83,7 +83,7 @@ outputs. A private tools checkout may be supplied for same-version code/plan tes
 that generated private path is never published.
 
 Already passed: the actual adoption-script dry-run and the published
-`minimax-h3-tools/select-adaln-weights` dry-run against the exact full source.
+`minimax-h3/select-adaln-weights` dry-run against the exact full source.
 The complete composition dry-run awaits that genuine adoption result; no receipt
 was fabricated merely to make a dry-run appear complete.
 

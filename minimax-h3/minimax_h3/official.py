@@ -67,7 +67,7 @@ from cozy_runtime.author import (
     ThreadPoolExecutor,
 )
 from cozy_runtime.media import DecodedAudio, DecodedAudioChunk, DecodedMediaEvent, DecodedVideoFrame
-from h3_tables.table_layout import TableLayout
+from minimax_h3.preparation.table_layout import TableLayout
 
 from .adaln_pruned import H3Transformer, build_transformer
 from .cell_texture import CellEqualizer
@@ -1894,7 +1894,7 @@ def build_h3_turbo_lora(config: Config, plans: Mapping[Trunk, TimestepPlan]) -> 
 
 class OfficialH3RegenerateLoRA:
     """Open-H3-Regenerate-2K's refine overlay: the merged rank-576 LoRA and its refine plan's
-    AdaLN tables (LMS Sharp's curve folded in by `minimax-h3-tools/regenerate-lora`), served
+    AdaLN tables (LMS Sharp's curve folded in by `minimax-h3/regenerate-lora`), served
     over the FL2VA DiT with its own heads."""
 
     def __init__(self, config: Config, plan: TimestepPlan) -> None:
@@ -1981,7 +1981,7 @@ def _dit_spec(config: Config, task: Trunk) -> tuple[dict[str, object], TableLayo
         if "table_keys" not in extension:
             raise ValueError(
                 f"model component {component!r} is missing its modulation table row labels; "
-                "regenerate the lane with minimax-h3-tools/bf16-pruned or fp8-pruned",
+                "regenerate the lane with minimax-h3/bf16-pruned or fp8-pruned",
             )
         fields.add("table_keys")
     if structure == "adaln-pruned" and "generating_projection_digest" in extension:
@@ -2136,7 +2136,7 @@ def _apply_video_vae_dtype(vae: TileBatchedVideoVAE, config: Config | None = Non
 
     Both original FP32 and pre-rounded FP16 matrix weights run under the same FP16
     decode autocast. The encoder and `quant_conv` compute in the dtype they are stored
-    in, FP16 in every lane (`h3_tables.lanes.vae_operand`): `encode` aligns its pixels to
+    in, FP16 in every lane (`minimax_h3.preparation.lanes.vae_operand`): `encode` aligns its pixels to
     it. Loading must preserve their supplied logical dtype and price the actual residency.
     The decoder's norms, biases, register tokens and config-derived RoPE retain their FP32
     contract. Config-only construction defaults to the original FP32 architecture.
