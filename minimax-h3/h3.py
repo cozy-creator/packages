@@ -183,7 +183,8 @@ if TYPE_CHECKING:
     from diffusers.modular_pipelines.minimax_h3.references import MiniMaxH3Reference
     from diffusers.modular_pipelines.modular_pipeline import PipelineState
 
-# Register preparation functions on the same App before the media entrypoints below.
+# Register preparation functions and P-H3-Image on the same App before the media entrypoints below.
+from minimax_h3 import image_tools as _image_tools  # noqa: F401
 from minimax_h3.preparation import job as _preparation  # noqa: F401
 
 _MIB = 1 << 20

@@ -179,6 +179,10 @@ class TileBatchedVideoVAE(AutoencoderKLMiniMaxH3):
         rows = [decoded[row * columns : (row + 1) * columns] for row in range(len(y_indices))]
         return self._stitch_tiles(rows, y_overlaps, x_overlaps)  # type: ignore[arg-type]  # rows of tile tuples: it indexes them
 
+    def time_grid(self, frames: int, device: torch.device) -> torch.Tensor:
+        """The decoder's rotary time of each of a clip's `frames` latent frames, upstream's."""
+        return 2.0 * (torch.arange(0.5, frames, dtype=torch.float32, device=device) / frames) - 1.0
+
     def _decode_tiles(self, batch: torch.Tensor) -> torch.Tensor:
         """Upstream's ViT decoder over a batch of tiles, block by block: every tile passes a
         block before any tile enters the next, and `split` cuts each block's rows to the room.
@@ -197,8 +201,11 @@ class TileBatchedVideoVAE(AutoencoderKLMiniMaxH3):
         registers = decoder.register_tokens.expand(tiles, -1, -1).to(hidden.dtype)
         hidden = torch.cat([hidden, registers, torch.zeros_like(hidden[:, :1, :])], dim=1)
         grids = [
-            2.0 * (torch.arange(0.5, size, dtype=torch.float32, device=hidden.device) / size) - 1.0
-            for size in (frames, height, width)
+            self.time_grid(frames, hidden.device),
+            *(
+                2.0 * (torch.arange(0.5, size, dtype=torch.float32, device=hidden.device) / size) - 1.0
+                for size in (height, width)
+            ),
         ]
         positions = torch.stack(torch.meshgrid(*grids, indexing="ij"), dim=-1).flatten(0, 2)[None]
         suffix = positions.new_zeros((1, decoder.num_register_tokens + 1, 3))
