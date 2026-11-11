@@ -17,7 +17,7 @@ root = Path(__file__).resolve().parents[1]
 import minimax_h3.official
 import h3_tables.job
 
-for name, expected in {"cozy-runtime": "0.44.2", "tensorfs": "0.23.1", "minimax-h3": "0.9.4", "minimax-h3-tools": "0.4.1"}.items():
+for name, expected in {"cozy-runtime": "0.44.2", "tensorfs": "0.23.1", "msgspec": "0.21.1", "minimax-h3": "0.9.5", "minimax-h3-tools": "0.4.1"}.items():
     assert importlib.metadata.version(name) == expected, name
 assert Path(minimax_h3.official.__file__).is_relative_to(Path(sys.prefix))
 assert Path(h3_tables.job.__file__).is_relative_to(Path(sys.prefix))
@@ -29,7 +29,7 @@ module.__file__ = str(test_path)
 sys.modules[module.__name__] = module
 exec(compile(text, str(test_path), "exec"), module.__dict__)
 suite = unittest.defaultTestLoader.loadTestsFromModule(module)
-assert suite.countTestCases() == 11
+assert suite.countTestCases() == 12
 result = unittest.TextTestRunner(verbosity=2).run(suite)
 if not result.wasSuccessful():
     raise SystemExit(1)

@@ -103,6 +103,13 @@ class UpscalerCheckpointDataTests(unittest.TestCase):
         self.assertEqual(failure.exception.code, "config_missing")
         self.assertIn("latent_normalization", str(failure.exception))
 
+    def test_disabled_normalization_is_refused(self) -> None:
+        config = {"enabled": False, "mean": [0] * 24, "std": [1] * 24}
+        with self.assertRaises(InvalidRequest) as failure:
+            _normalization(Config({"latent_normalization": config}))
+        self.assertEqual(failure.exception.code, "config_invalid")
+        self.assertIn("enabled", str(failure.exception))
+
     def test_malformed_normalization_refuses_before_model_allocation(self) -> None:
         for field, values in (("mean", [float("nan")] * 24), ("mean", [0] * 23), ("std", [0] * 24)):
             config = {"enabled": True, "mean": [0] * 24, "std": [1] * 24, field: values}

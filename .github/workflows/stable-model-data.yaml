@@ -42,24 +42,49 @@ jobs:
           before = tomllib.loads(Path('minimax-h3/uv.lock').read_text())
           lock_path = Path(sys.argv[1])
           after = tomllib.loads(lock_path.read_text())
-          changed = {'minimax-h3', 'minimax-h3-tools'}
+          changed = {'minimax-h3'}
           def untouched(lock):
               return Counter(json.dumps(package, sort_keys=True) for package in lock['package'] if package['name'] not in changed)
           assert untouched(before) == untouched(after), 'an unrelated dependency pin or artifact moved'
           packages = {package['name']: package for package in after['package']}
-          assert packages['minimax-h3']['version'] == '0.9.4'
+          assert packages['minimax-h3']['version'] == '0.9.5'
           tools = packages['minimax-h3-tools']
           assert tools['version'] == '0.4.1'
           assert tools['source'] == {'registry': 'https://tensorhub.com/v1/index/_/simple/'}
           assert any(wheel['url'] == 'https://tensorhub.com/v1/index/_/minimax-h3-tools/0.4.1/minimax_h3_tools-0.4.1-py3-none-any.whl' and wheel['hash'] == 'sha256:5de29a4c8d6be8cff53f757c3a059acfd29b276a513f3708faba38f4bcd6aaec' for wheel in tools['wheels'])
           assert packages['cozy-runtime']['version'] == '0.44.2'
           assert packages['tensorfs']['version'] == '0.23.1'
-          Path(sys.argv[2]).write_text(json.dumps({'root': '0.9.4', 'tools': '0.4.1', 'runtime': '0.44.2', 'tensorfs': '0.23.1', 'other_package_records_unchanged': True, 'lock_sha256': hashlib.sha256(lock_path.read_bytes()).hexdigest()}, indent=2) + '\n')
+          assert packages['msgspec']['version'] == '0.21.1'
+          Path(sys.argv[2]).write_text(json.dumps({'root': '0.9.5', 'tools': '0.4.1', 'runtime': '0.44.2', 'tensorfs': '0.23.1', 'msgspec': '0.21.1', 'other_package_records_unchanged': True, 'lock_sha256': hashlib.sha256(lock_path.read_bytes()).hexdigest()}, indent=2) + '\n')
           PY
-      - name: Install the published CPU SDK pair
+      - name: Install the actual frozen application dependencies
         run: |
           uv venv --python 3.12 .venv-stable
-          uv pip install --python .venv-stable/bin/python --index https://download.pytorch.org/whl/cpu --index-strategy unsafe-best-match -r checks/stable-model-data-requirements.txt
+          uv export --project "$RUNNER_TEMP/locks/minimax-h3" --frozen --no-dev --no-emit-project --no-hashes --no-header --format requirements-txt > "$RUNNER_TEMP/locks/frozen-requirements.txt"
+          cat > "$RUNNER_TEMP/locks/cpu-overrides.txt" <<'CPU'
+          torch==2.15.0+cpu
+          torchvision==0.29.1+cpu
+          CPU
+          uv pip install --python .venv-stable/bin/python --index https://download.pytorch.org/whl/cpu --index-strategy unsafe-best-match -r "$RUNNER_TEMP/locks/frozen-requirements.txt" --override "$RUNNER_TEMP/locks/cpu-overrides.txt" torch torchvision
+          uv pip freeze --python .venv-stable/bin/python > "$RUNNER_TEMP/locks/environment.txt"
+      - name: Reproduce the published normalization failure with the locked decoder
+        run: |
+          curl -fsSL https://tensorhub.com/v1/index/_/minimax-h3/0.9.4/minimax_h3-0.9.4-py3-none-any.whl -o "$RUNNER_TEMP/minimax_h3-0.9.4-py3-none-any.whl"
+          echo '87a16eef3d555d491e712982ec9c25ad29da274fbf858efeb62fea790a48c9bd  '"$RUNNER_TEMP/minimax_h3-0.9.4-py3-none-any.whl" | sha256sum -c -
+          uv pip install --python .venv-stable/bin/python --no-deps "$RUNNER_TEMP/minimax_h3-0.9.4-py3-none-any.whl"
+          .venv-stable/bin/python -I - <<'PY'
+          from importlib.metadata import version
+          from cozy_runtime.author import Config
+          from minimax_h3.latent_upscaler import _normalization
+          assert version('msgspec') == '0.21.1'
+          try:
+              _normalization(Config({'latent_normalization': {'enabled': True, 'mean': [0] * 24, 'std': [1] * 24}}))
+          except TypeError as error:
+              assert 'Literal' in str(error), str(error)
+              print('Expected published 0.9.4 normalization failure reproduced with locked msgspec0.21.1')
+          else:
+              raise AssertionError('The published normalization regression did not reproduce')
+          PY
       - name: Build and install candidate wheels
         run: |
           uv build --wheel --sdist --out-dir "$RUNNER_TEMP/wheels" minimax-h3-tools
