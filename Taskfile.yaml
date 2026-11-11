@@ -158,7 +158,7 @@ tasks:
           relock "$p" $(printf ' --upgrade-package=%s' $up $(raised "$p"))
           if ! pinned "$p"; then
             [ -n "$dry" ] || { echo "$p: the relock did not take $up at their released versions" >&2; exit 1; }
-            echo "$p: dry run, so it locks $up as the Hub holds them, not at their unpublished master versions"
+            echo "$p: dry run, so it locks the Hub's $up, not the unpublished master version"
           fi
           release "$p"
         done
