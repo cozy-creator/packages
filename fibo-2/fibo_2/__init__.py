@@ -161,7 +161,7 @@ def _generate(
 
 _MODEL = ("transformer", "text_encoder", "vae")
 _DEV = "briaai/fibo-2-dev@0.1.1"
-_TURBO = "briaai/fibo-2-edit-turbo@0.1.1"
+_TURBO = "briaai/fibo-2-edit-turbo@0.2.0"
 _VLM = "briaai/fibo-vlm@0.1.0"
 _EDIT_VLM = "briaai/fibo-edit-vlm@0.1.0"
 _COMPONENTS = {"model": _MODEL, "upsampler": ("model",), "edit_upsampler": ("model",)}
