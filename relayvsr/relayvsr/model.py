@@ -9,11 +9,11 @@ import torch.nn.functional as F
 from cozy_runtime import rng
 from cozy_runtime.accel import hold_dtype
 from cozy_runtime.accel.kernels import Plan
-from cozy_runtime.author import Config, Loader, Model, uses_components
+from cozy_runtime.author import Config, InvalidRequest, Loader, Model, uses_components
 
 from . import kernels
-from .flash import Condition, FlashVSR, History
-from .wan import CHANNELS, Ring, WanVSR
+from .flash import Condition, FlashConfig, FlashVSR, History
+from .wan import Ring, WanConfig, WanVSR
 
 #: Frames are padded to this (upstream's `prepare_lr`: Wan's latent and patch grid at 1/4 scale).
 STRIDE = 8
@@ -28,11 +28,20 @@ class Components(TypedDict):
 
 class Graph:
     components: Components
+    #: Keyframes a keyframe sees, itself included.
+    context: int
 
     def __init__(self, config: Config) -> None:
-        if config.mapping().get("architecture") != ARCHITECTURE:
-            raise ValueError(f"this checkpoint is {config.mapping().get('architecture')!r}, and RelayVSR runs the {ARCHITECTURE!r} one: leave `model` at its default")
-        self.components = {"wan": WanVSR().eval().to(torch.bfloat16), "flash": FlashVSR().eval()}
+        if not {"model", "wan", "flash"} <= set(config.keys()):
+            raise InvalidRequest(
+                "this RelayVSR checkpoint has no `wan` and `flash` configs: use kopper/relayvsr@0.2.0 or newer", code="config_missing"
+            )
+        architecture = config.section("model").as_str("architecture")
+        if architecture != ARCHITECTURE:
+            raise ValueError(f"this checkpoint is {architecture!r}, and RelayVSR runs the {ARCHITECTURE!r} one: leave `model` at its default")
+        wan, flash = config.section("wan").typed(WanConfig), config.section("flash").typed(FlashConfig)
+        self.components = {"wan": WanVSR(wan).eval().to(torch.bfloat16), "flash": FlashVSR(flash).eval()}
+        self.context = wan.temporal_context_frames
 
 
 def build(config: Config) -> Graph:
@@ -58,6 +67,10 @@ class RelayModel(Model[Graph]):
     def load(self, loader: Loader) -> None:
         self.graph = loader.construct(build)
 
+    def ring(self) -> Ring:
+        """The keyframes' K/V a stream holds."""
+        return Ring(self.graph.context)
+
     def execution_plan(self, plan: Plan) -> str:
         return kernels.install(plan)
 
@@ -81,7 +94,7 @@ class RelayModel(Model[Graph]):
         device = torch.device(str(self.device))
         upsampled = F.interpolate(frame.to(device, torch.bfloat16), scale_factor=4, mode="bilinear", align_corners=False)
         _, _, h, w = upsampled.shape
-        noise = rng.noise((frame.shape[0], CHANNELS, h // 16, w // 16), generator, device=device)
+        noise = rng.noise((frame.shape[0], wan.in_channels, h // 16, w // 16), generator, device=device)
         with torch.inference_mode():
             return wan.keyframe(upsampled, noise, ring)
 
