@@ -82,7 +82,7 @@ from .continuation import (
     export_context,
 )
 from .guide_rows import ANCHOR_LATENTS, ANCHORS, GUIDE, GUIDE_LATENTS, GuideClip, anchor_rows, guide_rows
-from .reference_rows import ClipRows, LoopState, motion_size, public_video
+from .reference_rows import ClipRows, LoopState, motion_size, public_video, unprotect_carried
 from .steps import denoise_official
 from .overlay import ATTENTION_KWARG, OVERLAY_KWARG, REGENERATE_BANK, TURBO_BANK, Overlay, TurboSchedule
 from .vae_tiles import TileBatchedVideoVAE, encode_condition
@@ -183,12 +183,15 @@ def _attention_layout(
     fields = state.denoiser_input_fields
     # NVIDIA's H3 policy protects every row before target video, including target
     # audio. Diffusers packs text, reference media, target audio, then target video.
+    # A continuation's carried frames are video, not references: they sit after the
+    # prefix and take the video's own sparsity (Paul 11-12; `unprotect_carried`).
     # Shape/count metadata is host-resident; do not read GPU values.
     return AttentionLayout(
         live_tokens=fields["token_tags"].numel(),
         protected_prefix=(
             fields["text_indices"].numel()
             + state.num_condition_video_rows
+            - state.carried_video_rows
             + fields["audio_indices"].numel()
         ),
         step=step,
@@ -1637,6 +1640,9 @@ class OfficialH3Pipeline:
             references, latents = state.normalized_references, state.condition_latents
             clips = ClipRows(block_state, references, latents, scoped.patch_size, start=guided)
             clips.thin(block_state)
+        block_state.carried_video_rows = (
+            0 if context is None else unprotect_carried(block_state, context, tuple(scoped.patch_size))
+        )
         # Every path runs `denoise_official`; on several ranks each rank runs the loop.
         cancel()
         loop_over = partial(

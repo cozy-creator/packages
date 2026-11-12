@@ -25,7 +25,7 @@ from typing import Protocol
 
 import torch
 
-from .continuation import ContextReferenceLayout
+from .continuation import AVContext, ContextReferenceLayout
 
 CANVAS_DIVISOR = 2
 FRAME_STRIDE = 2
@@ -50,6 +50,8 @@ class LoopState(Protocol):
     audio_latents: torch.Tensor
     num_condition_video_rows: int
     num_condition_audio_rows: int
+    #: the carried picture rows that left the protected prefix (`continuation.unprotect_carried`)
+    carried_video_rows: int
     video_indices: torch.Tensor
     token_tags: torch.Tensor
     prompt_embeds: torch.Tensor
@@ -160,3 +162,53 @@ def select_rows(block_state: LoopState, keep: torch.Tensor) -> None:
     for name, value in fields.items():
         setattr(block_state, name, value)
     block_state.denoiser_input_fields = fields
+
+
+def permute_rows(block_state: LoopState, order: torch.Tensor) -> None:
+    """The packed rows in `order` (`order[new] = old`), with every per-row field. Attention reads
+    each row by its rotary position, so only where a row sits changes: which rows a prefix holds,
+    and Sol's 64-row blocks."""
+    fields = dict(block_state.denoiser_input_fields)
+    if set(fields) != _LAYOUT_FIELDS or order.numel() != fields["token_tags"].numel():
+        raise ValueError(f"unexpected packed layout for a permutation: {sorted(fields)}")
+    moved = torch.empty_like(order)
+    moved[order] = torch.arange(order.numel(), device=order.device)
+    for name in ("video_indices", "audio_indices", "text_indices"):
+        fields[name] = moved.to(fields[name].device)[fields[name]]
+    for name in ("position_ids", "token_tags"):
+        fields[name] = fields[name][order.to(fields[name].device)]
+    block_state.row_timestep_plan = [
+        (timesteps, indices[order.to(indices.device)])
+        for timesteps, indices in block_state.row_timestep_plan
+    ]
+    for name, value in fields.items():
+        setattr(block_state, name, value)
+    block_state.denoiser_input_fields = fields
+
+
+def unprotect_carried(state: LoopState, context: AVContext, patch_size: Sequence[int]) -> int:
+    """The carried picture rows out of the protected prefix: they take the video's own sparsity,
+    dense for the dense steps and routed after (Paul, 11-12). Text, references and audio stay
+    protected, as NVIDIA's recipe has them. The carried rows, the last condition rows, move to
+    just before the first target row, so what stays protected is still one prefix. Returns how
+    many moved; none when the layout isn't the one this reads (its rows stay protected)."""
+    if context.video is None:
+        return 0
+    _, patch_h, patch_w = patch_size
+    _, _, frames, height, width = (int(n) for n in context.video.shape)
+    count, conditions = frames * (height // patch_h) * (width // patch_w), state.num_condition_video_rows
+    fields = state.denoiser_input_fields
+    video, rows = fields["video_indices"], fields["token_tags"].numel()
+    if not 0 < count <= conditions < video.numel():
+        return 0
+    # One read before the loop: where the carried block and the first target row sit.
+    carried = video[conditions - count : conditions + 1].tolist()
+    start, target = carried[0], carried[-1]
+    if carried[:-1] != list(range(start, start + count)) or target < start + count:
+        return 0
+    order = torch.cat([
+        torch.arange(start), torch.arange(start + count, target),
+        torch.arange(start, start + count), torch.arange(target, rows),
+    ]).to(fields["token_tags"].device)  # fmt: skip
+    permute_rows(state, order)
+    return count
