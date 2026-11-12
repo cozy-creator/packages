@@ -8,7 +8,7 @@ from typing import Annotated, Literal
 import msgspec
 from cozy_runtime.author import Adjustments, App, Context, Outputs, Seed, Telemetry
 from cozy_runtime.fields import MENTION, AspectRatio, FileBound, Image, Prompt, Ratios
-from cozy_runtime.image import Guidance, ImageRequest, ImageResult, NegativePrompt, Sizes, Steps, held
+from cozy_runtime.image import Control, Guidance, ImageRequest, ImageResult, NegativePrompt, Sizes, Steps, held
 from cozy_runtime.media import ImageFile
 from PIL import Image as PILImage
 from PIL import ImageOps
@@ -19,6 +19,7 @@ from .adapters import (
     KINDS,
     Adapter,
     armed,
+    blacked,
     depth_map,
     edit_references,
     fitted,
@@ -41,16 +42,8 @@ PICTURE_SIZES = Sizes((MIN_MEGAPIXELS, 2.0), (256, 4096), PATCH, "Krea 2's adapt
 RAW, TURBO = (52, 3.5, 1.0), (8, 0.0, 4.0)
 #: How much of a starting picture is redrawn by default (`denoise`).
 DENOISE = 0.7
-
-
-class Control(msgspec.Struct, kw_only=True):
-    """A control map and how strongly it holds: a depth map (near is white), an OpenPose or DWPose skeleton,
-    white lines on black (`lineart`), or a picture whose region to repaint is black (`inpaint`)."""
-
-    image: Annotated[ImageFile, FileBound(max_decoded_bytes=256 << 20)]
-    kind: Literal["depth", "pose", "lineart", "sketch", "canny", "inpaint"]
-    #: The adapter's LoRA strength (Patil's `--lora-scale`, the node's LoRA weight).
-    strength: Annotated[float, msgspec.Meta(ge=0, le=2)] = 1.0
+#: The control kinds Krea 2 has an adapter for (`adapters.KINDS`); the Runtime drops any other with a warning.
+Kinds = Literal["pose", "lineart", "inpaint", "depth"]
 
 
 class TurboInput(ImageRequest):
@@ -61,8 +54,8 @@ class TurboInput(ImageRequest):
     image: Annotated[ImageFile, FileBound(max_decoded_bytes=256 << 20)] | None = None
     #: How much of `image` is redrawn: the noise it starts under; 1 redraws it from noise. None: 0.7.
     denoise: Annotated[float, msgspec.Meta(gt=0, le=1)] | None = None
-    #: Control maps; Krea 2 reads one, of a kind it has an adapter for (`adapters.KINDS`).
-    control: list[Control] = msgspec.field(default_factory=list)
+    #: Control maps; Krea 2 reads the first. `inpaint`'s is the picture with the area to redraw transparent.
+    control: list[Control[Kinds]] = msgspec.field(default_factory=list)
 
 
 class GenerateInput(TurboInput):
@@ -85,21 +78,16 @@ def _said(prompt: Prompt[Image], adj: Adjustments) -> tuple[str, list[PILImage.I
     return said, [prompt.references[key].file.read() for key in keys[:EDIT_PICTURES]]
 
 
-def _control(controls: list[Control], adj: Adjustments) -> Control | None:
-    """The control Krea 2 reads: the first of a kind it has an adapter for, at a strength above 0."""
-    usable = []
-    for control in controls:
-        if control.kind not in KINDS:
-            adj.warn("control", f"ignored: Krea 2 has no {control.kind} adapter")
-        elif control.strength > 0:
-            usable.append(control)
+def _control(controls: list[Control[Kinds]], adj: Adjustments) -> Control[Kinds] | None:
+    """The control Krea 2 reads: the first at a strength above 0."""
+    usable = [control for control in controls if control.strength > 0]
     if len(usable) > 1:
         adj.warn("control", f"Krea 2 reads one control map, so it goes without the {len(usable) - 1} after the first")
     return usable[0] if usable else None
 
 
-def _generate(ctx: Context, payload: TurboInput, model: Krea2, adapters: Adapters, out: Outputs, tel: Telemetry,
-              adj: Adjustments, *, distilled: bool) -> ImageResult:
+def _generate(ctx: Context, payload: TurboInput, model: Krea2, text_encoder: Krea2, adapters: Adapters, out: Outputs,
+              tel: Telemetry, adj: Adjustments, *, distilled: bool) -> ImageResult:
     model.hold_vae()
     prompt, pictures = _said(payload.prompt, adj)
     control = _control(payload.control, adj)
@@ -117,7 +105,9 @@ def _generate(ctx: Context, payload: TurboInput, model: Krea2, adapters: Adapter
         adj.warn("denoise", "ignored: there is no image to start from")
     seed = payload.drawn_seed()
     with tel.stage("reading pictures"):
-        mapped = control.image.read() if control is not None else None
+        mapped = None
+        if control is not None:
+            mapped = blacked(control.image.read(mode="RGBA")) if control.kind == "inpaint" else control.image.read()
         start = payload.image.read() if payload.image is not None else None
     first = next((p.size for p in (*pictures, mapped, start) if p is not None), None)
     limits = PICTURE_SIZES if pictures or mapped is not None else SIZES
@@ -152,10 +142,10 @@ def _generate(ctx: Context, payload: TurboInput, model: Krea2, adapters: Adapter
             seen, labels = (vlm_sized(mapped),), True
         else:
             seen, labels = (), False
-        positive = model.encode_pictures(prompt, seen, labels) if seen else model.encode(prompt)
+        positive = text_encoder.encode_pictures(prompt, seen, labels) if seen else text_encoder.encode(prompt)
         negative = None
         if guidance > 0:
-            negative = model.encode_pictures(words, seen, labels) if seen else model.encode(words)
+            negative = text_encoder.encode_pictures(words, seen, labels) if seen else text_encoder.encode(words)
     isolated = kind is not None and kind.isolated
     branches = (Branch(positive, before, after, isolated),
                 None if negative is None else Branch(negative, before, after, isolated))
@@ -178,7 +168,11 @@ def _generate(ctx: Context, payload: TurboInput, model: Krea2, adapters: Adapter
 
 _RAW_MODEL = "krea/krea-2@0.1.0"
 _TURBO_MODEL = "krea/krea-2-turbo@0.1.0"
-_KREA = ("transformer", "text_encoder", "vae")
+#: `model` is the DiT and VAE of a Krea 2 checkpoint; `text_encoder` the Qwen3-VL-4B of any Krea 2 checkpoint, the
+#: function's own by default (Raw's and Turbo's are byte-identical), or an abliterated one
+#: (`model.text_encoder=quiho/qwen3-vl-4b-abliterated@0.1.0`).
+_KREA = ("transformer", "vae")
+_TEXT = ("text_encoder",)
 #: Each adapter's mirror on the Hub, by slot (`adapters.py`), its one component; each is built and fetched only
 #: when a request needs it.
 _EDIT = "conradlocke/identity-edit@0.1.0"
@@ -189,28 +183,30 @@ _INPAINT = "cierpliwy/inpaint-edit@0.1.0"
 _LORA = ("transformer",)
 
 
-@app.entrypoint(defaults={"model": _RAW_MODEL, "edit": _EDIT, "depth": _DEPTH, "pose": _POSE, "lineart": _LINEART,
-                          "inpaint": _INPAINT},
-                components={"model": _KREA, "edit": _LORA, "depth": _LORA, "pose": _LORA, "lineart": _LORA,
-                            "inpaint": _LORA},
+@app.entrypoint(defaults={"model": _RAW_MODEL, "text_encoder": _RAW_MODEL, "edit": _EDIT, "depth": _DEPTH,
+                          "pose": _POSE, "lineart": _LINEART, "inpaint": _INPAINT},
+                components={"model": _KREA, "text_encoder": _TEXT, "edit": _LORA, "depth": _LORA, "pose": _LORA,
+                            "lineart": _LORA, "inpaint": _LORA},
                 on_demand=("edit", "depth", "pose", "lineart", "inpaint"), memoize=True)  # fmt: skip
-def generate(ctx: Context, payload: GenerateInput, model: Krea2, edit: Adapter, depth: Adapter, pose: Adapter,
-             lineart: Adapter, inpaint: Adapter, out: Outputs, tel: Telemetry, adj: Adjustments) -> ImageResult:
+def generate(ctx: Context, payload: GenerateInput, model: Krea2, text_encoder: Krea2, edit: Adapter, depth: Adapter,
+             pose: Adapter, lineart: Adapter, inpaint: Adapter, out: Outputs, tel: Telemetry,
+             adj: Adjustments) -> ImageResult:
     """The full model, Krea 2 Raw (or a fine-tune of it): 52 steps at guidance 3.5, 1 MP."""
     adapters = {"edit": edit, "depth": depth, "pose": pose, "lineart": lineart, "inpaint": inpaint}
-    return _generate(ctx, payload, model, adapters, out, tel, adj, distilled=False)
+    return _generate(ctx, payload, model, text_encoder, adapters, out, tel, adj, distilled=False)
 
 
-@app.entrypoint(defaults={"model": _TURBO_MODEL, "edit": _EDIT, "depth": _DEPTH, "pose": _POSE, "lineart": _LINEART,
-                          "inpaint": _INPAINT},
-                components={"model": _KREA, "edit": _LORA, "depth": _LORA, "pose": _LORA, "lineart": _LORA,
-                            "inpaint": _LORA},
+@app.entrypoint(defaults={"model": _TURBO_MODEL, "text_encoder": _TURBO_MODEL, "edit": _EDIT, "depth": _DEPTH,
+                          "pose": _POSE, "lineart": _LINEART, "inpaint": _INPAINT},
+                components={"model": _KREA, "text_encoder": _TEXT, "edit": _LORA, "depth": _LORA, "pose": _LORA,
+                            "lineart": _LORA, "inpaint": _LORA},
                 on_demand=("edit", "depth", "pose", "lineart", "inpaint"), memoize=True)  # fmt: skip
-def generate_turbo(ctx: Context, payload: TurboInput, model: Krea2, edit: Adapter, depth: Adapter, pose: Adapter,
-                   lineart: Adapter, inpaint: Adapter, out: Outputs, tel: Telemetry, adj: Adjustments) -> ImageResult:
+def generate_turbo(ctx: Context, payload: TurboInput, model: Krea2, text_encoder: Krea2, edit: Adapter,
+                   depth: Adapter, pose: Adapter, lineart: Adapter, inpaint: Adapter, out: Outputs, tel: Telemetry,
+                   adj: Adjustments) -> ImageResult:
     """The fast model, Krea 2 Turbo (or a fine-tune of it): 8 steps without guidance at its fixed shift, 2048²."""
     adapters = {"edit": edit, "depth": depth, "pose": pose, "lineart": lineart, "inpaint": inpaint}
-    return _generate(ctx, payload, model, adapters, out, tel, adj, distilled=True)
+    return _generate(ctx, payload, model, text_encoder, adapters, out, tel, adj, distilled=True)
 
 
 class ImageBox(msgspec.Struct, kw_only=True):
@@ -230,13 +226,14 @@ class ImageBox(msgspec.Struct, kw_only=True):
 # Each checkpoint is built, and its weights fetched, only when a box asks for it; the edit adapter only for a box
 # with pictures.
 @app.tool(label="Image", named="image",
-          defaults={"full": _RAW_MODEL, "model": _TURBO_MODEL, "edit": _EDIT, "depth": _DEPTH, "pose": _POSE,
-                    "lineart": _LINEART, "inpaint": _INPAINT},
-          components={"full": _KREA, "model": _KREA, "edit": _LORA, "depth": _LORA, "pose": _LORA, "lineart": _LORA,
-                      "inpaint": _LORA},
+          defaults={"full": _RAW_MODEL, "model": _TURBO_MODEL, "text_encoder": _TURBO_MODEL, "edit": _EDIT,
+                    "depth": _DEPTH, "pose": _POSE, "lineart": _LINEART, "inpaint": _INPAINT},
+          components={"full": _KREA, "model": _KREA, "text_encoder": _TEXT, "edit": _LORA, "depth": _LORA,
+                      "pose": _LORA, "lineart": _LORA, "inpaint": _LORA},
           on_demand=("full", "model", "edit", "depth", "pose", "lineart", "inpaint"), memoize=True)  # fmt: skip
-def image(ctx: Context, payload: ImageBox, full: Krea2, model: Krea2, edit: Adapter, depth: Adapter, pose: Adapter,
-          lineart: Adapter, inpaint: Adapter, out: Outputs, tel: Telemetry, adj: Adjustments) -> ImageResult:
+def image(ctx: Context, payload: ImageBox, full: Krea2, model: Krea2, text_encoder: Krea2, edit: Adapter,
+          depth: Adapter, pose: Adapter, lineart: Adapter, inpaint: Adapter, out: Outputs, tel: Telemetry,
+          adj: Adjustments) -> ImageResult:
     """Krea 2 on a canvas: Turbo, or Raw, which loads only when asked for; an edit of the pictures it mentions."""
     kind = TurboInput if payload.turbo else GenerateInput
     megapixels = payload.megapixels
@@ -245,4 +242,5 @@ def image(ctx: Context, payload: ImageBox, full: Krea2, model: Krea2, edit: Adap
     request = kind(prompt=payload.instructions, aspect_ratio=payload.aspect_ratio, megapixels=megapixels,
                    seed=payload.seed)  # fmt: skip
     adapters = {"edit": edit, "depth": depth, "pose": pose, "lineart": lineart, "inpaint": inpaint}
-    return _generate(ctx, request, model if payload.turbo else full, adapters, out, tel, adj, distilled=payload.turbo)
+    return _generate(ctx, request, model if payload.turbo else full, text_encoder, adapters, out, tel, adj,
+                     distilled=payload.turbo)

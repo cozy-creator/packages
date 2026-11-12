@@ -498,7 +498,8 @@ def fused_text(transformer: Krea2Transformer2DModel, text: torch.Tensor) -> torc
 
 class Krea2(Model[Krea2Graph]):
     """One Krea 2 checkpoint, Raw or Turbo. Their configs are identical and the pipeline's `is_distilled` is
-    not in the model's config, so the caller names the regime (`denoise(distilled=)`)."""
+    not in the model's config, so the caller names the regime (`denoise(distilled=)`). A function binds it
+    twice: `model` for its DiT and VAE, `text_encoder` for its Qwen3-VL (`encode`, `encode_pictures`)."""
 
     #: Caller LoRAs on the DiT, at any strength: the Runtime bakes them into the weights.
     serving = Serving(loras=("transformer",))
