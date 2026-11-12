@@ -237,8 +237,8 @@ class ImageToImageInput(msgspec.Struct, kw_only=True):
     image: Annotated[ImageFile, FileBound(max_decoded_bytes=256 << 20)]
     #: What the picture becomes.
     prompt: str = ""
-    #: How much changes: the noise the picture starts under (`MossImage.denoise`), a light touch near 0, a new
-    #: picture at 1.
+    #: How much changes: the last fraction of the steps that run from the picture, as ComfyUI's denoise
+    #: (`MossImage.denoise`), a light touch near 0, a new picture at 1.
     strength: Annotated[float, msgspec.Meta(gt=0, le=1)] = 0.6
     #: The picture's ratio at this many megapixels (`SIZES.fit`); unset, the picture's own size.
     megapixels: Annotated[float, msgspec.Meta(gt=0)] | None = None
@@ -260,14 +260,15 @@ def image_to_image(ctx: Context, payload: ImageToImageInput, model: MossImage, o
                     "MOSS-Image's CFG 1-20")
     seed = payload.seed if payload.seed is not None else ImageRequest(prompt="").drawn_seed()
     return remake(ctx, model, out, tel, picture, payload.prompt, payload.negative_prompt or "", width=width,
-                  height=height, steps=steps, guidance=guidance, seed=seed, strength=payload.strength)  # fmt: skip
+                  height=height, steps=steps, guidance=guidance, seed=seed, denoise=payload.strength)  # fmt: skip
 
 
 def remake(ctx: Context, model: MossImage, out: Outputs, tel: Telemetry, picture: PILImage.Image, prompt: str,
            negative_prompt: str, *, width: int, height: int, steps: int, guidance: float, seed: int,
-           strength: float) -> ImageResult:
-    """Image-to-image: the picture Lanczos to `width` x `height`, encoded, noised to `strength` and denoised from
-    there (`MossImage.denoise`'s `start`), CFG against `negative_prompt`."""
+           strength: float = 1.0, denoise: float | None = None) -> ImageResult:
+    """Image-to-image: the picture Lanczos to `width` x `height`, encoded, noised to the sigma `strength` (or the
+    schedule's last `denoise` fraction) and denoised from there (`MossImage.denoise`'s `start`), CFG against
+    `negative_prompt`."""
     model.hold_vae(tel)
     with tel.stage("encoding picture"):
         start = model.encode_image(picture.convert("RGB").resize((width, height), PILImage.Resampling.LANCZOS))
@@ -277,7 +278,7 @@ def remake(ctx: Context, model: MossImage, out: Outputs, tel: Telemetry, picture
     ctx.raise_if_cancelled()
     with tel.stage("generating image"):
         latents = model.denoise(positive, negative, width=width, height=height, steps=steps, guidance=guidance, seed=seed,
-                                tel=tel, progress=ctx.progress, start=start, strength=strength)  # fmt: skip
+                                tel=tel, progress=ctx.progress, start=start, strength=strength, denoise=denoise)  # fmt: skip
     with tel.stage("decoding image"):
         image = model.decode(latents)
     with tel.stage("saving image"):
