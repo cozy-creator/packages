@@ -1,5 +1,6 @@
 """Anima through Diffusers' maintained modular pipeline: text to image, image to image, inpaint, mentioned
-pictures through LuciferTC's IP-Adapter and control maps through kohya's ControlNet-LLLite (se-127)."""
+pictures through LuciferTC's IP-Adapter, poses through Claquasse's control-LoRA and the other control maps through
+kohya's ControlNet-LLLite (se-127)."""
 
 from __future__ import annotations
 
@@ -26,7 +27,7 @@ from cozy_runtime.image import Control, Guidance, ImageRequest, ImageResult, Neg
 from cozy_runtime.media import ImageFile
 from PIL import Image as PILImage
 
-from .adapters import Adapters, ImageEncoder, IPAdapter, LLLite, References, Shifts
+from .adapters import Adapters, ImageEncoder, IPAdapter, LLLite, PoseControl, References, Shifts
 from .model import _SAVE, AnimaModel, Start, _Phases
 
 app = App()
@@ -70,8 +71,8 @@ class GenerateInput(ImageRequest):
     #: How much of the picture is redrawn: 1 is from noise. 0.9 by default: at 0.6 and 0.75 a new outfit in the
     #: words left the old one; 0.9 changed it and kept the character (se-127, pod-session 43205340966).
     strength: Annotated[float, msgspec.Meta(gt=0.0, le=1.0), Advanced()] = 0.9
-    #: Control maps, each through its kind's ControlNet-LLLite; `inpaint`'s is the picture with the area to
-    #: redraw transparent.
+    #: Control maps: a pose skeleton through Claquasse's control-LoRA, each other kind through its ControlNet-LLLite;
+    #: `inpaint`'s is the picture with the area to redraw transparent.
     control: list[Control[Kind]] = msgspec.field(default_factory=list)
     #: How strongly the mentioned pictures steer, the IP-Adapter's token scale.
     reference_strength: Annotated[float, msgspec.Meta(ge=0.0, le=2.0), Advanced()] = 1.0
@@ -114,7 +115,7 @@ _DEFAULTS = {
     "image_encoder": "google/siglip2-base-patch16-512@0.1.0",
     "ip_adapter": "lucifertc/ip-adapter@0.1.0",
     "depth": "kohya-ss/lllite-depth@0.1.0",
-    "pose": "kohya-ss/lllite-pose@0.1.0",
+    "pose": "claquasse/control-pose@0.1.0",
     "lineart": "kohya-ss/lllite-any-test-like@0.1.0",
     "sketch": "kohya-ss/lllite-any-test-like@0.1.0",
     "inpaint": "kohya-ss/lllite-inpainting@0.1.0",
@@ -147,9 +148,26 @@ def _map(control: Control[Kind], width: int, height: int) -> tuple[torch.Tensor,
     return torch.cat([rgb * (1 - mask), mask * 2 - 1], dim=1), mask
 
 
+#: An inpaint's edge, in pixels: the area grows this far, then fades out over about as far again, so the new
+#: picture meets the kept one in a ring around the area, redrawn whole late in the schedule (`model._FREED`) and
+#: blended into the picture's own pixels (InvokeAI's gradient mask; A1111 blurs its mask, ComfyUI grows it).
+_GROW, _FADE = 16, 8
+
+
+def _feathered(mask: torch.Tensor) -> torch.Tensor:
+    """`mask` [1, 1, H, W] (1 redraws) grown by `_GROW` px and faded by three box blurs of `_FADE` px: 1 up to the
+    area's edge, 0 from about 40 px out."""
+    grown = F.max_pool2d(mask, (1, 2 * _GROW + 1), stride=1, padding=(0, _GROW))
+    soft = F.max_pool2d(grown, (2 * _GROW + 1, 1), stride=1, padding=(_GROW, 0))
+    for _ in range(3):
+        soft = F.avg_pool2d(soft, (1, 2 * _FADE + 1), stride=1, padding=(0, _FADE), count_include_pad=False)
+        soft = F.avg_pool2d(soft, (2 * _FADE + 1, 1), stride=1, padding=(_FADE, 0), count_include_pad=False)
+    return torch.maximum(mask, soft)
+
+
 def _start(payload: GenerateInput, width: int, height: int, adj: Adjustments) -> Start | None:
     """Image to image from `image`, or an inpaint from the first `inpaint` map (its picture where `image` is
-    absent, fully redrawn inside the mask)."""
+    absent, fully redrawn inside the mask and feathered out past it)."""
     inpaints = [c for c in payload.control if c.kind == "inpaint"]
     if len(inpaints) > 1:
         adj.warn("control", "Anima inpaints one area at a time: the first inpaint map is used")
@@ -160,8 +178,7 @@ def _start(payload: GenerateInput, width: int, height: int, adj: Adjustments) ->
     assert mask is not None
     if picture is None:
         picture = inpaints[0].image.read().resize((width, height), PILImage.Resampling.LANCZOS)
-    latent = F.interpolate(mask, size=(height // 8, width // 8), mode="area")
-    return Start(picture, payload.strength if payload.image is not None else 1.0, latent.unsqueeze(2))
+    return Start(picture, payload.strength if payload.image is not None else 1.0, _feathered(mask))
 
 
 def _generate(
@@ -170,6 +187,7 @@ def _generate(
     model: AnimaModel,
     encoder: ImageEncoder,
     ip_adapter: IPAdapter,
+    pose: PoseControl,
     lllites: dict[str, LLLite],
     out: Outputs,
     tel: Telemetry,
@@ -200,8 +218,13 @@ def _generate(
             tokens = encoder.tokens([p.file.read() for p in pictures])
         tokens = (tokens.float() * payload.reference_strength).to(torch.bfloat16).flatten(0, 1).unsqueeze(0)
     controls = [c for c in payload.control if c.strength > 0]
-    # Decoded here: no picture is read while a model holds its weights.
-    maps = [(control, _map(control, width, height)[0]) for control in controls]
+    poses = [c for c in controls if c.kind == "pose"]
+    if len(poses) > 1:
+        adj.warn("control", "Anima follows one pose at a time: the first pose map is used")
+    # Decoded here: no picture is read while a model holds its weights. A skeleton is resized as Claquasse's
+    # workflow resizes it (nearest).
+    skeleton = poses[0].image.read(mode="RGB").resize((width, height), PILImage.Resampling.NEAREST) if poses else None
+    maps = [(control, _map(control, width, height)[0]) for control in controls if control.kind != "pose"]
     if controls:
         tel.log("control", kinds=", ".join(c.kind for c in controls))
     with _Phases(tel, ctx.progress) as phases:
@@ -223,17 +246,26 @@ def _generate(
                     continue
                 shifts.append(Shifts(lllite.graph, lllite.condition(pixels), control.strength))
             references = None if tokens is None else References(ip_adapter.graph, tokens.to(torch.device(str(model.device))))
-            return render(Adapters(references, shifts))
+            embedded = None if skeleton is None else pose.tokens(model.latents(skeleton)) * poses[0].strength
+            return render(Adapters(references, shifts, embedded))
 
         body: Callable[[], torch.Tensor] = armed
-        for used in {id(lllites[c.kind]): lllites[c.kind] for c in controls}.values():
+        for used in {id(lllites[c.kind]): lllites[c.kind] for c, _ in maps}.values():
             body = partial(used.armed, body)
         if tokens is not None:
             body = partial(ip_adapter.armed, body)
+        if skeleton is not None:
+            body = partial(pose.applied, model.pipe.sites, body)
         images = body()
         # Still `decoding`: the pipeline left that bracket open and the host copy below is
         # the tail of the same work.
         image = images[0]
+        if start is not None and start.mask is not None:
+            # Around an inpaint the picture's own pixels, faded into the new ones: no VAE round trip shows there.
+            kept = torch.frombuffer(bytearray(start.picture.convert("RGB").tobytes()), dtype=torch.uint8)
+            kept = kept.view(height, width, 3).permute(2, 0, 1).to(image.device, torch.float32) / 255
+            mask = start.mask[0].to(image.device, torch.float32)
+            image = mask * image.float().clamp(0, 1) + (1 - mask) * kept
         # F32 and rounded, as Diffusers' `VaeImageProcessor` makes PIL bytes: bf16 then
         # truncation darkened every pixel.
         pixels = (image.float().clamp(0, 1) * 255).round().to("cpu", dtype=torch.uint8)
@@ -248,12 +280,12 @@ def _generate(
 
 @app.entrypoint(defaults=_DEFAULTS, on_demand=_ON_DEMAND, memoize=True)
 def generate(ctx: Context, payload: GenerateInput, model: AnimaModel, image_encoder: ImageEncoder,
-             ip_adapter: IPAdapter, depth: LLLite, pose: LLLite, lineart: LLLite, sketch: LLLite, inpaint: LLLite,
-             out: Outputs, tel: Telemetry, adj: Adjustments) -> ImageResult:  # fmt: skip
+             ip_adapter: IPAdapter, depth: LLLite, pose: PoseControl, lineart: LLLite, sketch: LLLite,
+             inpaint: LLLite, out: Outputs, tel: Telemetry, adj: Adjustments) -> ImageResult:  # fmt: skip
     """One native-resolution Anima image: from words, steered by the pictures they mention and by control maps,
     or from a start picture."""
-    lllites = {"depth": depth, "pose": pose, "lineart": lineart, "sketch": sketch, "inpaint": inpaint}
-    return _generate(ctx, payload, model, image_encoder, ip_adapter, lllites, out, tel, adj)
+    lllites = {"depth": depth, "lineart": lineart, "sketch": sketch, "inpaint": inpaint}
+    return _generate(ctx, payload, model, image_encoder, ip_adapter, pose, lllites, out, tel, adj)
 
 
 # ------------------------------------------------------------------ quantized lanes
@@ -297,7 +329,7 @@ class ImageBox(msgspec.Struct, kw_only=True):
     image: Annotated[ImageFile, FileBound(max_decoded_bytes=256 << 20)] | None = None
     #: `generate`: how much of the start picture is redrawn.
     strength: Annotated[float, msgspec.Meta(gt=0.0, le=1.0), Advanced()] = 0.9
-    #: `generate`: control maps, each through its kind's ControlNet-LLLite.
+    #: `generate`: control maps, a pose through Claquasse's control-LoRA and the rest through ControlNet-LLLite.
     control: list[Control[Kind]] = msgspec.field(default_factory=list)
     #: `generate`: how strongly the mentioned pictures steer.
     reference_strength: Annotated[float, msgspec.Meta(ge=0.0, le=2.0), Advanced()] = 1.0
@@ -312,12 +344,12 @@ class ImageBox(msgspec.Struct, kw_only=True):
 
 @app.tool(label="Image", named="image", defaults=_DEFAULTS, on_demand=_ON_DEMAND, memoize=True)
 def image(ctx: Context, payload: ImageBox, model: AnimaModel, image_encoder: ImageEncoder, ip_adapter: IPAdapter,
-          depth: LLLite, pose: LLLite, lineart: LLLite, sketch: LLLite, inpaint: LLLite, out: Outputs, tel: Telemetry,
-          adj: Adjustments) -> ImageResult:  # fmt: skip
+          depth: LLLite, pose: PoseControl, lineart: LLLite, sketch: LLLite, inpaint: LLLite, out: Outputs,
+          tel: Telemetry, adj: Adjustments) -> ImageResult:  # fmt: skip
     """Anima on a canvas: `generate` from the box. Mentioned pictures steer it, a start picture makes it an edit."""
     request = GenerateInput(prompt=payload.instructions, aspect_ratio=payload.aspect_ratio, megapixels=float(payload.megapixels),
                             seed=payload.seed, negative_prompt=payload.negative_prompt, image=payload.image,
                             strength=payload.strength, control=payload.control,
                             reference_strength=payload.reference_strength)  # fmt: skip
-    lllites = {"depth": depth, "pose": pose, "lineart": lineart, "sketch": sketch, "inpaint": inpaint}
-    return _generate(ctx, request, model, image_encoder, ip_adapter, lllites, out, tel, adj)
+    lllites = {"depth": depth, "lineart": lineart, "sketch": sketch, "inpaint": inpaint}
+    return _generate(ctx, request, model, image_encoder, ip_adapter, pose, lllites, out, tel, adj)

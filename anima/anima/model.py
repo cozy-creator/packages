@@ -10,8 +10,9 @@ from types import TracebackType
 from typing import Any, NamedTuple, Protocol, TypedDict, cast
 
 import torch
+import torch.nn.functional as F
 from cozy_runtime import rng
-from cozy_runtime.accel import fusion, hold_dtype, stepcache
+from cozy_runtime.accel import fusion, hold_dtype, lora, stepcache
 from cozy_runtime.author import (
     Config, Loader, Model, ModelAssets, Serving, Telemetry, UnsupportedInput, preview, uses_components,
 )
@@ -77,6 +78,8 @@ class AnimaPipeline:
 
         for component in (transformer, text_encoder, text_conditioner, vae):
             component.eval()
+        #: Where an adapter's own LoRA arms (Claquasse's pose): the DiT's and the LLM adapter's linears.
+        self.sites = {"transformer": lora.Sites(transformer), "text_conditioner": lora.Sites(text_conditioner)}
         self.scheduler_config: dict[str, object] = mapping["scheduler"]
         self.tokenizer = _tokenizer(assets, "tokenizer")
         self.t5_tokenizer = _tokenizer(assets, "t5_tokenizer")
@@ -111,8 +114,8 @@ def build_pipeline(config: Config, *, assets: ModelAssets) -> AnimaPipeline:
 
 class Start(NamedTuple):
     """Image-to-image: the picture at the output's size, how much of the schedule redraws it (`strength`), and
-    for an inpaint the latent-size mask of what to redraw ([1, 1, 1, h, w], 1 redraws); the rest is put back
-    each step."""
+    for an inpaint the pixel mask of what to redraw ([1, 1, H, W], 1 redraws), feathered out past the area; the
+    rest is put back each step and the picture's own pixels kept around the area."""
 
     picture: PILImage.Image
     strength: float
@@ -200,7 +203,9 @@ class AnimaModel(Model[AnimaPipeline]):
             noise = randn_tensor(tuple(image.shape), generator=generator, device=device, dtype=torch.float32)
             inputs = {"image_latents": image, "latents": noise, "strength": start.strength}
             if start.mask is not None:
-                held = _Held(image, noise, start.mask.to(device, torch.float32))
+                mask = F.interpolate(start.mask, size=image.shape[-2:], mode="area").unsqueeze(2)
+                mask = mask.to(device, torch.float32)
+                held = _Held(image, noise, mask, (mask > 0).float())
         pipeline = _pipeline(start is not None, device, phases, batched, fused, cache, adapters, held)
         pipeline.register_components(  # type: ignore[no-untyped-call]  # Diffusers' own, unannotated
             **self.pipe.components,
@@ -226,6 +231,15 @@ class AnimaModel(Model[AnimaPipeline]):
         )
         return images
 
+    @uses_components("vae")
+    def latents(self, picture: PILImage.Image) -> torch.Tensor:
+        """`picture`'s latent as the VAE encodes it, unnormalized (ComfyUI's `VAEEncode`): [1, 16, 1, h, w]."""
+        vae = self.pipe.components["vae"]
+        pixels = VaeImageProcessor(vae_scale_factor=8).preprocess(picture, height=picture.height, width=picture.width)
+        pixels = pixels.unsqueeze(2).to(torch.device(str(self.device)), vae.dtype)
+        latent: torch.Tensor = vae.encode(pixels).latent_dist.mode()
+        return latent.float()
+
 
 class _Start(TypedDict, total=False):
     """An image-to-image denoise's start, as the modular pipeline's inputs."""
@@ -235,13 +249,19 @@ class _Start(TypedDict, total=False):
     strength: float
 
 
+#: An inpaint's feathered edge is redrawn whole once a step reaches this sigma: InvokeAI's rectified-flow inpaint,
+#: whose soft mask holds the edge to the picture early and then lets it join the new area.
+_FREED = 0.5
+
+
 class _Held(NamedTuple):
-    """An inpaint's start latents, its noise and its mask: outside the mask each step puts the start back, noised
-    to the step's sigma."""
+    """An inpaint's start latents, its noise, its feathered mask at latent size and where that mask is not 0: each
+    step puts the start back outside it, noised to the step's sigma."""
 
     image: torch.Tensor
     noise: torch.Tensor
     mask: torch.Tensor
+    freed: torch.Tensor
 
 
 def _pipeline(
@@ -374,10 +394,11 @@ class _Denoise(AnimaDenoiseStep):
                 preview(lambda: latents - scheduler.sigmas[i] * prediction, "qwen-image")
                 latents = scheduler.step(prediction, t, latents, return_dict=False)[0]
                 if self.held is not None:
-                    # The sigma the step went to; 0 after the last, the start itself.
-                    sigma = scheduler.sigmas[scheduler.step_index].to(latents.device, torch.float32)
+                    # The sigma the step went to (the scheduler keeps them on the host); 0 after the last.
+                    sigma = float(scheduler.sigmas[scheduler.step_index])
                     kept = (1 - sigma) * self.held.image + sigma * self.held.noise
-                    latents = (self.held.mask * latents + (1 - self.held.mask) * kept).to(latents.dtype)
+                    mask = self.held.mask if sigma > _FREED else self.held.freed
+                    latents = (mask * latents + (1 - mask) * kept).to(latents.dtype)
                 on_step(i)
         self.phases.enter(_DECODE)
         block_state.latents = latents

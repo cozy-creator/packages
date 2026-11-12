@@ -1,5 +1,6 @@
-"""Anima's adapters (se-127): LuciferTC's SigLIP2 IP-Adapter for mentioned pictures and kohya's ControlNet-LLLite
-for control maps. Each is its author's file uploaded as it is, configured by its own safetensors metadata.
+"""Anima's adapters (se-127): LuciferTC's SigLIP2 IP-Adapter for mentioned pictures, Claquasse's pose control-LoRA
+for poses and kohya's ControlNet-LLLite for the other control maps. Each is its author's file uploaded as it is,
+configured by its own safetensors metadata.
 
 The IP-Adapter follows its ComfyUI node (LuciferTC9527/ComfyUI-Anima_IP-Adapter `nodes.py`) and InvokeAI's port
 (`backend/anima/ip_adapter.py`): SigLIP2's tokens of each picture, letterboxed on black at 512², scaled by its strength;
@@ -10,16 +11,23 @@ LoRA applies on the cross-attention q/k/v/out only, as both references apply it.
 LLLite follows kohya's `control_net_lllite_anima.py` (v2): the control map at the output's pixel size through
 `conditioning1`, one token per DiT token; each target linear's input gains `up(silu(film(mid([cond + depth, silu(down
 (x))]))))` times its strength, on every row.
+
+The pose control follows Claquasse's ComfyUI node (`anima_control_lora`): the skeleton's VAE latent, unnormalized
+as ComfyUI's `VAEEncode` gives it, through a zero-init `ControlEmbedder` (2×2 latent patches, 64 → 2048) added to
+the patch embedding times its strength, on every row; its rank-16 LoRA on every DiT linear and the LLM adapter's
+at 1, as `LoraLoaderModelOnly` loads it, armed on the model's `lora.Sites` while the pose steers.
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
-from dataclasses import dataclass, field
+from collections.abc import Callable, Mapping, Sequence
+from contextlib import ExitStack
+from dataclasses import dataclass, field, replace
 from typing import TypeVar
 
 import torch
 import torch.nn.functional as F
+from cozy_runtime.accel import lora
 from cozy_runtime.author import Config, Loader, Model, Serving, UnsupportedInput, uses_components
 from PIL import Image as PILImage
 from torch import nn
@@ -29,8 +37,9 @@ from transformers.initialization import no_init_weights
 T = TypeVar("T")
 #: An as-is upload's one component.
 COMPONENT = "model"
-#: Anima Base's DiT: 28 blocks of width 2048, 16 heads of 128.
+#: Anima Base's DiT: 28 blocks of width 2048, 16 heads of 128; its LLM adapter's blocks.
 BLOCKS, WIDTH, HEADS = 28, 2048, 16
+ADAPTER_BLOCKS = 6
 #: The SigLIP2 input the IP-Adapter was trained on: a 512² letterbox.
 SIGLIP_SIZE = 512
 
@@ -372,21 +381,113 @@ class Shifts:
         return out
 
 
+# ---------------------------------------------------------------- Claquasse's pose control-LoRA
+
+
+def _pose_sites() -> dict[str, tuple[str, str]]:
+    """Each LoRA site in the file's names (ComfyUI's, under `diffusion_model.`): the component and the linear it
+    adapts there, by Diffusers' names (TensorFS's `anima.single_file`)."""
+    sites: dict[str, tuple[str, str]] = {}
+    for n in range(BLOCKS):
+        native, ours = f"blocks.{n}", f"transformer_blocks.{n}"
+        for attention, attn in (("self_attn", "attn1"), ("cross_attn", "attn2")):
+            for p in "qkv":
+                sites[f"{native}.{attention}.{p}_proj"] = ("transformer", f"{ours}.{attn}.to_{p}")
+            sites[f"{native}.{attention}.output_proj"] = ("transformer", f"{ours}.{attn}.to_out.0")
+        for part, norm in (("self_attn", "norm1"), ("cross_attn", "norm2"), ("mlp", "norm3")):
+            for i in (1, 2):
+                sites[f"{native}.adaln_modulation_{part}.{i}"] = ("transformer", f"{ours}.{norm}.linear_{i}")
+        sites[f"{native}.mlp.layer1"] = ("transformer", f"{ours}.ff.net.0.proj")
+        sites[f"{native}.mlp.layer2"] = ("transformer", f"{ours}.ff.net.2")
+    for n in range(ADAPTER_BLOCKS):
+        block = f"blocks.{n}"
+        for attention in ("self_attn", "cross_attn"):
+            for p in ("q_proj", "k_proj", "v_proj", "o_proj"):
+                sites[f"llm_adapter.{block}.{attention}.{p}"] = ("text_conditioner", f"{block}.{attention}.{p}")
+        for i in (0, 2):
+            sites[f"llm_adapter.{block}.mlp.{i}"] = ("text_conditioner", f"{block}.mlp.{i}")
+    return sites
+
+
+def _put(root: nn.Module, path: str, module: nn.Module) -> None:
+    parent = root
+    for name in path.split(".")[:-1]:
+        if not hasattr(parent, name):
+            parent.add_module(name, nn.Module())
+        parent = parent.get_submodule(name)
+    parent.add_module(path.rsplit(".", 1)[-1], module)
+
+
+#: The stored dtypes a pose file's tensors keep (its embedder f32, its LoRA bf16).
+_DTYPES = {"f32": torch.float32, "bf16": torch.bfloat16, "f16": torch.float16}
+
+
+class PoseGraph:
+    def __init__(self, config: Config) -> None:
+        file = f"{COMPONENT}.diffusion_model"
+        root = nn.Module()
+        key = f"{file}.control_embedder.proj.weight"
+        outputs, inputs = config.tensor_shape(key, default=(WIDTH, 64))
+        self.embedder = nn.Linear(inputs, outputs, dtype=_DTYPES[config.tensor_dtype(key, default="f32")])
+        _put(root, "diffusion_model.control_embedder.proj", self.embedder)
+        #: Each component's factors by its linear's path there, as `lora.Sites` arms them.
+        self.sites: dict[str, dict[str, lora.Pair]] = {"transformer": {}, "text_conditioner": {}}
+        for native, (component, path) in _pose_sites().items():
+            down, up = f"{file}.{native}.lora_A.weight", f"{file}.{native}.lora_B.weight"
+            rank, fan_in = config.tensor_shape(down, default=(16, WIDTH))
+            fan_out, _ = config.tensor_shape(up, default=(WIDTH, rank))
+            # No stored alpha: ComfyUI's loader then scales by 1.
+            pair = lora.Pair(fan_in, fan_out, rank).to(_DTYPES[config.tensor_dtype(down, default="bf16")])
+            _put(root, f"diffusion_model.{native}", pair)
+            self.sites[component][path] = pair
+        self.components: dict[str, nn.Module] = {COMPONENT: root}
+
+
+class PoseControl(Model[PoseGraph]):
+    """Claquasse's Anima pose control-LoRA: its control embedder and its LoRA's factors, kept at their 16 bits."""
+
+    serving = Serving(encoded_leaves=False, min_bits=16)
+
+    graph: PoseGraph
+
+    def load(self, loader: Loader) -> None:
+        self.graph = loader.construct(PoseGraph)
+
+    @uses_components(COMPONENT)
+    def tokens(self, latent: torch.Tensor) -> torch.Tensor:
+        """The skeleton's latent [1, 16, 1, h, w], unnormalized, as tokens the patch embedding gains: [1, 1, h/2,
+        w/2, 2048], its 2×2 patches flattened channel first, as Cosmos' patch embedding flattens."""
+        b, c, t, h, w = latent.shape
+        patches = latent.reshape(b, c, t, h // 2, 2, w // 2, 2).permute(0, 2, 3, 5, 1, 4, 6).flatten(4)
+        weight = self.graph.embedder.weight
+        out: torch.Tensor = self.graph.embedder(patches.to(weight.device, weight.dtype))
+        return out
+
+    @uses_components(COMPONENT)
+    def applied(self, sites: Mapping[str, lora.Sites], body: Callable[[], T]) -> T:
+        """`body` with this LoRA armed on Anima's components (`sites`, by component)."""
+        with ExitStack() as armed:
+            for component, factors in self.graph.sites.items():
+                armed.enter_context(sites[component].applied(factors))
+            return body()
+
+
 # ---------------------------------------------------------------- one denoise's adapters
 
 
 @dataclass
 class Adapters:
-    """What a denoise's DiT calls add: the references, the control maps' shifts, and which rows of the call are
-    the conditional ones (the IP term goes there only). The DiT's call takes it as an argument, so the Runtime
-    runs those calls as written, never from a recorded graph."""
+    """What a denoise's DiT calls add: the references, the control maps' shifts, the pose's tokens on the patch
+    embedding, and which rows of the call are the conditional ones (the IP term goes there only). The DiT's call
+    takes it as an argument, so the Runtime runs those calls as written, never from a recorded graph."""
 
     references: References | None = None
     shifts: list[Shifts] = field(default_factory=list)
+    embedded: torch.Tensor | None = None  # [1, 1, h/2, w/2, 2048]
     rows: tuple[bool, ...] = (True,)
 
     def at(self, rows: tuple[bool, ...]) -> Adapters:
-        return Adapters(self.references, self.shifts, rows)
+        return replace(self, rows=rows)
 
     def shift(self, index: int, target: str, x: torch.Tensor) -> torch.Tensor:
         for shifts in self.shifts:

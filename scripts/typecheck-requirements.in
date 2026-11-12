@@ -2,7 +2,7 @@
 # `scripts/typecheck.sh lock` pins them into typecheck-requirements.txt; re-pin when the Runtime moves:
 # the typed Runtime the packages build on and the TensorFS whose typed stubs it reads (git revs until they publish).
 mypy
-cozy-runtime[adapters,media] @ git+https://github.com/cozy-creator/cozy-runtime@e71b9aecf48ce44119e97be8fc8e28c2993e32a5
+cozy-runtime[adapters,media] @ git+https://github.com/cozy-creator/cozy-runtime@a90a31f830389ec7f2fc7ff1ffebb6ca9512843a
 tensorfs==0.24.2
 torch @ https://download.pytorch.org/whl/cpu/torch-2.15.0%2Bcpu-cp312-cp312-manylinux_2_28_x86_64.whl
 torchvision

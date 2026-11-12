@@ -22,7 +22,7 @@ from typing import TYPE_CHECKING, Protocol, cast
 import torch
 import torch.nn.functional as F
 from cozy_runtime import tiles
-from cozy_runtime.accel import fusion
+from cozy_runtime.accel import fusion, lora
 from cozy_runtime.author import device
 from cozy_runtime.accel.kernels import PreQuantized, int8_rows, native, quantize_once, rms_rope_split_half
 from diffusers.models.activations import GELU
@@ -45,6 +45,7 @@ from diffusers.models.normalization import RMSNorm
 from diffusers.models.transformers.transformer_cosmos import (
     CosmosAdaLayerNormZero,
     CosmosAttnProcessor2_0,
+    CosmosPatchEmbed,
     CosmosRotaryPosEmbed,
     CosmosTransformer3DModel,
     CosmosTransformerBlock,
@@ -455,7 +456,10 @@ def _native_rms_forward(module: RMSNorm, hidden_states: torch.Tensor) -> torch.T
 
 
 def _hooked(*modules: torch.nn.Module) -> bool:
-    return any(m._forward_hooks or m._forward_pre_hooks for m in modules)
+    """Whether a hook other than an overlay's changes these modules' forwards (`int8_rows` reads an overlay's)."""
+    return any(
+        m._forward_pre_hooks or any(not isinstance(h, lora.Hook) for h in m._forward_hooks.values()) for m in modules
+    )
 
 
 def _normed(
@@ -663,6 +667,15 @@ def _block_forward(
     return hidden_states
 
 
+def _patch_forward(embed: CosmosPatchEmbed, hidden_states: torch.Tensor, *, scope: _Scope) -> torch.Tensor:
+    """`CosmosPatchEmbed.forward`, plus the pose's tokens of `scope`'s call on every row."""
+    out: torch.Tensor = CosmosPatchEmbed.forward(embed, hidden_states)
+    adapters = scope.adapters
+    if adapters is None or adapters.embedded is None:
+        return out
+    return out + adapters.embedded.to(out.dtype)
+
+
 def _install_transformer_plan(transformer: CosmosTransformer3DModel, *, kernel: bool) -> None:
     """The plan's forwards; with `kernel`, the fused self-attention kernel and its rotary table."""
     rope = _RopeMatrix()
@@ -717,6 +730,8 @@ def _install_transformer_plan(transformer: CosmosTransformer3DModel, *, kernel: 
         block.forward = MethodType(partial(_block_forward, index=index, scope=scope), block)  # type: ignore[method-assign]  # the plan's forward
     if kernel:
         transformer.rope.forward = MethodType(_direct_rope_forward, transformer.rope)  # type: ignore[method-assign]  # the plan's
+    embed = transformer.patch_embed
+    embed.forward = MethodType(partial(_patch_forward, scope=scope), embed)  # type: ignore[method-assign]  # the plan's
     transformer._cozy_scope = scope  # type: ignore[assignment]  # a plain attribute: nn.Module keeps non-tensors as such
     original = transformer.forward
 
