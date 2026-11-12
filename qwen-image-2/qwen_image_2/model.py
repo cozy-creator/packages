@@ -376,6 +376,19 @@ class QwenImage21Model(Model[QwenImage21Graph]):
                 )
         return resized, torch.cat(packed, dim=1)
 
+    @uses_components("vae")
+    def encode_canvas(self, image: Image.Image) -> torch.Tensor:
+        """The picture at its own size as the DiT's packed normalized latents (`denoise`'s `start`)."""
+        vae = self.graph.components["vae"]
+        device = torch.device(str(self.device))
+        pipeline = self._pipeline()
+        with torch.inference_mode():
+            pixels = pipeline.image_processor.preprocess(image.convert("RGBA"), width=image.width, height=image.height)
+            encoded = _encoded(vae, pixels.unsqueeze(2).to(device=device, dtype=vae.dtype))
+            return pipeline._pack_latents(  # type: ignore[no-untyped-call]  # Diffusers' own, unannotated
+                encoded, 1, pipeline.latent_channels, encoded.shape[3], encoded.shape[4]
+            ).cpu()
+
     @memoize
     @uses_components("text_encoder")
     def encode_image_prompt(
@@ -406,8 +419,13 @@ class QwenImage21Model(Model[QwenImage21Graph]):
         reference_images: list[Image.Image] | None = None,
         reference_latents: torch.Tensor | None = None,
         image_pad_mask: torch.Tensor | None = None,
+        start: torch.Tensor | None = None,
+        strength: float = 1.0,
     ) -> torch.Tensor:
-        """`QwenImage21Pipeline.__call__`'s loop, the references' latent tokens before the target's.
+        """With `start` (`encode_canvas`), img2img: the steps whose sigma is above `strength` are skipped and the
+        state begins as `start` noised to the first kept sigma.
+
+        `QwenImage21Pipeline.__call__`'s loop, the references' latent tokens before the target's.
         Its preparation mirrors the pipeline's, reusing its `prepare_latents`, `calculate_shift`
         and `retrieve_timesteps`, so the schedule, noise and layout match the Diffusers loop.
 
@@ -450,7 +468,16 @@ class QwenImage21Model(Model[QwenImage21Graph]):
                 euler.config.get("max_shift", 1.15),
             )
             _, steps = retrieve_timesteps(euler, steps, device, sigmas=spacing, mu=mu)  # type: ignore[arg-type]  # Diffusers types sigmas as a list; the array serves
-            euler.set_begin_index(0)
+            # With `start`, img2img: `strength` takes the place of the last sigma above it, the steps before skipped.
+            first = 0
+            if start is not None:
+                first = max(int((euler.sigmas[:-1] > strength).sum()) - 1, 0)
+                euler.sigmas[first] = min(float(euler.sigmas[first]), strength)
+                euler.timesteps[first] = euler.sigmas[first] * euler.config["num_train_timesteps"]
+            euler.set_begin_index(first)
+            if start is not None:
+                sigma = float(euler.sigmas[first])
+                latents = ((1 - sigma) * start.to(device=device, dtype=torch.float32) + sigma * latents.float()).to(latents.dtype)
             timesteps = euler.timesteps
             # The pipeline casts the timestep to the latent dtype and only then divides by 1000.
             times = timesteps.to(torch.bfloat16) / 1000
@@ -464,6 +491,8 @@ class QwenImage21Model(Model[QwenImage21Graph]):
                 # Under a parallel decoder the state is F32 from the first step, as `scheduler.step` makes it.
                 latents = latents if heads is None else latents.float()
                 for i, t in enumerate(timesteps):
+                    if i < first:
+                        continue
                     noise = transformer(latents, joint=(times[i : i + 1], embeds, references, *joint.inputs()),
                                         projection=None if heads is None else heads[i])
                     latents = euler.step(noise, t, latents, return_dict=False)[0]
@@ -475,13 +504,13 @@ class QwenImage21Model(Model[QwenImage21Graph]):
             with retained(nbytes * transformer.dtype.itemsize * len(blocks)) as held:
                 # Step 0 prefills each layer's prefix K/V into the store over the full joint sequence.
                 kv_cache = _RetainedKV(len(blocks), held)
-                first = None
+                hook = None
                 if heads is not None:
-                    first = transformer.proj_out.register_forward_hook(lambda _m, a, _o: F.linear(a[0], heads[0]))
+                    hook = transformer.proj_out.register_forward_hook(lambda _m, a, _o: F.linear(a[0], heads[first]))
                 try:
                     noise = transformer(
                         hidden_states=torch.cat([*references, latents], dim=1),
-                        timestep=timesteps[0:1].to(transformer.dtype) / 1000,
+                        timestep=timesteps[first : first + 1].to(transformer.dtype) / 1000,
                         encoder_hidden_states=embeds,
                         encoder_hidden_states_mask=None,
                         img_shapes=img_shapes,
@@ -492,15 +521,15 @@ class QwenImage21Model(Model[QwenImage21Graph]):
                         return_dict=False,
                     )[0]
                 finally:
-                    if first is not None:
-                        first.remove()
+                    if hook is not None:
+                        hook.remove()
                 noise = noise[:, -latents.shape[1] :]
                 # A parallel decoder's prediction is F32, and so is the state from here (PDD's
                 # `native_time_fp32_state`); the DiT reads it in its own dtype.
                 noise = noise if heads is None else noise.float()
-                latents = euler.step(noise, timesteps[0], latents, return_dict=False)[0]
-                progress(0, steps)
-                for i in range(1, steps):
+                latents = euler.step(noise, timesteps[first], latents, return_dict=False)[0]
+                progress(first, steps)
+                for i in range(first + 1, steps):
                     cached = (times[i : i + 1], layout.rotary_emb, layout.modulation_mask, kv_cache.prefix())
                     noise = transformer(latents, cached=cached, projection=None if heads is None else heads[i])
                     latents = euler.step(noise, timesteps[i], latents, return_dict=False)[0]

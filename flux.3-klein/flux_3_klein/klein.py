@@ -378,8 +378,12 @@ class Klein(Model[KleinGraph]):
         guidance: float | None,
         seed: int,
         progress: Callable[[int, int], None],
+        start: torch.Tensor | None = None,
+        strength: float = 1.0,
     ) -> torch.Tensor:
-        """BFL's Euler sampler: a flow map jumps to the next timestep; the base model takes CFG.
+        """BFL's Euler sampler: a flow map jumps to the next timestep; the base model takes CFG. With
+        `start` (packed normalized latents of the canvas), the state begins as `start` noised to
+        `strength` and the schedule's timesteps below it follow.
 
         Text and references sit at t = 0, so the base model runs their early blocks once per
         request and the Runtime holds them (`retained`: on the card while there is room, else
@@ -390,9 +394,13 @@ class Klein(Model[KleinGraph]):
         device = torch.device(str(self.device))
         rows, columns = height // PATCH, width // PATCH
         timesteps = schedule(steps)
+        if start is not None:
+            timesteps = [strength, *(t for t in timesteps if t < strength)]
         with torch.no_grad():
             noise = rng.noise((rows * columns, tf.config["in_channels"]), seed)
             x = noise[None].to(torch.bfloat16).float().to(device)  # bf16 values, an fp32 state across steps
+            if start is not None:
+                x = (1.0 - strength) * start.to(device).float() + strength * x
             texts = [embeds] if negative is None else [negative, embeds]
             texts = [t.to(device=device, dtype=torch.bfloat16) for t in texts]
             refs = None if references is None else references[0].to(device)
@@ -433,7 +441,7 @@ class Klein(Model[KleinGraph]):
                         unconditional, conditional = velocities
                         velocity = unconditional + guidance * (conditional - unconditional)
                     x = x + (then - now) * velocity
-                    progress(i, steps)
+                    progress(i, len(timesteps) - 1)
         return x.cpu()
 
     @uses_components("vae")

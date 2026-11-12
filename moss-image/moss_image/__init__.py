@@ -8,8 +8,11 @@ from typing import Annotated, Literal
 
 import msgspec
 from cozy_runtime.author import Adjustments, App, Context, Outputs, Seed, Telemetry
-from cozy_runtime.fields import AspectRatio, Ratios
+from cozy_runtime.fields import Advanced, AspectRatio, FileBound, Ratios
+from cozy_runtime.media import ImageFile
+from PIL import Image as PILImage
 from cozy_runtime.image import (
+    MEGAPIXEL,
     Guidance,
     ImageRequest,
     ImageResult,
@@ -118,3 +121,42 @@ def image(ctx: Context, payload: ImageBox, model: MossImage, out: Outputs, tel: 
     request = GenerateInput(prompt=payload.instructions, aspect_ratio=payload.aspect_ratio, megapixels=payload.megapixels,
                             seed=payload.seed, negative_prompt=payload.negative_prompt)  # fmt: skip
     return generate(ctx, request, model, out, tel, adj)
+
+
+#: What MOSS-Image is told of a picture it upscales.
+UPSCALE_PROMPT = "a high quality, highly detailed, sharp picture"
+
+
+class UpscaleInput(msgspec.Struct, kw_only=True):
+    #: `upscale`: the picture, the box's own version.
+    image: Annotated[ImageFile, FileBound(max_decoded_bytes=256 << 20)]
+    #: `upscale`: the picture's ratio at this size (`SIZES.fit`), up to MOSS-Image's 4 MP.
+    megapixels: Literal[2, 4] = 4
+    #: `MossImage.denoise`'s `strength`: the noise the picture starts under (se-123).
+    denoise: Annotated[float, msgspec.Meta(gt=0, le=1), Advanced()] = 0.4
+    seed: Seed | None = None
+
+
+@app.tool(label="Upscale", named="image", defaults=_DEFAULTS, components=_COMPONENTS, memoize=True)
+def upscale(ctx: Context, payload: UpscaleInput, model: MossImage, out: Outputs, tel: Telemetry,
+            adj: Adjustments) -> ImageResult:
+    """The picture larger: Lanczos to the size asked, then MOSS-Image img2img over it (50-step schedule, CFG 3)."""
+    model.hold_vae(tel)
+    with tel.stage("reading picture"):
+        picture = payload.image.read()
+    width, height = SIZES.fit(adj, picture.size, payload.megapixels * MEGAPIXEL)
+    seed = payload.seed if payload.seed is not None else ImageRequest(prompt="").drawn_seed()
+    with tel.stage("encoding picture"):
+        start = model.encode_image(picture.resize((width, height), PILImage.Resampling.LANCZOS))
+    with tel.stage("encoding prompt"):
+        positive, negative = model.encode(UPSCALE_PROMPT), model.encode("")
+    ctx.raise_if_cancelled()
+    with tel.stage("generating image"):
+        latents = model.denoise(positive, negative, width=width, height=height, steps=STEPS, guidance=GUIDANCE, seed=seed,
+                                tel=tel, progress=ctx.progress, start=start, strength=payload.denoise)  # fmt: skip
+    with tel.stage("decoding image"):
+        image = model.decode(latents)
+    with tel.stage("saving image"):
+        asset = out.save_image(image, format="png")
+    tel.log("upscale", source=f"{picture.width}x{picture.height}", width=width, height=height, denoise=payload.denoise)
+    return ImageResult(asset, width, height, seed, UPSCALE_PROMPT)

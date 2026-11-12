@@ -8,7 +8,8 @@ from typing import Annotated, Literal
 
 import msgspec
 from cozy_runtime.author import Adjustments, App, Context, Outputs, Seed, Telemetry
-from cozy_runtime.fields import Advanced, AspectRatio, Image, Prompt, Ratios, name_key
+from cozy_runtime.fields import Advanced, AspectRatio, FileBound, Image, Prompt, Ratios, name_key
+from cozy_runtime.media import ImageFile
 from cozy_runtime.image import (
     Box,
     Guidance,
@@ -299,3 +300,49 @@ def image(ctx: Context, payload: ImageBox, drafter: Drafter, full: Klein, model:
     request = kind(prompt=payload.instructions, aspect_ratio=payload.aspect_ratio, megapixels=payload.megapixels,
                    seed=payload.seed, prompt_upsampling=payload.prompt_upsampling)  # fmt: skip
     return _generate(ctx, function, request, drafter, klein, upsampler, out, tel, adj)
+
+
+#: What Klein is asked of a picture it upscales, read directly (`tagged`).
+UPSCALE_PROMPT = (f"Upscale {tagged(1)} to a higher resolution. Keep the picture exactly as it is: the same composition, "
+                  "framing, colours, lighting and every detail; only make it sharper and more finely detailed.")
+
+
+class UpscaleInput(msgspec.Struct, kw_only=True):
+    #: `upscale`: the picture, the box's own version.
+    image: Annotated[ImageFile, FileBound(max_decoded_bytes=256 << 20)]
+    #: `upscale`: the picture's ratio at this size (`SIZES.fit`), up to Klein's 4 MiP.
+    megapixels: Literal[2, 4] = 4
+    #: `Klein.denoise`'s `strength`: the noise the picture starts under; 1 redraws it from noise (se-123).
+    denoise: Annotated[float, msgspec.Meta(gt=0, le=1), Advanced()] = 0.35
+    seed: Seed | None = None
+
+
+@app.tool(label="Upscale", named="image", defaults={"model": _DISTILLED}, components={"model": _KLEIN},
+          memoize=True)  # fmt: skip
+def upscale(ctx: Context, payload: UpscaleInput, model: Klein, out: Outputs, tel: Telemetry,
+            adj: Adjustments) -> ImageResult:
+    """The picture larger: Klein edits it at the size asked, the picture Lanczos-upscaled to the canvas both as the
+    reference and, below `denoise`, as the start."""
+    with tel.stage("reading picture"):
+        picture = payload.image.read()
+    width, height = SIZES.fit(adj, picture.size, payload.megapixels * MEGAPIXEL)
+    canvas = picture.resize((width, height), PILImage.Resampling.LANCZOS)
+    seed = payload.seed if payload.seed is not None else ImageRequest(prompt="").drawn_seed()
+    model.hold_vae(tel)
+    with tel.stage("encoding reference images"):
+        references = model.encode_references([canvas])
+    with tel.stage("encoding prompt"):
+        embeds = model.encode(UPSCALE_PROMPT)
+    ctx.raise_if_cancelled()
+    with tel.stage("generating image"):
+        tokens = model.denoise(
+            embeds, None, references, width=width, height=height, steps=_STEPS["generate_turbo"][0], guidance=None,
+            seed=seed, progress=ctx.progress, start=references[0] if payload.denoise < 1 else None,
+            strength=payload.denoise,
+        )
+    with tel.stage("decoding image"):
+        image = model.decode(tokens, width=width, height=height)
+    with tel.stage("saving image"):
+        asset = out.save_image(image, format="png")
+    tel.log("upscale", source=f"{picture.width}x{picture.height}", width=width, height=height, denoise=payload.denoise)
+    return ImageResult(asset, width, height, seed, UPSCALE_PROMPT)

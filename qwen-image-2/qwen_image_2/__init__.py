@@ -9,8 +9,9 @@ from typing import Annotated, Literal
 import msgspec
 import torch
 from cozy_runtime.author import Adjustments, App, Context, OutputError, Outputs, Seed, Telemetry
-from cozy_runtime.fields import Advanced, AspectRatio, Image, MENTION, Prompt, Ratios
-from cozy_runtime.image import ImageRequest, ImageResult, Sizes, ratio_of
+from cozy_runtime.fields import Advanced, AspectRatio, FileBound, Image, MENTION, Prompt, Ratios
+from cozy_runtime.image import MEGAPIXEL, ImageRequest, ImageResult, Sizes, ratio_of
+from cozy_runtime.media import ImageFile
 from PIL import Image as PILImage
 
 from . import quantize as quantize  # its recipes
@@ -278,3 +279,53 @@ def image(
                             prompt_upsampling=payload.prompt_upsampling, creativity=payload.creativity)  # fmt: skip
     return _generate(ctx, request, expander, model, rewriter, text_encoder, out, tel, adj,
                      turbo_lora if payload.turbo else None)  # fmt: skip
+
+
+#: What Qwen Image 2 is asked of a picture it upscales; a lone picture is named in words (`label`).
+UPSCALE_PROMPT = ("Upscale the picture to a higher resolution. Keep the picture exactly as it is: the same composition, "
+                  "framing, colours, lighting and every detail; only make it sharper and more finely detailed.")
+
+
+class UpscaleInput(msgspec.Struct, kw_only=True):
+    #: `upscale`: the picture, the box's own version.
+    image: Annotated[ImageFile, FileBound(max_decoded_bytes=256 << 20)]
+    #: `upscale`: the picture's ratio at this size (`SIZES.fit`), up to Qwen's 4 MP.
+    megapixels: Literal[2, 4] = 4
+    #: `QwenImage21Model.denoise`'s `strength`: the noise the picture starts under; 1 redraws it from noise (se-123).
+    denoise: Annotated[float, msgspec.Meta(gt=0, le=1), Advanced()] = 0.2
+    seed: Seed | None = None
+
+
+_UPSCALE = {"model": "qwen/qwen-image-2.1@0.1.0", "text_encoder": "atomicchat/qwen-image-2.1-text-encoder-abliterated@0.1.0",
+            "turbo_lora": "alibaba-pai/qwen-image-2.1-fun-acc@0.1.0"}
+
+
+@app.tool(label="Upscale", named="image", defaults=_UPSCALE,
+          components={"model": ("transformer", "vae"), "text_encoder": ("text_encoder",)}, memoize=True)  # fmt: skip
+def upscale(ctx: Context, payload: UpscaleInput, model: QwenImage21Model, text_encoder: QwenImage21Model,
+            turbo_lora: FunAccLoRA, out: Outputs, tel: Telemetry, adj: Adjustments) -> ImageResult:
+    """The picture larger: Qwen Image 2 Turbo edits it at the size asked, the picture its reference and, Lanczos-upscaled
+    to the canvas, below `denoise` its start."""
+    with tel.stage("reading picture"):
+        picture = payload.image.read(mode="RGBA")
+    width, height = SIZES.fit(adj, picture.size, payload.megapixels * MEGAPIXEL)
+    seed = payload.seed if payload.seed is not None else ImageRequest(prompt="").drawn_seed()
+    model.hold_vae(tel)
+    with tel.stage("encoding reference images"):
+        conditioning, latents = model.encode_reference_images([picture])
+        start = None
+        if payload.denoise < 1:
+            start = model.encode_canvas(picture.resize((width, height), PILImage.Resampling.LANCZOS))
+    with tel.stage("encoding prompt"):
+        embeds, mask, image_pad_mask = text_encoder.encode_image_prompt(UPSCALE_PROMPT, conditioning)
+    ctx.raise_if_cancelled()
+    with tel.stage("generating image"):
+        latents = turbo_lora.denoise(model, embeds, mask, width=width, height=height, steps=turbo_lora.steps, seed=seed,
+                                     progress=ctx.progress, reference_images=[picture], reference_latents=latents,
+                                     image_pad_mask=image_pad_mask, start=start, strength=payload.denoise)  # fmt: skip
+    with tel.stage("decoding image"):
+        image = decoded_image(model.decode(latents, width=width, height=height))
+    with tel.stage("saving image"):
+        asset = out.save_image(image, format="png")
+    tel.log("upscale", source=f"{picture.width}x{picture.height}", width=width, height=height)
+    return ImageResult(asset, width, height, seed, UPSCALE_PROMPT)
