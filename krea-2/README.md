@@ -27,10 +27,37 @@ cozy run krea-2/generate prompt='a red fox in fresh snow at golden hour' seed=7
 cozy run krea-2/generate_turbo --input request.yaml --lora <org/krea-2-lora>,0.8
 ```
 
-Fields: `prompt`, `aspect_ratio` (any `W:H`, default 1:1), `megapixels` (Raw 1, Turbo 4), `steps` (1–100) and
-`seed` (random when omitted, returned). `generate` also takes `guidance` (0–20; 0 runs no negative branch) and
-`negative_prompt` (default empty, as Krea's): Turbo samples without guidance. Krea 2 makes images from text only, so its `prompt` is words: a mentioned text box goes in as its words, and a mentioned picture as its name, with a warning ([references](../docs/references.md)).
-Unknown fields are dropped with a warning. The result is `image`, `width`, `height`, `seed` and `prompt`.
+Fields: `prompt`, `aspect_ratio` (any `W:H`, default 1:1, or the first picture's), `megapixels` (Raw 1, Turbo 4,
+or the first picture's), `steps` (1–100) and `seed` (random when omitted, returned). `generate` also takes
+`guidance` (0–20; 0 runs no negative branch) and `negative_prompt` (default empty, as Krea's): Turbo samples
+without guidance. Unknown fields are dropped with a warning. The result is `image`, `width`, `height`, `seed`
+and `prompt`.
+
+## Pictures
+
+Krea 2 is text-only upstream; its community adapters make it edit. Each is a LoRA the package arms itself,
+from its author's mirror on the Hub (`--model <slot>=<ref>` swaps one).
+
+- **Edit:** the pictures a prompt mentions (`<amy> on a beach at dusk`; up to 2, the first the scene, the
+  second the person) are edited with Identity Edit V2 (`edit` slot). A mention reads as its name
+  ([references](../docs/references.md)).
+- **Image-to-image:** `image` is a picture to start from, `denoise` how much of it is redrawn (default 0.7).
+- **Control:** `control` is a list of `{image, kind, strength}`, `image` the ready map. Krea 2 reads the first
+  of a kind it has an adapter for; the others are ignored with a warning.
+
+| input | adapter (slot) | how it conditions | Raw | Turbo |
+| --- | --- | --- | --- | --- |
+| mentioned pictures | conradlocke Identity Edit V2 (`edit`) | VAE tokens before the target + Qwen3-VL sees the pictures | yes | yes (8 steps, its card's) |
+| `pose` (OpenPose/DWPose skeleton) | thedeoxen pose ControlNet LoRA (`pose`) | ai-toolkit edit: VAE tokens after the target at t=0 + `Picture 1:` | yes | yes (trained on Turbo) |
+| `lineart` (white lines on black) | Cierpliwy lineart edit (`lineart`) | ai-toolkit edit | yes (trained on Raw) | yes |
+| `inpaint` (the region to repaint black) | Cierpliwy inpaint edit (`inpaint`) | ai-toolkit edit, its pictures attending only to themselves | yes (trained on Raw) | yes |
+| `depth` (near is white) | Patil depth ControlNet-LoRA (`depth`) | the map's latents beside each image token (`img_in` 64 → 128) | yes | yes |
+| `sketch`, `canny` | none | ignored | | |
+
+With pictures, the output is at most 2 MP (the adapters' range). A control with mentioned pictures goes as its
+VAE tokens alone. General Edit V2 (`--model edit=conradlocke/general-edit@0.1.0`) is the same author's
+instruction editor (remove, recolor, relight); the two are not stacked. Identity Edit V2 and General Edit V2 are
+free for non-commercial use only; commercial use needs the author's licence (their model card).
 
 Guidance is Krea's: `cond + g·(cond − uncond)`, so Krea's 3.5 is ComfyUI's cfg 4.5, and Turbo's 0 is
 ComfyUI's cfg 1.

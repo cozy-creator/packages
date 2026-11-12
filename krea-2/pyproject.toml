@@ -1,7 +1,7 @@
 [project]
 name = "krea-2"
-version = "0.8.0"
-description = "Cozy text-to-image with Krea 2: Raw, the full model, and Turbo, its 8-step distillation"
+version = "0.9.0rc1"
+description = "Cozy Krea 2: Raw and Turbo, text to image, and through its community adapters edits, image-to-image and control maps"
 requires-python = ">=3.12"
 dependencies = [
     "cozy-runtime[adapters,media]>=0.45.0,<0.46",
