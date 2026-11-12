@@ -505,6 +505,7 @@ class MossImage(Model[MossGraph]):
         tel: Telemetry,
         start: torch.Tensor | None = None,
         strength: float = 1.0,
+        denoise: float | None = None,
         references: list[torch.Tensor] | None = None,
         edit_format: EditFormat = "moss-image-edit",
     ) -> torch.Tensor:
@@ -522,9 +523,16 @@ class MossImage(Model[MossGraph]):
         fused = device.type == "cuda" and not native()
         scheduler = construct(MossScheduler, self.graph.scheduler_config)
         scheduler.set_timesteps(steps, device=device)
-        # With `start` (`encode_image`), img2img: the steps whose sigma is above `strength` are skipped and the
-        # state begins as `start` noised to the first kept sigma.
-        first = 0 if start is None else min(int((scheduler.sigmas[:-1] > strength).sum()), len(scheduler.timesteps) - 1)
+        # With `start` (`encode_image`), img2img: the steps whose sigma is above `strength` are skipped, or with
+        # `denoise` all but that last fraction of them (ComfyUI's denoise), and the state begins as `start` noised to
+        # the first kept sigma.
+        count = len(scheduler.timesteps)
+        if start is None:
+            first = 0
+        elif denoise is not None:
+            first = count - max(1, round(denoise * count))
+        else:
+            first = min(int((scheduler.sigmas[:-1] > strength).sum()), count - 1)
         if start is not None:
             scheduler.set_begin_index(first)
         with torch.no_grad():

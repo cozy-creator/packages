@@ -33,7 +33,8 @@ and checks every mention names something, so a package only replaces `<key>` wit
 | krea-2 | its name (up to 2) | Identity Edit V2's captions name no pictures |
 | minimax-h3 | `<Picture N>`, `<Video N>`, `<Audio N>` per segment; see its README | MiniMax's reference guide |
 | anima | its description, else nothing | the pictures go to its IP-Adapter, which upstream prompts never name |
-| ideogram-4, moss-image, sdxl | (takes no pictures) | text to image only |
+| moss-image | its name; several as `image N`; as words under a control map | no convention upstream: Moss-Image-Edit's instructions say "the image" |
+| ideogram-4, sdxl | (takes no pictures) | text to image only |
 
 ```python
 from cozy_runtime.author import Image, ImageRequest, Prompt
