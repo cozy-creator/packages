@@ -414,8 +414,8 @@ class SdxlModel(Model[SdxlPipeline]):
                 unet.cozy_step = i
                 noise = guided(unet, scheduler.scale_model_input(latents, t), scheduler.timesteps[i], prompt,
                                pooled, time_ids, guidance)
-                latents, x0 = advance(noise, t, latents)[:2]
-                preview(x0, "sdxl")
+                preview(lambda: (latents - (1 - scheduler.alphas_cumprod[t]) ** 0.5 * noise) / scheduler.alphas_cumprod[t] ** 0.5, "sdxl")
+                latents = advance(noise, t, latents)[0]
                 progress(i, steps)
             image = decode_latents(vae, latents.to(dtype=dtype), scale)
         return image, prompt, pooled, latents
