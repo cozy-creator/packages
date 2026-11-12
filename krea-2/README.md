@@ -68,14 +68,16 @@ ComfyUI's cfg 1.
 `text_encoder` is its own slot: it reads the Qwen3-VL-4B of any Krea 2 checkpoint, the function's own by default
 (Raw's and Turbo's are byte-identical); `model` reads only the DiT and VAE. Quiho's abliterated encoder
 ([Krea2_NSFW_Uncensored_Complete](https://huggingface.co/Quiho/Krea2_NSFW_Uncensored_Complete),
-`quiho/qwen3-vl-4b-abliterated`) is Qwen3-VL-4B with its refusal direction removed, so it reads a prompt the official
-encoder steers away from as written:
+`quiho/qwen3-vl-4b-abliterated`) is Qwen3-VL-4B with its refusal direction removed:
 
 ```sh
 cozy run krea-2/generate_turbo prompt='...' model.text_encoder=quiho/qwen3-vl-4b-abliterated@0.1.0
 ```
 
-Its weights are fp8, as Quiho publishes them (lane `fp8`).
+Quiho publishes it in fp8 only. Its `int8` lane is this package's recipe, written from those fp8 values, and serves
+wherever the card has int8 tensor cores; `fp8` serves the rest.
+On an RTX 4090 it changed details but not what an explicit prompt renders, with or without an NSFW LoRA: what
+Turbo leaves out (a "topless" prompt drawn in a bikini) it leaves out with either encoder.
 
 ## Sizes
 
@@ -125,6 +127,7 @@ cozy model quantize krea/krea-2-turbo@sha256:<bf16 commit> --lane int8 --package
 cozy model upload hf://Quiho/Krea2_NSFW_Uncensored_Complete@4ecd0d82d30daec24691db30495d752f2d7d7f64/qwen3VL4BAbliteratedComfyui_FP8.safetensors \
   quiho/qwen3-vl-4b-abliterated --lane fp8 --base krea/krea-2-turbo@sha256:<bf16 commit> \
   --mirror https://huggingface.co/Quiho/Krea2_NSFW_Uncensored_Complete --on <machine>
+cozy model quantize quiho/qwen3-vl-4b-abliterated@sha256:<fp8 commit> --lane int8 --package krea-2 --on <machine>
 ```
 
 The upload reads the Diffusers folders (`raw.safetensors` and `turbo.safetensors`, the reference
@@ -134,7 +137,8 @@ every linear of the 28 DiT blocks and every projection of Qwen3-VL's language la
 embedders, modulation, final layer, token embedding and VAE keep their bytes.
 
 Quiho's encoder is one ComfyUI file (`model.layers.*`, `model.visual.*`), which TensorFS's `qwen3vl.comfy` table reads
-as the `text_encoder`; its linears are plain fp8 with no scales, which TensorFS reads at scale 1, as ComfyUI does.
+as the `text_encoder`; its linears are plain fp8 with no scales, which TensorFS reads as `fp8.rowwise` with every row's
+scale 1, the values ComfyUI upcasts, so the int8 recipe reads them exactly.
 The upload takes the DiT, VAE and tokenizer from `--base`, so the mirror is a whole Krea 2 Turbo checkpoint, of which
 the slot reads only the encoder.
 
