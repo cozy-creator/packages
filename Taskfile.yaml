@@ -30,7 +30,7 @@ tasks:
   # `--rc` (cl-922), on a checkout of the open RC's branch: a package built for the RC's Runtime, at a PEP 440 prerelease
   # version (`0.10.0rc1`), published live from that branch: every hub's unversioned default and every released client skip
   # a prerelease, and a dev home's rental on the RC's Runtime takes it. It declares that Runtime as its floor, locked by URL
-  # (`cozy-runtime>=0.46.0.dev2250,<0.47`, scripts/rc-floor.py), and its Triton sets compile with it (cozy-runtime's
+  # (`cozy-runtime>=0.47.0.dev2260,<0.48`, scripts/rc-floor.py), and its Triton sets compile with it (cozy-runtime's
   # prerelease rc-<x.y.z>); the pyproject and lock it changes are pushed to the RC branch; nothing cascades.
   publish:
     desc: "Publish candidates from master to every hub (yanked), then cascade to their in-repo dependents: task publish -- [--dry-run] [--rc] qwen-image-2"
