@@ -67,8 +67,9 @@ class GenerateInput(ImageRequest):
     prompt: Prompt[Image] = Prompt()  # type: ignore[assignment]  # a prompt with pictures, in place of the base's text
     #: Image to image: start from this picture, `strength` of the schedule redrawing it.
     image: Annotated[ImageFile, FileBound(max_decoded_bytes=256 << 20)] | None = None
-    #: How much of the picture is redrawn: 1 is from noise.
-    strength: Annotated[float, msgspec.Meta(gt=0.0, le=1.0), Advanced()] = 0.6
+    #: How much of the picture is redrawn: 1 is from noise. 0.9 by default: at 0.6 and 0.75 a new outfit in the
+    #: words left the old one; 0.9 changed it and kept the character (se-127, pod-session 43205340966).
+    strength: Annotated[float, msgspec.Meta(gt=0.0, le=1.0), Advanced()] = 0.9
     #: Control maps, each through its kind's ControlNet-LLLite; `inpaint`'s is the picture with the area to
     #: redraw transparent.
     control: list[Control[Kind]] = msgspec.field(default_factory=list)
@@ -295,7 +296,7 @@ class ImageBox(msgspec.Struct, kw_only=True):
     #: `generate`: start from this picture (image to image).
     image: Annotated[ImageFile, FileBound(max_decoded_bytes=256 << 20)] | None = None
     #: `generate`: how much of the start picture is redrawn.
-    strength: Annotated[float, msgspec.Meta(gt=0.0, le=1.0), Advanced()] = 0.6
+    strength: Annotated[float, msgspec.Meta(gt=0.0, le=1.0), Advanced()] = 0.9
     #: `generate`: control maps, each through its kind's ControlNet-LLLite.
     control: list[Control[Kind]] = msgspec.field(default_factory=list)
     #: `generate`: how strongly the mentioned pictures steer.

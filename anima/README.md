@@ -43,7 +43,8 @@ steps 8–50, guidance 1–10. Out of range clamps with a `clamp` adjustment. Th
   IP-Adapter (`lucifertc/ip-adapter`, with `google/siglip2-base-patch16-512`): the character's hair, outfit and
   accessories carry over. A mention reads as its picture's description, else as nothing ([references](../docs/references.md)).
   `reference_strength` (0–2, default 1) scales them.
-- **Image to image:** `image` is the start picture, `strength` (default 0.6) how much of it is redrawn.
+- **Image to image:** `image` is the start picture, `strength` (default 0.9) how much of it is redrawn: below about
+  0.8 it keeps the picture's colours and outfit whatever the words say.
 - **Control maps:** `control` is a list of `{image, kind, strength}`, each map at any size (it is fitted to the
   output), through kohya's ControlNet-LLLite for its kind:
 
@@ -51,7 +52,7 @@ steps 8–50, guidance 1–10. Out of range clamps with a `clamp` adjustment. Th
   |---|---|---|
   | `sketch`, `lineart` | lines or a scribble | `kohya-ss/lllite-any-test-like` (Base 1.0) |
   | `depth` | a depth map | `kohya-ss/lllite-depth` (Preview3) |
-  | `pose` | an OpenPose skeleton | `kohya-ss/lllite-pose` (Preview3) |
+  | `pose` | an OpenPose skeleton | `kohya-ss/lllite-pose` (Preview3; follows loosely) |
   | `inpaint` | the picture with the area to redraw transparent | `kohya-ss/lllite-inpainting` (Base 1.0) |
 
   An inpaint redraws only the transparent area: the rest is put back every step. Its start is the map's picture,
