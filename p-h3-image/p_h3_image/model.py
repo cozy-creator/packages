@@ -266,9 +266,13 @@ class PH3Image(Model[ImageGraph]):
         height: int,
         seed: int,
         on_step: Callable[[int], None],
+        start: torch.Tensor | None = None,
+        first: int = 0,
     ) -> torch.Tensor:
         """The image's normalized latents, `(1, 24, 1, h, w)`: each picture's noise drawn first, then the image's,
-        then the audio's, from the seed's one stream (Diffusers' order), 8 dense Euler steps."""
+        then the audio's, from the seed's one stream (Diffusers' order), 8 dense Euler steps. With `start` (the
+        canvas's normalized latents, `encode_pictures`), the steps before `first` are skipped and the image begins
+        as `start` noised to `SIGMAS[first]`."""
         device = torch.device(str(self.device))
         generator = rng.generator(seed)
         latent_height, latent_width = height // 16, width // 16
@@ -281,6 +285,8 @@ class PH3Image(Model[ImageGraph]):
             level = torch.tensor(NOISE_AUG, device=device)
             packed.append(patchify_video_latents(level * condition.to(device) + (1.0 - level) * noise, PATCH))
         noise = randn_tensor((1, 24, 1, latent_height, latent_width), generator=generator, device=device, dtype=torch.float32)
+        if start is not None:
+            noise = (1.0 - SIGMAS[first]) * start.to(device) + SIGMAS[first] * noise
         video = patchify_video_latents(noise, PATCH)
         if packed:
             video = torch.cat([*packed, video])
@@ -288,6 +294,8 @@ class PH3Image(Model[ImageGraph]):
         scheduler, audio_scheduler = MiniMaxH3Scheduler(shift=SHIFT), MiniMaxH3Scheduler(shift=SHIFT)
         for each in (scheduler, audio_scheduler):
             each.set_timesteps(sigmas=list(SIGMAS), device=device)
+            if first:
+                each.set_begin_index(first)
         texts = int(held["text_indices"].numel())
         rows = [
             tuple(value.to(device) for value in MiniMaxH3SetTimestepsStep.build_row_timesteps(
@@ -309,6 +317,8 @@ class PH3Image(Model[ImageGraph]):
             with attention_scope(layout):
                 text = transformer.text_rows(embeds)
                 for i, (times, indices) in enumerate(rows):
+                    if i < first:
+                        continue
                     velocity, audio_velocity = transformer(
                         hidden_states=video[None], audio_hidden_states=audio[None],
                         encoder_hidden_states=embeds, timestep=times, timestep_indices=indices, token_tags=tokens,

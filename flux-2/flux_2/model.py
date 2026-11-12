@@ -293,9 +293,11 @@ class Flux2(Model[Flux2Graph]):
         guidance: float | None,
         seed: int,
         progress: Callable[[int, int], None],
+        start: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """BFL's Euler sampler in bf16 (`denoise`, `denoise_cfg`): [dev] embeds `guidance`, [klein] Base
-        takes CFG against `negative`, [klein] distilled takes neither."""
+        takes CFG against `negative`, [klein] distilled takes neither. With `start` (the canvas's packed
+        normalized latents), the state begins as `start` noised to the first timestep."""
         tf = self.graph.components["transformer"]
         device = torch.device(str(self.device))
         rows, columns = height // PATCH, width // PATCH
@@ -304,6 +306,8 @@ class Flux2(Model[Flux2Graph]):
         steps = len(timesteps) - 1
         with torch.no_grad():
             x = noise.to(torch.bfloat16).flatten(2).transpose(1, 2).to(device)
+            if start is not None:
+                x = ((1.0 - timesteps[0]) * start.to(device).float() + timesteps[0] * x.float()).to(torch.bfloat16)
             ids = grid_ids(rows, columns)
             text = embeds if negative is None else torch.cat([negative, embeds])
             text = text.to(device=device, dtype=torch.bfloat16)
