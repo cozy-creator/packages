@@ -38,11 +38,23 @@ SIGLIP_SIZE = 512
 # ---------------------------------------------------------------- SigLIP2
 
 
+class _Vision(nn.Module):
+    """SigLIP2's vision tower under the name `SiglipModel` stores it by (`vision_model.`): its tokens."""
+
+    def __init__(self, config: SiglipVisionConfig) -> None:
+        super().__init__()
+        self.vision_model = SiglipVisionModel(config)
+
+    def forward(self, pixels: torch.Tensor) -> torch.Tensor:
+        out: torch.Tensor = self.vision_model(pixel_values=pixels, interpolate_pos_encoding=True).last_hidden_state
+        return out
+
+
 class EncoderGraph:
     def __init__(self, config: Config) -> None:
         vision = SiglipVisionConfig(**config.mapping()["vision_config"])
         with no_init_weights():
-            encoder = SiglipVisionModel(vision)
+            encoder = _Vision(vision)
         stored = config.tensor_dtype(f"{COMPONENT}.vision_model.embeddings.patch_embedding.weight", default="f32")
         self.components: dict[str, nn.Module] = {
             COMPONENT: encoder.to(torch.float32 if stored == "f32" else torch.bfloat16).eval()
@@ -77,7 +89,7 @@ class ImageEncoder(Model[EncoderGraph]):
         encoder = self.graph.components[COMPONENT]
         weight = next(encoder.parameters())
         pixels = torch.stack([letterbox(p) for p in pictures]).to(torch.device(str(self.device)), weight.dtype)
-        out: torch.Tensor = encoder(pixel_values=pixels, interpolate_pos_encoding=True).last_hidden_state
+        out: torch.Tensor = encoder(pixels)
         return out
 
 
