@@ -331,7 +331,7 @@ class Transformer(Krea2Transformer2DModel):
     def forward(self, latents: torch.Tensor, timestep: torch.Tensor, streams: list[Stream],
                 control: torch.Tensor | None = None) -> list[torch.Tensor]:
         """Each prompt's velocity at `timestep` [1] (0-1): `Krea2Transformer2DModel.forward` op for op past
-        what no step changes (`Krea2.stream`). A branch's pictures before the target share the step's
+        what no step changes (`Krea2._stream`). A branch's pictures before the target share the step's
         modulation; those after it take time 0's. The prompts pass through each block in turn, so a
         streamed block comes in once per step."""
         # The embedders and the final layer run in their stored F32; the blocks in bf16.
@@ -547,7 +547,7 @@ class Krea2(Model[Krea2Graph]):
             std = z.new_tensor(vae.config["latents_std"]).view(1, -1, 1, 1)
             return ((z - mean) / std).cpu()
 
-    def stream(self, branch: Branch, rows: int, columns: int, device: torch.device) -> Stream:
+    def _stream(self, branch: Branch, rows: int, columns: int, device: torch.device) -> Stream:
         """What no step changes of one branch: its fused text, its pictures through `img_in` (clean, so
         once), its rotary tables over [text | before | target | after], and its attention bias: the target's
         logits on a reference raised by log `boost`, and an isolated branch's `after` blind to the rest."""
@@ -613,7 +613,7 @@ class Krea2(Model[Krea2Graph]):
         armed control adapter's projection (`Transformer.embed`).
 
         Each step is one call of the transformer (`Transformer.forward`), with what no step changes built
-        once before the loop (`stream`)."""
+        once before the loop (`_stream`)."""
         transformer = self.graph.components["transformer"]
         device = torch.device(str(self.device))
         rows, columns = height // PATCH, width // PATCH
@@ -637,7 +637,7 @@ class Krea2(Model[Krea2Graph]):
                 sigma = float(scheduler.sigmas[first])
                 latents = ((1 - sigma) * packed(start.to(device)) + sigma * latents.float()).to(DTYPE)
             tokens = None if control is None else packed(control.to(device)).to(DTYPE)
-            streams = [self.stream(branch, rows, columns, device)
+            streams = [self._stream(branch, rows, columns, device)
                        for branch in (positive, *([] if negative is None else [negative]))]
             for i, t in enumerate(scheduler.timesteps):
                 if i < first:
