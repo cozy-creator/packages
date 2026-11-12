@@ -28,7 +28,7 @@ from PIL import Image, ImageOps
 from torch import nn
 from transformers.initialization import no_init_weights
 
-from .model import PATCH, SLOTS, Reference, Transformer
+from .model import PATCH, SLOTS, Reference, Transformer, as_stored
 
 T = TypeVar("T")
 #: An uploaded Krea 2 LoRA's one component (TensorFS's `krea2.lora`), its modules under Diffusers' names.
@@ -82,6 +82,7 @@ class AdapterGraph:
                 image = linears["img_in"]
                 self.projection = nn.Linear(2 * image.in_features, image.out_features, dtype=torch.float32)
                 _add(root, "img_in.modules_to_save", self.projection)
+        as_stored(config, COMPONENT, root)  # factors in their stored dtype (bf16, or Patil's F32)
         self.components: dict[str, nn.Module] = {COMPONENT: root}
 
 
@@ -96,7 +97,7 @@ def _add(root: nn.Module, path: str, module: nn.Module) -> None:
 
 
 class Adapter(Model[AdapterGraph]):
-    """A Krea 2 adapter's LoRA, kept at its stored 16 bits (a control projection at its F32)."""
+    """A Krea 2 adapter's LoRA, kept at its stored dtype."""
 
     serving = Serving(encoded_leaves=False, min_bits=16)
 
