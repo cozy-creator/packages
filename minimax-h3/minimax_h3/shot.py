@@ -16,7 +16,7 @@ import msgspec
 import numpy as np
 import numpy.typing as npt
 import torch
-from cozy_runtime.author import InvalidRequest, OutputError, Outputs, Seed
+from cozy_runtime.author import InvalidRequest, OutputError, Outputs, Seed, Telemetry
 from cozy_runtime.fields import (
     Advanced,
     AspectRatio,
@@ -105,8 +105,8 @@ class Shot(msgspec.Struct, kw_only=True):
 
     summary: Prompt[Image | Video | Audio] = Prompt()
     beats: Annotated[list[Beat], Count(min=1)]
-    soundscape: Annotated[Prompt[Image | Video | Audio], Placeholder("N/A (silent)")] = Prompt()
-    music: Annotated[Prompt[Image | Video | Audio], Placeholder("N/A (silent)")] = Prompt()
+    soundscape: Annotated[Prompt[Image | Video | Audio], Placeholder("N/A")] = Prompt()
+    music: Annotated[Prompt[Image | Video | Audio], Placeholder("N/A")] = Prompt()
     aspect_ratio: Annotated[AspectRatio, Ratios("16:9")] | None = None
     first_frame: ShotImage | None = None
     last_frame: ShotImage | None = None
@@ -618,6 +618,53 @@ def _cover(picture: PILImage.Image, size: tuple[int, int]) -> bytes:
 def _frame_event(rgb: bytes, index: int, size: tuple[int, int]) -> DecodedVideoFrame:
     return DecodedVideoFrame(width=size[0], height=size[1], rgb=rgb, pts=index, duration=1, time_base=Fraction(1, FPS),
                              pixel_aspect_ratio=Fraction(1), **VIDEO_COLOR)  # fmt: skip
+
+
+class SoFar:
+    """A shot's segments made so far as one video, joined by packet copy under their own sound (`Outputs.join_video`), so its
+    box plays them while the next renders. The last segment's decode of the whole shot as one replaces it. Segments that can't be
+    joined show alone, with a warning, and the shot goes on."""
+
+    def __init__(self, out: Outputs, tel: Telemetry, first: VideoFile) -> None:
+        self._tel, self._frames, self._samples, self._refused = tel, 0, 0, False
+        self._sound: DecodedAudioFormat | None = None
+        try:
+            if (sound := first.probe().soundtrack) is not None:
+                layout, names = AUDIO_LAYOUTS[sound.channels]
+                self._sound = DecodedAudioFormat(channels=sound.channels, sample_rate=sound.sample_rate, channel_layout=layout,
+                                                 channel_names=names, time_base=Fraction(1, sound.sample_rate))  # fmt: skip
+            self._join = out.join_video(self._sound)
+        except OutputError as error:
+            self._refuse(error)
+
+    def add(self, video: VideoFile) -> VideoFile:
+        """`video` after the others: the joined video so far."""
+        if self._refused:
+            return video
+        try:
+            return self._join.append(video, lambda frames: self._soundtrack(video, frames))
+        except OutputError as error:
+            self._refuse(error)
+            return video
+
+    def _refuse(self, error: OutputError) -> None:
+        self._refused = True
+        self._tel.log("h3 segments shown alone", level="warn", reason=str(error))
+
+    def _soundtrack(self, video: VideoFile, frames: int) -> Iterator[DecodedAudioChunk]:
+        """`video`'s sound, cut or padded to its `frames` on the joined clock."""
+        self._frames += frames
+        if (sound := self._sound) is None:
+            return
+        wanted = self._frames * sound.sample_rate // FPS - self._samples
+        parts = sound_chunks(video.stream(pictures=False))
+        wave = np.concatenate(parts, axis=1)[:, :wanted] if parts else np.zeros((sound.channels, 0), dtype=np.float32)
+        wave = np.pad(wave, ((0, 0), (0, wanted - wave.shape[1]))).astype(np.float32)
+        yield DecodedAudioChunk(channels=sound.channels, sample_count=wanted, sample_rate=sound.sample_rate,
+                                channel_layout=sound.channel_layout, channel_names=sound.channel_names,
+                                pcm_f32le=tuple(np.ascontiguousarray(channel).tobytes() for channel in wave),
+                                pts=self._samples, time_base=sound.time_base)  # fmt: skip
+        self._samples += wanted
 
 
 def join_kept(out: Outputs, take: VideoFile, frames: int, new: VideoFile) -> tuple[VideoFile, list[str]]:
