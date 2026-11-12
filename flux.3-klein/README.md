@@ -132,7 +132,7 @@ cozy model upload run:<run> atomicchat/flux-3-klein-upsampler-abliterated --lane
 ```
 
 Klein never builds Qwen3-VL's vision tower, its last four layers or its head, so it never loads those
-tensors either. BFL's upsampler system prompts ship in `flux_3_klein/system_prompts.json`.
+tensors either. BFL's upsampler system prompts are the upsampler checkpoint's `system_prompts.json`.
 
 ## The int8 lane
 

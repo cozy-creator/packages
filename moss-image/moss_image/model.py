@@ -350,7 +350,8 @@ def build_tokenizer(assets: ModelAssets) -> PreTrainedTokenizerFast:
 class MossImage(Model[MossGraph]):
     """One MOSS-Image checkpoint (Base or SFT)."""
 
-    serving = Serving(attention_bits={"transformer.layers.": 8})
+    #: Caller LoRAs on the DiT, at any strength: the Runtime bakes them into the weights.
+    serving = Serving(attention_bits={"transformer.layers.": 8}, loras=("transformer",))
 
     graph: MossGraph
     tokenizer: PreTrainedTokenizerFast

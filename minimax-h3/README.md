@@ -20,7 +20,7 @@ See [preparation functions and recipes](docs/preparation.md). Previously publish
 
 ```yaml
 # shot.yaml — cozy run minimax-h3/generate --input shot.yaml (in a project: each <name> is that box)
-summary: <theo> and <juno> fight on <dock>, on 35 mm film, in a warm grade, with no crowd.   # every segment reads it
+summary: <theo> and <juno> fight on <dock>, on 35 mm film, in a warm grade, with no crowd.   # the first segment's scene; later ones keep its references
 beats:                                        # what happens, in order, each 1 to 15 s; together, the shot's length
   - {duration: 6, description: The two circle each other.}
   - {duration: 7, description: <juno> feints left and sweeps <theo>'s legs, as in <walk@24-120>.}
@@ -46,8 +46,10 @@ summary, with the shot's start). H3 numbers references by first mention in the b
 **First and last frame** are centre-cropped and scaled to the shot: its `aspect_ratio` (16:9) when set, else the
 first frame's shape, moved toward 16:9 when the shot has several segments and that shape can't carry across a join.
 
-**Pick up from here** fills `pickup` (`take`, `out_frame` on H3's `17k + 5` join grid, and `beats_from`): the take's
-first `out_frame` frames are kept and the beats from `beats_from` seconds render after them; unset, `beats_from` is the
+**Pick up from here** fills `pickup` (`take`, `out_frame`, and `beats_from`): only whole segments are redone, so
+`out_frame` is one of the take's `seams` or its end, and a frame between seams starts at the seam before it (a take made
+before seams were kept cuts on H3's `17k + 5` join grid). The take's first `out_frame` frames are kept unchanged and the
+beats from `beats_from` seconds render after them; unset, `beats_from` is the
 cut's time on the box's own take and 0 on another's. With the take's latents it goes on from them and the video
 decodes as one; without them a new video opens on the cut frame and is joined after the kept start. A `last_frame`
 ends the final segment; a `first_frame` is ignored. `kept_s` in the result says where the new part starts.
@@ -56,7 +58,8 @@ ends the final segment; a `first_frame` is ignored. `kept_s` in the result says 
 first segment, the plate's own first frame is the picture. The plate sets the shape; there is no summary, soundscape
 or music, and joins carry 22 frames.
 
-The result is `video` (768p mp4), `latents` (its own, which a pickup resumes and `upscale` starts from) and `warnings`.
+The result is `video` (768p mp4), `latents` (its own, which a pickup resumes and `upscale` starts from), `seams` (the
+frames where each segment after the first starts, a pickup's kept ones included, also kept in the latents) and `warnings`.
 
 - **Beats.** The summary and each beat become MiniMax's sections and `At` times, on one timeline, and a line of a person's that would
   read as ours is kept from it. A beat with no words is only a length. An empty `soundscape` or `music` says `N/A`, which is the
@@ -66,10 +69,10 @@ The result is `video` (768p mp4), `latents` (its own, which a pickup resumes and
   a `retention_analysis` line for each picture without one (`<name>: keep the look shown in the reference.`), `non_diegetic_music`
   from its field, and `overall_soundscape` from its, or `N/A`, which the guide reads as silence. Your own line replaces any of these. A
   `style:` line means nothing to H3: it goes where it stands.
-- **Sections.** With a `detailed_description:`, timestamps are read only inside it. `summary:`, `overall_soundscape:` and
-  `non_diegetic_music:` go on every segment.
+- **Sections.** With a `detailed_description:`, timestamps are read only inside it. `overall_soundscape:` and
+  `non_diegetic_music:` go on every segment, `summary:` as **Segments** says.
 - **Task tag.** With references, every segment's `summary` opens with its `[task + task]` from the guide, computed from the
-  request: a plate is `video editing`, a pickup `video continuation`, a first or last frame `keyframe completion`,
+  request: a plate is `video editing`, a shot's segment that goes on from frames before it (a later one, a pickup) `video continuation`, a first or last frame `keyframe completion`,
   a picture or reference video `reference generation`, a voice `audio reference`. A different tag you wrote is replaced, with a warning; with no `summary`, one holds just the tag.
   Text alone has none.
 - **Timestamps.** `At MM:SS.mmm` or `At MM:SS`, any case, at the start of a line, after an optional `[Shot N]`. A time
@@ -82,7 +85,10 @@ The result is `video` (768p mp4), `latents` (its own, which a pickup resumes and
   carrying the last segment's frames. A segment's text is only its own blocks: the one that opens it loses its time, the
   rest are timed on its clock, whose head is the carried frames, and its `[Shot N]` renumber from 1. So nothing redraws
   the scene at a join (restating an opening pulled runs 24980/24981 back there, with a cut), and each block says only
-  what happens then: the carried frames and pictures hold the rest. A later segment keeps the `summary`, as the scene it plays in, so say the scene there and not the sequence, and put camera moves in the text they belong to: in the summary they run again in every segment. It takes each
+  what happens then: the carried frames and pictures hold the rest. A later segment's `summary` says only that it continues the shot
+  from there, with the references the summary names: the guide's summary is the target video's, and the whole shot's there, even
+  said to be the whole shot's, played what earlier segments showed again (runs 47464, 47808). So the summary sets the first segment's
+  scene, and each beat says what happens in its own. It takes each
   reference's own `retention_analysis` line without its `(appears in …)`, or the default line for a picture. A shot of
   several segments decodes their latents as one video, so no join steps the picture.
 - **Timing that doesn't fit.** Nothing is refused. A block too long for a segment renders at the limit and warns with its

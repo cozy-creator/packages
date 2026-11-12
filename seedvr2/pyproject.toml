@@ -1,6 +1,6 @@
 [project]
 name = "seedvr2"
-version = "0.6.2"
+version = "0.7.0rc3"
 description = "SeedVR2 7B video and picture restoration"
 requires-python = ">=3.12"
 dependencies = [

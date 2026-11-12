@@ -40,7 +40,7 @@ predecessor's picture ends one frame early when its grid rounds the sound down (
 
 ## Resuming mid-video
 
-A pickup's `out_frame` cuts a whole video's latents at the nearest `17k + 5` frames (`shot_latents.cut`): the same tokens, in
+A pickup's `out_frame` cuts a whole video's latents at one of its seams (`shot_latents.cut`, on the `17k + 5` grid): the same tokens, in
 phase, whichever segment made them, so the last 22 frames there are the carry and the new segment joins the kept latents and
 decodes with them as one. The file keeps no audio latents before a video's end, so the carried second is encoded from its
 soundtrack by the audio VAE, ending on the tick nearest the picture join, where the kept sound stops. That is the one

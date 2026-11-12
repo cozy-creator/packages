@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from itertools import pairwise
 from typing import Literal, NamedTuple
 
@@ -415,6 +415,23 @@ def _tasks(text: str) -> list[str]:
     prefix = _PREFIX.match(text, start, end)
     given = [task.strip() for task in prefix.group(1).split("+")] if prefix else []
     return given if all(task.casefold() in TASKS for task in given) else []
+
+
+def later_part(text: str, names: Collection[str] = ()) -> str:
+    """A segment's text when it goes on from an earlier part of its own shot. Its summary is the target video's (ref
+    guide 3), which is only what's still to come: the whole shot's summary there, even said to be the whole shot's, played
+    what the earlier part showed again (se-130: runs 47464, 47635, 47774, 47808). So it says only that the target goes on,
+    with the references the summary names (of `names`), so they stay; its beats say what happens."""
+    _, start, end = _sections(text).get("summary", (0, 0, 0))
+    said = text[start:end].strip()
+    if not said:
+        return text
+    tag = prefix.group(0) + " " if (prefix := _PREFIX.match(said)) and _tasks(f"summary:\n{said}") else ""
+    named = list(dict.fromkeys(token.group(0) for token in MENTION.finditer(said) if token.group(1) in names))
+    who = f", with {', '.join(named)}," if named else ""
+    framed = (f"{tag}The target video continues this shot from where its earlier part ends{who} and shows only what "
+              "happens from there, as the detailed description says.")  # fmt: skip
+    return f"{text[:start]}\n{framed}\n\n{text[end:].lstrip()}" if text[end:].strip() else f"{text[:start]}\n{framed}"
 
 
 def _sections(text: str) -> dict[str, tuple[int, int, int]]:

@@ -176,7 +176,7 @@ class Fibo2(Model[FiboGraph]):
         try:
             with torch.inference_mode():
                 pipe(prompt=prompt, image=images or None, width=width, height=height, guidance_scale=guidance,
-                     negative_prompt=negative, fonts=[io.BytesIO(font) for font in self.fonts],  # type: ignore[arg-type]  # Pillow's truetype reads a file object as well as a path
+                     negative_prompt=negative, fonts=[io.BytesIO(font) for font in self.fonts],
                      output_type="latent")
         except _Encoded:
             first, *rest = pipe.encoded

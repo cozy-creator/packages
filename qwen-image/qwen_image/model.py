@@ -370,6 +370,9 @@ def sample(
 class QwenImageTransformer(Model[TransformerGraph]):
     """A Qwen-Image DiT alone (Qwen-Image-Edit-2511's): it denoises what a `QwenImage` encodes."""
 
+    #: Caller LoRAs on the DiT (`--lora edit_model=…`), at any strength: the Runtime bakes them into the weights.
+    serving = Serving(loras=("transformer",))
+
     graph: TransformerGraph
 
     def load(self, loader: Loader) -> None:
@@ -404,6 +407,9 @@ class QwenImageTransformer(Model[TransformerGraph]):
 class QwenImage(Model[QwenImageGraph]):
     """A whole Qwen-Image checkpoint (Qwen-Image-2512): it encodes text and references for either
     DiT, denoises on its own and decodes."""
+
+    #: Caller LoRAs on its DiT, as `QwenImageTransformer`'s.
+    serving = Serving(loras=("transformer",))
 
     graph: QwenImageGraph
     processor: Qwen2VLProcessor

@@ -83,4 +83,8 @@ tfs import \
   --name seedvr2-7b
 ```
 
-Publish the result as `bytedance-seed/seedvr2-7b@0.1.0`, lane `bf16`: the package's default release.
+`bytedance-seed/seedvr2-7b@0.1.1` adds upstream's configs (SeedVR `e4de8c24`) to that checkpoint as `model`
+assets: `configs_7b/main.yaml` and the VAE config it inherits,
+`models/video_vae_v3/s8_c16_t4_inflation_sd3.yaml`. The DiT's and VAE's arguments, the latent scale, the VAE's
+causal slicing and the diffusion are read from them; the one step and cfg 1.0 are upstream's SeedVR2 inference
+(`projects/inference_seedvr2_7b.py`). It is the package's default release.

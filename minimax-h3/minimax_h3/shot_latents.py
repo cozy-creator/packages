@@ -6,10 +6,11 @@ The file is safetensors: `latents`, the normalized `(1, 24, T, h, w)` video late
 the VAE's `5n + 2` grid; `context`, its last segment's carry (encoded `AVContext`), which a
 continuation's first segment carries in; and metadata naming the format, the latent space
 (`vae_space`), the frames the shot delivered (the grid's `17n + 5` frames, or fewer when its
-duration was trimmed) and the text it was made from (`text`), which an upscale re-renders it from.
+duration was trimmed), the text it was made from (`text`), which an upscale re-renders it from, and its `seams`, the frames
+where each segment after the first starts, which a pickup of it starts at (Paul, 11-12: only whole segments are redone).
 
-A shot cut at a join (a pickup's `out_frame`, `cut`) is the same file: its latents up to there, the carry there from those
-latents, and `sound`, the sound that stays, whose last second the carry takes once encoded: the file holds no audio latents
+A shot cut at a seam (a pickup's `out_frame`, `cut`) is the same file: its latents and seams up to there, the carry there
+from those latents, and `sound`, the sound that stays, whose last second the carry takes once encoded: the file holds no audio latents
 before a shot's end."""
 
 from __future__ import annotations
@@ -29,6 +30,8 @@ from .continuation import TICKS_PER_FRAME, AVContext, audio_ticks, decode_contex
 from .official import FRAMES_PER_CHUNK, LATENTS_PER_CHUNK
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
     from diffusers.models.autoencoders.autoencoder_kl_minimax_h3 import AutoencoderKLMiniMaxH3
 
 FORMAT = "minimax-h3/latents/2"
@@ -46,15 +49,25 @@ def vae_space(vae: AutoencoderKLMiniMaxH3) -> str:
     return hashlib.sha256(json.dumps(space, sort_keys=True).encode()).hexdigest()[:16]
 
 
-def save(latents: torch.Tensor, frames: int, space: str, context: bytes, text: str) -> bytes:
+def save(latents: torch.Tensor, frames: int, space: str, context: bytes, text: str, seams: Sequence[int]) -> bytes:
     """A shot's latents, with its last segment's carry (`context`, encoded `AVContext`), what a
-    pickup of it carries into its first segment, and the text it was made from (`text`),
-    which an upscale that re-renders it reads when given none."""
+    pickup of it carries into its first segment, the text it was made from (`text`),
+    which an upscale that re-renders it reads when given none, and its `seams`."""
     carry = torch.frombuffer(bytearray(context), dtype=torch.uint8) if context else torch.zeros(0, dtype=torch.uint8)
     return save_tensors(
         {"latents": latents.detach().to("cpu", torch.float16).contiguous(), "context": carry},
-        metadata={"format": FORMAT, "vae_space": space, "frames": str(frames), "text": text},
+        metadata={"format": FORMAT, "vae_space": space, "frames": str(frames), "text": text, "seams": _said(seams)},
     )
+
+
+def _said(seams: Sequence[int]) -> str:
+    return ",".join(str(seam) for seam in seams)
+
+
+def seams(data: bytes) -> list[int] | None:
+    """The frames where each of a shot's segments after the first starts; None for a file made before they were kept."""
+    said = metadata_or_none(data).get("seams")
+    return None if said is None else [int(seam) for seam in said.split(",") if seam]
 
 
 def context(data: bytes) -> bytes:
@@ -84,9 +97,10 @@ def cut(data: bytes, frames: int, carried: int, kept_sound: torch.Tensor) -> byt
     pad = samples - int(kept_sound.shape[1])
     # A last frame's sound can fall a little short of the video's clock.
     sound = torch.nn.functional.pad(kept_sound, (0, max(pad, 0)))[:, :samples].contiguous()
+    kept = {"seams": _said([seam for seam in held if seam < frames])} if (held := seams(data)) is not None else {}
     return save_tensors(
         {"latents": latents.contiguous(), "context": torch.frombuffer(bytearray(carry), dtype=torch.uint8), "sound": sound},
-        metadata={**meta, "frames": str(frames)},
+        metadata={**meta, "frames": str(frames), **kept},
     )
 
 

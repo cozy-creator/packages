@@ -168,9 +168,9 @@ class _RetainedKV(QwenImage21KVCache):
     def __init__(self, num_layers: int, held: Store) -> None:
         self.layer_caches = [_RetainedLayer(held) for _ in range(num_layers)]
 
-    def prefix(self) -> list[KV]:
-        """Each layer's keys and values, as a cached step reads them."""
-        return [layer.get() for layer in self.layer_caches]
+    def prefix(self, layer: int) -> KV:
+        """A layer's keys and values, as a cached step reads them."""
+        return self.layer_caches[layer].get()
 
 
 _DTYPES = {"f32": torch.float32, "bf16": torch.bfloat16, "f16": torch.float16}
@@ -600,7 +600,7 @@ class QwenImage21Model(Model[QwenImage21Graph]):
                 latents = euler.step(noise, timesteps[first], latents, return_dict=False)[0]
                 progress(first, steps)
                 for i in range(first + 1, steps):
-                    cached = (times[i : i + 1], layout.rotary_emb, layout.modulation_mask, kv_cache.prefix())
+                    cached = (times[i : i + 1], layout.rotary_emb, layout.modulation_mask, kv_cache.prefix)
                     noise = transformer(latents, cached=cached, projection=None if heads is None else heads[i])
                     preview(lambda: latents - euler.sigmas[i] * noise, "qwen-image-2", grid=(height // 16, width // 16))
                     latents = euler.step(noise, timesteps[i], latents, return_dict=False)[0]

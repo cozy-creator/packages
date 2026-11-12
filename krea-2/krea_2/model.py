@@ -18,7 +18,7 @@ import math
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from functools import partial
-from typing import TYPE_CHECKING, TypedDict, cast
+from typing import TYPE_CHECKING, NamedTuple, TypedDict, cast
 
 import numpy as np
 import torch
@@ -74,14 +74,12 @@ DTYPE = torch.bfloat16
 TAPS = (2, 5, 8, 11, 14, 17, 20, 23, 26, 29, 32, 35)
 #: Diffusers' fixed text length: at most 512 tokens after the dropped system prefix.
 TEXT_TOKENS = 512
-#: `Krea2Pipeline`'s template (Qwen-Image's): the prompt between a system prefix of 34 tokens, which the
-#: DiT never reads, and a 5-token assistant suffix.
-PROMPT_PREFIX = (
-    "<|im_start|>system\nDescribe the image by detailing the color, shape, size, texture, quantity, text, "
-    "spatial relationships of the objects and background:<|im_end|>\n<|im_start|>user\n"
+#: `Krea2Pipeline`'s system prompt (Qwen-Image's). The checkpoint's chat template frames it and the
+#: prompt (`frame`); the DiT never reads the system turn.
+SYSTEM_PROMPT = (
+    "Describe the image by detailing the color, shape, size, texture, quantity, text, "
+    "spatial relationships of the objects and background:"
 )
-PROMPT_SUFFIX = "<|im_end|>\n<|im_start|>assistant\n"
-PREFIX_TOKENS, SUFFIX_TOKENS = 34, 5
 #: Turbo's fixed timestep shift (Diffusers' `is_distilled`); Raw's follows the token count.
 DISTILLED_MU = 1.15
 _DTYPES = {"f32": torch.float32, "bf16": torch.bfloat16, "f16": torch.float16}
@@ -418,6 +416,28 @@ def build_tokenizer(assets: ModelAssets) -> PreTrainedTokenizerFast:
     )
 
 
+class Frame(NamedTuple):
+    """The text around a prompt, and how many tokens each side is."""
+
+    prefix: str
+    suffix: str
+    prefix_tokens: int
+    suffix_tokens: int
+
+
+def frame(assets: ModelAssets, tokenizer: PreTrainedTokenizerFast) -> Frame:
+    """The checkpoint's `tokenizer/chat_template.jinja` around a prompt, as `Krea2Pipeline` asks: its
+    system prompt, the prompt as the user's turn, then the assistant's."""
+    mark = "\x00"
+    framed = tokenizer.apply_chat_template(
+        [{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": mark}],
+        chat_template=assets.read("tokenizer/chat_template.jinja").decode(), tokenize=False,
+        add_generation_prompt=True,
+    )
+    prefix, suffix = str(framed).split(mark)
+    return Frame(prefix, suffix, len(tokenizer(prefix).input_ids), len(tokenizer(suffix).input_ids))
+
+
 def unpack(latents: torch.Tensor, height: int, width: int) -> torch.Tensor:
     """Diffusers' `_unpack_latents`: DiT tokens [1, (H/16)(W/16), 64] as one VAE frame [1, 16, 1, H/8, W/8]."""
     rows, columns = height // PATCH, width // PATCH
@@ -485,10 +505,12 @@ class Krea2(Model[Krea2Graph]):
 
     graph: Krea2Graph
     tokenizer: PreTrainedTokenizerFast
+    prompt_frame: Frame
 
     def load(self, loader: Loader) -> None:
         self.graph = loader.construct(Krea2Graph)
         self.tokenizer = build_tokenizer(loader.assets)
+        self.prompt_frame = frame(loader.assets, self.tokenizer)
 
     def execution_plan(self, plan: Plan) -> str:
         vae = self.graph.components["vae"]
@@ -515,8 +537,8 @@ class Krea2(Model[Krea2Graph]):
     @memoize
     @uses_components("text_encoder")
     def encode(self, prompt: str) -> torch.Tensor:
-        """The DiT's text conditioning [1, S, 12, 2560] (bf16, on the CPU): Diffusers' Qwen-Image chat
-        template, at most 512 tokens after its 34-token system prefix, the 12 tapped hidden states.
+        """The DiT's text conditioning [1, S, 12, 2560] (bf16, on the CPU): the prompt in the checkpoint's
+        chat template (`frame`), at most 512 tokens after its system prefix, the 12 tapped hidden states.
 
         Diffusers pads the prompt to 512 tokens and masks the padding, with positions counting real
         tokens only; the DiT reads text keys at rotary position 0 and masks padded ones. Unpadded, the
@@ -524,16 +546,17 @@ class Krea2(Model[Krea2Graph]):
         compute or a mask (which leaves only SDPA among attention kernels)."""
         encoder = self.graph.components["text_encoder"].language_model
         device = torch.device(str(self.device))
+        framed = self.prompt_frame
         tokens = self.tokenizer(
-            PROMPT_PREFIX + prompt, truncation=True,
-            max_length=TEXT_TOKENS + PREFIX_TOKENS - SUFFIX_TOKENS,
-        ).input_ids + self.tokenizer(PROMPT_SUFFIX).input_ids
+            framed.prefix + prompt, truncation=True,
+            max_length=TEXT_TOKENS + framed.prefix_tokens - framed.suffix_tokens,
+        ).input_ids + self.tokenizer(framed.suffix).input_ids
         ids = torch.tensor([tokens], device=device)
         positions = torch.arange(ids.shape[1], device=device).view(1, 1, -1).expand(3, 1, -1)
         with torch.inference_mode():
             hidden = encoder(input_ids=ids, position_ids=positions, output_hidden_states=True,
                              use_cache=False).hidden_states
-            stacked = torch.stack([hidden[i] for i in TAPS], dim=2)[:, PREFIX_TOKENS:]
+            stacked = torch.stack([hidden[i] for i in TAPS], dim=2)[:, framed.prefix_tokens:]
         return stacked.to(DTYPE).cpu()
 
     @memoize
@@ -542,16 +565,17 @@ class Krea2(Model[Krea2Graph]):
         """`encode` with `pictures` read by Qwen3-VL's vision tower in the user's turn, before the prompt, each
         `Picture N: ` first with `labels` (ai-toolkit's edits) or bare (Identity Edit), as Transformers' Qwen3-VL
         reads them (DeepStack included). The pictures come at the size the adapter reads them; their tokens
-        stay in the conditioning, after the 34-token prefix. [1, S, 12, 2560] bf16, on the CPU."""
+        stay in the conditioning, after the system prefix (`frame`). [1, S, 12, 2560] bf16, on the CPU."""
         encoder = self.graph.components["text_encoder"]
         device = torch.device(str(self.device))
         heads = "".join(f"Picture {n}: {VISION}" if labels else VISION for n in range(1, len(pictures) + 1))
-        words = self.tokenizer(prompt).input_ids[:TEXT_TOKENS - SUFFIX_TOKENS]
+        framed = self.prompt_frame
+        words = self.tokenizer(prompt).input_ids[:TEXT_TOKENS - framed.suffix_tokens]
         pad = encoder.image_token_id
         patches, grids = zip(*(vision_patches(picture) for picture in pictures), strict=True)
         ids: list[int] = []
         sizes = iter(rows * columns // VISION_MERGE**2 for _, rows, columns in grids)
-        for token in self.tokenizer(PROMPT_PREFIX + heads).input_ids + words + self.tokenizer(PROMPT_SUFFIX).input_ids:
+        for token in self.tokenizer(framed.prefix + heads).input_ids + words + self.tokenizer(framed.suffix).input_ids:
             ids.extend([pad] * next(sizes) if token == pad else [token])
         positions = mrope(ids, pad, grids).to(device)
         tokens = torch.tensor([ids], device=device)
@@ -564,7 +588,7 @@ class Krea2(Model[Krea2Graph]):
             hidden = language(inputs_embeds=embeds, position_ids=positions, visual_pos_masks=visual,
                               deepstack_visual_embeds=list(seen.deepstack_features), output_hidden_states=True,
                               use_cache=False).hidden_states
-            stacked = torch.stack([hidden[i] for i in TAPS], dim=2)[:, PREFIX_TOKENS:]
+            stacked = torch.stack([hidden[i] for i in TAPS], dim=2)[:, framed.prefix_tokens:]
         return stacked.to(DTYPE).cpu()
 
     @memoize

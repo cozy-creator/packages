@@ -1,6 +1,6 @@
 """FLUX.3 Klein's prompt upsampler (a Qwen3.5-9B fine-tune), served from its as-is upload: the
-construction config is BFL's `config.json`, and the tokenizer, processor and chat template are the
-checkpoint's assets.
+construction config is BFL's `config.json`, and the tokenizer, processor, chat template and system
+prompts are the checkpoint's assets.
 
 Inference follows BFL's `flux3/pup.py`: greedy decoding, presence penalty 1.5 for text-to-image and 0
 for edits, references resized to the upsampler's budget and round-tripped through JPEG q92.
@@ -18,7 +18,6 @@ import json
 import math
 import re
 from collections.abc import Callable, Sequence
-from importlib.resources import files
 from typing import TypedDict, cast
 
 import torch
@@ -265,7 +264,7 @@ class Upsampler(Model[UpsamplerGraph]):
 
     graph: UpsamplerGraph
     processor: ProcessorMixin
-    #: BFL's system prompts (`system_prompts.json` of its repository), by task.
+    #: BFL's system prompts, by task: the checkpoint's `system_prompts.json` (its repository's).
     system_prompts: dict[str, str]
 
     def execution_plan(self, plan: Plan) -> str:
@@ -274,7 +273,7 @@ class Upsampler(Model[UpsamplerGraph]):
     def load(self, loader: Loader) -> None:
         self.graph = loader.construct(UpsamplerGraph)
         self.processor = vlm.processor(loader.assets)
-        self.system_prompts = json.loads(files(__package__).joinpath("system_prompts.json").read_bytes())
+        self.system_prompts = json.loads(loader.assets.read("system_prompts.json"))
 
     @memoize
     @uses_components(COMPONENT)
