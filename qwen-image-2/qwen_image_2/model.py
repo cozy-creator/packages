@@ -11,7 +11,8 @@ Turbo overlay (`turbo.FunAccLoRA`) reaches the DiT's linears through permanent h
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from functools import partial
 from typing import Protocol, TypedDict, cast
 
@@ -282,6 +283,37 @@ def build_qwen_image21(config: Config) -> QwenImage21Graph:
     return QwenImage21Graph(config)
 
 
+#: A forward pre-hook's answer: the call's positional and keyword arguments.
+_Call = tuple[tuple[object, ...], dict[str, object]]
+
+
+@contextmanager
+def _last_layer_only(encoder: Qwen3VLForConditionalGeneration) -> Iterator[None]:
+    """While open, a forward of `encoder` keeps its language model's last hidden state alone, and none of its
+    vision tower's. Diffusers' `encode_prompt` asks for every layer's (`output_hidden_states=True`) and reads
+    `hidden_states[-1]`: 36 layers x tokens x 4096 held through the forward, 5.9 GiB at 21k tokens (se-122, run
+    46676). Transformers' list form keeps the layers it names, and ties the last to `last_hidden_state`, so
+    `hidden_states[-1]` is the same tensor."""
+    language: nn.Module = encoder.model.language_model
+    last = [len(cast(nn.ModuleList, language.layers)) - 1]
+
+    def tower(_: nn.Module, args: tuple[object, ...], kwargs: dict[str, object]) -> _Call:
+        return args, {**kwargs, "output_hidden_states": False}
+
+    def layers(_: nn.Module, args: tuple[object, ...], kwargs: dict[str, object]) -> _Call:
+        return args, {**kwargs, "output_hidden_states": last}
+
+    handles = (
+        encoder.register_forward_pre_hook(tower, with_kwargs=True),
+        language.register_forward_pre_hook(layers, with_kwargs=True),
+    )
+    try:
+        yield
+    finally:
+        for handle in handles:
+            handle.remove()
+
+
 class _StagedPipeline(QwenImage21Pipeline):
     #: The device the Runtime runs the model on (`Model.device`).
     device_placed: torch.device = torch.device("cpu")
@@ -345,7 +377,7 @@ class QwenImage21Model(Model[QwenImage21Graph]):
     @uses_components("text_encoder")
     def encode(self, prompt: str) -> tuple[torch.Tensor, torch.Tensor | None]:
         encoder = self.graph.components["text_encoder"]
-        with torch.inference_mode():
+        with torch.inference_mode(), _last_layer_only(encoder):
             embeds, mask, _ = self._pipeline().encode_prompt(
                 prompt, device=torch.device(str(self.device))
             )
@@ -398,7 +430,7 @@ class QwenImage21Model(Model[QwenImage21Graph]):
     ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
         """Encode the instruction and ordered reference images as one condition."""
         encoder = self.graph.components["text_encoder"]
-        with torch.inference_mode():
+        with torch.inference_mode(), _last_layer_only(encoder):
             encoded: tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None] = self._pipeline().encode_prompt(
                 prompt, image=images, device=torch.device(str(self.device))  # type: ignore[arg-type]  # pictures, of its input union
             )
