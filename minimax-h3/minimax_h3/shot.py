@@ -6,7 +6,7 @@ from __future__ import annotations
 import hashlib
 import math
 import re
-from collections.abc import Iterable, Iterator, Mapping, Sequence
+from collections.abc import Collection, Iterable, Iterator, Mapping, Sequence
 from contextlib import AbstractContextManager
 from fractions import Fraction
 from itertools import accumulate, pairwise
@@ -53,7 +53,7 @@ from safetensors.torch import load as load_tensors
 from minimax_h3 import shot_latents
 from minimax_h3.continuation import AUDIO_TICKS_PER_S, Carry, ContinuationPlan, audio_ticks, carries, decode_context
 from minimax_h3.official import FPS, MAX_CANVAS_RATIO, MAX_FRAMES, clip_size, shown_width, within_ratio
-from story import _HEADER, MENTION, MIN_CLIP_SECONDS, StoryReference, description_span, name_key, without_sections
+from story import _HEADER, MENTION, MIN_CLIP_SECONDS, StoryReference, description_span, later_part, name_key, without_sections
 
 #: An output's or latents' byte bound: TensorD's output allowance reads it (256 MiB where none is declared), and the
 #: disk is the real limit.
@@ -103,8 +103,8 @@ class ShotPickup(Pickup, frozen=True, kw_only=True):
 
 
 class Shot(msgspec.Struct, kw_only=True):
-    """One continuous shot of any length, with sound: a summary every segment reads, then what happens, beat by beat.
-    An empty soundscape or music goes as N/A."""
+    """One continuous shot of any length, with sound: a summary that sets the scene (a later segment keeps only its
+    references), then what happens, beat by beat. An empty soundscape or music goes as N/A."""
 
     summary: Prompt[Image | Video | Audio] = Prompt()
     beats: Annotated[list[Beat], Count(min=1)]
@@ -400,15 +400,16 @@ def blocks(body: str, duration_s: float) -> tuple[list[Block], list[str]]:
 
 
 def segment_texts(prompt: str, starts: Sequence[float], *, continued: bool = False, carried: bool = True,
-                  duration_s: float = math.inf, carry: Carry = _CARRY) -> list[str]:  # fmt: skip
-    """Each segment's text: the prompt's, with nothing added, and only its own blocks (`plan_segments` and `starts`:
-    what opens each), so no segment redraws what an earlier one set up (0.2.4 gate, runs 24980/24981: back in the food
-    cart). The first is as written, past 15 s without what comes after it. A later one keeps the text's sections, its
-    summary among them, less the retention, which tells the whole video's flow (`story` restores each reference's own
-    retention line): the block it opens on, with no time, then the rest with their times on its clock, whose head is the
-    carried frames, and its `[Shot N]` renumbered from 1. With `continued`, the first segment goes on from a take too, on
-    the block in force at its start, carrying the take's frames unless not `carried`. The audio and music fields close
-    every segment."""
+                  duration_s: float = math.inf, carry: Carry = _CARRY, beats_at: float = 0.0, names: Collection[str] = ()
+                  ) -> list[str]:  # fmt: skip
+    """Each segment's text: the prompt's, and only its own blocks (`plan_segments` and `starts`: what opens each), so no
+    segment redraws what an earlier one set up (0.2.4 gate, runs 24980/24981: back in the food cart). The first is as
+    written, past 15 s without what comes after it. A later one keeps the text's sections, less the retention, which
+    tells the whole video's flow (`story` restores each reference's own retention line): the block it opens on, with no
+    time, then the rest with their times on its clock, whose head is the carried frames, and its `[Shot N]` renumbered
+    from 1. One that opens after the shot's own beats began (`beats_at`, on the video's clock) is a later part of it, so
+    its summary says only that, with the references of `names` it mentions (`later_part`). With `continued`, the first segment goes on from a take too, on the block in force
+    at its start, carrying the take's frames unless not `carried`. The audio and music fields close every segment."""
     head, body, tail = prompt_parts(prompt)
     timed_blocks, _ = blocks(body, duration_s)
     begin, stop = description_span(body)
@@ -433,6 +434,8 @@ def segment_texts(prompt: str, starts: Sequence[float], *, continued: bool = Fal
             description = _OWN_SHOT.sub(lambda _: f"[Shot {next(number)}]", "\n".join(line for line in lines if line))
             text = "\n\n".join(filter(None, (body[:begin].rstrip() + ("\n" if begin else "") + description, body[stop:].strip())))
             text = without_sections(text, ("retention_analysis",))
+            if start > beats_at + 1 / FPS:
+                text = later_part(text, names)
         text = head + text
         texts.append(f"{text}\n\n{tail}" if tail else text)
     return texts
