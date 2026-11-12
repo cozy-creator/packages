@@ -15,7 +15,7 @@ from cozy_runtime.media import ImageFile
 from PIL import Image as PILImage
 
 from . import quantize as quantize  # its recipes
-from .model import QwenImage21Model
+from .model import QwenImage21Model, reference_grids
 from .rewriter import Creativity, Enhancer, rewrite
 from .turbo import FunAccLoRA
 
@@ -161,6 +161,10 @@ def _generate(
     first = reference_images[0].size if reference_images else None
     width, height = payload.size(adj, first, SIZES, megapixels=DEFAULT_MEGAPIXELS)
     with tel.stage("encoding prompt"):
+        prompt, keep, given = text_encoder.fit_prompt(prompt, reference_grids(reference_images or []))
+        if keep < given:
+            beside = f" beside {len(pictures)} pictures" if reference_images else ""
+            adj.warn("prompt", f"Qwen-Image 2.1 reads {keep} of its {given} tokens{beside}, so it goes without the rest")
         if reference_images is None:
             embeds, mask = text_encoder.encode(prompt)
         else:

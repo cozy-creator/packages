@@ -3,15 +3,16 @@
 A port of Diffusers' `modular_pipelines/p_h3_image` (main f598e6e6, not in a release). The image is one
 latent frame denoised in one packed sequence beside two audio latents it discards: `[text | audio | image]`
 for text-to-image, `[text | pictures | audio | image]` for an edit. Eight Euler steps on the checkpoint's
-fixed sigma grid, no CFG. The text is Qwen3-VL-4B's hidden states 13/19/25/31/36 through Pruna's
-connector; an edit's pictures are vision tokens in it too.
+fixed sigma grid, no CFG. The text is Qwen3-VL-4B's decoder layers 12/18/24/30/35 (hidden states 13/19/25/31/36,
+the last normed) through Pruna's connector; an edit's pictures are vision tokens in it too.
 """
 
 from __future__ import annotations
 
 import math
 import struct
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from typing import Literal, cast
 
 import numpy as np
@@ -56,7 +57,9 @@ PICTURE_PIXELS = (MEGAPIXEL, 8 * MEGAPIXEL)
 CANVAS_MIN_PIXELS = 4 * MEGAPIXEL
 #: What the text encoder and the upsampler see of a picture: about one megapixel.
 VISION_PIXELS = 1_000_000
-HIDDEN_STATES = (13, 19, 25, 31, 36)
+#: The Qwen3-VL decoder layers whose outputs the connector reads: Pruna's hidden states 13/19/25/31/36, the last
+#: normed (Transformers ties the last layer's to `last_hidden_state`).
+TEXT_LAYERS = (12, 18, 24, 30, 35)
 #: The transformer config's labels of the AdaLN rows a `bf16` checkpoint stores (`lanes.pruned`).
 TABLES = "adaln_tables"
 
@@ -129,13 +132,13 @@ def stored[M: nn.Module](module: M, component: str, config: Config) -> M:
 
 
 class TextConnector(nn.Module):
-    """Pruna's `PH3ImageTextConnector`: the encoder's hidden states `HIDDEN_STATES` concatenated, standardized,
+    """Pruna's `PH3ImageTextConnector`: the encoder's `TEXT_LAYERS` outputs concatenated, standardized,
     projected to the DiT's 5120 text channels and destandardized; the first token, an attention sink, is a learned
     row. Float32, as stored."""
 
     def __init__(self, text_hidden_size: int = 2560, out_channels: int = 5120, **_: object) -> None:
         super().__init__()
-        width = len(HIDDEN_STATES) * text_hidden_size
+        width = len(TEXT_LAYERS) * text_hidden_size
         self.input_mean = nn.Parameter(torch.zeros(width))
         self.input_std = nn.Parameter(torch.ones(width))
         self.proj = nn.Linear(width, out_channels, bias=False)
@@ -145,10 +148,40 @@ class TextConnector(nn.Module):
 
     def forward(self, hidden_states: Sequence[torch.Tensor]) -> torch.Tensor:
         dtype = self.proj.weight.dtype
-        rows = torch.cat([hidden_states[index] for index in HIDDEN_STATES], dim=-1)
+        rows = torch.cat([hidden_states[index] for index in TEXT_LAYERS], dim=-1)
         rows = (rows.to(dtype) - self.input_mean) / self.input_std
         rows = self.proj(rows) * self.output_std + self.output_mean
         return torch.cat([self.sink_embedding.expand(rows.shape[0], 1, -1), rows[:, 1:]], dim=1)
+
+
+#: A forward pre-hook's answer: the call's positional and keyword arguments.
+_Call = tuple[tuple[object, ...], dict[str, object]]
+
+
+@contextmanager
+def _hidden_states_of(encoder: Qwen3VLForConditionalGeneration, layers: Sequence[int]) -> Iterator[None]:
+    """While open, a forward of `encoder` keeps its language model's `layers` outputs alone (Transformers' list
+    form of `output_hidden_states`, by decoder layer, the last tied to `last_hidden_state`), and none of its vision
+    tower's. `output_hidden_states=True` held all 37 (x tokens x 2560) through the forward, and every vision
+    block's beside them (se-122)."""
+    language: nn.Module = encoder.model.language_model
+    kept = list(layers)
+
+    def tower(_: nn.Module, args: tuple[object, ...], kwargs: dict[str, object]) -> _Call:
+        return args, {**kwargs, "output_hidden_states": False}
+
+    def text(_: nn.Module, args: tuple[object, ...], kwargs: dict[str, object]) -> _Call:
+        return args, {**kwargs, "output_hidden_states": kept}
+
+    handles = (
+        encoder.register_forward_pre_hook(tower, with_kwargs=True),
+        language.register_forward_pre_hook(text, with_kwargs=True),
+    )
+    try:
+        yield
+    finally:
+        for handle in handles:
+            handle.remove()
 
 
 def _forget_rope_deltas(module: nn.Module, _args: tuple[object, ...], _output: object) -> None:
@@ -236,9 +269,9 @@ class PH3Image(Model[ImageGraph]):
         types = torch.tensor(self.processor.create_mm_token_type_ids([token_ids]), dtype=torch.long, device=device)
         extra = {name: value.to(device, encoder.dtype if name.startswith("pixel_") else value.dtype)
                  for name, value in vision.items()}  # fmt: skip
-        with torch.no_grad():
+        with torch.no_grad(), _hidden_states_of(encoder, TEXT_LAYERS):
             out = encoder(input_ids=input_ids, attention_mask=torch.ones_like(input_ids), mm_token_type_ids=types,
-                          use_cache=False, output_hidden_states=True, logits_to_keep=1, **extra)  # fmt: skip
+                          use_cache=False, logits_to_keep=1, **extra)  # fmt: skip
             embeds = self.graph.components["text_connector"](out.hidden_states).to(torch.bfloat16)
         return embeds, torch.tensor(tags, dtype=torch.long)
 
