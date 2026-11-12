@@ -161,6 +161,7 @@ from minimax_h3.shot import (
     shot_latents_file,
     shot_windows,
     sound_chunks,
+    SoFar,
     unusable,
     upscale_prompt,
     written,
@@ -1636,6 +1637,7 @@ async def _render(ctx: Context, shot: Shot, out: Outputs, tel: Telemetry, *, pla
     expected = None
     models = {} if lora is None else {"base_model": lora}
     returned: list[SegmentOutput] = []
+    so_far = SoFar(out, tel)
     for index, (segment, plan) in enumerate(zip(calls, plans, strict=True)):
         ctx.raise_if_cancelled()
         first = opening if index == 0 else None
@@ -1684,8 +1686,11 @@ async def _render(ctx: Context, shot: Shot, out: Outputs, tel: Telemetry, *, pla
         returned.append(result)
         warnings += result.warnings
         files[f"Segment {index + 1} end"] = result.last_frame
-        whole = index + 1 == count and (take is None or carried)
-        out.publish("video", result.video, label="Video" if whole else f"Segment {index + 1} of {count}")
+        # Each segment shows as it lands, after those before it, so its box plays all made so far while the next renders.
+        if index + 1 == count and (take is None or carried):
+            out.publish("video", result.video, label="Video")
+        else:
+            out.publish("video", so_far.add(result.video), label=f"Segments 1-{index + 1} of {count}" if index else f"Segment 1 of {count}")
     video, kept = returned[-1].video, None
     if take is not None and not carried:
         video, said = join_kept(out, take.file, done, video)
