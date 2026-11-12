@@ -1,9 +1,9 @@
 # Anima
 
-`generate` makes one anime-style image from a text prompt with Anima Base 1.0. The model's
-licence is non-commercial.
+`generate` makes one anime-style image with Anima Base 1.0: from a text prompt, steered by the pictures it
+mentions and by control maps, or from a start picture. The model's licence is non-commercial, as are its adapters'.
 
-`image` is the canvas tool, its prompt `instructions`: `aspect_ratio`, `megapixels`, `negative_prompt` and `seed`.
+`image` is the canvas tool, its prompt `instructions`, with the same inputs: a box with pictures edits.
 
 The model card's quality tags open the prompt; the package adds nothing to it:
 
@@ -34,8 +34,35 @@ Inputs: `prompt`, `aspect_ratio` (any W:H), `megapixels` (any size, 1024² pixel
 uses guidance, default 0.15–0.70) and `first_block_cache` (0 = off). Left out, each is Anima's
 default: 1:1 at its 1536 class (1536², 2.25 MP), 30 steps at guidance 4.5, the card's negative
 prompt, a random seed. Sizes round to 32 px within 1–2.25 MP and the rotary range (2048 px sides);
-steps 8–50, guidance 1–10. Out of range clamps with a `clamp` adjustment. Anima makes images from text only: its prompt is words, so a picture mentioned in it goes as its name ([references](../docs/references.md)). The result is `image` (a WebP in
+steps 8–50, guidance 1–10. Out of range clamps with a `clamp` adjustment. The result is `image` (a WebP in
 `~/.cozy/outputs`), `width`, `height`, `seed` and `prompt`.
+
+## Pictures
+
+- **Mentioned pictures** (`<amy> sitting in a cafe`), up to 4, steer the image through LuciferTC's SigLIP2
+  IP-Adapter (`lucifertc/ip-adapter`, with `google/siglip2-base-patch16-512`): the character's hair, outfit and
+  accessories carry over. A mention reads as its picture's description, else as nothing ([references](../docs/references.md)).
+  `reference_strength` (0–2, default 1) scales them.
+- **Image to image:** `image` is the start picture, `strength` (default 0.6) how much of it is redrawn.
+- **Control maps:** `control` is a list of `{image, kind, strength}`, each map at any size (it is fitted to the
+  output), through kohya's ControlNet-LLLite for its kind:
+
+  | kind | map | adapter |
+  |---|---|---|
+  | `sketch`, `lineart` | lines or a scribble | `kohya-ss/lllite-any-test-like` (Base 1.0) |
+  | `depth` | a depth map | `kohya-ss/lllite-depth` (Preview3) |
+  | `pose` | an OpenPose skeleton | `kohya-ss/lllite-pose` (Preview3) |
+  | `inpaint` | the picture with the area to redraw transparent | `kohya-ss/lllite-inpainting` (Base 1.0) |
+
+  An inpaint redraws only the transparent area: the rest is put back every step. Its start is the map's picture,
+  fully redrawn there, or `image` at `strength`. `canny` has no Anima adapter yet, so it is ignored with a note.
+  Another kohya LLLite file works by pinning its slot: `model.pose=toyxyz/controlnet-lllite-3dpose`.
+
+```yaml
+prompt: masterpiece, best quality, <amy> reading in a library
+control:
+  - {image: pose.png, kind: pose}
+```
 
 GPU: any NVIDIA card with 8 GB. The default 8-bit lane is 3.2 GiB (`circlestone-labs/anima@1.0.0`); the
 bf16 lane is 5.2 GiB. A 1024² image at 30 steps takes about 8.4 s on an RTX 4090 and 70 s on an

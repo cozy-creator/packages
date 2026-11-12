@@ -12,7 +12,9 @@ from typing import Any, NamedTuple, Protocol, TypedDict, cast
 import torch
 from cozy_runtime import rng
 from cozy_runtime.accel import fusion, hold_dtype, stepcache
-from cozy_runtime.author import Config, Loader, Model, ModelAssets, Serving, Telemetry, preview, uses_components
+from cozy_runtime.author import (
+    Config, Loader, Model, ModelAssets, Serving, Telemetry, UnsupportedInput, preview, uses_components,
+)
 from cozy_runtime.accel.kernels import Plan
 from diffusers.configuration_utils import ConfigMixin
 from diffusers.models.autoencoders.autoencoder_kl_qwenimage import AutoencoderKLQwenImage
@@ -23,12 +25,17 @@ from diffusers.modular_pipelines.anima.modular_pipeline import AnimaModularPipel
 from diffusers.modular_pipelines.modular_pipeline import BlockState, ModularPipeline, ModularPipelineBlocks, PipelineState
 from diffusers.schedulers.scheduling_flow_match_euler_discrete import FlowMatchEulerDiscreteScheduler
 from diffusers.modular_pipelines.anima.denoise import AnimaDenoiseStep
+from diffusers.modular_pipelines.anima.encoders import encode_vae_image
+from diffusers.image_processor import VaeImageProcessor
+from diffusers.utils.torch_utils import randn_tensor
+from PIL import Image as PILImage
 from transformers import AutoModel, PreTrainedTokenizerFast, Qwen3Config, Qwen3Model
 from transformers import initialization as transformer_init
 from transformers.modeling_utils import local_torch_dtype
 from tokenizers import Tokenizer
 
 from . import optimization
+from .adapters import Adapters
 
 #: The DiT's block stack for `stepcache` (FBCache): each Cosmos block returns its hidden states.
 STACK = stepcache.Stack(CosmosTransformer3DModel, blocks="transformer_blocks", carried=(0,))
@@ -38,6 +45,7 @@ STACK = stepcache.Stack(CosmosTransformer3DModel, blocks="transformer_blocks", c
 #: are read by a person. Only `denoise` is measured per step — it is the only phase long enough
 #: to need it, and at the default 1536 class it is 150 of the roughly 160 seconds.
 _ENCODE_PROMPT = "encoding prompt"
+_ENCODE_PICTURE = "encoding picture"
 _CONDITION = "conditioning"
 _DENOISE = "denoise"
 _DECODE = "decoding"
@@ -101,6 +109,16 @@ def build_pipeline(config: Config, *, assets: ModelAssets) -> AnimaPipeline:
     return AnimaPipeline(config, assets=assets)
 
 
+class Start(NamedTuple):
+    """Image-to-image: the picture at the output's size, how much of the schedule redraws it (`strength`), and
+    for an inpaint the latent-size mask of what to redraw ([1, 1, 1, h, w], 1 redraws); the rest is put back
+    each step."""
+
+    picture: PILImage.Image
+    strength: float
+    mask: torch.Tensor | None = None
+
+
 class AnimaModel(Model[AnimaPipeline]):
     """Touches its components through their forward passes only, so an encoded lane may
     replace DiT linears with native leaves (the fp8 lane's whole point on sm89). The filled
@@ -156,12 +174,34 @@ class AnimaModel(Model[AnimaPipeline]):
         seed: int,
         phases: _Phases,
         batched: bool,
+        *,
+        start: Start | None = None,
+        adapters: Adapters | None = None,
     ) -> torch.Tensor:
+        """`start`: begin from a picture (image-to-image, inpaint). `adapters`: the references and control maps
+        the DiT's calls add (se-127)."""
         device = torch.device(str(self.device))
         generator = rng.generator(seed)
-        fused = optimization.installed(self.pipe.components["transformer"])
+        transformer = self.pipe.components["transformer"]
+        if adapters is not None and not optimization.adaptable(transformer):
+            raise UnsupportedInput(
+                "Anima takes pictures and control maps through its plan, which this Diffusers build refuses",
+                code="adapters_unplanned",
+            )
+        fused = optimization.installed(transformer)
         cache = stepcache.FirstBlockCache(first_block_cache) if first_block_cache > 0.0 else None
-        pipeline = _text2image_pipeline(device, phases, batched, fused, cache)
+        inputs: dict[str, object] = {}
+        held = None
+        if start is not None:
+            phases.enter(_ENCODE_PICTURE)
+            vae = self.pipe.components["vae"]
+            pixels = VaeImageProcessor(vae_scale_factor=8).preprocess(start.picture, height=height, width=width)
+            image = encode_vae_image(pixels, vae, generator, device, vae.dtype, latent_channels=16).float()
+            noise = randn_tensor(tuple(image.shape), generator=generator, device=device, dtype=torch.float32)
+            inputs = {"image_latents": image, "latents": noise, "strength": start.strength}
+            if start.mask is not None:
+                held = _Held(image, noise, start.mask.to(device, torch.float32))
+        pipeline = _pipeline(start is not None, device, phases, batched, fused, cache, adapters, held)
         pipeline.register_components(  # type: ignore[no-untyped-call]  # Diffusers' own, unannotated
             **self.pipe.components,
             scheduler=construct(FlowMatchEulerDiscreteScheduler, self.pipe.scheduler_config),
@@ -182,15 +222,32 @@ class AnimaModel(Model[AnimaPipeline]):
             generator=generator,
             output="images",
             output_type="pt",
+            **inputs,
         )
         return images
 
 
-def _text2image_pipeline(
-    device: torch.device, phases: _Phases, batched: bool, fused: bool, cache: stepcache.Policy | None
+class _Held(NamedTuple):
+    """An inpaint's start latents, its noise and its mask: outside the mask each step puts the start back, noised
+    to the step's sigma."""
+
+    image: torch.Tensor
+    noise: torch.Tensor
+    mask: torch.Tensor
+
+
+def _pipeline(
+    pictured: bool,
+    device: torch.device,
+    phases: _Phases,
+    batched: bool,
+    fused: bool,
+    cache: stepcache.Policy | None,
+    adapters: Adapters | None,
+    held: _Held | None,
 ) -> AnimaModularPipeline:
-    """The text2image pipeline, instrumented on the blocks it will actually run, its denoise loop
-    `_Denoise`, its padding mask at latent size when `fused`.
+    """The text2image pipeline, or with `pictured` img2img from latents the caller encoded, instrumented on the
+    blocks it will actually run, its denoise loop `_Denoise`, its padding mask at latent size when `fused`.
 
     `ModularPipeline.blocks` is a property returning a DEEPCOPY, so a hook installed through
     it is thrown away and the meter never moves — the whole of the frozen `conditioning 0%`
@@ -215,16 +272,21 @@ def _text2image_pipeline(
         def _execution_device(self) -> torch.device:
             return device
 
-    blocks = AnimaAutoBlocks().get_workflow("text2image")  # type: ignore[no-untyped-call]  # Diffusers' blocks, unannotated
+    workflow = "img2img" if pictured else "text2image"
+    blocks = AnimaAutoBlocks().get_workflow(workflow)  # type: ignore[no-untyped-call]  # Diffusers' blocks, unannotated
     order = list(blocks.sub_blocks)
+    encoders = [name for name in order if name.rsplit(".", 1)[-1] == "vae_encoder"]
     if not {"denoise.denoise", "denoise.text_conditioning", "denoise.prepare_latents"} <= set(
         order
-    ):
-        raise RuntimeError(f"Diffusers Anima text2image blocks changed: {order}")
-    blocks.sub_blocks["denoise.denoise"] = _Denoise(phases, batched, cache)
-    if fused:
+    ) or len(encoders) != int(pictured):
+        raise RuntimeError(f"Diffusers Anima {workflow} blocks changed: {order}")
+    blocks.sub_blocks["denoise.denoise"] = _Denoise(phases, batched, cache, adapters, held)
+    if pictured:
+        # The picture's latents come encoded (`render`), with the noise its inpaint puts back.
+        blocks.sub_blocks.pop(encoders[0])
+    elif fused:
         blocks.sub_blocks["denoise.prepare_latents"] = optimization.FusedLatents()  # type: ignore[no-untyped-call]  # its base's __init__
-    blocks.sub_blocks.insert("conditioning", Announce(), order.index("denoise.text_conditioning"))  # type: ignore[no-untyped-call]  # its base's __init__
+    blocks.sub_blocks.insert("conditioning", Announce(), list(blocks.sub_blocks).index("denoise.text_conditioning"))  # type: ignore[no-untyped-call]  # its base's __init__
     return RuntimeAnimaPipeline(blocks=blocks)
 
 
@@ -246,11 +308,20 @@ class _Denoise(AnimaDenoiseStep):
     forward streams the whole transformer through the card, so this halves a CFG step's copies (C4 of
     the small-pool analysis). `cache` is FBCache as a `stepcache` policy: each forward of a step (the
     condition, then the unconditional one) keeps its own state, as Diffusers' per-condition cache
-    contexts did."""
+    contexts did. `adapters` go into every DiT call, the IP term on its conditional rows; `held` puts an
+    inpaint's start back outside its mask after each step."""
 
-    def __init__(self, phases: _Phases, batched: bool, cache: stepcache.Policy | None) -> None:
+    def __init__(
+        self,
+        phases: _Phases,
+        batched: bool,
+        cache: stepcache.Policy | None,
+        adapters: Adapters | None = None,
+        held: _Held | None = None,
+    ) -> None:
         super().__init__()  # type: ignore[no-untyped-call]  # Diffusers' blocks, unannotated
         self.phases, self.batched, self.cache = phases, batched, cache
+        self.adapters, self.held = adapters, held
 
     @torch.no_grad()
     def __call__(
@@ -265,10 +336,12 @@ class _Denoise(AnimaDenoiseStep):
         if negative is not None:
             negative = torch.cat([positive, negative.to(dtype)]) if self.batched else negative.to(dtype)
 
-        def predict(hidden: torch.Tensor, timestep: torch.Tensor, text: torch.Tensor) -> torch.Tensor:
+        def predict(hidden: torch.Tensor, timestep: torch.Tensor, text: torch.Tensor, *rows: bool) -> torch.Tensor:
+            """`rows`: which of the call's rows are conditional, where the references add their term."""
+            extra = {} if self.adapters is None else {"adapters": self.adapters.at(rows)}
             return transformer(  # type: ignore[no-any-return]
                 hidden_states=hidden, timestep=timestep, padding_mask=block_state.padding_mask,
-                encoder_hidden_states=text, return_dict=False,
+                encoder_hidden_states=text, return_dict=False, **extra,
             )[0]
 
         self.phases.enter(_DENOISE)
@@ -282,16 +355,21 @@ class _Denoise(AnimaDenoiseStep):
                 hidden = latents.to(dtype)
                 timestep = t.expand(1).to(dtype) / scheduler.config.num_train_timesteps
                 if guider.num_conditions == 1:
-                    prediction = predict(hidden, timestep, positive)
+                    prediction = predict(hidden, timestep, positive, True)
                 else:
                     if self.batched:
-                        conditional, unconditional = predict(torch.cat([hidden] * 2), timestep, negative).chunk(2)  # type: ignore[arg-type]  # two conditions: a negative
+                        conditional, unconditional = predict(torch.cat([hidden] * 2), timestep, negative, True, False).chunk(2)  # type: ignore[arg-type]  # two conditions: a negative
                     else:
-                        conditional = predict(hidden, timestep, positive)
-                        unconditional = predict(hidden, timestep, negative)  # type: ignore[arg-type]  # two conditions: a negative
+                        conditional = predict(hidden, timestep, positive, True)
+                        unconditional = predict(hidden, timestep, negative, False)  # type: ignore[arg-type]  # two conditions: a negative
                     prediction = unconditional + guider.guidance_scale * (conditional - unconditional)
                 preview(lambda: latents - scheduler.sigmas[i] * prediction, "qwen-image")
                 latents = scheduler.step(prediction, t, latents, return_dict=False)[0]
+                if self.held is not None:
+                    # The sigma the step went to; 0 after the last, the start itself.
+                    sigma = scheduler.sigmas[scheduler.step_index].to(latents.device, torch.float32)
+                    kept = (1 - sigma) * self.held.image + sigma * self.held.noise
+                    latents = (self.held.mask * latents + (1 - self.held.mask) * kept).to(latents.dtype)
                 on_step(i)
         self.phases.enter(_DECODE)
         block_state.latents = latents
