@@ -79,8 +79,8 @@ Ideogram publishes only weight-only fp8 (per-row scales on every linear, its own
 16-bit release exists. TensorFS ingests the fp8 with Diffusers' keys (tfs-134), and the DiTs' `int8` lane is
 written from it (Paul 11-12), as Comfy-Org's `ideogram4_*int8_convrot` files are: every block linear in
 `int8.convrot`, the rest kept fp8. The machine serves `int8` wherever the GPU has int8 tensor cores, fp8 on
-B300; GeForce cards run fp8 at half rate. The repository is gated: accept Ideogram's licence on Hugging Face
-with the account whose token cozy uses.
+B300; GeForce cards run fp8 at half rate (RTX 4090: 0.80 s a step at int8, 1.01 at fp8). The repository is
+gated: accept Ideogram's licence on Hugging Face with the account whose token cozy uses.
 
 ```sh
 cozy model upload hf://ideogram-ai/ideogram-4-fp8@ee79a7237b519f1402ceacf952f30c8a31ec5073 ideogram-ai/ideogram-4 --lane fp8 --on <machine>
