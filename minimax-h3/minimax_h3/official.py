@@ -82,7 +82,7 @@ from .continuation import (
     export_context,
 )
 from .guide_rows import ANCHOR_LATENTS, ANCHORS, GUIDE, GUIDE_LATENTS, GuideClip, anchor_rows, guide_rows
-from .reference_rows import ClipRows, LoopState, motion_size, public_video
+from .reference_rows import ClipRows, LoopState, motion_size, public_video, unprotect_carried
 from .steps import denoise_official
 from .overlay import ATTENTION_KWARG, OVERLAY_KWARG, REGENERATE_BANK, TURBO_BANK, Overlay, TurboSchedule
 from .vae_tiles import TileBatchedVideoVAE, encode_condition
@@ -183,12 +183,15 @@ def _attention_layout(
     fields = state.denoiser_input_fields
     # NVIDIA's H3 policy protects every row before target video, including target
     # audio. Diffusers packs text, reference media, target audio, then target video.
+    # A continuation's carried frames are video, not references: they sit after the
+    # prefix and take the video's own sparsity (Paul 11-12; `unprotect_carried`).
     # Shape/count metadata is host-resident; do not read GPU values.
     return AttentionLayout(
         live_tokens=fields["token_tags"].numel(),
         protected_prefix=(
             fields["text_indices"].numel()
             + state.num_condition_video_rows
+            - state.carried_video_rows
             + fields["audio_indices"].numel()
         ),
         step=step,
@@ -1137,15 +1140,17 @@ class OfficialH3Pipeline:
         task: Task = "fl2va",
         plan: TimestepPlan | None = None,
         delivery: ContinuationPlan | None = None,
+        canvas: tuple[int, int] | None = None,
     ) -> PipelineState:
         """`delivery` is the segment's clock when its successor carries a picture or sound
-        (`export_context`); an FL2VA segment carries nothing in itself."""
+        (`export_context`); an FL2VA segment carries nothing in itself. `canvas` is the
+        (height, width) a text-only render takes, else the official 16:9."""
         if delivery is not None and (delivery.carried or frames != delivery.sample_frames):
             raise InvalidRequest("an FL2VA segment carries nothing in and samples its own window",
                                  code="h3_continuation")
-        # With no anchor, state the official default canvas. With an anchor, leaving the
-        # dimensions absent makes the first supplied keyframe the geometry authority.
-        height, width = (768, 1344) if first_frame is None and last_frame is None else (None, None)
+        # With no anchor, state the canvas (the official default 16:9 unless asked). With an
+        # anchor, leaving the dimensions absent makes the first supplied keyframe the geometry authority.
+        height, width = (canvas or (768, 1344)) if first_frame is None and last_frame is None else (None, None)
         state = self._start(
             _trunk_task(task, "fl2va"),
             prompt=prompt,
@@ -1177,12 +1182,14 @@ class OfficialH3Pipeline:
         delivery: ContinuationPlan | None = None,
         guide: GuideClip | None = None,
         anchors: Sequence[tuple[PILImage.Image, Literal["first", "last"]]] = (),
+        canvas: tuple[int, int] | None = None,
     ) -> PipelineState:
         """``reference_image_short_edges`` is one resolved edge per image reference, in
         packed order; the official setup step resizes each image to its own. A `guide` sets
         the render's canvas (`guide_rows`), else the carried picture does, else the first
         keyframe `anchor`, as FL2VA's first keyframe does; each anchor is fitted to it
-        (`anchor_rows`)."""
+        (`anchor_rows`). Else `canvas`, the (height, width) asked for, else the official 16:9:
+        a reference picture never sets it."""
         if context is not None:
             context.validate()
             if delivery is None or delivery.carried != context.carry:
@@ -1193,17 +1200,19 @@ class OfficialH3Pipeline:
             )
         if delivery is not None and frames != delivery.sample_frames:
             raise InvalidRequest("sample frames differ from delivery plan", code="h3_continuation")
-        canvas: dict[str, int]
+        size: dict[str, int]
         if guide is not None:
-            canvas = dict(zip(("height", "width"), map(int, guide.frames.shape[1:3]), strict=True))
+            size = dict(zip(("height", "width"), map(int, guide.frames.shape[1:3]), strict=True))
         elif context is not None and context.canvas is not None:
-            canvas = dict(zip(("height", "width"), context.canvas, strict=True))
+            size = dict(zip(("height", "width"), context.canvas, strict=True))
         elif anchors:
             width, height = anchors[0][0].size
-            canvas = dict(zip(("height", "width"),
-                              (int(v) for v in resolve_canvas_size(width, height, *CANVAS)), strict=True))
+            size = dict(zip(("height", "width"),
+                            (int(v) for v in resolve_canvas_size(width, height, *CANVAS)), strict=True))
+        elif canvas is not None:
+            size = dict(zip(("height", "width"), canvas, strict=True))
         else:
-            canvas = {}
+            size = {}
         state = self._start(
             _trunk_task(task, "ref2va"),
             prompt=prompt,
@@ -1213,7 +1222,7 @@ class OfficialH3Pipeline:
             references=list(references),
             image_short_edges=tuple(reference_image_short_edges),
             plan=plan,
-            **canvas,
+            **size,
         )
         state.set("normalized_references", [
             replace(normalized, frames=source.motion[:frames])
@@ -1631,6 +1640,9 @@ class OfficialH3Pipeline:
             references, latents = state.normalized_references, state.condition_latents
             clips = ClipRows(block_state, references, latents, scoped.patch_size, start=guided)
             clips.thin(block_state)
+        block_state.carried_video_rows = (
+            0 if context is None else unprotect_carried(block_state, context, tuple(scoped.patch_size))
+        )
         # Every path runs `denoise_official`; on several ranks each rank runs the loop.
         cancel()
         loop_over = partial(

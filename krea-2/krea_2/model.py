@@ -1,21 +1,29 @@
 """Krea 2 (Raw and Turbo), component-staged over Diffusers' modules.
 
 The DiT and VAE are Diffusers' (`Krea2Transformer2DModel`, `AutoencoderKLQwenImage`, 0.42.1); the text
-encoder is Transformers' Qwen3-VL-4B text model. Prompt conditioning, the schedule and the sampler are
-Diffusers' `Krea2Pipeline`, Krea's reference code (`krea-ai/krea-2` db3984f) in its form. Runtime
-constructs and fills the modules and owns their residency.
+encoder is Transformers' Qwen3-VL-4B, its vision tower read only with pictures. Prompt conditioning, the
+schedule and the sampler are Diffusers' `Krea2Pipeline`, Krea's reference code (`krea-ai/krea-2` db3984f) in
+its form. Runtime constructs and fills the modules and owns their residency.
+
+Krea 2 takes no pictures upstream; its community adapters (`adapters.py`) add them as clean VAE tokens in the
+DiT's sequence (`Reference`), as Qwen3-VL vision tokens in its text (`encode_pictures`), or as a control
+latent beside each image token (`denoise(control=)`). An adapter's LoRA reaches the DiT through permanent
+hooks (`cozy_runtime.lora.Hook`), which Runtime bakes into the resident weights while it is armed.
 """
 
 from __future__ import annotations
 
 import json
-from collections.abc import Callable, Mapping
+import math
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
+from functools import partial
 from typing import TYPE_CHECKING, NamedTuple, TypedDict, cast
 
 import numpy as np
 import torch
 from cozy_runtime import rng, tiles
-from cozy_runtime.accel import fusion, hold_dtype
+from cozy_runtime.accel import fusion, hold_dtype, lora
 from cozy_runtime.author import (
     Config,
     Loader,
@@ -32,20 +40,27 @@ from diffusers.models.autoencoders.autoencoder_kl_qwenimage import (
     AutoencoderKLQwenImage,
     QwenImageCausalConv3d,
     QwenImageDecoder3d,
+    QwenImageResample,
     QwenImageResidualBlock,
     QwenImageRMS_norm,
     QwenImageUpsample,
 )
-from diffusers.models.transformers.transformer_krea2 import Krea2Transformer2DModel, Krea2TransformerBlock
+from diffusers.models.transformers.transformer_krea2 import (
+    Krea2FinalLayer,
+    Krea2TextProjection,
+    Krea2TimestepEmbedding,
+    Krea2Transformer2DModel,
+    Krea2TransformerBlock,
+)
 from diffusers.schedulers.scheduling_flow_match_euler_discrete import FlowMatchEulerDiscreteScheduler
-from diffusers.pipelines.krea2.pipeline_krea2 import Krea2Pipeline, calculate_shift, retrieve_timesteps
+from diffusers.pipelines.krea2.pipeline_krea2 import calculate_shift, retrieve_timesteps
 from PIL import Image
 from tokenizers import Tokenizer
 from torch import nn
 from torch.nn import functional as F
 from transformers import PreTrainedTokenizerFast, Qwen3VLConfig
 from transformers.initialization import no_init_weights
-from transformers.models.qwen3_vl.modeling_qwen3_vl import Qwen3VLTextModel
+from transformers.models.qwen3_vl.modeling_qwen3_vl import Qwen3VLTextModel, Qwen3VLVisionModel
 
 if TYPE_CHECKING:
     from diffusers.configuration_utils import ConfigMixin
@@ -68,12 +83,21 @@ SYSTEM_PROMPT = (
 #: Turbo's fixed timestep shift (Diffusers' `is_distilled`); Raw's follows the token count.
 DISTILLED_MU = 1.15
 _DTYPES = {"f32": torch.float32, "bf16": torch.bfloat16, "f16": torch.float16}
+#: Qwen3-VL-4B-Instruct's image processor (`preprocessor_config.json`): 16 px patches merged 2x2, each patch
+#: twice in time, mean and std 0.5, 64Ki to 16Mi pixels on the 32 px grid.
+VISION_PATCH, VISION_MERGE, VISION_FRAMES = 16, 2, 2
+VISION_PIXELS = (65536, 16777216)
+IMAGE_PAD = "<|image_pad|>"
+VISION = "<|vision_start|>" + IMAGE_PAD + "<|vision_end|>"
+#: Adapters armed at once: an edit's and a control's (`Krea2.denoise`'s `overlays`).
+SLOTS = 2
 
 
 class TextEncoder(nn.Module):
-    """Qwen3-VL-4B's language model (`language_model.*`) up to the deepest tapped layer. The vision
-    tower, the later layers and the final norm are never built, so their bytes are never read; with the
-    norm an identity, hidden state `depth` stays the pre-norm output Diffusers taps."""
+    """Qwen3-VL-4B: its language model (`language_model.*`) up to the deepest tapped layer, and its vision
+    tower (`visual.*`), which only a prompt with pictures runs. The later layers and the final norm are never
+    built, so their bytes are never read; with the norm an identity, hidden state `depth` stays the pre-norm
+    output Diffusers taps."""
 
     def __init__(self, config: Qwen3VLConfig, depth: int) -> None:
         super().__init__()
@@ -82,38 +106,110 @@ class TextEncoder(nn.Module):
         )
         self.language_model.layers = nn.ModuleList(list(self.language_model.layers)[:depth])
         self.language_model.norm = nn.Identity()  # type: ignore[assignment, unused-ignore]  # the final norm, removed
+        self.visual: Qwen3VLVisionModel = Qwen3VLVisionModel._from_config(  # type: ignore[no-untyped-call]  # Transformers' _from_config is unannotated
+            config.vision_config, dtype=DTYPE
+        )
+        self.image_token_id = int(config.image_token_id)
+
+
+def smart_resize(height: int, width: int) -> tuple[int, int]:
+    """Transformers' Qwen2-VL `smart_resize` at Qwen3-VL's factor (32) and pixel range."""
+    factor = VISION_PATCH * VISION_MERGE
+    low, high = VISION_PIXELS
+    h, w = max(factor, round(height / factor) * factor), max(factor, round(width / factor) * factor)
+    if h * w > high:
+        beta = math.sqrt(height * width / high)
+        h = max(factor, math.floor(height / beta / factor) * factor)
+        w = max(factor, math.floor(width / beta / factor) * factor)
+    elif h * w < low:
+        beta = math.sqrt(low / (height * width))
+        h, w = math.ceil(height * beta / factor) * factor, math.ceil(width * beta / factor) * factor
+    return h, w
+
+
+def vision_patches(picture: Image.Image) -> tuple[torch.Tensor, tuple[int, int, int]]:
+    """Transformers' Qwen2-VL image processor on one picture: bicubic to `smart_resize`, normalized by mean
+    and std 0.5, cut into 16 px patches in merge order, each repeated over 2 frames: [patches, 1536] F32 and
+    its (1, rows, columns) grid in patches."""
+    height, width = smart_resize(picture.height, picture.width)
+    pixels = np.asarray(picture.convert("RGB").resize((width, height), Image.Resampling.BICUBIC), dtype=np.float32)
+    x = (torch.from_numpy(pixels).permute(2, 0, 1) / 255.0 - 0.5) / 0.5
+    rows, columns, p, m = height // VISION_PATCH, width // VISION_PATCH, VISION_PATCH, VISION_MERGE
+    x = x.reshape(3, rows // m, m, p, columns // m, m, p).permute(1, 4, 2, 5, 0, 3, 6)
+    x = x.unsqueeze(5).expand(-1, -1, -1, -1, -1, VISION_FRAMES, -1, -1)
+    return x.reshape(rows * columns, 3 * VISION_FRAMES * p * p), (1, rows, columns)
+
+
+def mrope(ids: Sequence[int], pad: int, grids: Sequence[tuple[int, int, int]]) -> torch.Tensor:
+    """Qwen3-VL's `get_rope_index` for one sequence: text counts up on all three axes; a picture's merged
+    tokens sit on its (frame, row, column) grid from where the text reached, which then moves on by its
+    longer side. [3, 1, len(ids)]."""
+    parts: list[torch.Tensor] = []
+    at, i, pictures = 0, 0, iter(grids)
+    while i < len(ids):
+        if ids[i] == pad:
+            frames, rows, columns = next(pictures)
+            rows, columns = rows // VISION_MERGE, columns // VISION_MERGE
+            t, h, w = torch.meshgrid(torch.arange(frames), torch.arange(rows), torch.arange(columns), indexing="ij")
+            parts.append(torch.stack([t, h, w]).reshape(3, -1) + at)
+            at += max(rows, columns)
+            i += frames * rows * columns
+            continue
+        run = i
+        while run < len(ids) and ids[run] != pad:
+            run += 1
+        parts.append(torch.arange(at, at + run - i).view(1, -1).expand(3, -1))
+        at += run - i
+        i = run
+    return torch.cat(parts, dim=1)[:, None]
 
 
 class Block(Krea2TransformerBlock):
     """Diffusers' block with its modulation in the activations' dtype: the checkpoint stores the
-    block's `scale_shift_table` in F32, which Diffusers' bf16 load would cast."""
+    block's `scale_shift_table` in F32, which Diffusers' bf16 load would cast. With `split`, `temb` holds
+    two rows: the tokens before `split` read the first, the rest the second (an adapter's references at
+    time 0)."""
 
     def forward(self, hidden_states: torch.Tensor, temb: torch.Tensor,
                 image_rotary_emb: tuple[torch.Tensor, torch.Tensor],
-                attention_mask: torch.Tensor | None = None) -> torch.Tensor:
+                attention_mask: torch.Tensor | None = None, split: int | None = None) -> torch.Tensor:
         rows = temb.unflatten(-1, (6, -1))
         modulation = (rows + self.scale_shift_table).to(hidden_states.dtype)
         prescale, preshift, pregate, postscale, postshift, postgate = modulation.unbind(-2)
-        attn_out = self.attn((1.0 + prescale) * self.norm1(hidden_states) + preshift,
+
+        def modulated(x: torch.Tensor, scale: torch.Tensor, shift: torch.Tensor) -> torch.Tensor:
+            if split is None:
+                return (1.0 + scale) * x + shift
+            return torch.cat(((1.0 + scale[0]) * x[:, :split] + shift[0], (1.0 + scale[1]) * x[:, split:] + shift[1]), 1)
+
+        def gated(x: torch.Tensor, gate: torch.Tensor) -> torch.Tensor:
+            return gate * x if split is None else torch.cat((gate[0] * x[:, :split], gate[1] * x[:, split:]), 1)
+
+        attn_out = self.attn(modulated(self.norm1(hidden_states), prescale, preshift),
                              attention_mask=attention_mask, image_rotary_emb=image_rotary_emb)
-        hidden_states = hidden_states + pregate * attn_out
-        ff_out = self.ff((1.0 + postscale) * self.norm2(hidden_states) + postshift)
-        out: torch.Tensor = hidden_states + postgate * ff_out
+        hidden_states = hidden_states + gated(attn_out, pregate)
+        ff_out = self.ff(modulated(self.norm2(hidden_states), postscale, postshift))
+        out: torch.Tensor = hidden_states + gated(ff_out, postgate)
         return out
 
 
 def _modulation(block: nn.Module, arguments: Mapping[str, object]) -> fusion.Modulation:
-    """`Block.forward`'s six adaLN rows in the activations' dtype; a batch of one reads row 0."""
+    """`Block.forward`'s six adaLN rows in the activations' dtype; a batch of one reads row 0, and with
+    `split` the tokens from it on read row 1."""
     # Runtime fuses the `Block`s and binds their forward's tensors.
     hidden, temb = cast(torch.Tensor, arguments["hidden_states"]), cast(torch.Tensor, arguments["temb"])
     rows6 = temb.unflatten(-1, (6, -1))
     table = (rows6 + cast(Block, block).scale_shift_table).to(hidden.dtype)
     rows = [row.reshape(-1, row.shape[-1]) for row in table.unbind(-2)]
     batch, tokens = hidden.shape[:2]
-    index = torch.arange(batch, device=hidden.device).repeat_interleave(tokens)
+    split = cast("int | None", arguments.get("split"))
+    if split is not None:
+        index = (torch.arange(tokens, device=hidden.device) >= split).long()
+    else:
+        index = torch.arange(batch, device=hidden.device).repeat_interleave(tokens)
+        index = index[:1] if batch == 1 else index
     prescale, preshift, pregate, postscale, postshift, postgate = rows
-    return fusion.Modulation(index[:1] if batch == 1 else index, prescale, pregate, postscale,
-                             postgate, preshift, postshift)
+    return fusion.Modulation(index, prescale, pregate, postscale, postgate, preshift, postshift)
 
 
 #: `Block` as Runtime fuses it: zero-centered fp32 RMSNorms (rounding once), modulated by `1 + scale`
@@ -162,25 +258,114 @@ def as_stored(config: Config, component: str, root: nn.Module) -> None:
                 module.register_parameter(name, nn.Parameter(param.to(dtype), requires_grad=False))
 
 
+@dataclass(frozen=True)
+class Reference:
+    """A clean picture in the DiT's sequence, as an adapter places it: its VAE latents [1, 16, h/8, w/8]
+    (normalized, on the CPU), its RoPE frame and the (row, column) its grid starts at, in tokens."""
+
+    latents: torch.Tensor
+    frame: int
+    origin: tuple[float, float] = (0.0, 0.0)
+    #: The target's attention to it, multiplied (Identity Edit's `ref_boost`: a logit bias of its log).
+    boost: float = 1.0
+
+
+@dataclass(frozen=True)
+class Branch:
+    """One prompt of a request (positive or negative) and the pictures its sequence carries: `before` the
+    target at the step's time (Identity Edit), `after` it at time 0 (ai-toolkit's edits), the latter
+    attending only among themselves when `isolated` (a LoRA trained with ai-toolkit's `kv_cache`)."""
+
+    text: torch.Tensor
+    before: tuple[Reference, ...] = ()
+    after: tuple[Reference, ...] = ()
+    isolated: bool = False
+
+
+@dataclass(frozen=True)
+class Stream:
+    """A branch as each step reads it, built once: its fused text, its pictures through `img_in`, its
+    rotary tables, its attention bias, and where its target tokens sit."""
+
+    text: torch.Tensor
+    before: torch.Tensor | None
+    after: torch.Tensor | None
+    rotary: tuple[torch.Tensor, torch.Tensor]
+    mask: torch.Tensor | None
+    target: int
+
+
+def packed(latents: torch.Tensor) -> torch.Tensor:
+    """VAE latents [1, C, 2r, 2c] as DiT tokens [1, r*c, 4C], `unpack`'s inverse."""
+    _, channels, height, width = latents.shape
+    rows, columns = height // 2, width // 2
+    x = latents.view(1, channels, rows, 2, columns, 2).permute(0, 2, 4, 1, 3, 5)
+    return x.reshape(1, rows * columns, channels * 4)
+
+
+def grid(frame: float, rows: int, columns: int, origin: tuple[float, float], device: torch.device) -> torch.Tensor:
+    """A (frame, row, column) RoPE coordinate per token of a rows x columns grid starting at `origin`."""
+    ids = torch.zeros(rows, columns, 3, device=device)
+    ids[..., 0] = frame
+    ids[..., 1] = torch.arange(rows, device=device)[:, None] + origin[0]
+    ids[..., 2] = torch.arange(columns, device=device)[None, :] + origin[1]
+    return ids.reshape(rows * columns, 3)
+
+
 class Transformer(Krea2Transformer2DModel):
     """`Krea2Transformer2DModel` whose forward is one sampling step for every prompt of a request."""
 
-    def forward(
-        self, latents: torch.Tensor, timestep: torch.Tensor, texts: list[torch.Tensor],
-        rotary: list[tuple[torch.Tensor, torch.Tensor]],
-    ) -> list[torch.Tensor]:
+    #: Each slot's armed adapter, its factors by linear (`adapters.Adapter.applied`), else None.
+    _cozy_overlays: list[Mapping[str, lora.Factors] | None]
+    #: A control adapter's expanded input projection while it is armed (`adapters.Adapter.applied`): its
+    #: weight [6144, 128] over each image token and its control token side by side, and its bias.
+    _cozy_projection: tuple[torch.Tensor, torch.Tensor] | None = None
+
+    def embed(self, latents: torch.Tensor, control: torch.Tensor | None) -> torch.Tensor:
+        """`img_in`, in its stored dtype, or with `control` tokens the armed control adapter's projection over
+        both (Patil's `ControlInputLayer`)."""
+        if control is None:
+            return cast(torch.Tensor, self.img_in(latents.to(_dtype(self.img_in)))).to(latents.dtype)
+        if self._cozy_projection is None:
+            raise ValueError("a control map reaches Krea 2 only through an armed control adapter")
+        weight, bias = self._cozy_projection
+        x = torch.cat((latents, control.to(latents.dtype)), dim=-1).to(weight.dtype)
+        return F.linear(x, weight, bias.to(weight.dtype)).to(latents.dtype)
+
+    def forward(self, latents: torch.Tensor, timestep: torch.Tensor, streams: list[Stream],
+                control: torch.Tensor | None = None) -> list[torch.Tensor]:
         """Each prompt's velocity at `timestep` [1] (0-1): `Krea2Transformer2DModel.forward` op for op past
-        what no step changes, each prompt's fused text (`fused_text`) and rotary tables. The prompts pass
-        through each block in turn, so a streamed block comes in once per step."""
-        # The embedders and the final layer run in their stored F32; the blocks in bf16.
-        temb = self.time_embed(timestep, dtype=_dtype(self.time_embed))
+        what no step changes (`Krea2._stream`). A branch's pictures before the target share the step's
+        modulation; those after it take time 0's. The prompts pass through each block in turn, so a
+        streamed block comes in once per step."""
+        # The embedders and the final layer run in each linear's stored dtype (F32 in Krea's checkpoints); the
+        # blocks in bf16.
+        temb = _timestep(self.time_embed, timestep)
         modulation = self.time_mod_proj(F.gelu(temb, approximate="tanh").to(_dtype(self.time_mod_proj)))
-        image = self.img_in(latents.to(_dtype(self.img_in))).to(latents.dtype)
-        hidden = [torch.cat([text, image], dim=1) for text in texts]
+        both = modulation
+        if any(stream.after is not None for stream in streams):
+            rest = _timestep(self.time_embed, torch.zeros_like(timestep))
+            rest = self.time_mod_proj(F.gelu(rest, approximate="tanh").to(_dtype(self.time_mod_proj)))
+            both = torch.cat((modulation, rest))
+        image = self.embed(latents, control)
+        hidden, splits = [], []
+        for stream in streams:
+            parts = [stream.text, *([stream.before] if stream.before is not None else []), image]
+            splits.append(None if stream.after is None else sum(int(p.shape[1]) for p in parts))
+            hidden.append(torch.cat([*parts, *([stream.after] if stream.after is not None else [])], dim=1))
         for block in self.transformer_blocks:
-            hidden = [block(h, modulation, rope) for h, rope in zip(hidden, rotary, strict=True)]
-        return [self.final_layer(h[:, text.shape[1]:], temb.to(_dtype(self.final_layer)))
-                for h, text in zip(hidden, texts, strict=True)]
+            hidden = [block(h, modulation if split is None else both, stream.rotary, stream.mask, split)
+                      for h, stream, split in zip(hidden, streams, splits, strict=True)]
+        size = int(image.shape[1])
+        return [_final(self.final_layer, h[:, stream.target:stream.target + size], temb)
+                for h, stream in zip(hidden, streams, strict=True)]
+
+
+def _armed(transformer: nn.Module, slot: int, path: str) -> lora.Factors | None:
+    """An armed adapter's factors at `path` in `slot` (`Krea2.denoise`'s `overlays`), else None."""
+    armed: list[Mapping[str, lora.Factors] | None] = getattr(transformer, "_cozy_overlays", [None] * SLOTS)
+    sites = armed[slot]
+    return None if sites is None else sites.get(path)
 
 
 class Krea2Graph:
@@ -192,6 +377,13 @@ class Krea2Graph:
         transformer.__class__ = Transformer
         for block in transformer.transformer_blocks:
             block.__class__ = Block
+        # Every linear of the DiT serves an armed adapter's factors (`adapters.Adapter`), one hook per slot.
+        dit = cast(Transformer, transformer)  # its class, set above
+        dit._cozy_overlays = [None] * SLOTS  # a plain attribute: nn.Module keeps a list as such
+        for path, module in dit.named_modules():
+            if isinstance(module, nn.Linear):
+                for slot in range(SLOTS):
+                    module.register_forward_hook(lora.Hook(partial(_armed, dit, slot, path)))
         as_stored(config, "transformer", transformer)
         as_stored(config, "vae", vae)
         self.components: Components = {
@@ -255,7 +447,38 @@ def unpack(latents: torch.Tensor, height: int, width: int) -> torch.Tensor:
 
 
 def _dtype(module: nn.Module) -> torch.dtype:
-    return next(module.parameters()).dtype
+    """The dtype `module` computes in: its own weight's (a checkpoint may store a layer's weights and its
+    neighbours' in different dtypes), else a float leaf's activations, bf16."""
+    weight = getattr(module, "weight", None)
+    dtype = weight.dtype if isinstance(weight, torch.Tensor) else next(module.parameters()).dtype
+    return dtype if dtype in (torch.float32, torch.bfloat16, torch.float16) else DTYPE
+
+
+def _timestep(embedding: Krea2TimestepEmbedding, timestep: torch.Tensor) -> torch.Tensor:
+    """`Krea2TimestepEmbedding.forward`, each linear reading its own dtype."""
+    half = embedding.embed_dim // 2
+    freqs = torch.exp(-math.log(1e4) * torch.arange(half, dtype=torch.float32, device=timestep.device) / half)
+    args = (timestep.float() * 1e3)[:, None, None] * freqs
+    emb = torch.cat([torch.cos(args), torch.sin(args)], dim=-1)
+    hidden = embedding.linear_1(emb.to(_dtype(embedding.linear_1)))
+    out: torch.Tensor = embedding.linear_2(F.gelu(hidden, approximate="tanh").to(_dtype(embedding.linear_2)))
+    return out
+
+
+def _text_in(projection: Krea2TextProjection, hidden: torch.Tensor) -> torch.Tensor:
+    """`Krea2TextProjection.forward`: the norm in its weight's dtype, each linear in its own."""
+    hidden = projection.norm(hidden.to(_dtype(projection.norm)))
+    hidden = projection.linear_1(hidden.to(_dtype(projection.linear_1)))
+    out: torch.Tensor = projection.linear_2(F.gelu(hidden, approximate="tanh").to(_dtype(projection.linear_2)))
+    return out
+
+
+def _final(layer: Krea2FinalLayer, hidden: torch.Tensor, temb: torch.Tensor) -> torch.Tensor:
+    """`Krea2FinalLayer.forward`: the modulation in its table's dtype, the projection in its own."""
+    table = layer.scale_shift_table
+    scale, shift = (temb.to(table.dtype) + table).chunk(2, dim=1)
+    out: torch.Tensor = layer.linear(((1.0 + scale) * layer.norm(hidden) + shift).to(_dtype(layer.linear)))
+    return out
 
 
 def fused_text(transformer: Krea2Transformer2DModel, text: torch.Tensor) -> torch.Tensor:
@@ -270,8 +493,7 @@ def fused_text(transformer: Krea2Transformer2DModel, text: torch.Tensor) -> torc
     hidden = fusion.projector(hidden.to(_dtype(fusion.projector))).squeeze(-1).to(text.dtype)
     for block in fusion.refiner_blocks:
         hidden = block(hidden)
-    out: torch.Tensor = transformer.txt_in(hidden.to(_dtype(transformer.txt_in)))
-    return out.to(text.dtype)
+    return _text_in(transformer.txt_in, hidden).to(text.dtype)
 
 
 class Krea2(Model[Krea2Graph]):
@@ -292,15 +514,22 @@ class Krea2(Model[Krea2Graph]):
 
     def execution_plan(self, plan: Plan) -> str:
         vae = self.graph.components["vae"]
+        encoder = vae.encoder
+        # Not the encoder's temporal downsamplers: their `time_conv` only ever runs on a next frame's cache.
+        frame = (
+            *(block for block in encoder.down_blocks if not isinstance(block, QwenImageResample)),
+            encoder.conv_in, encoder.mid_block, encoder.conv_out, vae.quant_conv,
+            vae.decoder, vae.post_quant_conv,
+        )
         installed = (
             fusion.install(plan, BLOCK, self.graph.components["transformer"]),
             fusion.install_norms(plan, VAE_NORM, vae),
-            fusion.install_lone_frame(plan, VAE_FRAME, vae.decoder, vae.post_quant_conv),
+            fusion.install_lone_frame(plan, VAE_FRAME, *frame),
         )
         return "+".join(identity for identity in installed if identity)
 
     def hold_vae(self) -> None:
-        """Decode in `VAE_DTYPE` on CUDA; the CPU keeps the stored F32. The Runtime casts the VAE's
+        """Encode and decode in `VAE_DTYPE` on CUDA; the CPU keeps the stored F32. The Runtime casts the VAE's
         stored F32 when it next fills it. Called before any VAE scope opens."""
         if torch.device(str(self.device)).type == "cuda":
             hold_dtype(self.graph.components["vae"], VAE_DTYPE)
@@ -330,11 +559,99 @@ class Krea2(Model[Krea2Graph]):
             stacked = torch.stack([hidden[i] for i in TAPS], dim=2)[:, framed.prefix_tokens:]
         return stacked.to(DTYPE).cpu()
 
+    @memoize
+    @uses_components("text_encoder")
+    def encode_pictures(self, prompt: str, pictures: tuple[Image.Image, ...], labels: bool) -> torch.Tensor:
+        """`encode` with `pictures` read by Qwen3-VL's vision tower in the user's turn, before the prompt, each
+        `Picture N: ` first with `labels` (ai-toolkit's edits) or bare (Identity Edit), as Transformers' Qwen3-VL
+        reads them (DeepStack included). The pictures come at the size the adapter reads them; their tokens
+        stay in the conditioning, after the system prefix (`frame`). [1, S, 12, 2560] bf16, on the CPU."""
+        encoder = self.graph.components["text_encoder"]
+        device = torch.device(str(self.device))
+        heads = "".join(f"Picture {n}: {VISION}" if labels else VISION for n in range(1, len(pictures) + 1))
+        framed = self.prompt_frame
+        words = self.tokenizer(prompt).input_ids[:TEXT_TOKENS - framed.suffix_tokens]
+        pad = encoder.image_token_id
+        patches, grids = zip(*(vision_patches(picture) for picture in pictures), strict=True)
+        ids: list[int] = []
+        sizes = iter(rows * columns // VISION_MERGE**2 for _, rows, columns in grids)
+        for token in self.tokenizer(framed.prefix + heads).input_ids + words + self.tokenizer(framed.suffix).input_ids:
+            ids.extend([pad] * next(sizes) if token == pad else [token])
+        positions = mrope(ids, pad, grids).to(device)
+        tokens = torch.tensor([ids], device=device)
+        visual = tokens == pad
+        with torch.inference_mode():
+            seen = encoder.visual(torch.cat(patches).to(device, DTYPE), grid_thw=torch.tensor(grids, device=device))
+            language = encoder.language_model
+            embeds = language.embed_tokens(tokens)
+            embeds = embeds.masked_scatter(visual[..., None], seen.pooler_output.to(embeds.dtype))
+            hidden = language(inputs_embeds=embeds, position_ids=positions, visual_pos_masks=visual,
+                              deepstack_visual_embeds=list(seen.deepstack_features), output_hidden_states=True,
+                              use_cache=False).hidden_states
+            stacked = torch.stack([hidden[i] for i in TAPS], dim=2)[:, framed.prefix_tokens:]
+        return stacked.to(DTYPE).cpu()
+
+    @memoize
+    @uses_components("vae")
+    def encode_image(self, picture: Image.Image) -> torch.Tensor:
+        """`decode` inverted: a picture already at its size (16 px grid) through the VAE's encoder, its mode,
+        normalized: [1, 16, H/8, W/8] F32 on the CPU. Diffusers' `encode` of one frame without its feature
+        cache (each convolution's input kept for a next frame an image never has)."""
+        vae = self.graph.components["vae"]
+        device = torch.device(str(self.device))
+        z_dim = int(vae.config["z_dim"])
+        with torch.inference_mode():
+            pixels = torch.from_numpy(np.asarray(picture.convert("RGB"), dtype=np.float32)).permute(2, 0, 1) / 127.5 - 1
+            moments = vae.quant_conv(vae.encoder(pixels[None, :, None].to(device, vae.dtype)))
+            z = moments[:, :z_dim, 0].float()
+            mean = z.new_tensor(vae.config["latents_mean"]).view(1, -1, 1, 1)
+            std = z.new_tensor(vae.config["latents_std"]).view(1, -1, 1, 1)
+            out: torch.Tensor = ((z - mean) / std).cpu()
+            return out
+
+    def _stream(self, branch: Branch, rows: int, columns: int, device: torch.device) -> Stream:
+        """What no step changes of one branch: its fused text, its pictures through `img_in` (clean, so
+        once), its rotary tables over [text | before | target | after], and its attention bias: the target's
+        logits on a reference raised by log `boost`, and an isolated branch's `after` blind to the rest."""
+        transformer = self.graph.components["transformer"]
+        text = fused_text(transformer, branch.text.to(device=device, dtype=DTYPE))
+        ids = [torch.zeros(text.shape[1], 3, device=device)]
+        boosts: list[tuple[int, int, float]] = []
+        at = int(text.shape[1])
+
+        def place(references: tuple[Reference, ...]) -> torch.Tensor | None:
+            nonlocal at
+            tokens = []
+            for reference in references:
+                latents = packed(reference.latents.to(device=device, dtype=DTYPE))
+                height, width = reference.latents.shape[-2] // 2, reference.latents.shape[-1] // 2
+                tokens.append(transformer.img_in(latents.to(_dtype(transformer.img_in))).to(DTYPE))
+                ids.append(grid(reference.frame, height, width, reference.origin, device))
+                boosts.append((at, at + height * width, reference.boost))
+                at += height * width
+            return torch.cat(tokens, dim=1) if tokens else None
+
+        before = place(branch.before)
+        target, size = at, rows * columns
+        ids.append(grid(0, rows, columns, (0.0, 0.0), device))
+        at += size
+        after = place(branch.after)
+        isolated = branch.isolated and after is not None
+        mask = None
+        if isolated or any(boost != 1.0 for _, _, boost in boosts):
+            mask = torch.zeros(1, 1, at, at, device=device, dtype=DTYPE)
+            for start, end, boost in boosts:
+                if boost != 1.0:
+                    mask[..., target:target + size, start:end] = math.log(max(boost, 1e-4))
+            if isolated:
+                mask[..., target + size:, :target + size] = float("-inf")
+        return Stream(text, before, after, transformer.rotary_emb(torch.cat(ids)), mask, target)
+
     @uses_components("transformer")
     def denoise(
         self,
-        positive: torch.Tensor,
-        negative: torch.Tensor | None,
+        positive: Branch,
+        negative: Branch | None,
         *,
         width: int,
         height: int,
@@ -343,14 +660,22 @@ class Krea2(Model[Krea2Graph]):
         seed: int,
         distilled: bool,
         progress: Callable[[int, int], None],
+        start: torch.Tensor | None = None,
+        strength: float = 1.0,
+        control: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """`Krea2Pipeline.__call__`'s loop: bf16 noise from `seed` drawn on the CPU,
         `FlowMatchEulerDiscreteScheduler` on `linspace(1, 1/steps)` time-shifted by mu, and Krea's guidance
         `cond + g(cond - uncond)` when `negative` is given. Returns the packed latents [1, (H/16)(W/16), 64]
         on the CPU.
 
+        With `start` (`encode_image` at the output's size), image-to-image: the steps whose sigma is above
+        `strength` are skipped and the state begins as `start` noised to the first kept sigma. With `control`
+        (`encode_image` at the output's size), each image token reads its control token beside it through the
+        armed control adapter's projection (`Transformer.embed`).
+
         Each step is one call of the transformer (`Transformer.forward`), with what no step changes built
-        once before the loop: each prompt's text-fusion and projection, and its rotary tables."""
+        once before the loop (`_stream`)."""
         transformer = self.graph.components["transformer"]
         device = torch.device(str(self.device))
         rows, columns = height // PATCH, width // PATCH
@@ -363,19 +688,24 @@ class Krea2(Model[Krea2Graph]):
         )
         # Diffusers types sigmas as a list; the scheduler takes the array as it is.
         retrieve_timesteps(scheduler, steps, device, sigmas=np.linspace(1.0, 1 / steps, steps), mu=mu)  # type: ignore[arg-type]
+        first = 0 if start is None else min(int((scheduler.sigmas[:-1] > strength).sum()), steps - 1)
+        if start is not None:
+            scheduler.set_begin_index(first)
         with torch.no_grad():
             noise = rng.noise((1, channels, rows * 2, columns * 2), seed, dtype=DTYPE)
             latents = noise.view(1, channels, rows, 2, columns, 2).permute(0, 2, 4, 1, 3, 5)
             latents = latents.reshape(1, rows * columns, channels * 4).to(device)
-            texts, rotary = [], []
-            for text in (positive, *([] if negative is None else [negative])):
-                text = text.to(device=device, dtype=DTYPE)
-                ids = Krea2Pipeline.prepare_position_ids(text.shape[1], rows, columns, device)
-                texts.append(fused_text(transformer, text))
-                rotary.append(transformer.rotary_emb(ids))
+            if start is not None:
+                sigma = float(scheduler.sigmas[first])
+                latents = ((1 - sigma) * packed(start.to(device)) + sigma * latents.float()).to(DTYPE)
+            tokens = None if control is None else packed(control.to(device)).to(DTYPE)
+            streams = [self._stream(branch, rows, columns, device)
+                       for branch in (positive, *([] if negative is None else [negative]))]
             for i, t in enumerate(scheduler.timesteps):
+                if i < first:
+                    continue
                 velocity: list[torch.Tensor] = transformer(
-                    latents, (t / config["num_train_timesteps"]).expand(1).to(DTYPE), texts, rotary
+                    latents, (t / config["num_train_timesteps"]).expand(1).to(DTYPE), streams, tokens
                 )
                 prediction = velocity[0]
                 if len(velocity) > 1:

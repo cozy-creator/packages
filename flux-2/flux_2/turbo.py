@@ -41,7 +41,7 @@ class Factors(nn.Module):
 
 class TurboGraph:
     def __init__(self, config: Config) -> None:
-        adapter = config.section(COMPONENT).mapping()
+        adapter = config.mapping()  # the one component's PEFT adapter config
         root = nn.Module()
         self.sites: dict[str, Factors] = {}
         dtype = torch.bfloat16

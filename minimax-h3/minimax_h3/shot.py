@@ -6,7 +6,7 @@ from __future__ import annotations
 import hashlib
 import math
 import re
-from collections.abc import Iterable, Iterator, Mapping, Sequence
+from collections.abc import Collection, Iterable, Iterator, Mapping, Sequence
 from contextlib import AbstractContextManager
 from fractions import Fraction
 from itertools import accumulate, pairwise
@@ -33,6 +33,7 @@ from cozy_runtime.fields import (
     Total,
     Video,
 )
+from cozy_runtime.image import ratio_of
 from cozy_runtime.media import (
     AudioFile,
     DecodedAudioChunk,
@@ -51,8 +52,8 @@ from safetensors.torch import load as load_tensors
 
 from minimax_h3 import shot_latents
 from minimax_h3.continuation import AUDIO_TICKS_PER_S, Carry, ContinuationPlan, audio_ticks, carries, decode_context
-from minimax_h3.official import FPS, MAX_FRAMES, clip_size, shown_width, within_ratio
-from story import _HEADER, MENTION, MIN_CLIP_SECONDS, StoryReference, description_span, name_key, without_sections
+from minimax_h3.official import FPS, MAX_CANVAS_RATIO, MAX_FRAMES, clip_size, shown_width, within_ratio
+from story import _HEADER, MENTION, MIN_CLIP_SECONDS, StoryReference, description_span, later_part, name_key, without_sections
 
 #: An output's or latents' byte bound: TensorD's output allowance reads it (256 MiB where none is declared), and the
 #: disk is the real limit.
@@ -90,8 +91,10 @@ class ShotVideo(Video, frozen=True, kw_only=True):
 
 
 class ShotPickup(Pickup, frozen=True, kw_only=True):
-    """Pick up from here: the take, the frame the new part starts on (H3's `17k + 5` join grid, past its shortest
-    piece: `shot_latents.nearest_join`), and the seconds into this shot's beats it starts at."""
+    """Pick up from here: the take, the frame the new part starts on, one of the take's seams (`ShotResult.seams`) or
+    its end, and the seconds into this shot's beats it starts at. Every segment before it stays as it was; a frame
+    between seams starts at the seam before it (Paul, 11-12). A take with no seams kept cuts on H3's `17k + 5` join grid
+    (`shot_latents.nearest_join`)."""
 
     take: ShotVideo
     out_frame: Annotated[int, Snap(17, offset=5, first=124)]  # `official.MIN_FRAMES`, 5 s on the grid
@@ -100,14 +103,15 @@ class ShotPickup(Pickup, frozen=True, kw_only=True):
 
 
 class Shot(msgspec.Struct, kw_only=True):
-    """One continuous shot of any length, with sound: a summary every segment reads, then what happens, beat by beat.
-    An empty soundscape or music goes as N/A."""
+    """One continuous shot of any length, with sound: a summary that sets the scene (a later segment keeps only its
+    references), then what happens, beat by beat. An empty soundscape or music goes as N/A."""
 
     summary: Prompt[Image | Video | Audio] = Prompt()
     beats: Annotated[list[Beat], Count(min=1)]
     soundscape: Annotated[Prompt[Image | Video | Audio], Placeholder("N/A")] = Prompt()
     music: Annotated[Prompt[Image | Video | Audio], Placeholder("N/A")] = Prompt()
-    aspect_ratio: Annotated[AspectRatio, Ratios("16:9")] | None = None
+    #: Unset is Auto: a first or last frame's shape, else a take's or plate's, else 16:9; never a reference picture's.
+    aspect_ratio: Annotated[AspectRatio, Ratios(min=1 / MAX_CANVAS_RATIO, max=MAX_CANVAS_RATIO)] | None = None
     first_frame: ShotImage | None = None
     last_frame: ShotImage | None = None
     turbo: bool = True
@@ -126,6 +130,9 @@ class ShotResult(msgspec.Struct):
     latents: Latents | None = None
     #: With a pickup: how many seconds of the take this keeps, where the new part starts.
     kept_s: float | None = None
+    #: The frames where each segment after the first starts, on the whole video: a pickup's take's seams before its cut,
+    #: the cut, then the new part's. A pickup starts at one of them, or at the end.
+    seams: list[int] = msgspec.field(default_factory=list)
 
 
 #: A segment holds 15 s; a later one 14 s new, beside what it carries.
@@ -139,6 +146,9 @@ _DESCRIPTION = re.compile(r"^[ \t]*(?:integrated[ _-]*multimodal|detailed)[ _-]*
 #: model reads the words for what: cozy never takes one for a cut.
 _TIMED = re.compile(r"^[ \t]*(\[Shot[ \t]*\d+\][ \t]*)?At[ \t]+(\d+):(\d+(?:\.\d+)?)[ \t]*,?[ \t]*", re.I | re.M)
 _OWN_SHOT = re.compile(r"\[Shot[ \t]*\d+\]", re.I)
+#: A first word that is plainly a word, which a block opening a later segment with no time capitalizes as a sentence's.
+#: Anything else goes as written: a LoRA trigger (`vfx_edit:`, `orb360`) is read by its exact case (se-124: `Vfx_edit:`).
+_PLAIN_WORD = re.compile(r"[a-z]+(?:'[a-z]+)?[,.;!?]?(?:\s|$)")
 FIRST_SHOT = re.compile(r"\[Shot[ \t]*1\]", re.I)
 #: A join lands on H3's 17-frame grid, so a picked-up video can end just short of the timestamp the next call opens on:
 #: within this, that block opens it, and the earlier ones stay history.
@@ -390,15 +400,16 @@ def blocks(body: str, duration_s: float) -> tuple[list[Block], list[str]]:
 
 
 def segment_texts(prompt: str, starts: Sequence[float], *, continued: bool = False, carried: bool = True,
-                  duration_s: float = math.inf, carry: Carry = _CARRY) -> list[str]:  # fmt: skip
-    """Each segment's text: the prompt's, with nothing added, and only its own blocks (`plan_segments` and `starts`:
-    what opens each), so no segment redraws what an earlier one set up (0.2.4 gate, runs 24980/24981: back in the food
-    cart). The first is as written, past 15 s without what comes after it. A later one keeps the text's sections, its
-    summary among them, less the retention, which tells the whole video's flow (`story` restores each reference's own
-    retention line): the block it opens on, with no time, then the rest with their times on its clock, whose head is the
-    carried frames, and its `[Shot N]` renumbered from 1. With `continued`, the first segment goes on from a take too, on
-    the block in force at its start, carrying the take's frames unless not `carried`. The audio and music fields close
-    every segment."""
+                  duration_s: float = math.inf, carry: Carry = _CARRY, beats_at: float = 0.0, names: Collection[str] = ()
+                  ) -> list[str]:  # fmt: skip
+    """Each segment's text: the prompt's, and only its own blocks (`plan_segments` and `starts`: what opens each), so no
+    segment redraws what an earlier one set up (0.2.4 gate, runs 24980/24981: back in the food cart). The first is as
+    written, past 15 s without what comes after it. A later one keeps the text's sections, less the retention, which
+    tells the whole video's flow (`story` restores each reference's own retention line): the block it opens on, with no
+    time, then the rest with their times on its clock, whose head is the carried frames, and its `[Shot N]` renumbered
+    from 1. One that opens after the shot's own beats began (`beats_at`, on the video's clock) is a later part of it, so
+    its summary says only that, with the references of `names` it mentions (`later_part`). With `continued`, the first segment goes on from a take too, on the block in force
+    at its start, carrying the take's frames unless not `carried`. The audio and music fields close every segment."""
     head, body, tail = prompt_parts(prompt)
     timed_blocks, _ = blocks(body, duration_s)
     begin, stop = description_span(body)
@@ -417,11 +428,14 @@ def segment_texts(prompt: str, starts: Sequence[float], *, continued: bool = Fal
                 if at == opens or start < at < end:
                     lead = carry.head_frames / FPS if index or carried else 0.0
                     time = f"At {clock(at - start + lead)}, " if at > max(opens, start) else ""
-                    lines.append(f"{'[Shot 1] ' if marked else ''}{time}{said if time else said[:1].upper() + said[1:]}")
+                    sentence = not time and _PLAIN_WORD.match(said) is not None
+                    lines.append(f"{'[Shot 1] ' if marked else ''}{time}{said[:1].upper() + said[1:] if sentence else said}")
             number = iter(range(1, len(body) + 2))
             description = _OWN_SHOT.sub(lambda _: f"[Shot {next(number)}]", "\n".join(line for line in lines if line))
             text = "\n\n".join(filter(None, (body[:begin].rstrip() + ("\n" if begin else "") + description, body[stop:].strip())))
             text = without_sections(text, ("retention_analysis",))
+            if start > beats_at + 1 / FPS:
+                text = later_part(text, names)
         text = head + text
         texts.append(f"{text}\n\n{tail}" if tail else text)
     return texts
@@ -487,9 +501,11 @@ def segment_seed(seed: int | None, request_id: str, index: int) -> int:
     return int.from_bytes(hashlib.sha256(f"{request_id}/h3/shot/{index}".encode()).digest()[:4], "big")
 
 
-def is_native(width: int, height: int) -> bool:
-    """Whether a shape is about H3's own 1344x768."""
-    return abs(Fraction(width, height) - Fraction(*NATIVE)) <= Fraction(1, 20)
+def ratio_frame(aspect_ratio: str) -> tuple[int, int]:
+    """An asked `W:H` as a frame of that exact shape, large enough for `canvas` to round on."""
+    width, height = ratio_of(aspect_ratio)
+    scale = math.ceil(4096 / min(width, height))
+    return width * scale, height * scale
 
 
 def canvas(frame: tuple[int, int], joined: bool) -> tuple[tuple[int, int], list[str]]:
@@ -559,17 +575,22 @@ def cut_latents(take: ShotVideo, frames: int, out: Outputs, carry: Carry) -> Fil
     return out.save_bytes(shot_latents.cut(data, frames, carry.frames, torch.from_numpy(sound)), media_type="application/octet-stream")
 
 
-def shot_latents_file(out: Outputs, parts: Sequence[File], frames: int, context: File, text: str) -> File:
+def shot_latents_file(out: Outputs, parts: Sequence[File], frames: int, context: File, text: str, seams: Sequence[int]) -> File:
     """The whole video's latents: each part's delivered latents end to end (each segment cuts its carried head, whole
     VAE cycles, so they join in phase; a picked-up take's own latents first), in the latent space they name, with its
-    last segment's carry and the text it was made from."""
+    last segment's carry, the text it was made from and its seams."""
     blobs = [part.read_bytes() for part in parts]
     spaces = {shot_latents.metadata(data).get("vae_space", "") for data in blobs}
     if len(spaces) != 1 or "" in spaces:
         raise OutputError("the video's segments name no single latent space", code="output_integrity")
     latents = torch.cat([load_tensors(data)["latents"] for data in blobs], dim=2)
-    return out.save_bytes(shot_latents.save(latents, frames, spaces.pop(), context.read_bytes(), text),
+    return out.save_bytes(shot_latents.save(latents, frames, spaces.pop(), context.read_bytes(), text, seams),
                           media_type="application/octet-stream")  # fmt: skip
+
+
+def at_seam(frame: int, seams: Sequence[int], end: int) -> int | None:
+    """Where a pickup asked at `frame` starts: the take's seam at or before it, or its end; None before its first seam."""
+    return max((seam for seam in [*seams, end] if seam <= frame), default=None) if frame < end else end
 
 
 def upscale_prompt(script: Script) -> str:

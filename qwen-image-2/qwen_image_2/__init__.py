@@ -9,7 +9,7 @@ from typing import Annotated, Literal
 import msgspec
 import torch
 from cozy_runtime.author import Adjustments, App, Context, OutputError, Outputs, Seed, Telemetry
-from cozy_runtime.fields import Advanced, AspectRatio, FileBound, Image, MENTION, Prompt, Ratios
+from cozy_runtime.fields import Advanced, AspectRatio, FileBound, Image, MENTION, Prompt, Ratios, When
 from cozy_runtime.image import MEGAPIXEL, ImageRequest, ImageResult, Sizes, ratio_of
 from cozy_runtime.media import ImageFile
 from PIL import Image as PILImage
@@ -28,7 +28,7 @@ MAX_MEGAPIXELS = 4.0
 SIZES = Sizes((MIN_MEGAPIXELS, MAX_MEGAPIXELS), (32, 2048 * 16), 32, "the 1-4 MP Qwen-Image serves")
 #: The size without references (Paul, 11-06: "2 megapixels is a good default").
 DEFAULT_MEGAPIXELS = 2
-#: The full model's steps; Turbo's are its overlay's (`turbo.STEPS`).
+#: The full model's steps; Turbo's are its overlay checkpoint's (`turbo.read_plan`).
 _STEPS = 40
 
 
@@ -43,8 +43,8 @@ class GenerateInput(ImageRequest):
     megapixels: Literal[1, 2, 4] = DEFAULT_MEGAPIXELS  # type: ignore[assignment]  # 2, a Literal member
     #: Qwen's prompt enhancer rewrites the request first (`rewriter`): an edit from its pictures, else the words.
     prompt_upsampling: bool = True
-    #: How far the rewrite goes beyond the words; `balanced` is Qwen's own.
-    creativity: Creativity = "balanced"
+    #: How far the rewrite goes beyond the words, so only with it (`_upsampled`); `balanced` is Qwen's own.
+    creativity: Annotated[Creativity, When("prompt_upsampling")] = "balanced"
 
 
 def label(n: int, key: str, count: int) -> str:
@@ -205,7 +205,7 @@ _FULL = {"expander": "pottokao/qwen-image-2.1-pe-t2i-abliterated@0.1.0", "model"
 _TURBO = {"expander": "pottokao/qwen-image-2.1-pe-t2i-abliterated@0.1.0", "model": "qwen/qwen-image-2.1@0.1.0",
           "rewriter": "darrellbest/qwen-image-2.1-pe-i2i-abliterated@0.1.0",
           "text_encoder": "atomicchat/qwen-image-2.1-text-encoder-abliterated@0.1.0",
-          "turbo_lora": "alibaba-pai/qwen-image-2.1-fun-acc@0.1.0"}
+          "turbo_lora": "alibaba-pai/qwen-image-2.1-fun-acc@0.1.1"}
 _COMPONENTS = {"expander": ("model",), "model": ("transformer", "vae"), "rewriter": ("model",),
                "text_encoder": ("text_encoder",)}
 #: Built and fetched on first use: an edit never pulls the expander, `prompt_upsampling=False` neither enhancer.
@@ -257,8 +257,8 @@ class ImageBox(msgspec.Struct, kw_only=True):
     seed: Seed | None = None
     #: Qwen's prompt enhancer rewrites the request first (`_upsampled`).
     prompt_upsampling: Annotated[bool, Advanced()] = True
-    #: How far that rewrite goes beyond the words (`rewrite`).
-    creativity: Annotated[Creativity, Advanced()] = "balanced"
+    #: How far that rewrite goes beyond the words (`rewrite`), so only with it.
+    creativity: Annotated[Creativity, Advanced(), When("prompt_upsampling")] = "balanced"
 
 
 # The Turbo overlay is built, and its weights fetched, only when a box asks for it, and an enhancer only when the
@@ -301,7 +301,7 @@ class UpscaleInput(msgspec.Struct, kw_only=True):
 
 
 _UPSCALE = {"model": "qwen/qwen-image-2.1@0.1.0", "text_encoder": "atomicchat/qwen-image-2.1-text-encoder-abliterated@0.1.0",
-            "turbo_lora": "alibaba-pai/qwen-image-2.1-fun-acc@0.1.0"}
+            "turbo_lora": "alibaba-pai/qwen-image-2.1-fun-acc@0.1.1"}
 
 
 @app.tool(label="Upscale", named="image", defaults=_UPSCALE,

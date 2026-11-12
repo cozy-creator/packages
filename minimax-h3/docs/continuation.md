@@ -40,7 +40,7 @@ predecessor's picture ends one frame early when its grid rounds the sound down (
 
 ## Resuming mid-video
 
-A pickup's `out_frame` cuts a whole video's latents at the nearest `17k + 5` frames (`shot_latents.cut`): the same tokens, in
+A pickup's `out_frame` cuts a whole video's latents at one of its seams (`shot_latents.cut`, on the `17k + 5` grid): the same tokens, in
 phase, whichever segment made them, so the last 22 frames there are the carry and the new segment joins the kept latents and
 decodes with them as one. The file keeps no audio latents before a video's end, so the carried second is encoded from its
 soundtrack by the audio VAE, ending on the tick nearest the picture join, where the kept sound stops. That is the one
@@ -57,3 +57,5 @@ video decodes again as one, so only the last few frames before the join differ, 
 `expected_context_provenance`; `export_context(state, provenance=...)` returns the
 successor's carry after denoise, before decode. Contexts always come from the first,
 native-canvas pass; an upscale of the delivered video never feeds a successor.
+
+A carried window's picture rows aren't references: they take the video's own sparsity, dense for the dense steps and routed after, while text, references and audio stay protected (Paul, 11-12; `reference_rows.unprotect_carried` moves them out of the protected prefix, to just before the target rows).

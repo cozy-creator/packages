@@ -14,7 +14,7 @@ import torch
 from PIL import Image, ImageOps
 from torchvision.transforms import functional as vision
 from cozy_runtime.author import App, Context, Outputs, Seed, Telemetry
-from cozy_runtime.fields import Advanced, AspectRatio, FileBound, Ratios, Shape
+from cozy_runtime.fields import Advanced, AspectRatio, FileBound, Ratios, Shape, When
 from cozy_runtime.media import DecodedAudioChunk, DecodedMediaHeader, DecodedVideoFrame, ImageFile, VideoFile
 from .color import Correction
 from .frames import extend
@@ -54,10 +54,10 @@ class Tuning(Restoration, kw_only=True):
 
     #: `upscale`'s window size.
     batch_size: Annotated[int, msgspec.Meta(ge=1)] | None = None
-    #: `restore`: the last window padded to `batch_size`.
-    uniform_batch_size: Annotated[bool, Advanced()] = False
-    #: `upscale`'s `overlap`, crossfaded in `flush`.
-    temporal_overlap: Annotated[int, msgspec.Meta(ge=0, le=16), Advanced()] = 0
+    #: `restore`: the last window padded to `batch_size`, so only with one.
+    uniform_batch_size: Annotated[bool, Advanced(), When("batch_size")] = False
+    #: `upscale`'s `overlap`, crossfaded in `flush` between windows, so only with a `batch_size`.
+    temporal_overlap: Annotated[int, msgspec.Meta(ge=0, le=16), Advanced(), When("batch_size")] = 0
     #: `events`: mirrored, restored, then dropped.
     prepend_frames: Annotated[int, msgspec.Meta(ge=0, le=32), Advanced()] = 0
 
@@ -101,7 +101,7 @@ def output_sizes(
 @app.tool(
     label="Upscale",
     named="video",
-    defaults={"model": "bytedance-seed/seedvr2-7b@0.1.0"},
+    defaults={"model": "bytedance-seed/seedvr2-7b@0.1.1"},
     memoize=True,
 )
 def upscale(
@@ -251,7 +251,7 @@ class UpscaleImageOutput(msgspec.Struct):
 @app.tool(
     label="Upscale",
     named="image",
-    defaults={"model": "bytedance-seed/seedvr2-7b@0.1.0"},
+    defaults={"model": "bytedance-seed/seedvr2-7b@0.1.1"},
     memoize=True,
 )
 def upscale_image(
