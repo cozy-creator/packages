@@ -359,7 +359,7 @@ wheels = [
 
 [[package]]
 name = "minimax-h3"
-version = "0.11.1"
+version = "0.12.0rc3"
 source = { registry = "https://tensorhub.com/v1/index/_/simple/" }
 dependencies = [
     { name = "cozy-runtime", extra = ["adapters", "media"] },
@@ -377,7 +377,7 @@ dependencies = [
     { name = "transformers" },
 ]
 wheels = [
-    { url = "https://tensorhub.com/v1/index/_/minimax-h3/0.11.1/minimax_h3-0.11.1-py3-none-any.whl", hash = "sha256:2f9d409b64aab3d38b62a3e125d27e89c93a3eb1adf6153ed905c40da82f79d1" },
+    { url = "https://tensorhub.com/v1/index/_/minimax-h3/0.12.0rc3/minimax_h3-0.12.0rc3-py3-none-any.whl", hash = "sha256:53d8d8d8413345d554a53c5e680756656e4daea55d92010180024daf44adf84f" },
 ]
 
 [[package]]
@@ -464,7 +464,7 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "cozy-runtime", extras = ["media"], specifier = ">=0.45.0,<0.46" },
-    { name = "minimax-h3", specifier = ">=0.10.4", index = "https://tensorhub.com/v1/index/_/simple/" },
+    { name = "minimax-h3", specifier = ">=0.12.0rc2", index = "https://tensorhub.com/v1/index/_/simple/" },
     { name = "msgspec", specifier = ">=0.19" },
     { name = "numpy", specifier = ">=1.26" },
     { name = "pillow", specifier = ">=12" },
