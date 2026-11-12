@@ -56,7 +56,6 @@ from cozy_runtime.fields import (
     Shape,
     Spans,
 )
-from cozy_runtime.image import ratio_of
 from cozy_runtime.media import (
     AudioFile,
     DecodedAudioChunk,
@@ -152,10 +151,10 @@ from minimax_h3.shot import (
     fl2va_text,
     frame_at,
     here,
-    is_native,
     join_kept,
     plan_segments,
     prompt_parts,
+    ratio_frame,
     segment_seed,
     segment_texts,
     shot_latents_file,
@@ -834,8 +833,8 @@ FULL_RECIPES: dict[Quality, FullRecipe] = {
 class RegenerateInput(msgspec.Struct, kw_only=True):
     """`upscale` (`regenerate_shot`): the shot's 768p latents (`latents`, its
     own, as NVIDIA's `--input-latents`), else its video's frames encoded, upscaled in latent space
-    and refined by H3 at `resolution` from `prompt`, the video's soundtrack kept. The 7:4 frame
-    fills 16:9, stretched 1.6% horizontally; `768p` refines only."""
+    and refined by H3 at `resolution` from `prompt`, the video's soundtrack kept, at its own shape
+    (`refine_math.target`): a 7:4 frame fills 16:9, stretched 1.6%, and 4:7 9:16; `768p` refines only."""
 
     video: Annotated[VideoFile, FileBound(max_decoded_bytes=2 << 30)]
     latents: Latents | None = None
@@ -853,19 +852,20 @@ class RegenerateOutput(msgspec.Struct):
     warnings: list[str]
 
 
-#: The canvas the refine's latent is encoded at: H3's native 1344x768.
-_DRAFT_SIZE = (768, 1344)
-#: The draft's latent grid: `_DRAFT_SIZE` over the VAE's 16 px.
-_DRAFT_LATENT = (_DRAFT_SIZE[0] // VAE_SPATIAL_RATIO, _DRAFT_SIZE[1] // VAE_SPATIAL_RATIO)
+def _draft_size(video: VideoFile) -> tuple[int, int]:
+    """The (height, width) the refine's latent is at: the H3 canvas of the video's shape, as its shot rendered."""
+    probe = video.probe()
+    tall, wide = clip_size(shown_width(probe.width, probe.pixel_aspect_ratio), probe.height, guide=True)
+    return tall, wide
 
 
-def _read_draft(video: VideoFile) -> tuple[Tensor, Tensor | None, int, int, list[str]]:
-    """A video of any length as `(frames on the VAE grid, 768, 1344, 3)` uint8, each frame
+def _read_draft(video: VideoFile, draft: tuple[int, int]) -> tuple[Tensor, Tensor | None, int, int, list[str]]:
+    """A video of any length as `(frames on the VAE grid, *draft, 3)` uint8, each frame
     cover-scaled and centre-cropped as it decodes into one buffer sized from the header, its
     last frame held up to the grid; its `(channels, samples)` soundtrack or None, the sample
     rate, and how many frames it delivers."""
     probe = video.probe()
-    pixels = torch.empty((round(probe.duration * FPS) + 17, *_DRAFT_SIZE, 3), dtype=torch.uint8)
+    pixels = torch.empty((round(probe.duration * FPS) + 17, *draft, 3), dtype=torch.uint8)
     pcm: list[list[npt.NDArray[np.float32]]] = []
     count = width = height = rate = 0
     origin: Fraction | None = None
@@ -882,9 +882,9 @@ def _read_draft(video: VideoFile) -> tuple[Tensor, Tensor | None, int, int, list
                 if slot < count:
                     continue
                 if slot >= len(pixels):
-                    pixels = torch.cat([pixels, torch.empty((slot + 17 - len(pixels), *_DRAFT_SIZE, 3), dtype=torch.uint8)])
+                    pixels = torch.cat([pixels, torch.empty((slot + 17 - len(pixels), *draft, 3), dtype=torch.uint8)])
                 frame = torch.frombuffer(bytearray(event.rgb), dtype=torch.uint8)
-                pixels[count : slot + 1] = _cover(frame.reshape(height, width, 3))
+                pixels[count : slot + 1] = _cover(frame.reshape(height, width, 3), draft)
                 count = slot + 1
             else:
                 rate = event.sample_rate
@@ -895,8 +895,8 @@ def _read_draft(video: VideoFile) -> tuple[Tensor, Tensor | None, int, int, list
         pixels = torch.cat([pixels, pixels[-1:].expand(grid - len(pixels), -1, -1, -1)])
     pixels = pixels[:grid]
     pixels[count:] = pixels[count - 1]
-    warnings = [] if (height, width) == _DRAFT_SIZE else [
-        f"the {width}x{height} video was cover-scaled to 1344x768 for the refine"
+    warnings = [] if (height, width) == draft else [
+        f"the {width}x{height} video was scaled to {draft[1]}x{draft[0]} for the refine"
     ]  # fmt: skip
     if probe.frame_rate != FPS:
         warnings.append(f"the {float(probe.frame_rate or 0):g} fps video was read at 24 fps for the refine")
@@ -926,18 +926,18 @@ def _read_soundtrack(video: VideoFile, frames: int) -> tuple[Tensor | None, int]
     return waveform, rate
 
 
-def _cover(frame: Tensor) -> Tensor:
-    """One `(h, w, 3)` uint8 frame cover-scaled (bilinear) and centre-cropped to 1344x768."""
+def _cover(frame: Tensor, draft: tuple[int, int]) -> Tensor:
+    """One `(h, w, 3)` uint8 frame cover-scaled (bilinear) and centre-cropped to the `draft` (height, width)."""
     height, width = (int(value) for value in frame.shape[:2])
-    if (height, width) == _DRAFT_SIZE:
+    if (height, width) == draft:
         return frame
-    scale = max(_DRAFT_SIZE[0] / height, _DRAFT_SIZE[1] / width)
-    size = (max(_DRAFT_SIZE[0], round(height * scale)), max(_DRAFT_SIZE[1], round(width * scale)))
+    scale = max(draft[0] / height, draft[1] / width)
+    size = (max(draft[0], round(height * scale)), max(draft[1], round(width * scale)))
     image = torch.nn.functional.interpolate(
         frame.permute(2, 0, 1)[None].float(), size=size, mode="bilinear", align_corners=False
     )[0]
-    top, left = (size[0] - _DRAFT_SIZE[0]) // 2, (size[1] - _DRAFT_SIZE[1]) // 2
-    crop = image[:, top : top + _DRAFT_SIZE[0], left : left + _DRAFT_SIZE[1]]
+    top, left = (size[0] - draft[0]) // 2, (size[1] - draft[1]) // 2
+    crop = image[:, top : top + draft[0], left : left + draft[1]]
     return crop.round().clamp(0, 255).to(torch.uint8).permute(1, 2, 0)
 
 
@@ -959,14 +959,16 @@ def _render_keyframes(
     steps: int | None,
     first: PILImage.Image | None,
     last: PILImage.Image | None,
+    canvas: tuple[int, ...],
     turbo_lora: H3TurboLoRA | None = None,
     quality: Quality = "standard",
     delivery: ContinuationPlan | None = None,
     completed: Callable[[PipelineState], None] | None = None,
     ended: Callable[[Tensor], None] | None = None,
 ) -> H3VideoOutput:
-    """An FL2VA render: text, and a first and/or last keyframe. `delivery` and `completed`
-    hand a successor its carry, and `ended` its last frame (`fl2va_segment`)."""
+    """An FL2VA render: text, and a first and/or last keyframe, on the shot's (width, height)
+    `canvas`. `delivery` and `completed` hand a successor its carry, and `ended` its last frame
+    (`fl2va_segment`)."""
     plan = _plan(model, turbo_lora, "fl2va")
     steps = plan.schedule(steps).transformer_evaluations
     ctx.raise_if_cancelled()
@@ -984,6 +986,7 @@ def _render_keyframes(
             task=task,
             plan=plan,
             delivery=delivery,
+            canvas=(canvas[1], canvas[0]),
         )
     with tel.stage("condition_text"):
         model.condition_text(task, state)
@@ -1077,6 +1080,7 @@ def _references_to_video(
             plan=plan,
             guide=guide,
             anchors=anchors,
+            canvas=(payload.canvas[1], payload.canvas[0]),
         )
         for index, reference in enumerate(state.normalized_references):
             if reference.kind == "image":
@@ -1384,7 +1388,7 @@ async def fl2va_segment(
         prompt=encoder_prompt("fl2va", payload.prompt), seed=payload.seed,
         duration_s=payload.duration_s, steps=payload.steps,
         first=_frame(payload.first_frame, payload.canvas), last=_frame(payload.last_frame, payload.canvas),
-        turbo_lora=lora, quality=payload.quality, delivery=plan if plan.successor else None,
+        canvas=payload.canvas, turbo_lora=lora, quality=payload.quality, delivery=plan if plan.successor else None,
         completed=handed if handed.wanted else None,
         ended=partial(_keep_frames, out, ended),
     )  # fmt: skip
@@ -1414,9 +1418,11 @@ async def regenerate_shot(
     # Latents it can't use, the video stands for them.
     warnings: list[str] = []
     latents = None
+    draft = _draft_size(payload.video)
     if payload.latents is not None:
         try:
-            latents, frames = shot_latents.load(payload.latents.read_bytes(), base_model.latent_space(), _DRAFT_LATENT)
+            grid = (draft[0] // VAE_SPATIAL_RATIO, draft[1] // VAE_SPATIAL_RATIO)
+            latents, frames = shot_latents.load(payload.latents.read_bytes(), base_model.latent_space(), grid)
             waveform, sample_rate = _read_soundtrack(payload.video, frames)
         except InvalidRequest as refused:
             latents = None
@@ -1424,14 +1430,14 @@ async def regenerate_shot(
     cancel = ctx.raise_if_cancelled
     if latents is None:
         with tel.stage("read_video"):
-            pixels, waveform, sample_rate, frames, read = _read_draft(payload.video)
+            pixels, waveform, sample_rate, frames, read = _read_draft(payload.video, draft)
             warnings += read
         with tel.stage("encode_video"):
             latents = base_model.encode_clip(pixels)
         del pixels
     resolution = payload.resolution.value
     with tel.stage("upscale_latent"):
-        for height, width in refine_math.upscale_passes(resolution):
+        for height, width in refine_math.upscale_passes(resolution, draft):
             latents = latent_upscaler.upscale(latents, height=height, width=width)
     cancel()
     with tel.stage("condition_text"):
@@ -1452,8 +1458,8 @@ async def regenerate_shot(
             on_step=lambda step: ctx.progress(step, steps),
         )  # fmt: skip
     cancel()
-    height, _, keep = refine_math.TARGETS[resolution]
-    top = (height - keep) // 2
+    (height, width), (keep, keep_width) = refine_math.target(resolution, draft)
+    top, left = (height - keep) // 2, (width - keep_width) // 2
     with tel.stage("decode_video"):
         stream = _VideoStream(
             torch, out, frames=frames, waveform=waveform, sample_rate=sample_rate, cancel=cancel,  # type: ignore[possibly-undefined]  # read with the frames
@@ -1465,7 +1471,7 @@ async def regenerate_shot(
             nonlocal delivered
             take = min(int(chunk.shape[0]), frames - delivered)
             if take > 0:
-                stream.push(chunk[:take, :, top : top + keep])
+                stream.push(chunk[:take, :, top : top + keep, left : left + keep_width])
                 delivered += take
 
         try:
@@ -1565,22 +1571,24 @@ async def _render(ctx: Context, shot: Shot, out: Outputs, tel: Telemetry, *, pla
                                              carried=carried, carry=carry, split=plate is not None)  # fmt: skip
     warnings += [*timing, *planned]
     count = len(segments)
-    # The shot's canvas: a take it goes on from or a plate sets it; else the shape asked for; else its first or last frame's.
+    # The shot's canvas: a take it goes on from or a plate sets it; else the shape asked for; else Auto: its first or
+    # last frame's, else 16:9. A reference picture never sets it.
     holder = take.file if carried and take is not None else plate
+    asked = None if shot.aspect_ratio is None else canvas(ratio_frame(shot.aspect_ratio), count > 1)
     shape = NATIVE
     if holder is not None:
         probed = holder.probe()
         tall, wide = clip_size(shown_width(probed.width, probed.pixel_aspect_ratio), probed.height, guide=True)
         shape = (wide, tall)
-        if shot.aspect_ratio is not None and not is_native(probed.width, probed.height):
-            warnings.append(f"{'the plate' if plate is not None else 'the take'} is {probed.width}x{probed.height} and sets "
-                            f"the shape, not {shot.aspect_ratio}")  # fmt: skip
-    elif shot.aspect_ratio is not None:
-        if not is_native(*ratio_of(shot.aspect_ratio)):
-            warnings.append(f"minimax-h3 renders 1344x768 for now, not {shot.aspect_ratio}")
+    elif asked is not None and take is None:
+        shape, moved = asked
+        warnings += moved
     elif (keyframe := opening or ending) is not None:
         shape, moved = canvas((keyframe.probe().width, keyframe.probe().height), count > 1)
         warnings += moved
+    if asked is not None and asked[0] != shape:
+        warnings.append(f"{'the plate' if plate is not None else 'the take'} is {shape[0]}x{shape[1]} and sets the shape, "
+                        f"not {shot.aspect_ratio}")  # fmt: skip
     for name, keyframe in (("first_frame", shot.first_frame if opening is shot.first_frame else None), ("last_frame", ending)):
         if keyframe is not None:
             warnings += fitted(name, (keyframe.probe().width, keyframe.probe().height), shape)
