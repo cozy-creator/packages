@@ -541,7 +541,8 @@ def resolve_generate(payload: GenerateInput) -> GenerateFacts:
     width, height = sizes.fit(adj, target.ratio, sizes.pixels(adj, target))
     above_native = width * height > _NATIVE * MEGAPIXEL
     hidiffusion_applied = above_native if payload.hidiffusion is None else payload.hidiffusion
-    default_steps, default_guidance = (30, 7.5) if hidiffusion_applied else (20, 7.0)
+    # Euler settles by 40 at 1 MP (se-121); HiDiffusion's recipe is 30 DDIM steps.
+    default_steps, default_guidance = (30, 7.5) if hidiffusion_applied else (40, 7.0)
     steps = held(adj, "steps", payload.steps or default_steps, 1, 50)
     guidance = held(adj, "guidance", default_guidance if payload.guidance is None else payload.guidance, 0.0, 20.0)
     negative_prompt = _negative_prompt(payload.negative_prompt or "", hidiffusion_applied)
