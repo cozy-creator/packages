@@ -58,6 +58,7 @@ from cozy_runtime.author import (
     Seed,
     Serving,
     Telemetry,
+    preview,
     uses_components,
 )
 from cozy_runtime.fields import AspectRatio, Preflight, Ratios
@@ -409,7 +410,8 @@ class SdxlModel(Model[SdxlPipeline]):
                 unet.cozy_step = i
                 noise = guided(unet, scheduler.scale_model_input(latents, t), scheduler.timesteps[i], prompt,
                                pooled, time_ids, guidance)
-                latents = advance(noise, t, latents)[0]
+                latents, x0 = advance(noise, t, latents)[:2]
+                preview(x0, "sdxl")
                 progress(i, steps)
             image = decode_latents(vae, latents.to(dtype=dtype), scale)
         return image, prompt, pooled, latents

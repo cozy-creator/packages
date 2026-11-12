@@ -12,7 +12,7 @@ from typing import Any, NamedTuple, Protocol, TypedDict, cast
 import torch
 from cozy_runtime import rng
 from cozy_runtime.accel import fusion, hold_dtype, stepcache
-from cozy_runtime.author import Config, Loader, Model, ModelAssets, Telemetry, uses_components
+from cozy_runtime.author import Config, Loader, Model, ModelAssets, Telemetry, preview, uses_components
 from cozy_runtime.accel.kernels import Plan
 from diffusers.configuration_utils import ConfigMixin
 from diffusers.models.autoencoders.autoencoder_kl_qwenimage import AutoencoderKLQwenImage
@@ -287,6 +287,7 @@ class _Denoise(AnimaDenoiseStep):
                         conditional = predict(hidden, timestep, positive)
                         unconditional = predict(hidden, timestep, negative)  # type: ignore[arg-type]  # two conditions: a negative
                     prediction = unconditional + guider.guidance_scale * (conditional - unconditional)
+                preview(lambda: latents - scheduler.sigmas[i] * prediction, "qwen-image")
                 latents = scheduler.step(prediction, t, latents, return_dict=False)[0]
                 on_step(i)
         self.phases.enter(_DECODE)

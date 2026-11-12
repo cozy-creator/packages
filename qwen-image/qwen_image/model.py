@@ -37,6 +37,7 @@ from cozy_runtime.author import (
     Serving,
     Telemetry,
     memoize,
+    preview,
     uses_components,
 )
 from cozy_runtime.accel.kernels import Plan
@@ -310,6 +311,7 @@ def sample(
                 prediction = combined * (
                     torch.norm(prediction, dim=-1, keepdim=True) / torch.norm(combined, dim=-1, keepdim=True)
                 )
+            preview(lambda: latents - scheduler.sigmas[i] * prediction, "qwen-image", grid=(rows, columns))
             latents = scheduler.step(prediction, t, latents, return_dict=False)[0]
             progress(i, steps)
     return latents.cpu()

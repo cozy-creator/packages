@@ -20,7 +20,7 @@ import numpy as np
 import torch
 from cozy_runtime import rng, vlm
 from cozy_runtime.attention import Attention
-from cozy_runtime.author import Config, Loader, Model, retained, uses_components
+from cozy_runtime.author import Config, Loader, Model, preview, retained, uses_components
 from PIL import Image, ImageDraw
 from transformers import (
     Qwen3VLConfig,
@@ -552,6 +552,7 @@ class HiDreamO1(Model[O1Graph]):
                 velocity = velocities[0]
                 if guided:
                     velocity = velocities[1] + guidance * (velocities[0] - velocities[1])
+                preview(lambda: unpatch(z.float() + sigma * velocity, height, width), "pixels")
                 z = sampler.step(i, -velocity, z.float()).to(torch.bfloat16)
                 progress(i, count)
             image = unpatch((z + 1) / 2, height, width).cpu().float()

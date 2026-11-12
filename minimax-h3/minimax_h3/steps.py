@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Protocol, cast
 
 import torch
 from cozy_runtime.accel import stepcache
+from cozy_runtime.author import preview
 from cozy_runtime.accel.attention import attention_scope, AttentionLayout, producer_sites
 
 from . import producer
@@ -47,6 +48,7 @@ def denoise_official(
     sol_dense_steps: int,
     on_step: Callable[[int], object],
     *,
+    grid: tuple[int, int, int],
     steps: range | None = None,
     overlay: Overlay | None = None,
     cache: stepcache.Policy | None = None,
@@ -54,7 +56,8 @@ def denoise_official(
     """One rank's denoise of the loop's block `state` on its DiT (FL2VA's or Ref2VA's), its latents
     advanced over `steps` of its plan (all of them by default) by `schedulers`' own steps: under
     the turbo `overlay` (its tables and LoRA, and each step's collapsed heads), its DiT's stack
-    under `cache` when a preset names one."""
+    under `cache` when a preset names one. `grid` is the target rows' (frames, rows, columns),
+    which its previews show."""
     plan = state.row_timestep_plan
     steps = range(len(plan)) if steps is None else steps
     fields = state.denoiser_input_fields
@@ -113,6 +116,7 @@ def denoise_official(
                             rotary=rotary,
                             text=text,
                         )
+                    preview(lambda: video[video_rows:] + (1 - state.timesteps[i]) * velocity[0, video_rows:].float(), "minimax-h3", grid=grid)  # fmt: skip
                     video[video_rows:] = schedulers.scheduler.step(
                         velocity[0, video_rows:].float(), state.timesteps[i], video[video_rows:], return_dict=False  # type: ignore[arg-type]  # Diffusers annotates the legacy FloatTensor
                     )[0]

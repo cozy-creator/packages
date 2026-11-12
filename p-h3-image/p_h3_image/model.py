@@ -19,7 +19,7 @@ import torch
 from cozy_runtime import rng, vlm
 from cozy_runtime.accel.attention import AttentionLayout, attention_scope
 from cozy_runtime.accel.kernels import Plan
-from cozy_runtime.author import Config, Loader, Model, Serving, memoize, uses_components
+from cozy_runtime.author import Config, Loader, Model, Serving, memoize, preview, uses_components
 from diffusers.modular_pipelines.minimax_h3.before_denoise import (
     MiniMaxH3PrepareLayoutStep,
     MiniMaxH3SetTimestepsStep,
@@ -316,6 +316,7 @@ class PH3Image(Model[ImageGraph]):
                         audio_indices=fields["audio_indices"], text_indices=fields["text_indices"],
                         rotary=rotary, text=text,
                     )  # fmt: skip
+                    preview(lambda: _unpatchify(video[condition_rows:] + (1 - scheduler.timesteps[i]) * velocity[0, condition_rows:].float(), latent_height, latent_width), "minimax-h3")  # fmt: skip
                     video[condition_rows:] = scheduler.step(
                         velocity[0, condition_rows:].float(), scheduler.timesteps[i], video[condition_rows:], return_dict=False
                     )[0]

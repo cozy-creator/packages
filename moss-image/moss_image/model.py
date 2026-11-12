@@ -33,6 +33,7 @@ from cozy_runtime.author import (
     Serving,
     Telemetry,
     memoize,
+    preview,
     uses_components,
 )
 from cozy_runtime.accel.kernels import PreQuantized, int8_rows, native, quantize_once, rms_rope_split_half
@@ -426,6 +427,7 @@ class MossImage(Model[MossGraph]):
                 prediction = velocity[0]
                 if len(velocity) > 1:
                     prediction = velocity[1] + guidance * (velocity[0] - velocity[1])
+                preview(lambda: latents - scheduler.sigmas[i] * prediction, "flux2")
                 latents = scheduler.step(prediction, t, latents, return_dict=False)[0]
                 progress(i, len(timesteps))
         tel.log("dit block", rope="fused" if fused else "eager", **cast(Block, transformer.layers[0]).served)  # its blocks
