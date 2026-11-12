@@ -20,7 +20,8 @@ from __future__ import annotations
 
 import json
 import math
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from functools import partial
 from typing import TYPE_CHECKING, Any, TypedDict, cast
 
@@ -84,6 +85,10 @@ if TYPE_CHECKING:
 PATCH = 16
 #: The text-to-image prompt's token budget, as `QwenImagePipeline` runs it.
 TEXT_TOKENS = 512
+#: Rows of the DiT's rotary table (Diffusers' `QwenEmbedRope`): the image grids' positions first, the text's after.
+ROPE_ROWS = 4096
+#: Each picture's label and vision tokens in the edit's template (Diffusers' `img_prompt_template`).
+PICTURE = "Picture {}: <|vision_start|><|image_pad|><|vision_end|>"
 #: The DiT linears a Qwen-Image LoRA adapts in every block (lightx2v's Lightning: all twelve).
 LORA_SITES = (
     "attn.to_q",
@@ -243,6 +248,51 @@ def reference_sizes(image: Image.Image) -> tuple[tuple[int, int], tuple[int, int
 
 #: Encoded references: their packed VAE latents as one token sequence, and each one's token grid.
 References = tuple[torch.Tensor, list[tuple[int, int, int]]]
+
+
+def text_rows(grids: Sequence[tuple[int, int, int]]) -> int:
+    """The text tokens the DiT's rotary table holds beside these token grids, the target's and each reference's
+    (`QwenEmbedRope.forward`: the text's rows start past the largest grid's half side)."""
+    return ROPE_ROWS - max(max(rows, columns) // 2 for _, rows, columns in grids)
+
+
+def _conditions(pipeline: QwenImageEditPlusPipeline, images: list[Image.Image]) -> list[Image.Image]:
+    """Each reference as the vision encoder reads it, at its 384² area."""
+    conditions = []
+    for image in images:
+        (width, height), _ = reference_sizes(image)
+        conditions.append(pipeline.image_processor.resize(image, height, width))
+    return conditions
+
+
+#: A forward pre-hook's answer: the call's positional and keyword arguments.
+_Call = tuple[tuple[object, ...], dict[str, object]]
+
+
+@contextmanager
+def _last_layer_only(encoder: Qwen2_5_VLForConditionalGeneration) -> Iterator[None]:
+    """While open, a forward of `encoder` keeps its language model's last hidden state alone, and none of its
+    vision tower's. Diffusers' pipelines ask for every layer's (`output_hidden_states=True`) and read
+    `hidden_states[-1]`; Transformers' list form keeps the layers it names and ties the last to
+    `last_hidden_state`, so that is the same tensor (se-122)."""
+    language: nn.Module = encoder.model.language_model
+    last = [len(cast(nn.ModuleList, language.layers)) - 1]
+
+    def tower(_: nn.Module, args: tuple[object, ...], kwargs: dict[str, object]) -> _Call:
+        return args, {**kwargs, "output_hidden_states": False}
+
+    def layers(_: nn.Module, args: tuple[object, ...], kwargs: dict[str, object]) -> _Call:
+        return args, {**kwargs, "output_hidden_states": last}
+
+    handles = (
+        encoder.register_forward_pre_hook(tower, with_kwargs=True),
+        language.register_forward_pre_hook(layers, with_kwargs=True),
+    )
+    try:
+        yield
+    finally:
+        for handle in handles:
+            handle.remove()
 
 
 def sample(
@@ -408,17 +458,37 @@ class QwenImage(Model[QwenImageGraph]):
         text-to-image template, at most 512 tokens."""
         device = torch.device(str(self.device))
         pipeline = self._pipeline(edit=bool(images))
-        with torch.inference_mode():
+        with torch.inference_mode(), _last_layer_only(self.graph.components["text_encoder"]):
             if images:
-                conditions = []
-                for image in images:
-                    (width, height), _ = reference_sizes(image)
-                    conditions.append(pipeline.image_processor.resize(image, height, width))
+                conditions = _conditions(cast(QwenImageEditPlusPipeline, pipeline), images)
                 # With references `_pipeline` is the edit one; Diffusers types its image as one tensor.
                 embeds, mask = pipeline.encode_prompt(prompt, image=conditions, device=device)  # type: ignore[call-arg,arg-type]
             else:
                 embeds, mask = pipeline.encode_prompt(prompt, device=device, max_sequence_length=TEXT_TOKENS)
         return embeds.cpu(), None if mask is None else mask.cpu()
+
+    def edit_prompt(self, prompt: str, images: list[Image.Image], rows: int) -> tuple[str, int, int]:
+        """`prompt` as the edit reads it beside `images`, in the DiT's `rows` text rows (`text_rows`): the
+        template and each picture's label and vision tokens first, then as many of the prompt's tokens as fit.
+        Upstream reads any length and fails past its table (se-119). With the tokens kept and given."""
+        pipeline = cast(QwenImageEditPlusPipeline, self._pipeline(edit=True))
+        conditions = _conditions(pipeline, images)
+        labels = "".join(PICTURE.format(n) for n in range(1, len(images) + 1))
+        template, drop = pipeline.prompt_template_encode, pipeline.prompt_template_encode_start_idx
+
+        def length(text: str) -> int:
+            """The text rows Diffusers' `_get_qwen_prompt_embeds` makes of `text`."""
+            said = self.processor(text=[template.format(labels + text)], images=conditions)
+            return len(said["input_ids"][0]) - drop
+
+        tokenizer = self.processor.tokenizer
+        ids: list[int] = tokenizer(prompt)["input_ids"]
+        kept, keep = prompt, len(ids)
+        # A cut can tokenize longer at its edge: measured again until it fits.
+        while keep > 0 and (over := length(kept) - rows) > 0:
+            keep = max(keep - over, 0)
+            kept = tokenizer.decode(ids[:keep])
+        return kept, keep, len(ids)
 
     @memoize
     @uses_components("vae")

@@ -63,7 +63,9 @@ Conditioning and sampling are Diffusers' `QwenImagePipeline` and `QwenImageEditP
 Qwen's reference code: with tiny random modules the package's output equals both pipelines exactly.
 Text alone is read with the text-to-image template, at most 512 tokens. Each reference goes to the
 vision encoder at a 384² area and to the VAE at a 1024² area, and its latents sit beside the target
-at t = 0 (`zero_cond_t`). Noise is seeded on the CPU, the timesteps are `linspace(1, 1/steps)` with
+at t = 0 (`zero_cond_t`). An edit's text, the pictures' vision tokens and the prompt, is read up to the
+DiT's 4,096-row text rotary table less the largest grid's half side (about 2,000 prompt tokens beside ten
+pictures); upstream fails past it, the package reads the prompt's start and warns. Noise is seeded on the CPU, the timesteps are `linspace(1, 1/steps)` with
 the checkpoint's dynamic shift, and true CFG keeps the conditional prediction's norm. References are
 read upright, with any transparency composited over white. `generate_turbo` binds lightx2v's 8-step
 Lightning LoRA (V1.0, fp32) for each DiT at the file's `alpha / rank` (8/64) and samples at
