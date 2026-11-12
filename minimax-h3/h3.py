@@ -1637,7 +1637,7 @@ async def _render(ctx: Context, shot: Shot, out: Outputs, tel: Telemetry, *, pla
     expected = None
     models = {} if lora is None else {"base_model": lora}
     returned: list[SegmentOutput] = []
-    so_far = SoFar(out, tel)
+    so_far: SoFar | None = None
     for index, (segment, plan) in enumerate(zip(calls, plans, strict=True)):
         ctx.raise_if_cancelled()
         first = opening if index == 0 else None
@@ -1690,6 +1690,7 @@ async def _render(ctx: Context, shot: Shot, out: Outputs, tel: Telemetry, *, pla
         if index + 1 == count and (take is None or carried):
             out.publish("video", result.video, label="Video")
         else:
+            so_far = so_far or SoFar(out, tel, result.video)
             out.publish("video", so_far.add(result.video), label=f"Segments 1-{index + 1} of {count}" if index else f"Segment 1 of {count}")
     video, kept = returned[-1].video, None
     if take is not None and not carried:

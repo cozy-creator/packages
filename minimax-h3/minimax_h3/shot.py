@@ -10,7 +10,7 @@ from collections.abc import Iterable, Iterator, Mapping, Sequence
 from contextlib import AbstractContextManager
 from fractions import Fraction
 from itertools import accumulate, pairwise
-from typing import TYPE_CHECKING, Annotated, Literal, NamedTuple
+from typing import Annotated, Literal, NamedTuple
 
 import msgspec
 import numpy as np
@@ -53,9 +53,6 @@ from minimax_h3 import shot_latents
 from minimax_h3.continuation import AUDIO_TICKS_PER_S, Carry, ContinuationPlan, audio_ticks, carries, decode_context
 from minimax_h3.official import FPS, MAX_FRAMES, clip_size, shown_width, within_ratio
 from story import _HEADER, MENTION, MIN_CLIP_SECONDS, StoryReference, description_span, name_key, without_sections
-
-if TYPE_CHECKING:
-    from cozy_runtime.author._services import VideoJoin
 
 #: An output's or latents' byte bound: TensorD's output allowance reads it (256 MiB where none is declared), and the
 #: disk is the real limit.
@@ -625,32 +622,34 @@ def _frame_event(rgb: bytes, index: int, size: tuple[int, int]) -> DecodedVideoF
 
 class SoFar:
     """A shot's segments made so far as one video, joined by packet copy under their own sound (`Outputs.join_video`), so its
-    box plays them while the next renders. The last segment's decode of the whole shot as one replaces it."""
+    box plays them while the next renders. The last segment's decode of the whole shot as one replaces it. Segments that can't be
+    joined show alone, with a warning, and the shot goes on."""
 
-    def __init__(self, out: Outputs, tel: Telemetry) -> None:
-        self._out, self._tel = out, tel
-        self._join: VideoJoin | None = None
+    def __init__(self, out: Outputs, tel: Telemetry, first: VideoFile) -> None:
+        self._tel, self._frames, self._samples, self._refused = tel, 0, 0, False
         self._sound: DecodedAudioFormat | None = None
-        self._frames = self._samples = 0
-        self._refused = False
+        try:
+            if (sound := first.probe().soundtrack) is not None:
+                layout, names = AUDIO_LAYOUTS[sound.channels]
+                self._sound = DecodedAudioFormat(channels=sound.channels, sample_rate=sound.sample_rate, channel_layout=layout,
+                                                 channel_names=names, time_base=Fraction(1, sound.sample_rate))  # fmt: skip
+            self._join = out.join_video(self._sound)
+        except OutputError as error:
+            self._refuse(error)
 
     def add(self, video: VideoFile) -> VideoFile:
-        """`video` after the others: the joined video so far. A segment that can't be joined shows alone, as each after it does:
-        the shot goes on."""
+        """`video` after the others: the joined video so far."""
         if self._refused:
             return video
         try:
-            if self._join is None:
-                if (sound := video.probe().soundtrack) is not None:
-                    layout, names = AUDIO_LAYOUTS[sound.channels]
-                    self._sound = DecodedAudioFormat(channels=sound.channels, sample_rate=sound.sample_rate, channel_layout=layout,
-                                                     channel_names=names, time_base=Fraction(1, sound.sample_rate))  # fmt: skip
-                self._join = self._out.join_video(self._sound)
             return self._join.append(video, lambda frames: self._soundtrack(video, frames))
         except OutputError as error:
-            self._refused = True
-            self._tel.log("h3 segments shown alone", level="warn", reason=str(error))
+            self._refuse(error)
             return video
+
+    def _refuse(self, error: OutputError) -> None:
+        self._refused = True
+        self._tel.log("h3 segments shown alone", level="warn", reason=str(error))
 
     def _soundtrack(self, video: VideoFile, frames: int) -> Iterator[DecodedAudioChunk]:
         """`video`'s sound, cut or padded to its `frames` on the joined clock."""
