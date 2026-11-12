@@ -46,8 +46,10 @@ summary, with the shot's start). H3 numbers references by first mention in the b
 **First and last frame** are centre-cropped and scaled to the shot: its `aspect_ratio` (16:9) when set, else the
 first frame's shape, moved toward 16:9 when the shot has several segments and that shape can't carry across a join.
 
-**Pick up from here** fills `pickup` (`take`, `out_frame` on H3's `17k + 5` join grid, and `beats_from`): the take's
-first `out_frame` frames are kept and the beats from `beats_from` seconds render after them; unset, `beats_from` is the
+**Pick up from here** fills `pickup` (`take`, `out_frame`, and `beats_from`): only whole segments are redone, so
+`out_frame` is one of the take's `seams` or its end, and a frame between seams starts at the seam before it (a take made
+before seams were kept cuts on H3's `17k + 5` join grid). The take's first `out_frame` frames are kept unchanged and the
+beats from `beats_from` seconds render after them; unset, `beats_from` is the
 cut's time on the box's own take and 0 on another's. With the take's latents it goes on from them and the video
 decodes as one; without them a new video opens on the cut frame and is joined after the kept start. A `last_frame`
 ends the final segment; a `first_frame` is ignored. `kept_s` in the result says where the new part starts.
@@ -56,7 +58,8 @@ ends the final segment; a `first_frame` is ignored. `kept_s` in the result says 
 first segment, the plate's own first frame is the picture. The plate sets the shape; there is no summary, soundscape
 or music, and joins carry 22 frames.
 
-The result is `video` (768p mp4), `latents` (its own, which a pickup resumes and `upscale` starts from) and `warnings`.
+The result is `video` (768p mp4), `latents` (its own, which a pickup resumes and `upscale` starts from), `seams` (the
+frames where each segment after the first starts, a pickup's kept ones included, also kept in the latents) and `warnings`.
 
 - **Beats.** The summary and each beat become MiniMax's sections and `At` times, on one timeline, and a line of a person's that would
   read as ours is kept from it. A beat with no words is only a length. An empty `soundscape` or `music` says `N/A`, which is the
