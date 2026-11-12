@@ -190,7 +190,7 @@ class AnimaModel(Model[AnimaPipeline]):
             )
         fused = optimization.installed(transformer)
         cache = stepcache.FirstBlockCache(first_block_cache) if first_block_cache > 0.0 else None
-        inputs: dict[str, object] = {}
+        inputs: _Start = {}
         held = None
         if start is not None:
             phases.enter(_ENCODE_PICTURE)
@@ -225,6 +225,14 @@ class AnimaModel(Model[AnimaPipeline]):
             **inputs,
         )
         return images
+
+
+class _Start(TypedDict, total=False):
+    """An image-to-image denoise's start, as the modular pipeline's inputs."""
+
+    image_latents: torch.Tensor
+    latents: torch.Tensor
+    strength: float
 
 
 class _Held(NamedTuple):

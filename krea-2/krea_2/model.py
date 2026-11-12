@@ -606,7 +606,8 @@ class Krea2(Model[Krea2Graph]):
             z = moments[:, :z_dim, 0].float()
             mean = z.new_tensor(vae.config["latents_mean"]).view(1, -1, 1, 1)
             std = z.new_tensor(vae.config["latents_std"]).view(1, -1, 1, 1)
-            return ((z - mean) / std).cpu()
+            out: torch.Tensor = ((z - mean) / std).cpu()
+            return out
 
     def _stream(self, branch: Branch, rows: int, columns: int, device: torch.device) -> Stream:
         """What no step changes of one branch: its fused text, its pictures through `img_in` (clean, so
