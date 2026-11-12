@@ -42,18 +42,18 @@ class Transformer(Ideogram4Transformer2DModel):
 
     def forward(
         self, image: torch.Tensor, prefix: torch.Tensor | None, t: torch.Tensor, cos: torch.Tensor,
-        sin: torch.Tensor, segment_ids: torch.Tensor,
+        sin: torch.Tensor,
     ) -> torch.Tensor:
         """`Ideogram4Transformer2DModel.forward` past its text rows: the image tokens embedded beside
         `prefix` (`_text_rows`; None: image tokens alone), the blocks, and the final layer over the
-        image rows."""
+        image rows. One unpadded caption is one segment, so attention is full and takes no mask:
+        an all-true mask only kept SDPA off its flash kernel."""
         hidden = self.input_proj(image) + self.embed_image_indicator(torch.ones(1, dtype=torch.long, device=image.device))
         if prefix is not None:
             hidden = torch.cat([prefix, hidden], dim=1)
         adaln = F.silu(self.adaln_proj(self.t_embedding(t).unsqueeze(1)))
-        mask = (segment_ids.unsqueeze(2) == segment_ids.unsqueeze(1)).unsqueeze(1)
         for block in self.layers:
-            hidden = block(hidden, mask, (cos, sin), adaln)
+            hidden = block(hidden, None, (cos, sin), adaln)
         return self.final_layer(hidden[:, hidden.shape[1] - image.shape[1] :], conditioning=adaln)  # type: ignore[no-any-return]
 
 
@@ -170,11 +170,11 @@ class Ideogram4(Model[IdeogramGraph]):
         sigmas = _logit_normal_sigmas(steps, _resolution_aware_mu(height, width, mu), std=std, device=device)
         scheduler.set_timesteps(sigmas=sigmas.tolist(), device=device)
         with torch.no_grad():
-            position_ids, segment_ids, _ = Ideogram4Pipeline._prepare_ids([texts], rows, columns, texts, device)
+            position_ids, _, _ = Ideogram4Pipeline._prepare_ids([texts], rows, columns, texts, device)
             latents = rng.noise((1, tokens, tf.config["in_channels"]), seed, device=device)
             prefix = _text_rows(tf, features.to(device, DTYPE))
-            positive_rope = (*_rotary(tf, position_ids), segment_ids)
-            negative_rope = (*_rotary(uncond, position_ids[:, texts:]), segment_ids[:, texts:])
+            positive_rope = _rotary(tf, position_ids)
+            negative_rope = _rotary(uncond, position_ids[:, texts:])
             num_train_timesteps = scheduler.config["num_train_timesteps"]
             for i, t in enumerate(scheduler.timesteps):
                 t_model = (1.0 - t.float() / num_train_timesteps).expand(1).to(DTYPE)
