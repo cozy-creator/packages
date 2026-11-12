@@ -57,7 +57,7 @@ class Factors(nn.Module):
 class AdapterGraph:
     """An uploaded Krea 2 LoRA: factors at each of its `target_modules` (PEFT's config, which TensorFS
     writes with `lora_alpha` the commonest α), and a control LoRA's expanded input projection, which
-    TensorFS keeps as PEFT's `img_in.modules_to_save`."""
+    TensorFS keeps whole as `img_in.modules_to_save`."""
 
     def __init__(self, config: Config) -> None:
         adapter = config.section(COMPONENT) if COMPONENT in config.keys() else config
@@ -78,12 +78,22 @@ class AdapterGraph:
                 _add(root, path, factors)
                 self.sites[path] = factors
             self.projection: nn.Linear | None = None
-            if "img_in" in (settings.get("modules_to_save") or ()):
+            if _stored(config, f"{COMPONENT}.img_in.modules_to_save.weight"):
                 image = linears["img_in"]
                 self.projection = nn.Linear(2 * image.in_features, image.out_features, dtype=torch.float32)
                 _add(root, "img_in.modules_to_save", self.projection)
         as_stored(config, COMPONENT, root)  # factors in their stored dtype (bf16, or Patil's F32)
         self.components: dict[str, nn.Module] = {COMPONENT: root}
+
+
+def _stored(config: Config, key: str) -> bool:
+    """Whether the checkpoint stores `key`: the Runtime refuses a missing one (`config_tensor_missing`)."""
+    try:
+        return bool(config.tensor_dtype(key, default=""))
+    except Exception as exc:  # the Runtime's ConformanceError, which `cozy_runtime.author` doesn't export
+        if getattr(exc, "code", None) == "config_tensor_missing":
+            return False
+        raise
 
 
 def _add(root: nn.Module, path: str, module: nn.Module) -> None:
