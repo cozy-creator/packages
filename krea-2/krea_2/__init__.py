@@ -178,20 +178,21 @@ def _generate(ctx: Context, payload: TurboInput, model: Krea2, adapters: Adapter
 _RAW_MODEL = "krea/krea-2@0.1.0"
 _TURBO_MODEL = "krea/krea-2-turbo@0.1.0"
 _KREA = ("transformer", "text_encoder", "vae")
-#: Each adapter's mirror on the Hub, by slot (`adapters.py`); each is built and fetched only when a request
-#: needs it.
-_ADAPTERS = {
-    "edit": "conradlocke/identity-edit@0.1.0",
-    "depth": "patil/depth-control@0.1.0",
-    "pose": "thedeoxen/pose-control@0.1.0",
-    "lineart": "cierpliwy/lineart-edit@0.1.0",
-    "inpaint": "cierpliwy/inpaint-edit@0.1.0",
-}
-_ADAPTER_COMPONENTS = {slot: ("transformer",) for slot in _ADAPTERS}
+#: Each adapter's mirror on the Hub, by slot (`adapters.py`), its one component; each is built and fetched only
+#: when a request needs it.
+_EDIT = "conradlocke/identity-edit@0.1.0"
+_DEPTH = "patil/depth-control@0.1.0"
+_POSE = "thedeoxen/pose-control@0.1.0"
+_LINEART = "cierpliwy/lineart-edit@0.1.0"
+_INPAINT = "cierpliwy/inpaint-edit@0.1.0"
+_LORA = ("transformer",)
 
 
-@app.entrypoint(defaults={"model": _RAW_MODEL, **_ADAPTERS}, components={"model": _KREA, **_ADAPTER_COMPONENTS},
-                on_demand=tuple(_ADAPTERS), memoize=True)  # fmt: skip
+@app.entrypoint(defaults={"model": _RAW_MODEL, "edit": _EDIT, "depth": _DEPTH, "pose": _POSE, "lineart": _LINEART,
+                          "inpaint": _INPAINT},
+                components={"model": _KREA, "edit": _LORA, "depth": _LORA, "pose": _LORA, "lineart": _LORA,
+                            "inpaint": _LORA},
+                on_demand=("edit", "depth", "pose", "lineart", "inpaint"), memoize=True)  # fmt: skip
 def generate(ctx: Context, payload: GenerateInput, model: Krea2, edit: Adapter, depth: Adapter, pose: Adapter,
              lineart: Adapter, inpaint: Adapter, out: Outputs, tel: Telemetry, adj: Adjustments) -> ImageResult:
     """The full model, Krea 2 Raw (or a fine-tune of it): 52 steps at guidance 3.5, 1 MP."""
@@ -199,8 +200,11 @@ def generate(ctx: Context, payload: GenerateInput, model: Krea2, edit: Adapter, 
     return _generate(ctx, payload, model, adapters, out, tel, adj, distilled=False)
 
 
-@app.entrypoint(defaults={"model": _TURBO_MODEL, **_ADAPTERS}, components={"model": _KREA, **_ADAPTER_COMPONENTS},
-                on_demand=tuple(_ADAPTERS), memoize=True)  # fmt: skip
+@app.entrypoint(defaults={"model": _TURBO_MODEL, "edit": _EDIT, "depth": _DEPTH, "pose": _POSE, "lineart": _LINEART,
+                          "inpaint": _INPAINT},
+                components={"model": _KREA, "edit": _LORA, "depth": _LORA, "pose": _LORA, "lineart": _LORA,
+                            "inpaint": _LORA},
+                on_demand=("edit", "depth", "pose", "lineart", "inpaint"), memoize=True)  # fmt: skip
 def generate_turbo(ctx: Context, payload: TurboInput, model: Krea2, edit: Adapter, depth: Adapter, pose: Adapter,
                    lineart: Adapter, inpaint: Adapter, out: Outputs, tel: Telemetry, adj: Adjustments) -> ImageResult:
     """The fast model, Krea 2 Turbo (or a fine-tune of it): 8 steps without guidance at its fixed shift, 2048²."""
@@ -224,9 +228,12 @@ class ImageBox(msgspec.Struct, kw_only=True):
 
 # Each checkpoint is built, and its weights fetched, only when a box asks for it; the edit adapter only for a box
 # with pictures.
-@app.tool(label="Image", named="image", defaults={"full": _RAW_MODEL, "model": _TURBO_MODEL, **_ADAPTERS},
-          components={"full": _KREA, "model": _KREA, **_ADAPTER_COMPONENTS},
-          on_demand=("full", "model", *_ADAPTERS), memoize=True)  # fmt: skip
+@app.tool(label="Image", named="image",
+          defaults={"full": _RAW_MODEL, "model": _TURBO_MODEL, "edit": _EDIT, "depth": _DEPTH, "pose": _POSE,
+                    "lineart": _LINEART, "inpaint": _INPAINT},
+          components={"full": _KREA, "model": _KREA, "edit": _LORA, "depth": _LORA, "pose": _LORA, "lineart": _LORA,
+                      "inpaint": _LORA},
+          on_demand=("full", "model", "edit", "depth", "pose", "lineart", "inpaint"), memoize=True)  # fmt: skip
 def image(ctx: Context, payload: ImageBox, full: Krea2, model: Krea2, edit: Adapter, depth: Adapter, pose: Adapter,
           lineart: Adapter, inpaint: Adapter, out: Outputs, tel: Telemetry, adj: Adjustments) -> ImageResult:
     """Krea 2 on a canvas: Turbo, or Raw, which loads only when asked for; an edit of the pictures it mentions."""
