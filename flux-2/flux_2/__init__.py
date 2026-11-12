@@ -113,12 +113,12 @@ def _generate(ctx: Context, payload: TurboInput, model: Flux2, turbo: Flux2Turbo
 
 
 _DEV = "black-forest-labs/flux-2-dev@0.1.0"
-_TURBO = "fal/flux-2-dev-turbo@0.1.0"
+_TURBO = "fal/flux-2-dev-turbo@0.2.0"
 #: The upsampler is [dev]'s text encoder, built and fetched only when `prompt_upsampling` is on; the
 #: Turbo LoRA only with [dev].
 _COMPONENTS = {"model": ("transformer", "text_encoder", "vae"), "upsampler": ("text_encoder",)}
 _TURBO_COMPONENTS = {"model": ("transformer", "text_encoder", "vae"), "upsampler": ("text_encoder",),
-                     "turbo_lora": ("model",)}
+                     "turbo_lora": ("transformer",)}
 
 
 @app.entrypoint(defaults={"model": _DEV, "upsampler": _DEV}, components=_COMPONENTS, on_demand=("upsampler",),
@@ -179,7 +179,7 @@ class UpscaleInput(msgspec.Struct, kw_only=True):
 
 
 @app.tool(label="Upscale", named="image", defaults={"model": _DEV, "turbo_lora": _TURBO},
-          components={"model": _COMPONENTS["model"], "turbo_lora": ("model",)}, memoize=True)  # fmt: skip
+          components={"model": _COMPONENTS["model"], "turbo_lora": ("transformer",)}, memoize=True)  # fmt: skip
 def upscale(ctx: Context, payload: UpscaleInput, model: Flux2, turbo_lora: Flux2TurboLoRA, out: Outputs,
             tel: Telemetry, adj: Adjustments) -> ImageResult:
     """The picture larger: FLUX.2 [dev] Turbo edits it at the size asked, the picture Lanczos-upscaled to the canvas

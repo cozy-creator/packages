@@ -2,24 +2,25 @@
 
 The overlay is never merged into a [dev] lane. While `applied` runs, [dev]'s linear hooks
 (`cozy_runtime.lora.Hook`) serve its factors: Runtime bakes them into the resident weights by default, and a
-hook adds the update itself where they are not baked.
+hook adds the update itself where they are not baked. Its sites are the checkpoint's: each target's stored
+factors give their shapes (`Config.tensor_shape`).
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
-from typing import Any, TypeVar
+from collections.abc import Callable
+from typing import TypeVar
 
 import torch
 from cozy_runtime.accel import lora
 from cozy_runtime.author import Config, Loader, Model, Serving, uses_components
-from diffusers.models.transformers.transformer_flux2 import Flux2Transformer2DModel
 from torch import nn
 
 
 T = TypeVar("T")
-#: The upload's one component: the LoRA file at the repository's root.
-COMPONENT = "model"
+#: The upload's one component: TensorFS's `flux2.lora`, PEFT factors under [dev]'s module names.
+COMPONENT = "transformer"
+_DTYPES = {"f32": torch.float32, "bf16": torch.bfloat16, "f16": torch.float16}
 
 
 class Factors(nn.Module):
@@ -39,28 +40,30 @@ class Factors(nn.Module):
 
 
 class TurboGraph:
-    def __init__(  # type: ignore[explicit-any]  # geometry: **config into Diffusers' typed keywords
-        self, config: Config, geometry: Mapping[str, Any] | None = None
-    ) -> None:
+    def __init__(self, config: Config) -> None:
         adapter = config.section(COMPONENT).mapping()
-        rank = int(adapter["r"])
-        scale = float(adapter.get("lora_alpha", rank)) / rank
-        with torch.device("meta"):  # the base's sites; the class defaults are [dev]'s geometry
-            dev = Flux2Transformer2DModel(**(geometry or {}))
         root = nn.Module()
         self.sites: dict[str, Factors] = {}
+        dtype = torch.bfloat16
         for target in adapter["target_modules"]:
             path = target.removeprefix("transformer.")
-            linear = dev.get_submodule(path)
-            factors = Factors(linear.in_features, linear.out_features, rank, scale)
+            key = f"{COMPONENT}.{path}"
+            down = config.tensor_shape(f"{key}.lora_A.weight", default=())
+            up = config.tensor_shape(f"{key}.lora_B.weight", default=())
+            if len(down) != 2 or len(up) != 2:
+                raise ValueError(f"the Turbo LoRA's {path} has no stored factors to build it from")
+            (rank, inputs), (outputs, _) = down, up
+            # α: the config's `lora_alpha` (one rank, so no module states its own), else r.
+            factors = Factors(inputs, outputs, rank, float(adapter.get("lora_alpha", rank)) / rank)
+            dtype = _DTYPES[config.tensor_dtype(f"{key}.lora_A.weight", default="bf16")]
             parent = root
-            for name in target.split(".")[:-1]:
+            for name in path.split(".")[:-1]:
                 if not hasattr(parent, name):
                     parent.add_module(name, nn.Module())
                 parent = getattr(parent, name)
-            parent.add_module(target.rsplit(".", 1)[-1], factors)
+            parent.add_module(path.rsplit(".", 1)[-1], factors)
             self.sites[path] = factors
-        self.components: dict[str, nn.Module] = {COMPONENT: root.to(torch.bfloat16)}
+        self.components: dict[str, nn.Module] = {COMPONENT: root.to(dtype)}
 
 
 class Flux2TurboLoRA(Model[TurboGraph]):
