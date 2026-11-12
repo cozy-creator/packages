@@ -30,8 +30,9 @@ and checks every mention names something, so a package only replaces `<key>` wit
 | flux-2 | `image N` | BFL's prompting guide |
 | hunyuan-image-3 | `图N` | Tencent's documented prompts |
 | hidream-o1 | its name | no convention upstream |
+| krea-2 | its name (up to 2) | Identity Edit V2's captions name no pictures |
 | minimax-h3 | `<Picture N>`, `<Video N>`, `<Audio N>` per segment; see its README | MiniMax's reference guide |
-| anima, ideogram-4, krea-2, moss-image, sdxl | (takes no pictures) | text to image only |
+| anima, ideogram-4, moss-image, sdxl | (takes no pictures) | text to image only |
 
 ```python
 from cozy_runtime.author import Image, ImageRequest, Prompt
