@@ -7,7 +7,7 @@ hidden state, decoded by FLUX.2's VAE with its small decoder.
 `image` is the canvas tool, its prompt `instructions`: `aspect_ratio`, `megapixels`, `negative_prompt` and `seed`.
 
 **Edits.** A prompt that mentions pictures (`<amy> in a red coat`, up to 4) runs under chinoll's Moss-Image-Edit LoRA
-(`chinoll/moss-image-edit`, built in: the request names no LoRA): each picture, its long edge at most 512, is a
+(`chinoll/moss-image-edit`, built in: the request names no LoRA; `generate` and the Image tool are CPU roots whose GPU call is `text_to_image`, or `edit` with the LoRA stacked): each picture, its long edge at most 512, is a
 noise-free reference at t = 0 attending only to the references, computed once a request; the image and both
 CFG branches attend to it. 30 Euler steps at CFG 4 against an empty negative, at the first picture's ratio and 1 MP,
 as ComfyUI's Moss-Image-Edit workflows. One picture reads as its name, several as `image N`. Caller LoRAs stack with it.

@@ -110,20 +110,21 @@ def reference(picture: PILImage.Image) -> PILImage.Image:
     return picture if size == picture.size else picture.resize(size, PILImage.Resampling.LANCZOS)
 
 
-@app.entrypoint(defaults=_DEFAULTS, components=_COMPONENTS, on_demand=("model",), memoize=True)
-async def generate(ctx: Context, payload: GenerateInput, model: MossImage, out: Outputs, tel: Telemetry,
-                   adj: Adjustments) -> ImageResult:
-    """MOSS-Image SFT, 50 Euler steps at CFG 3, with `regions` laid out as upstream's layout JSON. The negative
-    branch skips block 22. With pictures mentioned, `edit` under Moss-Image-Edit (`EDIT_LORA`), stacked on the
-    model and any caller LoRA."""
+@app.entrypoint(accelerator=False)
+async def generate(ctx: Context, payload: GenerateInput) -> ImageResult:
+    """MOSS-Image from the text (`text_to_image`); with pictures mentioned, `edit` under Moss-Image-Edit
+    (`EDIT_LORA`), stacked on the model after any caller LoRA. Each is this request's GPU call, so the request's
+    model and LoRAs reach it."""
     if payload.prompt.references:
-        ctx.release_gpus()
         return await call(edit, payload=payload, model=ModelChoice(lora=(Lora(EDIT_LORA),)))
-    return text_to_image(ctx, payload, model, out, tel, adj)
+    return await call(text_to_image, payload=payload)
 
 
+@app.entrypoint(defaults=_DEFAULTS, components=_COMPONENTS, memoize=True, private=True)
 def text_to_image(ctx: Context, payload: GenerateInput, model: MossImage, out: Outputs, tel: Telemetry,
                   adj: Adjustments) -> ImageResult:
+    """MOSS-Image SFT, 50 Euler steps at CFG 3, with `regions` laid out as upstream's layout JSON. The negative
+    branch skips block 22."""
     model.hold_vae(tel)
     steps = held(adj, "steps", payload.steps or STEPS, 1, MOST_STEPS, "MOSS-Image's 1-200 steps")
     guidance = held(adj, "guidance", GUIDANCE if payload.guidance is None else payload.guidance, 1.0, 20.0,
@@ -151,7 +152,7 @@ def text_to_image(ctx: Context, payload: GenerateInput, model: MossImage, out: O
 @app.entrypoint(defaults=_DEFAULTS, components=_COMPONENTS, memoize=True, private=True)
 def edit(ctx: Context, payload: GenerateInput, model: MossImage, out: Outputs, tel: Telemetry,
          adj: Adjustments) -> ImageResult:
-    """`generate` with pictures, its caller having stacked Moss-Image-Edit on `model`: each picture a noise-free
+    """`generate` with pictures, Moss-Image-Edit stacked on `model` by its caller: each picture a noise-free
     reference at t = 0 (`MossImage.denoise`'s `references`), 30 Euler steps at CFG 4 against an empty negative that
     attends to them too, at the first picture's ratio (ComfyUI's Moss-Image-Edit workflows)."""
     model.hold_vae(tel)
@@ -195,14 +196,12 @@ class ImageBox(msgspec.Struct, kw_only=True):
     seed: Seed | None = None
 
 
-@app.tool(label="Image", named="image", defaults=_DEFAULTS, components=_COMPONENTS, on_demand=("model",),
-          memoize=True)  # fmt: skip
-async def image(ctx: Context, payload: ImageBox, model: MossImage, out: Outputs, tel: Telemetry,
-                adj: Adjustments) -> ImageResult:
+@app.tool(label="Image", named="image", accelerator=False)
+async def image(ctx: Context, payload: ImageBox) -> ImageResult:
     """MOSS-Image on a canvas: `generate` from the box, an edit of its pictures when it mentions any."""
     request = GenerateInput(prompt=payload.instructions, aspect_ratio=payload.aspect_ratio, megapixels=payload.megapixels,
                             seed=payload.seed, negative_prompt=payload.negative_prompt)  # fmt: skip
-    return await generate(ctx, request, model, out, tel, adj)
+    return await generate(ctx, request)
 
 
 #: What MOSS-Image is told of a picture it upscales.
