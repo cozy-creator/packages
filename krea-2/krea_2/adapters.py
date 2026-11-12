@@ -208,6 +208,13 @@ VLM_PIXELS, VLM_SIDE = 384 * 384, 28
 REFERENCE_PIXELS = 1024 * 1024
 
 
+def blacked(picture: Image.Image) -> Image.Image:
+    """An inpaint map (the picture with the area to redraw transparent) as Cierpliwy's inpaint LoRA reads it: that
+    area black. An opaque picture is unchanged."""
+    black = Image.new("RGBA", picture.size, (0, 0, 0, 255))
+    return Image.alpha_composite(black, picture.convert("RGBA")).convert("RGB")
+
+
 def vlm_sized(picture: Image.Image) -> Image.Image:
     """`_prep_vlm_images`: down (never up) to `VLM_PIXELS`, bicubic."""
     scale = min(1.0, math.sqrt(VLM_PIXELS / (picture.width * picture.height)))
@@ -245,8 +252,9 @@ class Kind:
     isolated: bool = False
 
 
-#: Each control kind Krea 2 has an adapter for; `sketch` and `canny` have none yet. Each ai-toolkit adapter's
-#: own workflow runs it with `Krea2OstrisEditModelPatch`'s `kv_cache` on: its map attends only to itself.
+#: Each control kind Krea 2 has an adapter for (the request's `Kinds`); `sketch` and `canny` have none yet. Each
+#: ai-toolkit adapter's own workflow runs it with `Krea2OstrisEditModelPatch`'s `kv_cache` on: its map attends only
+#: to itself.
 KINDS = {
     "depth": Kind("depth", "concat"),
     "pose": Kind("pose", "ai-toolkit", isolated=True),

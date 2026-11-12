@@ -42,17 +42,17 @@ from its author's mirror on the Hub (`--model <slot>=<ref>` swaps one).
   second the person) are edited with Identity Edit V2 (`edit` slot). A mention reads as its name
   ([references](../docs/references.md)).
 - **Image-to-image:** `image` is a picture to start from, `denoise` how much of it is redrawn (default 0.7).
-- **Control:** `control` is a list of `{image, kind, strength}`, `image` the ready map. Krea 2 reads the first
-  of a kind it has an adapter for; the others are ignored with a warning.
+- **Control:** `control` is a list of the Runtime's `Control` (`{image, kind, strength}`), `image` the ready map,
+  of the four kinds below; a map of another kind is dropped with a warning. Krea 2 reads the first.
 
 | input | adapter (slot) | how it conditions | Raw | Turbo |
 | --- | --- | --- | --- | --- |
 | mentioned pictures | conradlocke Identity Edit V2 (`edit`) | VAE tokens before the target + Qwen3-VL sees the pictures | yes | yes |
 | `pose` (OpenPose/DWPose skeleton) | thedeoxen pose ControlNet LoRA (`pose`) | ai-toolkit edit: VAE tokens after the target at t=0, attending only to themselves, + `Picture 1:` | untested | yes (trained on Turbo) |
 | `lineart` (white lines on black) | Cierpliwy lineart edit (`lineart`) | ai-toolkit edit, as pose | yes | yes |
-| `inpaint` (the region to repaint black) | Cierpliwy inpaint edit (`inpaint`) | ai-toolkit edit, as pose | yes | yes |
+| `inpaint` (the picture with the area to redraw transparent, or black) | Cierpliwy inpaint edit (`inpaint`) | ai-toolkit edit, as pose | yes | yes |
 | `depth` (near is white) | Patil depth ControlNet-LoRA (`depth`) | the map's latents beside each image token (`img_in` 64 → 128) | yes | yes |
-| `sketch`, `canny` | none | ignored | | |
+| `sketch`, `canny` | none | dropped with a warning | | |
 
 With pictures, the output is at most 2 MP (the adapters' range). A control with mentioned pictures goes as its
 VAE tokens alone, the person beside the canvas. The pose adapter follows a skeleton loosely, and with a person
@@ -62,6 +62,20 @@ free for non-commercial use only; commercial use needs the author's licence (the
 
 Guidance is Krea's: `cond + g·(cond − uncond)`, so Krea's 3.5 is ComfyUI's cfg 4.5, and Turbo's 0 is
 ComfyUI's cfg 1.
+
+## Text encoder
+
+`text_encoder` is its own slot: it reads the Qwen3-VL-4B of any Krea 2 checkpoint, the function's own by default
+(Raw's and Turbo's are byte-identical); `model` reads only the DiT and VAE. Quiho's abliterated encoder
+([Krea2_NSFW_Uncensored_Complete](https://huggingface.co/Quiho/Krea2_NSFW_Uncensored_Complete),
+`quiho/qwen3-vl-4b-abliterated`) is Qwen3-VL-4B with its refusal direction removed, so it reads a prompt the official
+encoder steers away from as written:
+
+```sh
+cozy run krea-2/generate_turbo prompt='...' model.text_encoder=quiho/qwen3-vl-4b-abliterated@0.1.0
+```
+
+Its weights are fp8, as Quiho publishes them (lane `fp8`).
 
 ## Sizes
 
@@ -108,6 +122,9 @@ cozy model upload hf://krea/Krea-2-Raw@6b0ece7fffb640c5e3bcbe0a7f10f66b8e60a603 
 cozy model upload hf://krea/Krea-2-Turbo@98e0fe118d17c9e3547fbb2e25acdbae2cadf7c7 krea/krea-2-turbo --lane bf16 --on <machine>
 cozy model quantize krea/krea-2@sha256:<bf16 commit> --lane int8 --package krea-2 --on <machine>
 cozy model quantize krea/krea-2-turbo@sha256:<bf16 commit> --lane int8 --package krea-2 --on <machine>
+cozy model upload hf://Quiho/Krea2_NSFW_Uncensored_Complete@4ecd0d82d30daec24691db30495d752f2d7d7f64/qwen3VL4BAbliteratedComfyui_FP8.safetensors \
+  quiho/qwen3-vl-4b-abliterated --lane fp8 --base krea/krea-2-turbo@sha256:<bf16 commit> \
+  --mirror https://huggingface.co/Quiho/Krea2_NSFW_Uncensored_Complete --on <machine>
 ```
 
 The upload reads the Diffusers folders (`raw.safetensors` and `turbo.safetensors`, the reference
@@ -115,6 +132,11 @@ checkpoints, are not taken); the text encoder and VAE are byte-identical in both
 (`int8.convrot`, W8A8 on int8 tensor cores, the default) takes what Comfy-Org's int8 ConvRot files do:
 every linear of the 28 DiT blocks and every projection of Qwen3-VL's language layers. The text fusion,
 embedders, modulation, final layer, token embedding and VAE keep their bytes.
+
+Quiho's encoder is one ComfyUI file (`model.layers.*`, `model.visual.*`), which TensorFS's `qwen3vl.comfy` table reads
+as the `text_encoder`; its linears are plain fp8 with no scales, which TensorFS reads at scale 1, as ComfyUI does.
+The upload takes the DiT, VAE and tokenizer from `--base`, so the mirror is a whole Krea 2 Turbo checkpoint, of which
+the slot reads only the encoder.
 
 ## Licence
 
