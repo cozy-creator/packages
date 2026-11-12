@@ -72,7 +72,7 @@ run per component. Euler from sigma 1 to 1/steps, shifted by the image size; flo
 from the seed on the CPU. Dev runs CFG 5 at 50 steps (the model card; Diffusers' default is 30), with
 the card's text-to-image negative prompt, or the empty caption the model was trained with for edits.
 Turbo runs 4 steps at guidance 1. The caption's text is also drawn and shown to Qwen3-VL, in the fonts
-training used (`fibo_2/fonts`). On an L40S, its 16-bit images are 37–54 dB PSNR from Diffusers'
+training used (the checkpoint's `fonts/`). On an L40S, its 16-bit images are 37–54 dB PSNR from Diffusers'
 own bf16 pipeline (same caption, seed and size, five cases: runs 14911–14923 against 14925/14926); the
 int8 lane's are 22.6–27.6 dB from them, the same pictures by eye (14929–14951). The VAE's BatchNorm
 statistics need Runtime ≥ 0.30.16 (cozy-runtime #1700). The steps are a plain loop over Diffusers'
@@ -81,11 +81,12 @@ statistics need Runtime ≥ 0.30.16 (cozy-runtime #1700). The steps are a plain 
 ## Prepare the models
 
 Upload each repository as it is, as lane `bf16`, and publish it with its quantized lanes (below).
-The Fibo repositories are gated: accept Bria's licence on Hugging Face first.
+The Fibo repositories are gated: accept Bria's licence on Hugging Face first. The checkpoint keeps the
+repository's `fonts/` (cozy ≥ 0.25), which the package reads from it.
 
 ```sh
 cozy model upload hf://briaai/Fibo-2.0-dev@fb2b781f9e9e5572a6c348a5af7a4d155a2b1ed0 briaai/fibo-2-dev --lane bf16 --on <machine>
-cozy model upload hf://briaai/Fibo-2.0-edit-turbo@901c02672d969ed21e44ff58f1a0872c7581ddb0 briaai/fibo-2-edit-turbo --lane bf16 --on <machine>
+cozy model upload hf://briaai/Fibo-2.0-edit-turbo@7b133d62d92e897f1468af0427a73cc41a03cb5d briaai/fibo-2-edit-turbo --lane bf16 --on <machine>
 cozy model upload hf://briaai/FIBO-vlm@bd13da5e0b73c808014d6260963e311c8cdf0d8b briaai/fibo-vlm --lane bf16 --on <machine>
 cozy model upload hf://briaai/FIBO-edit-vlm@61d852ebd380ac79e04ec171552f5d7cca1a04cc briaai/fibo-edit-vlm --lane bf16 --on <machine>
 ```
@@ -103,7 +104,7 @@ included, in NVFP4 (Blackwell), and a VLM's linears in NVFP4 (W4A16 decode).
 
 ```sh
 cozy model quantize briaai/fibo-2-dev@sha256:<bf16 commit> --lane int8 --package fibo-2 --on <machine>
-cozy model publish briaai/fibo-2-dev 0.1.0 sha256:<bf16 commit> sha256:<int8 commit>
+cozy model publish briaai/fibo-2-dev 0.1.1 sha256:<bf16 commit> sha256:<int8 commit>
 ```
 
 ## Licence
