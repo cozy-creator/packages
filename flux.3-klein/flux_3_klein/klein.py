@@ -1,4 +1,4 @@
-"""FLUX.3 Image Klein, base and distilled, component-staged over Diffusers' modules.
+"""FLUX.3 Klein, base and distilled, component-staged over Diffusers' modules.
 
 The modules are Diffusers' (`Flux3Transformer2DModel`, `AutoencoderKLFlux2`, the Qwen3-VL prompt
 encoding of its Flux3 modular pipeline); reference preparation and sampling follow BFL's reference
