@@ -1,10 +1,10 @@
 [project]
 name = "p-h3-image"
-version = "0.2.0rc1"
+version = "0.2.0"
 description = "P-H3-Image, Pruna AI's image model: text to image, or an edit of up to 8 pictures, at 8 MP in 8 steps"
 requires-python = ">=3.12,<3.15"
 dependencies = [
-    "cozy-runtime[adapters,media]>=0.45.0,<0.46",
+    "cozy-runtime[adapters,media]>=0.46.0,<0.47",
     "diffusers>=0.41,<0.42",
     "msgspec>=0.19",
     "numpy>=1.26",

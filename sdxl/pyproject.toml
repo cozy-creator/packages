@@ -5,11 +5,11 @@
 
 [project]
 name = "sdxl"
-version = "0.10.0rc2"
+version = "0.10.0"
 description = "Stable Diffusion XL text-to-image"
 requires-python = ">=3.12,<3.15"
 dependencies = [
-    "cozy-runtime[adapters,media]>=0.45.0,<0.46",
+    "cozy-runtime[adapters,media]>=0.46.0,<0.47",
     "diffusers>=0.40.0,<0.41",
     "hf-xet>=1.6.0",
     "hidiffusion>=0.1.10",
