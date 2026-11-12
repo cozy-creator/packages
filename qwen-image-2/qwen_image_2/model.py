@@ -274,7 +274,7 @@ def _vae(config: Config) -> AutoencoderKLQwenImage21:
     card short for the decode's activations. Each residual, attention and resample block is one page instead (every one
     is called as a module, also by `_decoded`)."""
     with transformer_init.no_init_weights():
-        vae = construct(AutoencoderKLQwenImage21, config.section("vae").mapping())
+        vae: AutoencoderKLQwenImage21 = construct(AutoencoderKLQwenImage21, config.section("vae").mapping())
     _to(vae, _stored(config, "vae", vae))
     vae._no_split_modules = [  # type: ignore[assignment]  # Diffusers declares None
         "QwenImage21ResidualBlock",
@@ -611,7 +611,7 @@ class QwenImage21VAE(Model[QwenImage21VAEGraph]):
             for image in images:
                 image = image.convert("RGBA")
                 width, height, _ = calculate_dimensions(1024 * 1024, image.width / image.height)  # type: ignore[no-untyped-call]  # Diffusers' own, unannotated
-                resized.append(self.processor.resize(image, width=width, height=height))
+                resized.append(cast(Image.Image, self.processor.resize(image, width=width, height=height)))  # a picture in, a picture out
                 pixels = (
                     self.processor.preprocess(image, width=width, height=height)
                     .unsqueeze(2)
