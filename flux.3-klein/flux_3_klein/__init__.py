@@ -1,4 +1,4 @@
-"""FLUX.3 Image Klein text-to-image and reference editing, distilled and base, with BFL's prompt upsampler."""
+"""FLUX.3 Klein text-to-image and reference editing, distilled and base, with BFL's prompt upsampler."""
 
 from __future__ import annotations
 
@@ -288,13 +288,13 @@ class ImageBox(msgspec.Struct, kw_only=True):
 
 
 # Each checkpoint is built, and its weights fetched, only when a box asks for it.
-@app.tool(label="Image", named="image",
+@app.tool(label="FLUX.3 Klein", named="image",
           defaults={"drafter": _DRAFTER, "full": _BASE, "model": _DISTILLED, "upsampler": _UPSAMPLER},
           components={"drafter": ("model",), "full": _KLEIN, "model": _KLEIN, "upsampler": ("model",)},
           on_demand=("drafter", "full", "model", "upsampler"), memoize=True)  # fmt: skip
 def image(ctx: Context, payload: ImageBox, drafter: Drafter, full: Klein, model: Klein, upsampler: Upsampler,
           out: Outputs, tel: Telemetry, adj: Adjustments) -> ImageResult:
-    """FLUX.3 Image Klein on a canvas, upsampled: the distilled model, or Base, which loads only when asked for."""
+    """FLUX.3 Klein on a canvas, upsampled: the distilled model, or Base, which loads only when asked for."""
     kind, function, klein = (TurboInput, "generate_turbo", model) if payload.turbo else (GenerateInput, "generate", full)
     request = kind(prompt=payload.instructions, aspect_ratio=payload.aspect_ratio, megapixels=payload.megapixels,
                    seed=payload.seed, prompt_upsampling=payload.prompt_upsampling)  # fmt: skip
