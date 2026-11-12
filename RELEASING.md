@@ -21,6 +21,20 @@ Bump the package's version on master first: a version any Hub already holds is r
 anything is published, and nothing is ever yanked but what that run just published. A dependent
 takes the next patch version no Hub holds. After a failed run, bump and run again.
 
+## Built for the open RC's Runtime (cl-922)
+
+A package that calls what only the open RC's Runtime has (`author.preview` before Runtime 0.46) is published from the
+RC branch as a PEP 440 prerelease, live:
+
+```sh
+uv version --project sdxl 0.10.0rc1   # the next rcN, committed to rc/<x.y.z>
+task publish -- --rc sdxl             # on a checkout of rc/<x.y.z>
+```
+
+Released clients and each Hub's unversioned default skip prereleases; a dev home's rental runs the RC's Runtime and takes
+the newest one. Its Triton sets compile with the RC's Runtime build. At the release the package publishes its final
+version (`0.10.0`) the usual way.
+
 Complete the [dependency qualification checklist](DEPENDENCIES.md) first. Worker images
 are OS/CUDA/PyTorch bases named by tag; the CLI updates the machine, Runtime and TensorFS
 at runtime, so a package never waits on an image.

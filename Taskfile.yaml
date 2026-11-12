@@ -27,28 +27,48 @@ tasks:
   # published or yanked: a root at one refuses before anything is published, a dependent bumps to the next free patch.
   # `--dry-run` does all of it on this checkout but the push to master and the Hub publish, builds each release's wheel
   # into dist/ instead, and leaves the checkout as it was.
+  # `--rc` (cl-922), on a checkout of the open RC's branch: a package built for the RC's Runtime, at a PEP 440 prerelease
+  # version (`0.10.0rc1`), published live from that branch: every hub's unversioned default and every released client skip
+  # a prerelease, and a dev home's rental on the RC's Runtime takes it. Its Triton sets compile with the RC's Runtime
+  # (cozy-runtime's prerelease rc-<x.y.z>); a lock it changes is pushed to the RC branch; nothing cascades.
   publish:
-    desc: "Publish candidates from master to every hub (yanked), then cascade to their in-repo dependents: task publish -- [--dry-run] qwen-image-2"
+    desc: "Publish candidates from master to every hub (yanked), then cascade to their in-repo dependents: task publish -- [--dry-run] [--rc] qwen-image-2"
     cmds:
       - |
-        set -euo pipefail; dry=; roots=" "
-        for a in {{.CLI_ARGS}}; do case $a in --dry-run) dry=1 ;; *) roots="$roots$a " ;; esac; done; changed=$roots
+        set -euo pipefail; dry=; rc=; roots=" "
+        for a in {{.CLI_ARGS}}; do case $a in --dry-run) dry=1 ;; --rc) rc=1 ;; *) roots="$roots$a " ;; esac; done; changed=$roots
         pkg() { grep -qs cozy.application "$1/pyproject.toml"; }
-        for r in $roots; do pkg "$r" || { echo "usage: task publish -- [--dry-run] <package>..." >&2; exit 2; }; done
+        ver() { grep -m1 '^version = ' "$1/pyproject.toml" | cut -d'"' -f2; }
+        for r in $roots; do pkg "$r" || { echo "usage: task publish -- [--dry-run] [--rc] <package>..." >&2; exit 2; }; done
         git diff --quiet HEAD || { echo "commit or discard tracked changes first" >&2; exit 1; }
-        [ -n "$dry" ] || { git fetch -q origin master; git merge -q --ff-only FETCH_HEAD; }
+        branch=master; yanked={{.YANKED}}; runtime=
+        if [ -n "$rc" ]; then
+          # The RC branch this checkout is on, or follows.
+          branch=$(git rev-parse --abbrev-ref HEAD); yanked=
+          case $branch in rc/*) ;; *) branch=$(git rev-parse --abbrev-ref '@{u}' 2>/dev/null || true); branch=${branch#origin/} ;; esac
+          case $branch in rc/*) ;; *) echo "--rc publishes from a checkout of the open RC's branch (rc/<x.y.z>), or one that follows it" >&2; exit 2 ;; esac
+          for r in $roots; do
+            echo "$(ver "$r")" | grep -qE '^[0-9.]+(a|b|rc)[0-9]+$|\.dev[0-9]+$' \
+              || { echo "$r $(ver "$r"): --rc publishes a prerelease (0.10.0rc1), which released clients skip; bump it first" >&2; exit 2; }
+          done
+          # The RC's Runtime, which its rentals run and its Triton sets compile with.
+          runtime=$(curl -fsSL "https://github.com/cozy-creator/cozy-runtime/releases/download/rc-${branch#rc/}/SHA256SUMS" | awk '/manylinux_2_28_x86_64\.whl$/ {print $2; exit}')
+          [ -n "$runtime" ] || { echo "cozy-runtime has no rc-${branch#rc/} build yet (its rc-dev.yaml)" >&2; exit 1; }
+          runtime="https://github.com/cozy-creator/cozy-runtime/releases/download/rc-${branch#rc/}/$runtime"
+        fi
+        [ -n "$dry" ] || { git fetch -q origin "$branch"; git merge -q --ff-only FETCH_HEAD; }
         start=$(git rev-parse HEAD); here=$PWD; work=$(mktemp -d); shipped=
         finish() {  # no `return`: Task's shell runs on past it in a trap
           git checkout -q -- .; if [ -n "$dry" ]; then git reset -q --keep "$start"; fi; rm -rf "$work"
           if [ -z "$shipped" ]; then :
           elif [ -n "$dry" ]; then echo "dry run, nothing pushed or published: $shipped (wheels in dist/)"
-          else echo "{{if .YANKED}}candidates (yanked){{else}}published live{{end}}: $shipped
+          elif [ -n "$rc" ]; then echo "prereleases for $branch's Runtime: $shipped"
+          else echo "$([ -n "$yanked" ] && echo "candidates (yanked)" || echo "published live"): $shipped
         gate: gh workflow run release-gate.yml -R cozy-creator/cozy-creator -f suites=packages -f pins=$shipped -f only=$(echo "$shipped" | sed "s/@[^,]*//g")
         then: task promote GATE=<passing release-gate run id>  (a hand gate: GATE=<its dirs> RECORD=<URL of its recorded result>)"
           fi
         }
         trap finish EXIT
-        ver() { grep -m1 '^version = ' "$1/pyproject.toml" | cut -d'"' -f2; }
         deps() { sed -n 's/^\([A-Za-z0-9._-]*\) = { *index = "tensorhub".*/\1/p' "$1/pyproject.toml"; }
         pinned() { for q in $up; do grep -A1 -x "name = \"$q\"" "$1/uv.lock" | grep -qx "version = \"$(ver "$q")\"" || return 1; done; }
         locked() { grep -A1 -x "name = \"$2\"" "$1/uv.lock" | sed -n 's/^version = "\(.*\)"$/\1/p'; }
@@ -107,6 +127,7 @@ tasks:
           bind=; [ -z "$(deps "$1")" ] || bind="--index tensorhub={{.LOCK_HUB}}/v1/index/_/simple/"
           (cd "$1" && UV_PROJECT_ENVIRONMENT=$e uv sync -q --frozen --no-dev --python 3.12 $bind)
           VIRTUAL_ENV=$e uv pip install -q {{.IMAGE_TORCH}}
+          [ -z "$runtime" ] || VIRTUAL_ENV=$e uv pip install -q --no-deps "cozy-runtime @ $runtime"
           (cd "$1" && CUDA_VISIBLE_DEVICES= nice -n 19 "$e/bin/python" -I -c "$prebuild" "$m" "$work/.kernels/$1") >/dev/null; }
         ship() {
           on=$(held "$1"); [ -z "$on" ] || { echo "$1 $(ver "$1") already exists on $on: not published, not yanked" >&2; exit 1; }
@@ -121,7 +142,7 @@ tasks:
               unzip -p "$w" '*/_triton/manifest.json' 2>/dev/null | jq -r '[.kernels[]] | group_by(.set)[] | "  \(.[0].set): " + (group_by(.sm) | map("sm\(.[0].sm) \(length)") | join(", "))' || true
               break
             fi
-            said=$(cd "$work/$1" && COZY_HUB_URL="$h" cozy package publish --root {{.YANKED}} --json) || exit 1
+            said=$(cd "$work/$1" && COZY_HUB_URL="$h" cozy package publish --root $yanked --json) || exit 1
             status=$(jq -r .status <<< "$said"); echo "$1 $(ver "$1") on $h: $status"
             case $status in published*) ;; *) echo "$h holds $1 $(ver "$1") already ($status): bump its version on master" >&2; exit 1 ;; esac
           done
@@ -132,9 +153,9 @@ tasks:
             git show "HEAD:$1/uv.lock" 2>/dev/null | pairs > "$work/before" || true; pairs < "$1/uv.lock" > "$work/after"
             echo "$1 $(ver "$1"): lock$(diff "$work/before" "$work/after" | sed -n 's/^\([<>]\) / \1 /p' | tr '\n' ';')"
             git commit -q -m "$1 $(ver "$1"): lock$(for q in $up; do printf ' %s %s' "$q" "$(ver "$q")"; done)" -- "$1"
-            [ -n "$dry" ] || until git push -q origin HEAD:master; do
-              git fetch -q origin master
-              git diff --quiet HEAD~1 FETCH_HEAD -- "$1" || { git reset -q --keep HEAD~1; echo "master changed $1 during its release; run again" >&2; exit 1; }
+            [ -n "$dry" ] || until git push -q origin "HEAD:$branch"; do
+              git fetch -q origin "$branch"
+              git diff --quiet HEAD~1 FETCH_HEAD -- "$1" || { git reset -q --keep HEAD~1; echo "$branch changed $1 during its release; run again" >&2; exit 1; }
               git rebase -q FETCH_HEAD
             done
           fi
@@ -143,6 +164,7 @@ tasks:
         for p in $(for p in */pyproject.toml; do p=${p%/pyproject.toml}; pkg "$p" || continue; echo "$p $p"; deps "$p" | sed "s|\$| $p|"; done | tsort); do
           pkg "$p" || continue
           case $roots in *" $p "*) up=; relock "$p"; release "$p"; continue ;; esac
+          [ -z "$rc" ] || continue
           up=$(for q in $(deps "$p"); do case $changed in *" $q "*) echo "$q" ;; esac; done)
           [ -n "$up" ] || continue
           changed="$changed$p "
