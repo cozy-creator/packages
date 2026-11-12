@@ -8,6 +8,7 @@ import math
 from dataclasses import dataclass, field
 from typing import cast
 
+import msgspec
 import torch
 import torch.nn.functional as F
 from cozy_runtime.author import State, Store, retained
@@ -15,15 +16,37 @@ from torch import nn
 
 from . import kernels
 
-#: `wan.safetensors`' `config` (format `refvsr-wan-v1`).
-DIM, HEADS, HEAD_DIM, LAYERS, FFN, TEXT, FREQ, CHANNELS = 3072, 24, 128, 30, 14336, 4096, 256, 48
-PATCH = (1, 2, 2)
-#: Tokens a query sees around itself (rows, columns) and the keyframes it sees (itself included).
-WINDOW, CONTEXT = (22, 40), 4
-#: RoPE's temporal origin trails the newest keyframe by this many (`temporal_rope.training_frames`).
-ROPE_FRAMES, ROPE_LENGTH = 8, 1024
 #: The one step: t=1000 (sigma 1), so the latent is noise minus the predicted velocity.
 TIMESTEP = 1000.0
+#: `prompt_embeds`' tokens: the checkpoint's tensor.
+PROMPT = 512
+
+
+class TemporalRope(msgspec.Struct):
+    #: RoPE's temporal origin trails the newest keyframe by this many.
+    training_frames: int
+
+
+class WanConfig(msgspec.Struct):
+    """What the `wan` component's config (upstream's `refvsr-wan-v1` file `config`) sets here."""
+
+    patch_size: tuple[int, int, int]
+    num_attention_heads: int
+    attention_head_dim: int
+    in_channels: int
+    out_channels: int
+    text_dim: int
+    freq_dim: int
+    ffn_dim: int
+    num_layers: int
+    eps: float
+    lq_proj_hidden_dim1: int
+    lq_proj_hidden_dim2: int
+    #: Tokens a query sees around itself (rows, columns).
+    spatial_window_size: tuple[int, int]
+    #: Keyframes a keyframe sees, itself included.
+    temporal_context_frames: int
+    temporal_rope: TemporalRope
 
 
 class FP32LayerNorm(nn.LayerNorm):
@@ -65,13 +88,13 @@ class ConditionEmbedder(nn.Module):
 
 
 class Attention(nn.Module):
-    def __init__(self, dim: int, heads: int) -> None:
+    def __init__(self, dim: int, heads: int, eps: float) -> None:
         super().__init__()
         self.heads = heads
         self.to_q, self.to_k, self.to_v = (nn.Linear(dim, dim) for _ in range(3))
         self.to_out = nn.ModuleList([nn.Linear(dim, dim), nn.Identity()])
-        self.norm_q = nn.RMSNorm(dim, eps=1e-6)
-        self.norm_k = nn.RMSNorm(dim, eps=1e-6)
+        self.norm_q = nn.RMSNorm(dim, eps=eps)
+        self.norm_k = nn.RMSNorm(dim, eps=eps)
 
     def keys(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """Normalized, unrotated keys and values, (batch, tokens, heads, head_dim)."""
@@ -106,14 +129,14 @@ class FeedForward(nn.Module):
 
 
 class Block(nn.Module):
-    def __init__(self, dim: int, ffn: int, heads: int) -> None:
+    def __init__(self, dim: int, ffn: int, heads: int, eps: float) -> None:
         super().__init__()
-        self.norm1 = FP32LayerNorm(dim, 1e-6, elementwise_affine=False)
-        self.attn1 = Attention(dim, heads)
-        self.attn2 = Attention(dim, heads)
-        self.norm2 = FP32LayerNorm(dim, 1e-6, elementwise_affine=True)
+        self.norm1 = FP32LayerNorm(dim, eps, elementwise_affine=False)
+        self.attn1 = Attention(dim, heads, eps)
+        self.attn2 = Attention(dim, heads, eps)
+        self.norm2 = FP32LayerNorm(dim, eps, elementwise_affine=True)
         self.ffn = FeedForward(dim, ffn)
-        self.norm3 = FP32LayerNorm(dim, 1e-6, elementwise_affine=False)
+        self.norm3 = FP32LayerNorm(dim, eps, elementwise_affine=False)
         self.scale_shift_table = nn.Parameter(torch.empty(1, 6, dim))
 
 
@@ -148,10 +171,10 @@ class LQProjection(nn.Module):
         return y
 
 
-def rope_tables(height: int, width: int, frames: list[int], device: torch.device) -> tuple[torch.Tensor, torch.Tensor]:
-    """Wan's 3-D RoPE (44 temporal, 42 row and 42 column channels, each pair repeated) at `frames`,
-    every row and column: F32 (1, len(frames) * height * width, 1, 128), as Diffusers' tables."""
-    spans = (HEAD_DIM - 4 * (HEAD_DIM // 6), 2 * (HEAD_DIM // 6), 2 * (HEAD_DIM // 6))
+def rope_tables(head_dim: int, height: int, width: int, frames: list[int], device: torch.device) -> tuple[torch.Tensor, torch.Tensor]:
+    """Wan's 3-D RoPE (at 128 channels: 44 temporal, 42 row and 42 column, each pair repeated) at
+    `frames`, every row and column: F32 (1, len(frames) * height * width, 1, head_dim), as Diffusers' tables."""
+    spans = (head_dim - 4 * (head_dim // 6), 2 * (head_dim // 6), 2 * (head_dim // 6))
     cos: list[torch.Tensor] = []
     sin: list[torch.Tensor] = []
     for span, positions in zip(spans, (frames, range(height), range(width)), strict=True):
@@ -186,9 +209,10 @@ def rotate(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tenso
 
 @dataclass
 class Ring:
-    """The last `CONTEXT` keyframes' K/V of every block, held by the Runtime's memory (`retained`),
-    in the slots upstream's ring holds them: keyframe `f` sits in slot `f % CONTEXT`."""
+    """The last `context` keyframes' K/V of every block, held by the Runtime's memory (`retained`),
+    in the slots upstream's ring holds them: keyframe `f` sits in slot `f % context`."""
 
+    context: int
     #: per keyframe: its store and each block's (k, v), (batch, tokens, heads, head_dim)
     frames: dict[int, tuple[Store, list[State]]] = field(default_factory=dict)
     count: int = 0
@@ -196,7 +220,7 @@ class Ring:
     def slots(self) -> list[int]:
         """The keyframes held, in slot order, with the one being made."""
         f = self.count
-        return [f - ((f - slot) % CONTEXT) for slot in range(min(f + 1, CONTEXT))]
+        return [f - ((f - slot) % self.context) for slot in range(min(f + 1, self.context))]
 
     def kv(self, frame: int, block: int) -> tuple[torch.Tensor, torch.Tensor]:
         k, v = self.frames[frame][1][block].get()
@@ -207,7 +231,7 @@ class Ring:
         f = self.count
         store = retained(sum(k.nbytes + v.nbytes for k, v in kv))
         self.frames[f] = (store, [store.put(k, v) for k, v in kv])
-        for old in [s for s in self.frames if s <= f - CONTEXT]:
+        for old in [s for s in self.frames if s <= f - self.context]:
             self.frames.pop(old)[0].close()
         self.count += 1
 
@@ -222,32 +246,27 @@ class WanVSR(nn.Module):
 
     prompt_embeds: torch.Tensor
 
-    def __init__(
-        self,
-        dim: int = DIM,
-        heads: int = HEADS,
-        layers: int = LAYERS,
-        ffn: int = FFN,
-        text: int = TEXT,
-        prompt: int = 512,
-        lq: tuple[int, int] = (768, 3072),
-    ) -> None:
+    def __init__(self, config: WanConfig) -> None:
         super().__init__()
-        self.heads = heads
-        self.patch_embedding = nn.Conv3d(CHANNELS, dim, kernel_size=PATCH, stride=PATCH)
-        self.condition_embedder = ConditionEmbedder(dim, FREQ, text)
-        self.blocks = nn.ModuleList([Block(dim, ffn, heads) for _ in range(layers)])
-        self.norm_out = FP32LayerNorm(dim, 1e-6, elementwise_affine=False)
-        self.proj_out = nn.Linear(dim, CHANNELS * math.prod(PATCH))
+        heads, dim, text = config.num_attention_heads, config.num_attention_heads * config.attention_head_dim, config.text_dim
+        self.head_dim, self.in_channels, self.channels = config.attention_head_dim, config.in_channels, config.out_channels
+        self.patch = config.patch_size
+        self.window, self.context = config.spatial_window_size, config.temporal_context_frames
+        self.rope_frames = config.temporal_rope.training_frames
+        self.patch_embedding = nn.Conv3d(config.in_channels, dim, kernel_size=self.patch, stride=self.patch)
+        self.condition_embedder = ConditionEmbedder(dim, config.freq_dim, text)
+        self.blocks = nn.ModuleList([Block(dim, config.ffn_dim, heads, config.eps) for _ in range(config.num_layers)])
+        self.norm_out = FP32LayerNorm(dim, config.eps, elementwise_affine=False)
+        self.proj_out = nn.Linear(dim, self.channels * math.prod(self.patch))
         self.scale_shift_table = nn.Parameter(torch.empty(1, 2, dim))
-        self.lq_proj = LQProjection(dim, *lq)
-        self.register_buffer("prompt_embeds", torch.empty(1, prompt, text))
+        self.lq_proj = LQProjection(dim, config.lq_proj_hidden_dim1, config.lq_proj_hidden_dim2)
+        self.register_buffer("prompt_embeds", torch.empty(1, PROMPT, text))
 
     def keyframe(self, upsampled: torch.Tensor, noise: torch.Tensor, ring: Ring) -> torch.Tensor:
         """One keyframe's latent (b, 48, h/16, w/16) from its 4x frame (b, 3, h, w) in [-1, 1] and
         F32 noise of the latent's shape; appends its K/V to `ring`, dropping the oldest."""
         b, _, lh, lw = noise.shape
-        ph, pw = lh // PATCH[1], lw // PATCH[2]
+        ph, pw = lh // self.patch[1], lw // self.patch[2]
         dtype = upsampled.dtype
         temb, projected, text = self.condition_embedder(self.prompt_embeds.to(dtype))
         x = self.patch_embedding(noise.to(dtype)[:, :, None]).flatten(2).transpose(1, 2)
@@ -255,10 +274,10 @@ class WanVSR(nn.Module):
 
         f = ring.count
         slots = ring.slots()
-        origin = max(0, f - ROPE_FRAMES + 1)
-        q_rope = rope_tables(ph, pw, [f - origin], x.device)
-        k_rope = rope_tables(ph, pw, [s - origin for s in slots], x.device)
-        window = (min(WINDOW[0], ph), min(WINDOW[1], pw))
+        origin = max(0, f - self.rope_frames + 1)
+        q_rope = rope_tables(self.head_dim, ph, pw, [f - origin], x.device)
+        k_rope = rope_tables(self.head_dim, ph, pw, [s - origin for s in slots], x.device)
+        window = (min(self.window[0], ph), min(self.window[1], pw))
         local = window != (ph, pw)
         made: list[tuple[torch.Tensor, torch.Tensor]] = []
         for index, block in enumerate(cast(list[Block], list(self.blocks))):
@@ -293,6 +312,6 @@ class WanVSR(nn.Module):
 
         shift, scale = (self.scale_shift_table[None] + temb[:, :, None]).unbind(2)
         x = (self.norm_out(x.float()) * (1 + scale) + shift).type_as(x)
-        x = self.proj_out(x).reshape(b, ph, pw, PATCH[1], PATCH[2], CHANNELS)
-        velocity: torch.Tensor = x.permute(0, 5, 1, 3, 2, 4).reshape(b, CHANNELS, lh, lw)
+        x = self.proj_out(x).reshape(b, ph, pw, self.patch[1], self.patch[2], self.channels)
+        velocity: torch.Tensor = x.permute(0, 5, 1, 3, 2, 4).reshape(b, self.channels, lh, lw)
         return (noise - velocity.float()).to(dtype)

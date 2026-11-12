@@ -36,7 +36,8 @@ The Runtime keeps up to 88 GB on a 96 GB card; under a 24 GiB cap 2160p takes 88
 
 ## Weights
 
-`kopper/relayvsr@0.1.1`, a mirror of `hf://kopper/RelayVSR@d43dc5545f9a3bd1c7730b68ebff4ab1f9199bd1`
+`kopper/relayvsr@0.2.0`, a mirror of `hf://kopper/RelayVSR@d43dc5545f9a3bd1c7730b68ebff4ab1f9199bd1`
 (`wan.safetensors`, `flash.safetensors`; Apache-2.0 per the code repository, as the weights repository
 states no license). TensorFS's `relayvsr` table keeps their keys as they are, as component `wan` (bf16,
-with the prompt embeddings) and `flash` (F32, served in bf16 on CUDA), with architecture `RelayVSR`.
+with the prompt embeddings) and `flash` (F32, served in bf16 on CUDA), each with its file's own `config` as its
+component config, which the package builds from, and architecture `RelayVSR`.
