@@ -101,7 +101,7 @@ def output_sizes(
 @app.tool(
     label="Upscale",
     named="video",
-    defaults={"model": "bytedance-seed/seedvr2-7b@0.1.0"},
+    defaults={"model": "bytedance-seed/seedvr2-7b@0.1.1"},
     memoize=True,
 )
 def upscale(
@@ -251,7 +251,7 @@ class UpscaleImageOutput(msgspec.Struct):
 @app.tool(
     label="Upscale",
     named="image",
-    defaults={"model": "bytedance-seed/seedvr2-7b@0.1.0"},
+    defaults={"model": "bytedance-seed/seedvr2-7b@0.1.1"},
     memoize=True,
 )
 def upscale_image(
