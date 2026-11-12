@@ -1,4 +1,4 @@
-"""`image`: P-H3-Image text-to-image, or an edit of the pictures its instructions mention (`image.py`)."""
+"""P-H3-Image, Pruna AI's image model: text to image, or an edit of the pictures its instructions mention."""
 
 from __future__ import annotations
 
@@ -11,23 +11,12 @@ from cozy_runtime.fields import Advanced, AspectRatio, Image, Prompt, Range, Rat
 from cozy_runtime.image import MEGAPIXEL, ImageRequest, ImageResult, Sizes
 from PIL import Image as PILImage
 
-from .application import app
-from .image import (
-    CANVAS_MIN_PIXELS,
-    GRID,
-    IMAGE_COMPONENTS,
-    MAX_PICTURES,
-    PICTURE_PIXELS,
-    STEPS,
-    UPSAMPLER_COMPONENTS,
-    PH3Image,
-    PH3Upsampler,
-    aspect_label,
-    resized,
-    size_in_range,
-)
+from . import lanes as lanes  # the `pruned` lane function and the quantized lanes' recipes
+from .application import app as app
+from .model import CANVAS_MIN_PIXELS, GRID, IMAGE_COMPONENTS, MAX_PICTURES, PICTURE_PIXELS, STEPS, PH3Image, resized, size_in_range
+from .upsampler import UPSAMPLER_COMPONENTS, PH3Upsampler, aspect_label
 
-MODEL = "prunaai/p-h3-image@0.1.0"
+MODEL = "prunaai/p-h3-image@0.2.0"
 #: The card's 1-16 MP ladder on a 32 px grid, 8 MP by default (its presets: 1:1 is 2912x2912, 16:9 3872x2176).
 SIZES = Sizes((1.0, 16.0), (256, 8192), GRID, "P-H3-Image's sizes", widest=4)
 DEFAULT_MEGAPIXELS = 8.0
@@ -51,22 +40,22 @@ class _Request(ImageRequest):
 
 
 @app.tool(
-    label="Image",
+    label="P-H3-Image",
     named="image",
     defaults={"model": MODEL, "upsampler": MODEL},
     components={"model": IMAGE_COMPONENTS, "upsampler": UPSAMPLER_COMPONENTS},
     on_demand=("upsampler",),
     memoize=True,
 )
-def image(ctx: Context, payload: ImageBox, model: PH3Image, upsampler: PH3Upsampler, out: Outputs,
-          tel: Telemetry, adj: Adjustments) -> ImageResult:  # fmt: skip
+def generate(ctx: Context, payload: ImageBox, model: PH3Image, upsampler: PH3Upsampler, out: Outputs,
+             tel: Telemetry, adj: Adjustments) -> ImageResult:  # fmt: skip
     """P-H3-Image, 8 steps without CFG at 8 MP: text to image, or an edit of the pictures the instructions mention."""
     request = _Request(prompt=payload.instructions, aspect_ratio=payload.aspect_ratio,
                        megapixels=payload.megapixels, seed=payload.seed)  # fmt: skip
     keys = list(request.prompt.references)
     if len(keys) > MAX_PICTURES:
         adj.warn("instructions", f"P-H3-Image edits with {MAX_PICTURES} pictures, so it goes without "
-                           f"{', '.join(f'<{key}>' for key in keys[MAX_PICTURES:])}")  # fmt: skip
+                                 f"{', '.join(f'<{key}>' for key in keys[MAX_PICTURES:])}")  # fmt: skip
         keys = keys[:MAX_PICTURES]
     pictures: list[PILImage.Image] = [request.prompt.references[key].file.read().convert("RGB") for key in keys]
     text = request.prompt.text

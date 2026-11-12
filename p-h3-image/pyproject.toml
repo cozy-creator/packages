@@ -1,0 +1,44 @@
+[project]
+name = "p-h3-image"
+version = "0.1.0"
+description = "P-H3-Image, Pruna AI's image model: text to image, or an edit of up to 8 pictures, at 8 MP in 8 steps"
+requires-python = ">=3.12,<3.15"
+dependencies = [
+    "cozy-runtime[adapters,media]>=0.45.0,<0.46",
+    "diffusers>=0.41,<0.42",
+    "msgspec>=0.19",
+    "numpy>=1.26",
+    "pillow>=12",
+    "tensorfs>=0.24.0",
+    "torch>=2.6",
+    "torchvision>=0.21",
+    "transformers>=5.16.1",
+]
+
+[project.entry-points."cozy.application"]
+default = "p_h3_image:app"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["p_h3_image"]
+
+[tool.uv]
+environments = [
+    "sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "sys_platform == 'linux' and platform_machine == 'aarch64'",
+    "sys_platform == 'darwin' and platform_machine == 'arm64'",
+    "sys_platform == 'win32' and platform_machine == 'AMD64'",
+]
+
+# PyPI's torch is CUDA on Linux and MPS on macOS but CPU-only on Windows: Windows takes PyTorch's CUDA build.
+[[tool.uv.index]]
+name = "pytorch-cu130"
+url = "https://download.pytorch.org/whl/cu130"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu130", marker = "sys_platform == 'win32'" }
+torchvision = { index = "pytorch-cu130", marker = "sys_platform == 'win32'" }
