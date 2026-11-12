@@ -1,4 +1,4 @@
-"""Restore videos with SeedVR2 while retaining their presentation clock and soundtrack."""
+"""Restore videos with SeedVR2 while retaining their presentation clock and soundtrack, and single pictures."""
 
 from __future__ import annotations
 
@@ -15,7 +15,7 @@ from PIL import Image, ImageOps
 from torchvision.transforms import functional as vision
 from cozy_runtime.author import App, Context, Outputs, Seed, Telemetry
 from cozy_runtime.fields import Advanced, AspectRatio, FileBound, Ratios, Shape
-from cozy_runtime.media import DecodedAudioChunk, DecodedMediaHeader, DecodedVideoFrame, VideoFile
+from cozy_runtime.media import DecodedAudioChunk, DecodedMediaHeader, DecodedVideoFrame, ImageFile, VideoFile
 from .color import Correction
 from .frames import extend
 from .model import RestorationModel, restore as restore_window
@@ -38,7 +38,7 @@ _RESOLUTIONS: dict[Resolution, tuple[int, int]] = {
 }
 
 
-class Tuning(msgspec.Struct, kw_only=True):
+class Restoration(msgspec.Struct, kw_only=True):
     """The ComfyUI SeedVR2 Video Upscaler node's controls, under its names (README: Tuning), in the box's Advanced."""
 
     #: `restore_window`'s `correction`.
@@ -47,6 +47,11 @@ class Tuning(msgspec.Struct, kw_only=True):
     input_noise_scale: Annotated[float, msgspec.Meta(ge=0, le=1), Advanced()] = 0.0
     #: `restore_window`'s `latent_noise`.
     latent_noise_scale: Annotated[float, msgspec.Meta(ge=0, le=1), Advanced()] = 0.0
+
+
+class Tuning(Restoration, kw_only=True):
+    """The node's controls over time."""
+
     #: `upscale`'s window size.
     batch_size: Annotated[int, msgspec.Meta(ge=1)] | None = None
     #: `restore`: the last window padded to `batch_size`.
@@ -223,3 +228,59 @@ def upscale(
     if saved.frame_count != count:
         raise RuntimeError("video encoder changed the restored frame count")
     return UpscaleOutput(saved.video, count, float(saved.frame_rate), warnings)
+
+
+class UpscaleImageInput(Restoration, kw_only=True):
+    #: `upscale_image`: the picture restored, the box's own version.
+    image: Annotated[ImageFile, FileBound(max_decoded_bytes=256 << 20)]
+    #: `output_sizes`: the picture's shape fitted in this 16:9 canvas, as the video tool's.
+    resolution: Annotated[Resolution, Shape(pixels=_RESOLUTIONS)] = Resolution.HD
+    #: `restore_window`.
+    seed: Seed = 42  # type: ignore[assignment]  # a literal: the interface is read from source (Seed is an int NewType)
+
+
+class UpscaleImageOutput(msgspec.Struct):
+    image: Annotated[
+        ImageFile,
+        FileBound(max_bytes=1 << 40, max_decoded_bytes=256 << 20, media_types=("image/png",)),
+    ]
+    width: int
+    height: int
+
+
+@app.tool(
+    label="Upscale",
+    named="image",
+    defaults={"model": "bytedance-seed/seedvr2-7b@0.1.0"},
+    memoize=True,
+)
+def upscale_image(
+    ctx: Context,
+    payload: UpscaleImageInput,
+    model: RestorationModel,
+    out: Outputs,
+    tel: Telemetry,
+) -> UpscaleImageOutput:
+    """A picture restored and upscaled by SeedVR2 7B: one frame through the video tool's restoration, as a PNG."""
+    ctx.raise_if_cancelled()
+    with tel.stage("reading picture"):
+        picture = payload.image.read()
+    edge = int(payload.resolution.value[:-1])
+    (width, height), _ = output_sizes(picture.width, picture.height, edge, None)
+    with tel.stage("restoring picture"):
+        [restored] = restore_window(
+            model,
+            [picture],
+            width,
+            height,
+            payload.seed,
+            tel,
+            correction=payload.color_correction,
+            input_noise=payload.input_noise_scale,
+            latent_noise=payload.latent_noise_scale,
+        )
+    ctx.raise_if_cancelled()
+    with tel.stage("saving picture"):
+        saved = out.save_image(restored, format="png")
+    tel.log("upscale_image", source=f"{picture.width}x{picture.height}", width=width, height=height)
+    return UpscaleImageOutput(saved, width, height)
