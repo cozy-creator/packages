@@ -9,6 +9,7 @@ step's state and blend their velocities (`plan_windows`).
 
 from __future__ import annotations
 
+import math
 from collections.abc import Callable
 from typing import TYPE_CHECKING
 
@@ -46,7 +47,9 @@ TARGETS: dict[str, tuple[int, int, int]] = {
     "2160p": (2176, 3840, 2160),
 }
 #: The upscaler's trained range ends at 1440p: a larger target goes through it first.
-UPSCALER_CEILING = (1440, 2560)
+UPSCALER_CEILING = "1440p"
+#: H3's own canvas, which `TARGETS` are for: 16:9's 768x1344.
+NATIVE_CANVAS = (768, 1344)
 #: NVIDIA's refine forwards (`open_h3/sol_engine_fwd.py` SPARSE, `fast_dit.SparsePlan`): the refine
 #: steps that run dense (None: every one), and the Sol `tau` of the sparse ones. A sparse step's every
 #: block is sparse, its text and audio rows exact; the token refiner stays dense.
@@ -74,18 +77,33 @@ WINDOW_ROWS: int | None = None
 _ROW_BYTES = 11 * 5376
 
 
-def latent_size(resolution: str) -> tuple[int, int]:
-    height, width, _ = TARGETS[resolution]
-    return height // VAE_SPATIAL_RATIO, width // VAE_SPATIAL_RATIO
+def target(resolution: str, draft: tuple[int, int]) -> tuple[tuple[int, int], tuple[int, int]]:
+    """The (height, width) a `draft` canvas refines at, whole latent patches, and the centre it keeps: `TARGETS` for
+    16:9, turned for 9:16 (1080x1920 at 1080p); any other shape at the target's short edge, within its pixels."""
+    height, width, keep = TARGETS[resolution]
+    if resolution == "768p":
+        return draft, draft
+    if draft == NATIVE_CANVAS:
+        return (height, width), (keep, width)
+    if draft == NATIVE_CANVAS[::-1]:
+        return (width, height), (width, keep)
+    scale = min(keep / min(draft), math.sqrt(height * width / (draft[0] * draft[1])))
+    grid = VAE_SPATIAL_RATIO * PATCH_SIZE[1]
+    while True:  # whole patches, within the 16:9 target's pixels (the demand `Shape` declares)
+        kept = (2 * round(draft[0] * scale / 2), 2 * round(draft[1] * scale / 2))
+        computed = (-(-kept[0] // grid) * grid, -(-kept[1] // grid) * grid)
+        if computed[0] * computed[1] <= height * width:
+            return computed, kept
+        scale *= 0.995
 
 
-def upscale_passes(resolution: str) -> list[tuple[int, int]]:
+def upscale_passes(resolution: str, draft: tuple[int, int]) -> list[tuple[int, int]]:
     """The latent sizes the upscaler produces in order; none for a refine-only 768p pass."""
     if resolution == "768p":
         return []
-    target = latent_size(resolution)
-    ceiling = (UPSCALER_CEILING[0] // VAE_SPATIAL_RATIO, UPSCALER_CEILING[1] // VAE_SPATIAL_RATIO)
-    return [ceiling, target] if target[0] > ceiling[0] else [target]
+    sizes = [target(name, draft)[0] for name in (UPSCALER_CEILING, resolution)]
+    ceiling, wanted = ((h // VAE_SPATIAL_RATIO, w // VAE_SPATIAL_RATIO) for h, w in sizes)
+    return [ceiling, wanted] if wanted[0] * wanted[1] > ceiling[0] * ceiling[1] else [wanted]
 
 
 def frames_of(latent_frames: int) -> int:
