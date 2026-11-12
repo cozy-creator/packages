@@ -7,8 +7,8 @@ its pictures enter the sequence, which is its own (its model card and its ComfyU
   themselves, their longest side at most 768 px (`grounding_px`).
 - ai-toolkit's edit LoRAs (ostris `ComfyUI-Krea2-Ostris-Edit` 7756566, `ai-toolkit` krea2 `model_kwargs.edit`):
   each picture VAE-encoded at up to 1 MP on its own grid, after the target at frame 1, 2, … and time 0; the
-  prompt read after `Picture N: ` and each picture at up to 384² pixels. A LoRA trained with `kv_cache` (the
-  inpaint edit) keeps the pictures attending only among themselves.
+  prompt read after `Picture N: ` and each picture at up to 384² pixels; the pose, lineart and inpaint LoRAs'
+  workflows keep the pictures attending only among themselves (the node's `kv_cache`).
 - Patil's depth control LoRA (`Krea-2-controlnet` 909682a): the depth map VAE-encoded at the output's size,
   each of its tokens read beside its image token through an input projection of 128 features, not 64.
 """
@@ -177,12 +177,15 @@ def fitted(picture: Image.Image, width: int, height: int) -> tuple[Image.Image, 
     return picture, (max(0.0, (height - new_h) / PATCH / 2), max(0.0, (width - new_w) / PATCH / 2))
 
 
-def edit_references(latents: list[torch.Tensor], origins: list[tuple[float, float]], columns: int) -> tuple[Reference, ...]:
+def edit_references(latents: list[torch.Tensor], origins: list[tuple[float, float]], columns: int,
+                    free: bool) -> tuple[Reference, ...]:
     """Identity Edit V2's placement (model card): one reference pinned on the output (`aligned`, trained), its
-    fidelity at `BOOST`; with two, the scene (the first) pinned and the person (the second) beside the canvas
-    (`beside`, the most natural composites), boosted."""
+    fidelity at `BOOST`, or beside the canvas when the layout is the control map's (`free`: the person restaged
+    freely); with two, the scene (the first) pinned and the person (the second) beside the canvas (`beside`,
+    the most natural composites), boosted."""
     if len(latents) == 1:
-        return (Reference(latents[0], 1, origins[0], BOOST),)
+        origin = (origins[0][0], float(columns)) if free else origins[0]
+        return (Reference(latents[0], 1, origin, BOOST),)
     scene, person = latents
     return (Reference(scene, 1, origins[0]), Reference(person, 2, (origins[1][0], float(columns)), BOOST))
 
@@ -232,10 +235,11 @@ class Kind:
     isolated: bool = False
 
 
-#: Each control kind Krea 2 has an adapter for; `sketch` and `canny` have none yet.
+#: Each control kind Krea 2 has an adapter for; `sketch` and `canny` have none yet. Each ai-toolkit adapter's
+#: own workflow runs it with `Krea2OstrisEditModelPatch`'s `kv_cache` on: its map attends only to itself.
 KINDS = {
     "depth": Kind("depth", "concat"),
-    "pose": Kind("pose", "ai-toolkit"),
-    "lineart": Kind("lineart", "ai-toolkit"),
+    "pose": Kind("pose", "ai-toolkit", isolated=True),
+    "lineart": Kind("lineart", "ai-toolkit", isolated=True),
     "inpaint": Kind("inpaint", "ai-toolkit", isolated=True),
 }

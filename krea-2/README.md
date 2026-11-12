@@ -48,9 +48,9 @@ from its author's mirror on the Hub (`--model <slot>=<ref>` swaps one).
 | input | adapter (slot) | how it conditions | Raw | Turbo |
 | --- | --- | --- | --- | --- |
 | mentioned pictures | conradlocke Identity Edit V2 (`edit`) | VAE tokens before the target + Qwen3-VL sees the pictures | yes | yes (8 steps, its card's) |
-| `pose` (OpenPose/DWPose skeleton) | thedeoxen pose ControlNet LoRA (`pose`) | ai-toolkit edit: VAE tokens after the target at t=0 + `Picture 1:` | yes | yes (trained on Turbo) |
-| `lineart` (white lines on black) | Cierpliwy lineart edit (`lineart`) | ai-toolkit edit | yes (trained on Raw) | yes |
-| `inpaint` (the region to repaint black) | Cierpliwy inpaint edit (`inpaint`) | ai-toolkit edit, its pictures attending only to themselves | yes (trained on Raw) | yes |
+| `pose` (OpenPose/DWPose skeleton) | thedeoxen pose ControlNet LoRA (`pose`) | ai-toolkit edit: VAE tokens after the target at t=0, attending only to themselves, + `Picture 1:` | yes | yes (trained on Turbo) |
+| `lineart` (white lines on black) | Cierpliwy lineart edit (`lineart`) | ai-toolkit edit, as pose | yes (trained on Raw) | yes |
+| `inpaint` (the region to repaint black) | Cierpliwy inpaint edit (`inpaint`) | ai-toolkit edit, as pose | yes (trained on Raw) | yes |
 | `depth` (near is white) | Patil depth ControlNet-LoRA (`depth`) | the map's latents beside each image token (`img_in` 64 → 128) | yes | yes |
 | `sketch`, `canny` | none | ignored | | |
 

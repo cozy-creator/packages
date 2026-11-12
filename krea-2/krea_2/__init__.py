@@ -129,7 +129,8 @@ def _generate(ctx: Context, payload: TurboInput, model: Krea2, adapters: Adapter
         fits = [fitted(picture, width, height) for picture in pictures]
         before: tuple[Reference, ...] = ()
         if fits:
-            before = edit_references([model.encode_image(fit) for fit, _ in fits], [o for _, o in fits], width // PATCH)
+            before = edit_references([model.encode_image(fit) for fit, _ in fits], [o for _, o in fits], width // PATCH,
+                                     free=kind is not None)
         after: tuple[Reference, ...] = ()
         depth = None
         if kind is not None and mapped is not None:
