@@ -316,7 +316,7 @@ class PH3Image(Model[ImageGraph]):
                         audio_indices=fields["audio_indices"], text_indices=fields["text_indices"],
                         rotary=rotary, text=text,
                     )  # fmt: skip
-                    preview(lambda: _unpatchify(video[condition_rows:] + (1 - scheduler.timesteps[i]) * velocity[0, condition_rows:].float(), latent_height, latent_width), "minimax-h3")  # fmt: skip
+                    preview(lambda v=velocity: _unpatchify(video[condition_rows:] + (1 - scheduler.timesteps[i]) * v[0, condition_rows:].float(), latent_height, latent_width), "minimax-h3")  # fmt: skip
                     video[condition_rows:] = scheduler.step(
                         velocity[0, condition_rows:].float(), scheduler.timesteps[i], video[condition_rows:], return_dict=False
                     )[0]
