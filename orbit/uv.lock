@@ -359,7 +359,7 @@ wheels = [
 
 [[package]]
 name = "minimax-h3"
-version = "0.12.0rc3"
+version = "0.12.0rc4"
 source = { registry = "https://tensorhub.com/v1/index/_/simple/" }
 dependencies = [
     { name = "cozy-runtime", extra = ["adapters", "media"] },
@@ -377,7 +377,7 @@ dependencies = [
     { name = "transformers" },
 ]
 wheels = [
-    { url = "https://tensorhub.com/v1/index/_/minimax-h3/0.12.0rc3/minimax_h3-0.12.0rc3-py3-none-any.whl", hash = "sha256:53d8d8d8413345d554a53c5e680756656e4daea55d92010180024daf44adf84f" },
+    { url = "https://tensorhub.com/v1/index/_/minimax-h3/0.12.0rc4/minimax_h3-0.12.0rc4-py3-none-any.whl", hash = "sha256:25d80a8a5b25bc63c8412e9ff05b362f670a3cd6b47f4aab8b5be18f6530ac01" },
 ]
 
 [[package]]
