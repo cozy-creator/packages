@@ -9,7 +9,7 @@ from typing import Annotated, Literal
 import msgspec
 import torch
 from cozy_runtime.author import Adjustments, App, Context, OutputError, Outputs, Seed, Telemetry
-from cozy_runtime.fields import Advanced, AspectRatio, FileBound, Image, MENTION, Prompt, Ratios
+from cozy_runtime.fields import Advanced, AspectRatio, FileBound, Image, MENTION, Prompt, Ratios, When
 from cozy_runtime.image import MEGAPIXEL, ImageRequest, ImageResult, Sizes, ratio_of
 from cozy_runtime.media import ImageFile
 from PIL import Image as PILImage
@@ -43,8 +43,8 @@ class GenerateInput(ImageRequest):
     megapixels: Literal[1, 2, 4] = DEFAULT_MEGAPIXELS  # type: ignore[assignment]  # 2, a Literal member
     #: Qwen's prompt enhancer rewrites the request first (`rewriter`): an edit from its pictures, else the words.
     prompt_upsampling: bool = True
-    #: How far the rewrite goes beyond the words; `balanced` is Qwen's own.
-    creativity: Creativity = "balanced"
+    #: How far the rewrite goes beyond the words, so only with it (`_upsampled`); `balanced` is Qwen's own.
+    creativity: Annotated[Creativity, When("prompt_upsampling")] = "balanced"
 
 
 def label(n: int, key: str, count: int) -> str:
@@ -257,8 +257,8 @@ class ImageBox(msgspec.Struct, kw_only=True):
     seed: Seed | None = None
     #: Qwen's prompt enhancer rewrites the request first (`_upsampled`).
     prompt_upsampling: Annotated[bool, Advanced()] = True
-    #: How far that rewrite goes beyond the words (`rewrite`).
-    creativity: Annotated[Creativity, Advanced()] = "balanced"
+    #: How far that rewrite goes beyond the words (`rewrite`), so only with it.
+    creativity: Annotated[Creativity, Advanced(), When("prompt_upsampling")] = "balanced"
 
 
 # The Turbo overlay is built, and its weights fetched, only when a box asks for it, and an enhancer only when the
