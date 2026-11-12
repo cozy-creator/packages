@@ -10,7 +10,7 @@ Qwen3-VL-8B-Instruct (13 of its layers' hidden states, concatenated); the VAE is
 
 | function | checkpoints | default steps | guidance |
 | --- | --- | --- | --- |
-| `generate` | `ideogram-ai/ideogram-4@0.1.1`, text encoder `qwen/qwen3-vl-8b-instruct@0.1.1` (int8) | 48 | 7, then 3 on the last `ceil(steps/16)` |
+| `generate` | `ideogram-ai/ideogram-4@0.2.0` (int8, fp8), text encoder `qwen/qwen3-vl-8b-instruct@0.1.1` (int8) | 48 | 7, then 3 on the last `ceil(steps/16)` |
 
 There is no distilled checkpoint, so no `generate_turbo`; Ideogram's 20- and 12-step presets are
 `steps=20` and `steps=12`.
@@ -76,18 +76,20 @@ pipeline's forward exactly.
 ## Prepare the models
 
 Ideogram publishes only weight-only fp8 (per-row scales on every linear, its own key layout), and nf4; no
-16-bit release exists, so the package serves the official fp8 as Ideogram 4's only lane, with no bf16 or int8
-written from it (owner, 2026-10-24). TensorFS ingests it with Diffusers' keys (tfs-134). fp8 needs an fp8
-GPU (sm_89 and newer: RTX 4090, L40S, H100, Blackwell); 3090-class cards have no Ideogram lane yet. The
-repository is gated: accept Ideogram's licence on Hugging Face with the account whose token cozy uses.
+16-bit release exists. TensorFS ingests the fp8 with Diffusers' keys (tfs-134), and the DiTs' `int8` lane is
+written from it (Paul 11-12), as Comfy-Org's `ideogram4_*int8_convrot` files are: every block linear in
+`int8.convrot`, the rest kept fp8. The machine serves `int8` wherever the GPU has int8 tensor cores, fp8 on
+B300; GeForce cards run fp8 at half rate. The repository is gated: accept Ideogram's licence on Hugging Face
+with the account whose token cozy uses.
 
 ```sh
 cozy model upload hf://ideogram-ai/ideogram-4-fp8@ee79a7237b519f1402ceacf952f30c8a31ec5073 ideogram-ai/ideogram-4 --lane fp8 --on <machine>
+cozy model quantize ideogram-ai/ideogram-4@sha256:<fp8 commit> --lane int8 --package ./ideogram-4 --on <machine>
 cozy model upload hf://Qwen/Qwen3-VL-8B-Instruct@0c351dd01ed87e9c1b53cbc748cba10e6187ff3b qwen/qwen3-vl-8b-instruct --lane bf16 --on <machine>
 cozy model quantize qwen/qwen3-vl-8b-instruct@sha256:<bf16 commit> --lane int8 --package ./ideogram-4 --on <machine>
 ```
 
-The two DiTs are 19 GB at fp8. The text encoder's `int8` (from Qwen's bf16, 16 GB to 8 GB) takes its 36
+The two DiTs are 19 GB in either lane. The text encoder's `int8` (from Qwen's bf16, 16 GB to 8 GB) takes its 36
 language layers' linears; Ideogram's own fp8 text encoder is exactly the per-row fp8 of stock Qwen3-VL-8B-Instruct
 (checked byte for byte, 368 fp8 and 381 plain tensors), so stock Qwen serves as the encoder.
 
