@@ -1,10 +1,10 @@
 [project]
 name = "birefnet"
-version = "0.6.0"
+version = "0.7.0"
 description = "BiRefNet background removal for supplied character references"
 requires-python = ">=3.12"
 dependencies = [
-    "cozy-runtime[media]>=0.45.0,<0.46",
+    "cozy-runtime[media]>=0.46.0,<0.47",
     "einops>=0.8",
     "kornia>=0.8",
     "msgspec>=0.19",

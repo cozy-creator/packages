@@ -1,6 +1,6 @@
 [project]
 name = "orbit"
-version = "0.1.0"
+version = "0.2.0rc1"
 description = "Orbit: a picture's subject seen from all the way round, one clockwise camera turn by MiniMax H3 and ORB360"
 requires-python = ">=3.12,<3.15"
 dependencies = [
