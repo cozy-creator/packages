@@ -29,9 +29,10 @@ tasks:
   # into dist/ instead, and leaves the checkout as it was.
   # `--rc` (cl-922), on a checkout of the open RC's branch: a package built for the RC's Runtime, at a PEP 440 prerelease
   # version (`0.10.0rc1`), published live from that branch: every hub's unversioned default and every released client skip
-  # a prerelease, and a dev home's rental on the RC's Runtime takes it. It declares that Runtime as its floor, locked by URL
-  # (`cozy-runtime>=0.47.0.dev2260,<0.48`, scripts/rc-floor.py), and its Triton sets compile with it (cozy-runtime's
-  # prerelease rc-<x.y.z>); the pyproject and lock it changes are pushed to the RC branch; nothing cascades.
+  # a prerelease, and a dev home's rental on the RC's Runtime takes it. Its floor is the one its source declares (a release
+  # like 0.46.0 keeps it lockable by a dependent such as orbit), and its Triton sets compile with the RC's Runtime
+  # (cozy-runtime's prerelease rc-<x.y.z>). The RC branch takes changes only through its merge queue, so a lock the relock
+  # changes goes to it as a pull request, queued; nothing cascades. A push the remote refuses fails at once.
   publish:
     desc: "Publish candidates from master to every hub (yanked), then cascade to their in-repo dependents: task publish -- [--dry-run] [--rc] qwen-image-2"
     cmds:
@@ -52,14 +53,12 @@ tasks:
             echo "$(ver "$r")" | grep -qE '^[0-9.]+(a|b|rc)[0-9]+$|\.dev[0-9]+$' \
               || { echo "$r $(ver "$r"): --rc publishes a prerelease (0.10.0rc1), which released clients skip; bump it first" >&2; exit 2; }
           done
-          # The RC's Runtime, which its rentals run and its Triton sets compile with, and its pure wheel, which each root
-          # declares as its floor and locks by URL (scripts/rc-floor.py, cl-952): a machine runs it only on that Runtime.
+          # The RC's Runtime, which its rentals run and its Triton sets compile with.
           base="https://github.com/cozy-creator/cozy-runtime/releases/download/rc-${branch#rc/}"
           sums=$(curl -fsSL "$base/SHA256SUMS")
           runtime=$(awk '/manylinux_2_28_x86_64\.whl$/ {print $2; exit}' <<< "$sums")
-          pure=$(awk '/-py3-none-any\.whl$/ {print $2; exit}' <<< "$sums")
-          [ -n "$runtime" ] && [ -n "$pure" ] || { echo "cozy-runtime has no rc-${branch#rc/} build with its pure wheel yet (its rc-dev.yaml)" >&2; exit 1; }
-          runtime="$base/$runtime" pure="$base/$pure"
+          [ -n "$runtime" ] || { echo "cozy-runtime has no rc-${branch#rc/} build yet (its rc-dev.yaml)" >&2; exit 1; }
+          runtime="$base/$runtime"
         fi
         [ -n "$dry" ] || { git fetch -q origin "$branch"; git merge -q --ff-only FETCH_HEAD; }
         start=$(git rev-parse HEAD); here=$PWD; work=$(mktemp -d); shipped=
@@ -153,22 +152,52 @@ tasks:
           done
           shipped="$shipped${shipped:+,}$1@$(ver "$1")"
         }
+        # refused <what>: a push the remote turned down (a ruleset, a protected branch), in one line of git's own words.
+        refused() { echo "origin refused $1: $(grep -m1 -E 'rejected|declined|denied|error' "$work/push" || head -1 "$work/push")" >&2; exit 1; }
+        # land <package>: its lock commit pushed to master. Only a race (master moved, its files unchanged) goes again, onto
+        # the new tip; a refusal fails at once.
+        land() {
+          pushed=
+          for _ in 1 2 3 4 5; do
+            if git push -q origin "HEAD:$branch" 2> "$work/push"; then pushed=1; break; fi
+            git fetch -q origin "$branch"
+            if git merge-base --is-ancestor FETCH_HEAD HEAD; then refused "$1's lock on $branch"; fi
+            git diff --quiet HEAD~1 FETCH_HEAD -- "$1" || { git reset -q --keep HEAD~1; echo "$branch changed $1 during its release; run again" >&2; exit 1; }
+            git rebase -q FETCH_HEAD
+          done
+          [ -n "$pushed" ] || { echo "$branch moved under five pushes of $1's lock; run again" >&2; exit 1; }
+        }
+        # propose <package>: its lock commit as a pull request into the RC branch, which takes changes only through its
+        # merge queue, queued there.
+        propose() {
+          head=publish/$1-$(ver "$1")
+          git push -q origin "HEAD:refs/heads/$head" 2> "$work/push" || refused "$head"
+          pr=$(gh pr create --base "$branch" --head "$head" --title "$1 $(ver "$1"): lock" \
+            --body "The lock \`task publish -- --rc $1\` published $1 $(ver "$1") with.
+
+        ## Proof
+        n/a: a relock; the release is published from this commit.") || exit 1
+          gh pr merge "$pr" > /dev/null 2> "$work/push" || { echo "$pr is open, not queued: $(head -1 "$work/push")" >&2; exit 1; }
+          echo "$1 $(ver "$1"): its lock goes into $branch by $pr, queued"
+        }
         release() {
           if ! git diff --quiet HEAD; then
             git show "HEAD:$1/uv.lock" 2>/dev/null | pairs > "$work/before" || true; pairs < "$1/uv.lock" > "$work/after"
             echo "$1 $(ver "$1"): lock$(diff "$work/before" "$work/after" | sed -n 's/^\([<>]\) / \1 /p' | tr '\n' ';')"
             git commit -q -m "$1 $(ver "$1"): lock$(for q in $up; do printf ' %s %s' "$q" "$(ver "$q")"; done)" -- "$1"
-            [ -n "$dry" ] || until git push -q origin "HEAD:$branch"; do
-              git fetch -q origin "$branch"
-              git diff --quiet HEAD~1 FETCH_HEAD -- "$1" || { git reset -q --keep HEAD~1; echo "$branch changed $1 during its release; run again" >&2; exit 1; }
-              git rebase -q FETCH_HEAD
-            done
+            if [ -n "$dry" ]; then
+              [ -z "$rc" ] || echo "$1 $(ver "$1"): dry run, so no pull request into $branch carries its lock"
+            elif [ -n "$rc" ]; then
+              propose "$1"
+            else
+              land "$1"
+            fi
           fi
           ship "$1"
         }
         for p in $(for p in */pyproject.toml; do p=${p%/pyproject.toml}; pkg "$p" || continue; echo "$p $p"; deps "$p" | sed "s|\$| $p|"; done | tsort); do
           pkg "$p" || continue
-          case $roots in *" $p "*) up=; [ -z "$rc" ] || python3 -I scripts/rc-floor.py "$p/pyproject.toml" "$pure"; relock "$p"; release "$p"; continue ;; esac
+          case $roots in *" $p "*) up=; relock "$p"; release "$p"; continue ;; esac
           [ -z "$rc" ] || continue
           up=$(for q in $(deps "$p"); do case $changed in *" $q "*) echo "$q" ;; esac; done)
           [ -n "$up" ] || continue

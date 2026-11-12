@@ -32,11 +32,13 @@ task publish -- --rc sdxl             # on a checkout of rc/<x.y.z>
 ```
 
 Released clients and each Hub's unversioned default skip prereleases; a dev home's rental runs the RC's Runtime and takes
-the newest one. `--rc` makes the RC's Runtime build its floor, locked by URL (`cozy-runtime[media]>=0.47.0.dev2260,<0.48`,
-`[tool.uv.sources] cozy-runtime = { url = "…/rc-<x.y.z>/cozy_runtime-0.47.0.dev2260+g….whl" }`): the RC's Runtime is a dev
-release of the minor it makes, so a machine below it moves to it or refuses (cl-952), and `cozy package publish` refuses a package that
-imports what its floor lacks. Its Triton sets compile with that build. At the release the package publishes its final
-version (`0.10.0`) the usual way, with the release as its floor and no URL source.
+the newest one. Its floor is the one its source declares: a release such as `cozy-runtime>=0.46.0,<0.47`, which an RC
+Runtime meets (cl-952) and a dependent such as orbit can still lock. A package that needs what only the RC's Runtime has
+declares that build and locks it by URL in its source (`cozy-runtime>=0.47.0.dev2260,<0.48`, `[tool.uv.sources]
+cozy-runtime = { url = "…/rc-<x.y.z>/cozy_runtime-0.47.0.dev2260+g….whl" }`). Its Triton sets compile with the RC's
+Runtime. The RC branch takes changes only through its merge queue, so a lock the relock changes goes there as a pull
+request, queued; a push the remote refuses fails at once. At the release the package publishes its final version
+(`0.10.0`) the usual way.
 
 Complete the [dependency qualification checklist](DEPENDENCIES.md) first. Worker images
 are OS/CUDA/PyTorch bases named by tag; the CLI updates the machine, Runtime and TensorFS
