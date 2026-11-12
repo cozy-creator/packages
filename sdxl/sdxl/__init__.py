@@ -3,7 +3,7 @@
 The second launch family, and the ENGINELESS-PATH REFERENCE (`cozy-runtime-sdxl.md`): one
 `Model` class with author-written `load`, public methods each declaring the
 heavyweight components it may touch, one entrypoint. Runtime owns placement, offload and
-pinning; the Euler steps are a plain loop over Diffusers' scheduler.
+pinning; the DPM++ 2M Karras steps are a plain loop over Diffusers' scheduler.
 
 What it adds over cr-008b's corpus fixture, which it is otherwise faithful to:
 
@@ -74,7 +74,7 @@ from cozy_runtime.image import (
 from diffusers.models.autoencoders.autoencoder_kl import AutoencoderKL
 from diffusers.models.unets.unet_2d_condition import UNet2DConditionModel
 from diffusers.schedulers.scheduling_ddim import DDIMScheduler
-from diffusers.schedulers.scheduling_euler_discrete import EulerDiscreteScheduler
+from diffusers.schedulers.scheduling_dpmsolver_multistep import DPMSolverMultistepScheduler
 from hidiffusion import apply_hidiffusion, remove_hidiffusion
 from transformers import (
     CLIPTextConfig,
@@ -266,6 +266,10 @@ class SdxlComponents(TypedDict):
     vae: AutoencoderKL
 
 
+#: DPM++ 2M Karras, ComfyUI's and A1111's usual SDXL sampler; second order, as `generative-models`' DPMPP2M.
+DPMPP_2M_KARRAS: dict[str, object] = {"algorithm_type": "dpmsolver++", "solver_order": 2, "use_karras_sigmas": True}
+
+
 def construct[M: ConfigMixin](cls: type[M], config: dict[str, object]) -> M:
     """`cls.from_config(config)`, typed: it returns a tuple only with `return_unused_kwargs=True`."""
     return cast(M, cls.from_config(config))
@@ -369,25 +373,25 @@ class SdxlModel(Model[SdxlPipeline]):
         seed: int,
         progress: Callable[[int, int], None],
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Text encoding, every step and the decode: Diffusers' `EulerDiscreteScheduler`, or with
-        HiDiffusion its recipe's `DDIMScheduler` at eta 1. HiDiffusion's blocks choose by step
+        """Text encoding, every step and the decode: DPM++ 2M Karras (Diffusers'
+        `DPMSolverMultistepScheduler`), or with HiDiffusion its recipe's `DDIMScheduler` at eta 1. HiDiffusion's blocks choose by step
         (RAU-Net's switch, each window's shift). Returns the image, conditioning and latents."""
         components = self.pipe.components
         first, second = components["text_encoder"], components["text_encoder_2"]
         unet, vae = components["unet"], components["vae"]
         device = torch.device(str(self.device))
         generator = rng.generator(seed)
-        scheduler: DDIMScheduler | EulerDiscreteScheduler
+        scheduler: DDIMScheduler | DPMSolverMultistepScheduler
         advance: Callable[[torch.Tensor, int, torch.Tensor], BaseOutput | tuple[torch.Tensor, ...]]
         if hidiffusion:
             ddim = construct(DDIMScheduler, self.pipe.scheduler_config)
             ddim.set_timesteps(steps, device=device)
             scheduler, advance = ddim, functools.partial(ddim.step, return_dict=False, eta=1.0, generator=generator)
         else:
-            euler = construct(EulerDiscreteScheduler, self.pipe.scheduler_config)
-            euler.set_timesteps(steps, device=device)
-            scheduler, advance = euler, functools.partial(euler.step, return_dict=False)
-            euler.set_begin_index(0)
+            dpm = construct(DPMSolverMultistepScheduler, {**self.pipe.scheduler_config, **DPMPP_2M_KARRAS})
+            dpm.set_timesteps(steps, device=device)
+            scheduler, advance = dpm, functools.partial(dpm.step, return_dict=False)
+            dpm.set_begin_index(0)
         unet.begin_denoise_request(steps, hidiffusion, seed)
         batch = 1 if negative_tokens is None else 2
         dtype, scale = next(vae.parameters()).dtype, self.pipe.vae_scale
@@ -510,7 +514,7 @@ def _sample(
     tel: Telemetry,
     progress: Callable[[int, int], None],
 ) -> torch.Tensor:
-    """Encode, denoise and decode: Euler, or HiDiffusion's DDIM."""
+    """Encode, denoise and decode: DPM++ 2M Karras, or HiDiffusion's DDIM."""
     with tel.stage("generate"):
         image, prompt, pooled, latents = model.generate(
             tokens, negative_tokens if guidance > 1.0 else None,
@@ -541,8 +545,8 @@ def resolve_generate(payload: GenerateInput) -> GenerateFacts:
     width, height = sizes.fit(adj, target.ratio, sizes.pixels(adj, target))
     above_native = width * height > _NATIVE * MEGAPIXEL
     hidiffusion_applied = above_native if payload.hidiffusion is None else payload.hidiffusion
-    # Euler settles by 40 at 1 MP (se-121); HiDiffusion's recipe is 30 DDIM steps.
-    default_steps, default_guidance = (30, 7.5) if hidiffusion_applied else (40, 7.0)
+    # DPM++ 2M Karras at 30 (se-121); HiDiffusion's recipe is 30 DDIM steps.
+    default_steps, default_guidance = (30, 7.5) if hidiffusion_applied else (30, 7.0)
     steps = held(adj, "steps", payload.steps or default_steps, 1, 50)
     guidance = held(adj, "guidance", default_guidance if payload.guidance is None else payload.guidance, 0.0, 20.0)
     negative_prompt = _negative_prompt(payload.negative_prompt or "", hidiffusion_applied)
@@ -602,7 +606,7 @@ def generate(
     tel.metric("decoded_pixels", float(decoded_w * decoded_h))
     with tel.stage("encode_webp"):
         asset = out.save_image(ImageFrame(decoded_w, decoded_h, rgb), format="webp")
-    tel.log("sampled", sampler="ddim eta=1.0" if hidiffusion_applied else "euler", steps=steps,
+    tel.log("sampled", sampler="ddim eta=1.0" if hidiffusion_applied else "dpmpp_2m_karras", steps=steps,
             guidance=guidance, classifier_free=classifier_free, hidiffusion=hidiffusion_applied)
     return ImageResult(asset, decoded_w, decoded_h, seed, prompt)
 
