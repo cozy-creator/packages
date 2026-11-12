@@ -412,7 +412,8 @@ class SdxlModel(Model[SdxlPipeline]):
             with torch.no_grad():
                 clean = vae.encode(start.to(device=device, dtype=next(vae.parameters()).dtype)).latent_dist.mode()
             clean = (clean.float() * self.pipe.vae_scale).to(torch.float16)
-            latents = scheduler.add_noise(clean, latents, scheduler.timesteps[first_step : first_step + 1])
+            start_time = cast(torch.IntTensor, scheduler.timesteps[first_step : first_step + 1])  # Diffusers types it so
+            latents = scheduler.add_noise(clean, latents, start_time)
         # SDXL's micro-conditioning: (original_h, original_w, crop_top, crop_left, target_h,
         # target_w). The bucket IS the original size — these fine-tunes were trained on it.
         time_ids = torch.tensor(

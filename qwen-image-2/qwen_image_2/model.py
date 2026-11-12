@@ -386,9 +386,10 @@ class QwenImage21Model(Model[QwenImage21Graph]):
         with torch.inference_mode():
             pixels = pipeline.image_processor.preprocess(image.convert("RGBA"), width=image.width, height=image.height)
             encoded = _encoded(vae, pixels.unsqueeze(2).to(device=device, dtype=vae.dtype))
-            return pipeline._pack_latents(  # type: ignore[no-untyped-call]  # Diffusers' own, unannotated
+            packed: torch.Tensor = pipeline._pack_latents(  # type: ignore[no-untyped-call]  # Diffusers' own, unannotated
                 encoded, 1, pipeline.latent_channels, encoded.shape[3], encoded.shape[4]
-            ).cpu()
+            )
+            return packed.cpu()
 
     @memoize
     @uses_components("text_encoder")

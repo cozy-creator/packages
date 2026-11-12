@@ -399,7 +399,8 @@ class MossImage(Model[MossGraph]):
             z = z.view(b, c, h // 2, 2, w // 2, 2).permute(0, 1, 3, 5, 2, 4).reshape(b, c * 4, h // 2, w // 2)
             bn, eps = vae.bn, vae.config["batch_norm_eps"]
             std = (bn.running_var.float() + eps).sqrt().view(1, -1, 1, 1).to(z.device)  # type: ignore[union-attr]  # tracked
-            return ((z - bn.running_mean.float().to(z.device).view(1, -1, 1, 1)) / std).cpu()  # type: ignore[union-attr]  # tracked
+            normed: torch.Tensor = (z - bn.running_mean.float().to(z.device).view(1, -1, 1, 1)) / std  # type: ignore[union-attr]  # tracked
+            return normed.cpu()
 
     @uses_components("transformer")
     def denoise(
