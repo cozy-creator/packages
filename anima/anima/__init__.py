@@ -118,7 +118,7 @@ _DEFAULTS = {
     "sketch": "kohya-ss/lllite-any-test-like@0.1.0",
     "inpaint": "kohya-ss/lllite-inpainting@0.1.0",
 }
-_ON_DEMAND = tuple(slot for slot in _DEFAULTS if slot != "model")
+_ON_DEMAND = ("image_encoder", "ip_adapter", "depth", "pose", "lineart", "sketch", "inpaint")
 
 
 def _said(prompt: Prompt[Image], adj: Adjustments) -> tuple[str, list[Image]]:
