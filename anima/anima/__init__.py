@@ -199,6 +199,8 @@ def _generate(
             tokens = encoder.tokens([p.file.read() for p in pictures])
         tokens = (tokens.float() * payload.reference_strength).to(torch.bfloat16).flatten(0, 1).unsqueeze(0)
     controls = [c for c in payload.control if c.strength > 0]
+    # Decoded here: no picture is read while a model holds its weights.
+    maps = [(control, _map(control, width, height)[0]) for control in controls]
     if controls:
         tel.log("control", kinds=", ".join(c.kind for c in controls))
     with _Phases(tel, ctx.progress) as phases:
@@ -212,9 +214,8 @@ def _generate(
             if not controls and tokens is None:
                 return render(None)
             shifts = []
-            for control in controls:
+            for control, pixels in maps:
                 lllite = lllites[control.kind]
-                pixels, _ = _map(control, width, height)
                 if pixels.shape[1] != lllite.graph.channels:
                     adj.warn("control", f"{control.kind}'s adapter reads {lllite.graph.channels} channels, not "
                                         f"{pixels.shape[1]}: that map is ignored")
