@@ -601,7 +601,7 @@ wheels = [
 
 [[package]]
 name = "seedvr2"
-version = "0.6.0"
+version = "0.6.1"
 source = { editable = "." }
 dependencies = [
     { name = "cozy-runtime", extra = ["media"] },

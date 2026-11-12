@@ -1,4 +1,4 @@
-# SeedVR2 video restoration
+# SeedVR2 video and picture restoration
 
 Managed SeedVR2 7B restoration with the upstream Apache-2.0 architecture, one-step sampler,
 fixed conditioning, Runtime-selected attention kernels and Runtime-owned DiT/VAE weights.
@@ -7,6 +7,11 @@ on the CPU, so a seed restores the same video on any device), and `aspect_ratio`
 source's shape; `16:9` gives an exact letterboxed canvas, and on a canvas it's the box's shape). On a
 box, the Tuning controls sit under Advanced. Frame presentation timestamps and audio pass through
 Runtime's streaming media API.
+
+`upscale_image` (the Upscale tool on a picture box) restores one picture the same way, as a PNG: one frame
+through the same encode, denoise and decode. On a box its `image` is the box's own version (`<self.N>`), and the
+result is the box's next version. It takes `resolution` (the picture's shape fitted in that 16:9 canvas, as the video
+tool's), `seed`, `color_correction`, `input_noise_scale` and `latent_noise_scale`.
 
 Resolution defines the maximum 16:9 canvas; source-aspect output fits inside it. Internally,
 padding meets the model's 16-pixel grid and is cropped from the result. Audio is decoded and
