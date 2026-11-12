@@ -62,6 +62,17 @@ if TYPE_CHECKING:
 #: A rotary table: the fused kernel's rotation matrices, or Diffusers' (cos, sin) pair.
 Rotary = torch.Tensor | tuple[torch.Tensor, torch.Tensor]
 
+
+class _ApplyRotary(Protocol):
+    def __call__(
+        self, x: torch.Tensor, freqs_cis: Rotary, use_real: bool = ..., use_real_unbind_dim: int = ...
+    ) -> torch.Tensor: ...
+
+
+#: Diffusers' `apply_rotary_emb` as it runs: `freqs_cis` a tensor or a (cos, sin) pair, and with `use_real` the rotated
+#: tensor back (it annotates the pair as a 1-tuple and the result as a pair).
+_rotate = cast(_ApplyRotary, apply_rotary_emb)
+
 # The extension takes DLPack arrays and a CUDA stream through nanobind and never links libtorch,
 # so any torch this package installs on serves it. It is built for CUDA 13.0: a torch built for
 # CUDA 13.0 or later proves the driver runs it.
@@ -511,10 +522,11 @@ def _attention(
         .transpose(1, 2)
         for projection, site, x in zip(projections, sites, rows, strict=True)
     )
-    query, key = attn.norm_q(query), attn.norm_k(key)
+    norm_q, norm_k = cast(RMSNorm, attn.norm_q), cast(RMSNorm, attn.norm_k)  # Cosmos' rms_norm, typed None
+    query, key = norm_q(query), norm_k(key)
     if rotary is not None:
-        query = apply_rotary_emb(query, rotary, use_real=True, use_real_unbind_dim=-2)
-        key = apply_rotary_emb(key, rotary, use_real=True, use_real_unbind_dim=-2)
+        query = _rotate(query, rotary, use_real=True, use_real_unbind_dim=-2)
+        key = _rotate(key, rotary, use_real=True, use_real_unbind_dim=-2)
     output = dispatch_attention_fn(
         query.transpose(1, 2),
         key.transpose(1, 2),

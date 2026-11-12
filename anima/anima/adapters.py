@@ -147,12 +147,13 @@ class IPGraph:
             f"{COMPONENT}.lora.base_model.model.blocks.0.cross_attn.k_proj.lora_A.weight", default=(32, 1024)
         )
         root = nn.Module()
-        root.blocks = nn.ModuleList(_IPBlock(tokens, inner) for _ in range(BLOCKS))
-        crosses = nn.ModuleList(_Scoped("cross_attn", _CrossLoRA(text, rank)) for _ in range(BLOCKS))
+        self.blocks = [_IPBlock(tokens, inner) for _ in range(BLOCKS)]
+        root.blocks = nn.ModuleList(self.blocks)
+        self.crosses = [_CrossLoRA(text, rank) for _ in range(BLOCKS)]
+        crosses = nn.ModuleList(_Scoped("cross_attn", cross) for cross in self.crosses)
         root.lora = _Scoped("base_model", _Scoped("model", _Scoped("blocks", crosses)))
         #: alpha over rank, as PEFT scales; the references apply alpha = rank.
         self.scale = float(said.get("lora_alpha", rank)) / rank
-        self.crosses = [cross.cross_attn for cross in crosses]
         self.components: dict[str, nn.Module] = {COMPONENT: root.to(torch.bfloat16)}
 
 
@@ -185,7 +186,7 @@ class References:
     def term(self, index: int, query: torch.Tensor, timestep: torch.Tensor) -> torch.Tensor:
         """Block `index`'s image attention for `query` [b, heads, s, 128] (the block's normalized cross-attention
         query), gated by `adaln_ip` of the timestep embedding: [b, s, 2048]."""
-        block = self.adapter.components[COMPONENT].blocks[index]
+        block = self.adapter.blocks[index]
         tokens = self.tokens.to(query.dtype)
         key = block.ip_k_proj(tokens).unflatten(2, (HEADS, -1)).transpose(1, 2)
         value = block.ip_v_proj(tokens).unflatten(2, (HEADS, -1)).transpose(1, 2)
@@ -228,7 +229,8 @@ class _ResBlock(nn.Module):
         self.norm2, self.conv2 = _groups(channels), nn.Conv2d(channels, channels, 3, padding=1)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return x + self.conv2(F.silu(self.norm2(self.conv1(F.silu(self.norm1(x))))))
+        out: torch.Tensor = x + self.conv2(F.silu(self.norm2(self.conv1(F.silu(self.norm1(x))))))
+        return out
 
 
 class _ASPP(nn.Module):
@@ -310,7 +312,7 @@ class LLLiteGraph:
         if unknown := [a for a in atomics if a not in TARGETS]:
             raise UnsupportedInput(f"ControlNet-LLLite targets {', '.join(unknown)} are not Anima's", code="lllite_targets")
         cond, mlp = int(_metadata(said, "cond_emb_dim", "32")), int(_metadata(said, "mlp_dim", "64"))
-        dilations = ()
+        dilations: tuple[int, ...] = ()
         if _metadata(said, "use_aspp", "false").lower() == "true":
             dilations = tuple(int(d) for d in _metadata(said, "aspp_dilations", "1,2,4,8").split(",") if d.strip())
         #: 4: inpaint, RGB and a mask; kohya masks the RGB too (`inpaint_masked_input`).
@@ -319,7 +321,7 @@ class LLLiteGraph:
         trunk = _Conditioning(self.channels, int(_metadata(said, "cond_dim", "64")), cond,
                               int(_metadata(said, "cond_resblocks", "1")), dilations)
         root = nn.Module()
-        root.lllite_conditioning1 = trunk
+        root.lllite_conditioning1 = self.trunk = trunk
         #: (block, target) -> its shift, by the target names the DiT's block forward asks for.
         self.shifts: dict[tuple[int, str], _Shift] = {}
         for index in range(BLOCKS):
@@ -349,7 +351,7 @@ class LLLite(Model[LLLiteGraph]):
     @uses_components(COMPONENT)
     def condition(self, control: torch.Tensor) -> torch.Tensor:
         """`control` [1, channels, H, W] in [-1, 1] at the output's pixel size: one token per DiT token."""
-        trunk = self.graph.components[COMPONENT].lllite_conditioning1
+        trunk = self.graph.trunk
         out: torch.Tensor = trunk(control.to(torch.device(str(self.device)), next(trunk.parameters()).dtype))
         return out
 
@@ -366,7 +368,8 @@ class Shifts:
         found = self.adapter.shifts.get((index, target))
         if found is None or x.shape[1] != self.cond.shape[1]:
             return x
-        return x + (found(x, self.cond) * self.strength).to(x.dtype)
+        out: torch.Tensor = x + (found(x, self.cond) * self.strength).to(x.dtype)
+        return out
 
 
 # ---------------------------------------------------------------- one denoise's adapters
