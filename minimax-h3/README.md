@@ -20,7 +20,7 @@ See [preparation functions and recipes](docs/preparation.md). Previously publish
 
 ```yaml
 # shot.yaml — cozy run minimax-h3/generate --input shot.yaml (in a project: each <name> is that box)
-summary: <theo> and <juno> fight on <dock>, on 35 mm film, in a warm grade, with no crowd.   # every segment reads it
+summary: <theo> and <juno> fight on <dock>, on 35 mm film, in a warm grade, with no crowd.   # the first segment's scene; later ones keep its references
 beats:                                        # what happens, in order, each 1 to 15 s; together, the shot's length
   - {duration: 6, description: The two circle each other.}
   - {duration: 7, description: <juno> feints left and sweeps <theo>'s legs, as in <walk@24-120>.}
@@ -69,10 +69,10 @@ frames where each segment after the first starts, a pickup's kept ones included,
   a `retention_analysis` line for each picture without one (`<name>: keep the look shown in the reference.`), `non_diegetic_music`
   from its field, and `overall_soundscape` from its, or `N/A`, which the guide reads as silence. Your own line replaces any of these. A
   `style:` line means nothing to H3: it goes where it stands.
-- **Sections.** With a `detailed_description:`, timestamps are read only inside it. `summary:`, `overall_soundscape:` and
-  `non_diegetic_music:` go on every segment.
+- **Sections.** With a `detailed_description:`, timestamps are read only inside it. `overall_soundscape:` and
+  `non_diegetic_music:` go on every segment, `summary:` as **Segments** says.
 - **Task tag.** With references, every segment's `summary` opens with its `[task + task]` from the guide, computed from the
-  request: a plate is `video editing`, a pickup `video continuation`, a first or last frame `keyframe completion`,
+  request: a plate is `video editing`, a shot's segment that goes on from frames before it (a later one, a pickup) `video continuation`, a first or last frame `keyframe completion`,
   a picture or reference video `reference generation`, a voice `audio reference`. A different tag you wrote is replaced, with a warning; with no `summary`, one holds just the tag.
   Text alone has none.
 - **Timestamps.** `At MM:SS.mmm` or `At MM:SS`, any case, at the start of a line, after an optional `[Shot N]`. A time
@@ -85,7 +85,10 @@ frames where each segment after the first starts, a pickup's kept ones included,
   carrying the last segment's frames. A segment's text is only its own blocks: the one that opens it loses its time, the
   rest are timed on its clock, whose head is the carried frames, and its `[Shot N]` renumber from 1. So nothing redraws
   the scene at a join (restating an opening pulled runs 24980/24981 back there, with a cut), and each block says only
-  what happens then: the carried frames and pictures hold the rest. A later segment keeps the `summary`, as the scene it plays in, so say the scene there and not the sequence, and put camera moves in the text they belong to: in the summary they run again in every segment. It takes each
+  what happens then: the carried frames and pictures hold the rest. A later segment's `summary` says only that it continues the shot
+  from there, with the references the summary names: the guide's summary is the target video's, and the whole shot's there, even
+  said to be the whole shot's, played what earlier segments showed again (runs 47464, 47808). So the summary sets the first segment's
+  scene, and each beat says what happens in its own. It takes each
   reference's own `retention_analysis` line without its `(appears in …)`, or the default line for a picture. A shot of
   several segments decodes their latents as one video, so no join steps the picture.
 - **Timing that doesn't fit.** Nothing is refused. A block too long for a segment renders at the limit and warns with its
