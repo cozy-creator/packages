@@ -144,6 +144,7 @@ from minimax_h3.shot import (
     ShotImage,
     ShotResult,
     ShotVideo,
+    at_seam,
     blocks,
     canvas,
     cut_latents,
@@ -1541,10 +1542,22 @@ async def _render(ctx: Context, shot: Shot, out: Outputs, tel: Telemetry, *, pla
         warnings.append(f"this take's latents can't be used ({why}), so the new part opens on its frame and the join may show")
         latents = None
     carry, done, trimmed, offset = Carry(shot.carried_frames, True), 0, False, 0.0
+    kept: list[int] = []  # the take's seams it keeps
     if pickup is not None and take is not None:
         if latents is not None:
-            end = shot_latents.delivered(latents.read_bytes())
-            done = min(shot_latents.nearest_join(pickup.out_frame), end)
+            data = latents.read_bytes()
+            end, held = shot_latents.delivered(data), shot_latents.seams(data)
+            if held is None:  # a take from before seams were kept
+                done = min(shot_latents.nearest_join(pickup.out_frame), end)
+            elif (seam := at_seam(pickup.out_frame, held, end)) is None:
+                raise InvalidRequest(f"this take's first segment runs to {(held or [end])[0] / FPS:.2f} s, so picking up at "
+                                     f"{pickup.out_frame / FPS:.2f} s keeps nothing: render without a pickup to make it all again",
+                                     fields=["pickup.out_frame"])  # fmt: skip
+            else:
+                if seam != pickup.out_frame:
+                    warnings.append(f"a pickup starts where a segment does, so this keeps up to {seam / FPS:.2f} s "
+                                    f"(frame {seam}), not {pickup.out_frame / FPS:.2f} s")  # fmt: skip
+                done, kept = seam, [frame for frame in held if frame < seam]
         else:
             end = math.ceil(take.file.probe().duration * FPS)
             done = min(pickup.out_frame, end)
@@ -1599,6 +1612,7 @@ async def _render(ctx: Context, shot: Shot, out: Outputs, tel: Telemetry, *, pla
     # Every segment carries into a successor, its last too: the video's latents keep that carry, which a pickup resumes.
     plans = [ContinuationPlan(length, carry if index or carried else Carry(), carry) for index, length in enumerate(segments)]
     *starts, total = accumulate((plan.delivered_frames for plan in plans), initial=done)
+    seams = [*kept, *([done] if done else []), *starts[1:]]
     followed = StoryReference(name="Plate", kind="anchor_video", video=plate) if plate is not None else None
     clips = [(StoryReference(name=name, kind="video", video=video), start, end) for name, (video, start, end) in script.clips.items()]
     windows, notes = shot_windows([*clips, *([(followed, 0.0, math.inf)] if followed else [])],
@@ -1700,17 +1714,17 @@ async def _render(ctx: Context, shot: Shot, out: Outputs, tel: Telemetry, *, pla
         else:
             so_far = so_far or SoFar(out, tel, result.video)
             out.publish("video", so_far.add(result.video), label=f"Segments 1-{index + 1} of {count}" if index else f"Segment 1 of {count}")
-    video, kept = returned[-1].video, None
+    video, saved = returned[-1].video, None
     if take is not None and not carried:
         video, said = join_kept(out, take.file, done, video)
         warnings += said
         out.publish("video", video, label="Video")
     elif keep_latents:
-        kept = shot_latents_file(out, [*before[0], *(r.latents for r in returned)], total, returned[-1].context, upscale_prompt(script))
+        saved = shot_latents_file(out, [*before[0], *(r.latents for r in returned)], total, returned[-1].context, upscale_prompt(script), seams)
     ctx.release_gpus()
     tel.log("h3 shot", segments=count, delivered_frames=total, turbo=turbo, quality=shot.quality)
-    return ShotResult(video=video, warnings=list(dict.fromkeys(warnings)), latents=cast("Latents | None", kept),  # a saved file fills a Latents field
-                      kept_s=begun if take is not None else None)  # fmt: skip
+    return ShotResult(video=video, warnings=list(dict.fromkeys(warnings)), latents=cast("Latents | None", saved),  # a saved file fills a Latents field
+                      kept_s=begun if take is not None else None, seams=seams)  # fmt: skip
 
 
 @app.tool(label="Shot", named="shot", accelerator=False, reserved=_RESERVED)

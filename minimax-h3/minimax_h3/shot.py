@@ -91,8 +91,10 @@ class ShotVideo(Video, frozen=True, kw_only=True):
 
 
 class ShotPickup(Pickup, frozen=True, kw_only=True):
-    """Pick up from here: the take, the frame the new part starts on (H3's `17k + 5` join grid, past its shortest
-    piece: `shot_latents.nearest_join`), and the seconds into this shot's beats it starts at."""
+    """Pick up from here: the take, the frame the new part starts on, one of the take's seams (`ShotResult.seams`) or
+    its end, and the seconds into this shot's beats it starts at. Every segment before it stays as it was; a frame
+    between seams starts at the seam before it (Paul, 11-12). A take with no seams kept cuts on H3's `17k + 5` join grid
+    (`shot_latents.nearest_join`)."""
 
     take: ShotVideo
     out_frame: Annotated[int, Snap(17, offset=5, first=124)]  # `official.MIN_FRAMES`, 5 s on the grid
@@ -128,6 +130,9 @@ class ShotResult(msgspec.Struct):
     latents: Latents | None = None
     #: With a pickup: how many seconds of the take this keeps, where the new part starts.
     kept_s: float | None = None
+    #: The frames where each segment after the first starts, on the whole video: a pickup's take's seams before its cut,
+    #: the cut, then the new part's. A pickup starts at one of them, or at the end.
+    seams: list[int] = msgspec.field(default_factory=list)
 
 
 #: A segment holds 15 s; a later one 14 s new, beside what it carries.
@@ -567,17 +572,22 @@ def cut_latents(take: ShotVideo, frames: int, out: Outputs, carry: Carry) -> Fil
     return out.save_bytes(shot_latents.cut(data, frames, carry.frames, torch.from_numpy(sound)), media_type="application/octet-stream")
 
 
-def shot_latents_file(out: Outputs, parts: Sequence[File], frames: int, context: File, text: str) -> File:
+def shot_latents_file(out: Outputs, parts: Sequence[File], frames: int, context: File, text: str, seams: Sequence[int]) -> File:
     """The whole video's latents: each part's delivered latents end to end (each segment cuts its carried head, whole
     VAE cycles, so they join in phase; a picked-up take's own latents first), in the latent space they name, with its
-    last segment's carry and the text it was made from."""
+    last segment's carry, the text it was made from and its seams."""
     blobs = [part.read_bytes() for part in parts]
     spaces = {shot_latents.metadata(data).get("vae_space", "") for data in blobs}
     if len(spaces) != 1 or "" in spaces:
         raise OutputError("the video's segments name no single latent space", code="output_integrity")
     latents = torch.cat([load_tensors(data)["latents"] for data in blobs], dim=2)
-    return out.save_bytes(shot_latents.save(latents, frames, spaces.pop(), context.read_bytes(), text),
+    return out.save_bytes(shot_latents.save(latents, frames, spaces.pop(), context.read_bytes(), text, seams),
                           media_type="application/octet-stream")  # fmt: skip
+
+
+def at_seam(frame: int, seams: Sequence[int], end: int) -> int | None:
+    """Where a pickup asked at `frame` starts: the take's seam at or before it, or its end; None before its first seam."""
+    return max((seam for seam in [*seams, end] if seam <= frame), default=None) if frame < end else end
 
 
 def upscale_prompt(script: Script) -> str:
