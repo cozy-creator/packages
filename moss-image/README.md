@@ -12,8 +12,9 @@ noise-free reference at t = 0 attending only to the references, computed once a 
 CFG branches attend to it. 30 Euler steps at CFG 4 against an empty negative, at the first picture's ratio and 1 MP,
 as ComfyUI's Moss-Image-Edit workflows. One picture reads as its name, several as `image N`. Caller LoRAs stack with it.
 
-`image_to_image` remakes a picture from a prompt: `strength` (0.6) is the last fraction of the 50-step schedule that
-runs from the picture, as ComfyUI's denoise; CFG 3; `megapixels` unset keeps its size.
+`image_to_image` remakes a picture from a prompt: `strength` (0.75) is the last fraction of the 50-step schedule that
+runs from the picture, as ComfyUI's denoise (0.6 barely changes it, 0.85 loses its layout); CFG 3; `megapixels` unset
+keeps its size. A style-only prompt restyles a scene but leaves a photo of a person a photo: Moss-Image-Edit restyles.
 
 `upscale` (the Upscale tool on a picture box) makes the box's picture larger, at 2 or 4 MP: img2img over the picture
 Lanczos-upscaled to the canvas, 50-step schedule and CFG 3 from `denoise` (0.4) down. Downscaled back, 29 dB PSNR to the

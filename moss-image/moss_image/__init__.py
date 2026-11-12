@@ -239,7 +239,7 @@ class ImageToImageInput(msgspec.Struct, kw_only=True):
     prompt: str = ""
     #: How much changes: the last fraction of the steps that run from the picture, as ComfyUI's denoise
     #: (`MossImage.denoise`), a light touch near 0, a new picture at 1.
-    strength: Annotated[float, msgspec.Meta(gt=0, le=1)] = 0.6
+    strength: Annotated[float, msgspec.Meta(gt=0, le=1)] = 0.75
     #: The picture's ratio at this many megapixels (`SIZES.fit`); unset, the picture's own size.
     megapixels: Annotated[float, msgspec.Meta(gt=0)] | None = None
     steps: Steps = None
