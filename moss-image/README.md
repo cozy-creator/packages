@@ -4,7 +4,20 @@ OpenMOSS's MOSS-Image, a text-to-image model known for rendering text, reading l
 4,096 tokens) and placing objects and text in boxes. It is a 5B single-stream DiT over Qwen3.5-9B's last
 hidden state, decoded by FLUX.2's VAE with its small decoder.
 
-`image` is the canvas tool, its prompt `instructions`: `aspect_ratio`, `megapixels`, `negative_prompt` and `seed`.
+`image` is the canvas tool, its prompt `instructions`: `aspect_ratio`, `megapixels`, `negative_prompt`, `seed` and
+`control`.
+
+**Control.** `control` takes maps of kind `pose` (a DWPose skeleton, colored bones on black), `depth` (near is white),
+`canny`, `lineart` or `sketch` (white lines on black), each `{image, kind, strength}`. The first with a strength above 0
+runs under thedeoxen's control LoRA of its kind (`thedeoxen/moss-image-<kind>-controlnet`, `sketch` their scribble
+one; built in, at the control's strength; `generate` and the Image tool are CPU roots whose GPU call is `text_to_image`,
+or `control` with the LoRA stacked). They are AI-Toolkit edit LoRAs, so the map, resized to the picture, is the one
+reference (at t = 0, the image beside it at f = 0, the text before it), and Qwen3.5's vision tower reads it too
+(`Picture 1: ` before the prompt, at most 384² pixels), in both CFG branches. The picture is the map's size unless
+`aspect_ratio` or `megapixels` say otherwise, as in their workflows. 30 Euler steps at CFG 4, as their workflows; the
+default negative is theirs without "nsfw" (`worst quality, bad anatomy, watermark, jpeg artifact`), since users here
+stack NSFW LoRAs that it would fight. Each adapter trained alone on one map, so the rest are dropped with a warning.
+Make the maps with any preprocessor (DWPose, Depth Anything V2, Canny 100/200, Realistic Lineart coarse, HED).
 
 `upscale` (the Upscale tool on a picture box) makes the box's picture larger, at 2 or 4 MP: img2img over the picture
 Lanczos-upscaled to the canvas, 50-step schedule and CFG 3 from `denoise` (0.4) down. Downscaled back, 29 dB PSNR to the
@@ -13,6 +26,7 @@ input on a photo and a woodblock print, against SeedVR2's 26.5 and 30.3 (se-123)
 | function | checkpoint | default steps | guidance |
 | --- | --- | --- | --- |
 | `generate` | MOSS-Image-SFT | 50 | 3.0 (CFG; the negative branch skips block 22) |
+| `generate` with `control` | MOSS-Image-SFT + thedeoxen's adapter of the kind | 30 | 4.0 |
 
 Upstream ships no distilled checkpoint, so there is no `generate_turbo`. MOSS-Image-Base, the LoRA
 training base, runs with the same function: `model.model=moss-image-base@<release>`.
@@ -38,8 +52,9 @@ cozy run moss-image/generate prompt='A minimalist travel poster, cream backgroun
 
 Fields: `prompt`, `regions`, `aspect_ratio` (any `W:H`, default 1:1), `megapixels` (default 1), `steps`,
 `guidance`, `negative_prompt` (default empty, as upstream's; upstream's user guide suggests
-`nsfw, worst quality, bad anatomy, watermark, jpeg artifact`) and `seed` (random when omitted,
-returned). MOSS-Image makes images from text only: its prompt is words, so a picture mentioned in it goes as its name ([references](../docs/references.md)); place elements with `regions`.
+`nsfw, worst quality, bad anatomy, watermark, jpeg artifact`), `seed` (random when omitted, returned) and `control`
+(above). Its prompt is words, so a picture mentioned in it goes as its name ([references](../docs/references.md));
+place elements with `regions`, steer the structure with `control`.
 Unknown fields are dropped with a warning.
 
 The result has the image, its `width` and `height`, the `seed`, and `prompt`: what the model read.
@@ -70,7 +85,8 @@ Upstream's (`pipeline_moss_image.py`, OpenMOSS-Team/MOSS-Image-SFT `f972bd4b`): 
 5, its sigmas snapped to the nearest of the 1,000 training sigmas, CFG 3 whose negative branch runs
 without block 22, f32 noise from `seed` drawn on the CPU and f32 latents between steps. `guidance=1`
 runs one forward per step. The text encoder reads the prompt through Qwen3.5's chat template with
-thinking open; Qwen3.5's vision tower is never built or read.
+thinking open; its vision tower runs only for a control map, with the image processor config the checkpoint
+carries (`text_encoder/processor/preprocessor_config.json`, Qwen3.5-9B's, since `openmoss-team/moss-image@0.1.1`).
 
 ## Execution
 

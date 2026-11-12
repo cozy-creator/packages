@@ -2,8 +2,9 @@
 
 The DiT, its timestep grid and the sampling loop follow upstream's `pipeline_moss_image.py`
 (OpenMOSS-Team/MOSS-Image-SFT `f972bd4b`, Apache-2.0) module for module, with its state-dict names;
-Diffusers has no MOSS-Image. The text encoder is Transformers' Qwen3.5 text model and the VAE Diffusers'
-`AutoencoderKLFlux2`. Runtime constructs and fills the modules and owns their residency.
+Diffusers has no MOSS-Image. The text encoder is Transformers' Qwen3.5 (its vision tower reads the pictures
+AI-Toolkit's edit LoRAs show it) and the VAE Diffusers' `AutoencoderKLFlux2`. Runtime constructs and fills the
+modules and owns their residency.
 
 On a GPU a DiT block runs as ComfyUI's MOSS-Image does, with the Runtime's prebuilt kernels: each
 modulated RMSNorm and SiTU comes out of the int8 leaves' quantization pass (`int8_rows`, the norm
@@ -17,8 +18,9 @@ composition.
 from __future__ import annotations
 
 import json
+import math
 from collections.abc import Callable
-from typing import TypedDict, cast
+from typing import Literal, TypedDict, cast
 
 import numpy as np
 import torch
@@ -33,6 +35,7 @@ from cozy_runtime.author import (
     OutputError,
     Serving,
     Telemetry,
+    UnsupportedInput,
     memoize,
     preview,
     uses_components,
@@ -46,7 +49,8 @@ from PIL import Image
 from tokenizers import Tokenizer
 from transformers import PreTrainedTokenizerFast, Qwen3_5Config
 from transformers.initialization import no_init_weights
-from transformers.models.qwen3_5.modeling_qwen3_5 import Qwen3_5TextModel
+from transformers.models.qwen2_vl.image_processing_pil_qwen2_vl import Qwen2VLImageProcessorPil
+from transformers.models.qwen3_5.modeling_qwen3_5 import Qwen3_5Model
 
 #: The DiT's activations and the dtype upstream casts each linear's input to (its weights' in bf16).
 DTYPE = torch.bfloat16
@@ -58,6 +62,18 @@ MAX_TOKENS = 4096
 PATCH = 16
 #: Upstream's default guidance: the negative branch skips this block (zero-based).
 UNCOND_SKIP = frozenset({22})
+#: A block's keys and values of the references, each [1, N, heads, head_dim].
+type Reference = tuple[torch.Tensor, torch.Tensor]
+#: The RoPE layout an edit LoRA trained with (ComfyUI's `TextEncodeMOSSImageEdit` edit formats): Moss-Image-Edit's
+#: text from f = 0 and the image after it; AI-Toolkit's the image at f = 0 beside its references, the text before it.
+type EditFormat = Literal["moss-image-edit", "ai-toolkit"]
+#: Qwen3.5's image processor (Qwen3.5-9B's, which MOSS's checkpoint carries since 0.1.1).
+PROCESSOR = "text_encoder/processor/preprocessor_config.json"
+#: The most pixels the text encoder sees a picture at before its processor's grid (ComfyUI's `TextEncodeMOSSImageEdit`).
+GLIMPSE_PIXELS = 384 * 384
+#: A picture in the user turn, ahead of the text, as AI-Toolkit's edit LoRAs read it: `{}` its vision tokens.
+PICTURE = "Picture {}: <|vision_start|>{}<|vision_end|>"
+IMAGE_PAD = "<|image_pad|>"
 
 
 class RMSNorm(torch.nn.Module):
@@ -159,7 +175,10 @@ class Block(torch.nn.Module):
         #: How its last call ran the modulated norms and SiTU, for the run record.
         self.served = {"norms": "", "situ": ""}
 
-    def forward(self, x: torch.Tensor, rope: torch.Tensor, modulation: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, rope: torch.Tensor, modulation: torch.Tensor,
+                references: Reference | None = None, keep: list[Reference] | None = None) -> torch.Tensor:
+        """`references`: the references' keys and values here (`MossTransformer.references`), which every query
+        also attends to; `keep` collects this block's own keys and values (the references' pass)."""
         shift_a, scale_a, gate_a, shift_f, scale_f, gate_f = modulation.unbind(1)
         proj = self.proj
         qkv = proj["q"], proj["k"], proj["v"]
@@ -170,6 +189,10 @@ class Block(torch.nn.Module):
             q, k = rms_rope_split_half(q, k, rope, self.q_norm.weight, self.k_norm.weight, self.q_norm.eps)
         else:
             q, k = rotate(self.q_norm(q), rope), rotate(self.k_norm(k), rope)
+        if keep is not None:
+            keep.append((k, v))
+        if references is not None:
+            k, v = torch.cat((k, references[0]), 1), torch.cat((v, references[1]), 1)
         x.addcmul_(proj["o"](self.attn(q, k, v).flatten(2)), gate_a[:, None])
         hidden = proj["ffn_up_gate"](modulated(x, self.norm2, scale_f, shift_f, (proj["ffn_up_gate"],)))
         activated: torch.Tensor | PreQuantized | None = int8_rows(hidden, (proj["ffn_down"],), activation="situ")
@@ -207,19 +230,50 @@ class MossTransformer(torch.nn.Module):
         bands = 1 / (self.rope_base ** (torch.arange(self.num_bands, dtype=torch.float32, device="cpu") / self.num_bands))
         return (positions.unsqueeze(-1) * bands.to(positions.device)).flatten(-2)
 
-    def positions(self, height: int, width: int, text_length: int, device: torch.device) -> torch.Tensor:
+    def positions(self, height: int, width: int, text_length: int, device: torch.device,
+                  offset: int = 0) -> torch.Tensor:
         """(r, f, h, w) per token: the image centred on its grid with f = the text length, then the text
-        counting up on f."""
+        counting up on f, all shifted by `offset` on f (`-text_length` puts the image at f = 0, ComfyUI's
+        `f_offset`)."""
         h, w = torch.meshgrid(torch.arange(height, device=device), torch.arange(width, device=device), indexing="ij")
-        image = torch.stack((torch.zeros_like(h), torch.full_like(h, text_length), h, w), -1).flatten(0, 1).float()
+        f = torch.full_like(h, text_length + offset)
+        image = torch.stack((torch.zeros_like(h), f, h, w), -1).flatten(0, 1).float()
         image[:, 2] -= (height - 1) / 2
         image[:, 3] -= (width - 1) / 2
-        return torch.cat((image, self.text_positions(text_length, device)), 0)
+        return torch.cat((image, self.text_positions(text_length, device, offset)), 0)
 
     @staticmethod
-    def text_positions(text_length: int, device: torch.device) -> torch.Tensor:
+    def reference_positions(shapes: list[tuple[int, int]], device: torch.device) -> torch.Tensor:
+        """(r, f, h, w) of each reference's tokens: reference i on r = i + 1 and f = 0, its grid centred (ComfyUI's
+        `MOSSImage.rope`)."""
+        out = []
+        for index, (height, width) in enumerate(shapes):
+            h, w = torch.meshgrid(torch.arange(height, device=device), torch.arange(width, device=device), indexing="ij")
+            grid = torch.stack((torch.full_like(h, index + 1), torch.zeros_like(h), h, w), -1).flatten(0, 1).float()
+            grid[:, 2] -= (height - 1) / 2
+            grid[:, 3] -= (width - 1) / 2
+            out.append(grid)
+        return torch.cat(out, 0)
+
+    def references(self, latents: list[torch.Tensor], fused: bool) -> list[Reference]:
+        """Each block's keys and values of the references `latents` [1, 128, h, w] (an edit LoRA's): free of noise
+        at t = 0 and attending only to each other, so they depend on themselves alone and are computed once a
+        request (ComfyUI's `MOSSImage.preprocess_refs`)."""
+        device = latents[0].device
+        x = torch.cat([self.video_embedder(latent.flatten(2).transpose(1, 2).to(DTYPE)) for latent in latents], 1)
+        phase = self.phase(self.reference_positions([(latent.shape[2], latent.shape[3]) for latent in latents], device))
+        rope = self.rotations(phase) if fused else self.table(phase)
+        modulation, _ = self.modulation(torch.zeros(1, device=device))
+        kept: list[Reference] = []
+        x = x.contiguous()
+        for block in self.layers:
+            x = block(x, rope, modulation, keep=kept)
+        return kept
+
+    @staticmethod
+    def text_positions(text_length: int, device: torch.device, offset: int = 0) -> torch.Tensor:
         text = torch.zeros(text_length, 4, device=device, dtype=torch.float32)
-        text[:, 1] = torch.arange(text_length, device=device)
+        text[:, 1] = torch.arange(text_length, device=device) + offset
         return text
 
     @staticmethod
@@ -234,9 +288,10 @@ class MossTransformer(torch.nn.Module):
         out: torch.Tensor = torch.stack((cos, -sin, sin, cos), -1).unflatten(-1, (2, 2))
         return out.unsqueeze(0).unsqueeze(2)
 
-    def text(self, context: torch.Tensor) -> torch.Tensor:
-        """The step-invariant text stream [1, S, dim] of `context` [1, S, text_dim]."""
-        phase = self.phase(self.text_positions(context.shape[1], context.device))
+    def text(self, context: torch.Tensor, offset: int = 0) -> torch.Tensor:
+        """The step-invariant text stream [1, S, dim] of `context` [1, S, text_dim], its positions shifted by
+        `offset` on f as the stream's (`positions`)."""
+        phase = self.phase(self.text_positions(context.shape[1], context.device, offset))
         return self.text_embedder(context, self.table(phase))  # type: ignore[no-any-return]
 
     def modulation(self, timestep: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
@@ -257,15 +312,17 @@ class MossTransformer(torch.nn.Module):
         return out.float()
 
     def forward(self, latents: torch.Tensor, timestep: torch.Tensor, texts: list[torch.Tensor],
-                ropes: list[torch.Tensor]) -> list[torch.Tensor]:
+                ropes: list[torch.Tensor], references: list[Reference] | None = None) -> list[torch.Tensor]:
         """Each prompt's f32 velocity [1, C, H, W] of `latents` at `timestep` [1]: its text stream and
         RoPE, the conditional prompt first. The prompts pass through each block in turn, so a streamed
-        block comes in once per step; a later prompt skips `UNCOND_SKIP`, upstream's unconditional branch."""
+        block comes in once per step; a later prompt skips `UNCOND_SKIP`, upstream's unconditional branch.
+        Both attend to `references` (`references`), as the edit LoRAs' sampling conditions both."""
         modulation, head = self.modulation(timestep)
         video = self.video_embedder(latents.flatten(2).transpose(1, 2).to(DTYPE).contiguous())
         streams = [torch.cat((video, text), 1) for text in texts]
         for index, block in enumerate(self.layers):
-            streams = [x if branch and index in UNCOND_SKIP else block(x, rope, modulation)
+            held = None if references is None else references[index]
+            streams = [x if branch and index in UNCOND_SKIP else block(x, rope, modulation, held)
                        for branch, (x, rope) in enumerate(zip(streams, ropes, strict=True))]
         return [self.velocity(x, head, latents.shape[2], latents.shape[3]) for x in streams]
 
@@ -298,21 +355,14 @@ class MossScheduler(FlowMatchEulerDiscreteScheduler):
         super().set_timesteps(device=device, sigmas=sigmas.tolist())  # type: ignore[arg-type]  # Diffusers' own default is None
 
 
-class TextEncoder(torch.nn.Module):
-    """Qwen3.5-9B's text model (`language_model.*`). The vision tower is never built, so its bytes are
-    never read."""
-
-    def __init__(self, config: Qwen3_5Config) -> None:
-        super().__init__()
-        self.language_model: Qwen3_5TextModel = Qwen3_5TextModel._from_config(config.text_config, dtype=DTYPE)  # type: ignore[no-untyped-call]  # Transformers' _from_config is unannotated
-
-
 class MossGraph:
     def __init__(self, config: Config) -> None:
         with no_init_weights():
             self.components: Components = {
                 "transformer": MossTransformer(**config.section("transformer").mapping()).to(DTYPE).eval(),
-                "text_encoder": TextEncoder(Qwen3_5Config(**config.section("text_encoder").mapping())).eval(),
+                "text_encoder": Qwen3_5Model._from_config(  # type: ignore[no-untyped-call]  # Transformers' _from_config is unannotated
+                    Qwen3_5Config(**config.section("text_encoder").mapping()), dtype=DTYPE
+                ).eval(),
                 "vae": _to(construct(AutoencoderKLFlux2, config.section("vae").mapping()), torch.float32).eval(),
             }
         self.scheduler_config: dict[str, object] = config.section("scheduler").mapping()
@@ -320,7 +370,9 @@ class MossGraph:
 
 class Components(TypedDict):
     transformer: MossTransformer
-    text_encoder: TextEncoder
+    #: Qwen3.5-9B: its text model (`language_model.*`) and its vision tower (`visual.*`), which only a prompt with
+    #: pictures runs.
+    text_encoder: Qwen3_5Model
     vae: AutoencoderKLFlux2
 
 
@@ -347,6 +399,26 @@ def build_tokenizer(assets: ModelAssets) -> PreTrainedTokenizerFast:
     )
 
 
+def build_processor(assets: ModelAssets) -> Qwen2VLImageProcessorPil | None:
+    """Qwen3.5's image processor from the checkpoint's `PROCESSOR`; None for a checkpoint without one (MOSS-Image
+    0.1.0), which reads no pictures."""
+    if PROCESSOR not in assets.names():
+        return None
+    config = json.loads(assets.read(PROCESSOR))
+    for key in ("processor_class", "image_processor_type"):
+        config.pop(key, None)
+    return Qwen2VLImageProcessorPil(**config)
+
+
+def glimpse(picture: Image.Image) -> Image.Image:
+    """A picture as the text encoder takes it: at most `GLIMPSE_PIXELS`, its ratio kept (area resampling, ComfyUI's
+    `TextEncodeMOSSImageEdit`). Its processor then snaps it to its grid."""
+    picture = picture.convert("RGB")
+    scale = min(1.0, math.sqrt(GLIMPSE_PIXELS / (picture.width * picture.height)))
+    size = (max(1, round(picture.width * scale)), max(1, round(picture.height * scale)))
+    return picture if size == picture.size else picture.resize(size, Image.Resampling.BOX)
+
+
 class MossImage(Model[MossGraph]):
     """One MOSS-Image checkpoint (Base or SFT)."""
 
@@ -355,10 +427,12 @@ class MossImage(Model[MossGraph]):
 
     graph: MossGraph
     tokenizer: PreTrainedTokenizerFast
+    processor: Qwen2VLImageProcessorPil | None
 
     def load(self, loader: Loader) -> None:
         self.graph = loader.construct(MossGraph)
         self.tokenizer = build_tokenizer(loader.assets)
+        self.processor = build_processor(loader.assets)
 
     def hold_vae(self, tel: Telemetry) -> None:
         """Serve the VAE at `VAE_DTYPE` on a GPU from now on, before any VAE scope opens: the Runtime
@@ -370,22 +444,35 @@ class MossImage(Model[MossGraph]):
 
     @memoize
     @uses_components("text_encoder")
-    def encode(self, prompt: str) -> torch.Tensor:
+    def encode(self, prompt: str, pictures: tuple[Image.Image, ...] = ()) -> torch.Tensor:
         """The prompt's last hidden state [S, 4096] (bf16, on the CPU): the user turn of the chat
         template with thinking open, at most 4096 tokens, one unpadded forward. One prompt a call, so
-        a request's fixed negative is a memo hit."""
+        a request's fixed negative is a memo hit. `pictures` come before the text, each `Picture N: ` and its
+        vision tokens, one a merged patch of its `glimpse` (AI-Toolkit's edit LoRAs; ComfyUI's
+        `TextEncodeMOSSImageEdit`), with Qwen3.5's multimodal positions."""
         encoder = self.graph.components["text_encoder"]
         device = torch.device(str(self.device))
+        seen: dict[str, torch.Tensor] = {}
+        if pictures:
+            if self.processor is None:
+                raise UnsupportedInput(
+                    f"this MOSS-Image checkpoint has no {PROCESSOR}, which reading a picture needs: run "
+                    "openmoss-team/moss-image@0.1.1 or later", code="model_asset_missing",
+                )
+            seen = dict(self.processor.preprocess([glimpse(p) for p in pictures], return_tensors="pt"))
+            merged = (seen["image_grid_thw"].prod(-1) // self.processor.merge_size**2).tolist()
+            prompt = "".join(PICTURE.format(n, IMAGE_PAD * int(tokens)) for n, tokens in enumerate(merged, 1)) + prompt
         with torch.inference_mode():
             text = self.tokenizer.apply_chat_template(
                 [{"role": "user", "content": prompt}], tokenize=False, add_generation_prompt=True,
                 enable_thinking=True,
             )
             inputs = self.tokenizer(text, return_tensors="pt", truncation=True, max_length=MAX_TOKENS)
-            out = encoder.language_model(
-                input_ids=inputs.input_ids.to(device), attention_mask=inputs.attention_mask.to(device),
-                use_cache=False,
-            )
+            ids = inputs.input_ids.to(device)
+            visual = {key: value.to(device) for key, value in seen.items()}
+            if seen:
+                visual["mm_token_type_ids"] = (ids == encoder.config.image_token_id).int()
+            out = encoder(input_ids=ids, attention_mask=inputs.attention_mask.to(device), use_cache=False, **visual)
             return out.last_hidden_state[0].cpu()  # type: ignore[no-any-return]
 
     @uses_components("vae")
@@ -418,10 +505,13 @@ class MossImage(Model[MossGraph]):
         tel: Telemetry,
         start: torch.Tensor | None = None,
         strength: float = 1.0,
+        references: list[torch.Tensor] | None = None,
+        edit_format: EditFormat = "moss-image-edit",
     ) -> torch.Tensor:
         """Upstream's sampler: f32 noise from `seed` on the CPU, CFG against `negative` with block 22
         skipped in its branch, Euler (`MossScheduler`) in f32. Returns the latents [1, 128, H/16, W/16]
-        on the CPU.
+        on the CPU. `references` (`encode_image`'s) condition both branches, laid out on RoPE as the edit
+        LoRA trained (`edit_format`).
 
         Each prompt's text stream and RoPE are built once, before the loop; with CFG both branches
         pass through each block in turn inside one call of the transformer, so a streamed block comes in
@@ -442,17 +532,19 @@ class MossImage(Model[MossGraph]):
             if start is not None:
                 sigma = float(scheduler.sigmas[first])
                 latents = (1 - sigma) * start.to(device=device, dtype=latents.dtype) + sigma * latents
+            held = None if not references else transformer.references([r.to(device) for r in references], fused)
             texts, ropes = [], []
             for text in (positive, *([] if negative is None else [negative])):
                 context = text[None].to(device)
-                phase = transformer.phase(transformer.positions(rows, columns, context.shape[1], device))
-                texts.append(transformer.text(context))
+                offset = -context.shape[1] if held is not None and edit_format == "ai-toolkit" else 0
+                phase = transformer.phase(transformer.positions(rows, columns, context.shape[1], device, offset))
+                texts.append(transformer.text(context, offset))
                 ropes.append(transformer.rotations(phase) if fused else transformer.table(phase))
             timesteps = scheduler.timesteps
             for i, t in enumerate(timesteps):
                 if i < first:
                     continue
-                velocity = transformer(latents, t[None], texts, ropes)
+                velocity = transformer(latents, t[None], texts, ropes, held)
                 prediction = velocity[0]
                 if len(velocity) > 1:
                     prediction = velocity[1] + guidance * (velocity[0] - velocity[1])
