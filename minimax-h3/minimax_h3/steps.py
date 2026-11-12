@@ -116,7 +116,7 @@ def denoise_official(
                             rotary=rotary,
                             text=text,
                         )
-                    preview(lambda v=velocity: video[video_rows:] + (1 - state.timesteps[i]) * v[0, video_rows:].float(), "minimax-h3", grid=grid)  # fmt: skip
+                    preview(lambda: video[video_rows:] + (1 - state.timesteps[i]) * velocity[0, video_rows:].float(), "minimax-h3", grid=grid)  # noqa: F821  # fmt: skip
                     video[video_rows:] = schedulers.scheduler.step(
                         velocity[0, video_rows:].float(), state.timesteps[i], video[video_rows:], return_dict=False  # type: ignore[arg-type]  # Diffusers annotates the legacy FloatTensor
                     )[0]
