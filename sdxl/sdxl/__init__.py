@@ -61,7 +61,9 @@ from cozy_runtime.author import (
     preview,
     uses_components,
 )
-from cozy_runtime.fields import AspectRatio, Preflight, Ratios
+from cozy_runtime.fields import Advanced, AspectRatio, FileBound, Preflight, Ratios
+from cozy_runtime.media import ImageFile
+from PIL import Image as PILImage
 from cozy_runtime.image import (
     Guidance,
     ImageRequest,
@@ -373,10 +375,13 @@ class SdxlModel(Model[SdxlPipeline]):
         hidiffusion: bool,
         seed: int,
         progress: Callable[[int, int], None],
+        start: torch.Tensor | None = None,
+        strength: float = 1.0,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """Text encoding, every step and the decode: DPM++ 2M Karras (Diffusers'
         `DPMSolverMultistepScheduler`), or with HiDiffusion its recipe's `DDIMScheduler` at eta 1. HiDiffusion's blocks choose by step
-        (RAU-Net's switch, each window's shift). Returns the image, conditioning and latents."""
+        (RAU-Net's switch, each window's shift). Returns the image, conditioning and latents. With `start` (pixels
+        [1, 3, H, W] in -1..1), Diffusers' img2img: its latents noised to the last `strength` of the steps, which run."""
         components = self.pipe.components
         first, second = components["text_encoder"], components["text_encoder_2"]
         unet, vae = components["unet"], components["vae"]
@@ -397,7 +402,17 @@ class SdxlModel(Model[SdxlPipeline]):
         batch = 1 if negative_tokens is None else 2
         dtype, scale = next(vae.parameters()).dtype, self.pipe.vae_scale
         latents = rng.noise((1, 4, height // 8, width // 8), generator, dtype=torch.float16, device=device)
-        latents = latents * scheduler.init_noise_sigma
+        first_step = 0
+        if start is None:
+            latents = latents * scheduler.init_noise_sigma
+        else:
+            first_step = steps - max(1, min(steps, int(steps * strength)))
+            if isinstance(scheduler, DPMSolverMultistepScheduler):
+                scheduler.set_begin_index(first_step)
+            with torch.no_grad():
+                clean = vae.encode(start.to(device=device, dtype=next(vae.parameters()).dtype)).latent_dist.mode()
+            clean = (clean.float() * self.pipe.vae_scale).to(torch.float16)
+            latents = scheduler.add_noise(clean, latents, scheduler.timesteps[first_step : first_step + 1])
         # SDXL's micro-conditioning: (original_h, original_w, crop_top, crop_left, target_h,
         # target_w). The bucket IS the original size — these fine-tunes were trained on it.
         time_ids = torch.tensor(
@@ -411,12 +426,14 @@ class SdxlModel(Model[SdxlPipeline]):
             prompt, pooled = prompt.to(torch.float16), pooled.to(torch.float16)
             # The schedulers read their own tables by the host timestep; the UNet takes the device one.
             for i, t in enumerate(scheduler.timesteps.tolist()):
+                if i < first_step:
+                    continue
                 unet.cozy_step = i
                 noise = guided(unet, scheduler.scale_model_input(latents, t), scheduler.timesteps[i], prompt,
                                pooled, time_ids, guidance)
                 preview(lambda: (latents - (1 - scheduler.alphas_cumprod[t]) ** 0.5 * noise) / scheduler.alphas_cumprod[t] ** 0.5, "sdxl")
                 latents = advance(noise, t, latents)[0]
-                progress(i, steps)
+                progress(i - first_step, steps - first_step)
             image = decode_latents(vae, latents.to(dtype=dtype), scale)
         return image, prompt, pooled, latents
 
@@ -641,6 +658,48 @@ def image(ctx: Context, payload: ImageBox, facts: Preflight[GenerateFacts], mode
           tel: Telemetry, adj: Adjustments) -> ImageResult:
     """SDXL on a canvas: `generate` from the box."""
     return generate(ctx, _request(payload), facts, model, out, tel, adj)
+
+
+#: What SDXL is told of a picture it upscales, and kept from.
+UPSCALE_PROMPT = "a high quality, highly detailed, sharp picture"
+UPSCALE_NEGATIVE = "blurry, lowres, jpeg artifacts, noise, out of focus"
+
+
+class UpscaleInput(msgspec.Struct, kw_only=True):
+    #: `upscale`: the picture, the box's own version.
+    image: Annotated[ImageFile, FileBound(max_decoded_bytes=256 << 20)]
+    #: `upscale`: the picture's ratio at this size (`_SIZES.fit`), up to 8 MP.
+    megapixels: Literal[2, 4, 8] = 8
+    #: `SdxlModel.generate`'s `strength`: the share of the 30 steps run over the picture (se-123).
+    denoise: Annotated[float, msgspec.Meta(gt=0, le=1), Advanced()] = 0.2
+    seed: Seed | None = None
+
+
+@app.tool(label="Upscale", named="image", defaults=_DEFAULTS, memoize=True)
+def upscale(ctx: Context, payload: UpscaleInput, model: SdxlModel, out: Outputs, tel: Telemetry,
+            adj: Adjustments) -> ImageResult:
+    """The picture larger: Lanczos to the size asked, then SDXL img2img over the whole canvas (DPM++ 2M Karras)."""
+    hold_decode_dtype(model.pipe.components["vae"], tel)
+    with tel.stage("reading picture"):
+        picture = payload.image.read()
+    width, height = _SIZES.fit(adj, picture.size, payload.megapixels * MEGAPIXEL)
+    canvas = picture.resize((width, height), PILImage.Resampling.LANCZOS)
+    pixels = torch.frombuffer(bytearray(canvas.tobytes()), dtype=torch.uint8).view(height, width, 3)
+    start = (pixels.permute(2, 0, 1)[None].float() / 127.5 - 1.0)
+    seed = payload.seed if payload.seed is not None else ImageRequest(prompt="").drawn_seed()
+    with tel.stage("tokenize"):
+        tokens = _tokenize(model.tokenizers, UPSCALE_PROMPT)
+        negative = _tokenize(model.tokenizers, UPSCALE_NEGATIVE)
+    with tel.stage("generate"):
+        image, *_ = model.generate(tokens, negative, width=width, height=height, steps=30, guidance=7.0,
+                                   hidiffusion=False, seed=seed, progress=ctx.progress, start=start,
+                                   strength=payload.denoise)  # fmt: skip
+    rgb = ((image[0].float() / 2 + 0.5).clamp(0, 1) * 255).round().to(torch.uint8).permute(1, 2, 0).contiguous()
+    _integrity(image, rgb, tel)
+    with tel.stage("saving image"):
+        asset = out.save_image(ImageFrame(width, height, bytes(rgb.cpu().numpy().tobytes())), format="png")
+    tel.log("upscale", source=f"{picture.width}x{picture.height}", width=width, height=height, denoise=payload.denoise)
+    return ImageResult(asset, width, height, seed, UPSCALE_PROMPT)
 
 
 # ------------------------------------------------------------------ quantized lanes

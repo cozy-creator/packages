@@ -8,8 +8,10 @@ from typing import Annotated, Literal
 
 import msgspec
 from cozy_runtime.author import Adjustments, App, Context, Outputs, Seed, Telemetry
-from cozy_runtime.fields import Advanced, AspectRatio, Image, Prompt, Ratios
-from cozy_runtime.image import Guidance, ImageRequest, ImageResult, Sizes, Steps, held
+from cozy_runtime.fields import Advanced, AspectRatio, FileBound, Image, Prompt, Ratios
+from cozy_runtime.image import MEGAPIXEL, Guidance, ImageRequest, ImageResult, Sizes, Steps, held
+from cozy_runtime.media import ImageFile
+from PIL import Image as PILImage
 
 from .model import MAX_SIDE, MIN_SIDE, PATCH, TURBO_SIGMAS, Flux2, prepare_references, schedule
 from . import quantize as quantize  # its recipes
@@ -159,3 +161,53 @@ def image(ctx: Context, payload: ImageBox, model: Flux2, turbo_lora: Flux2TurboL
     request = GenerateInput(prompt=payload.instructions, aspect_ratio=payload.aspect_ratio, megapixels=payload.megapixels,
                             seed=payload.seed, prompt_upsampling=payload.prompt_upsampling)  # fmt: skip
     return _generate(ctx, request, model, turbo_lora if payload.turbo else None, upsampler, out, tel, adj)
+
+
+#: What FLUX.2 is asked of a picture it upscales, in BFL's words for a picture (`_said`).
+UPSCALE_PROMPT = ("Upscale image 1 to a higher resolution. Keep the picture exactly as it is: the same composition, "
+                  "framing, colours, lighting and every detail; only make it sharper and more finely detailed.")
+
+
+class UpscaleInput(msgspec.Struct, kw_only=True):
+    #: `upscale`: the picture, the box's own version.
+    image: Annotated[ImageFile, FileBound(max_decoded_bytes=256 << 20)]
+    #: `upscale`: the picture's ratio at this size (`SIZES.fit`), up to FLUX.2's 4 MP.
+    megapixels: Literal[2, 4] = 4
+    #: `Flux2.denoise`'s `start`: the time the picture starts at; 1 redraws it from noise (se-123).
+    denoise: Annotated[float, msgspec.Meta(gt=0, le=1), Advanced()] = 0.6
+    seed: Seed | None = None
+
+
+@app.tool(label="Upscale", named="image", defaults={"model": _DEV, "turbo_lora": _TURBO},
+          components={"model": _COMPONENTS["model"], "turbo_lora": ("model",)}, memoize=True)  # fmt: skip
+def upscale(ctx: Context, payload: UpscaleInput, model: Flux2, turbo_lora: Flux2TurboLoRA, out: Outputs,
+            tel: Telemetry, adj: Adjustments) -> ImageResult:
+    """The picture larger: FLUX.2 [dev] Turbo edits it at the size asked, the picture Lanczos-upscaled to the canvas
+    both as the reference (at most 2024² pixels, BFL's) and, below `denoise`, as the start."""
+    with tel.stage("reading picture"):
+        picture = payload.image.read()
+    width, height = SIZES.fit(adj, picture.size, payload.megapixels * MEGAPIXEL)
+    canvas = picture.resize((width, height), PILImage.Resampling.LANCZOS)
+    seed = payload.seed if payload.seed is not None else ImageRequest(prompt="").drawn_seed()
+    model.hold_vae(tel)
+    with tel.stage("encoding reference images"):
+        references = model.encode_references(prepare_references([canvas]))
+        start = None
+        if payload.denoise < 1:
+            start = model.encode_references([canvas])[0]
+    with tel.stage("encoding prompt"):
+        embeds = model.encode(UPSCALE_PROMPT)
+    ctx.raise_if_cancelled()
+    timesteps = schedule(8, (height // PATCH) * (width // PATCH), TURBO_SIGMAS)
+    if start is not None:
+        timesteps = [payload.denoise, *(t for t in timesteps if t < payload.denoise)]
+    denoise = partial(model.denoise, embeds, None, references, width=width, height=height, timesteps=timesteps,
+                      guidance=2.5, seed=seed, progress=ctx.progress, start=start)  # fmt: skip
+    with tel.stage("generating image"):
+        latents = turbo_lora.applied(model.graph.components["transformer"], denoise)
+    with tel.stage("decoding image"):
+        image = model.decode(latents, width=width, height=height)
+    with tel.stage("saving image"):
+        asset = out.save_image(image, format="png")
+    tel.log("upscale", source=f"{picture.width}x{picture.height}", width=width, height=height, denoise=payload.denoise)
+    return ImageResult(asset, width, height, seed, UPSCALE_PROMPT)

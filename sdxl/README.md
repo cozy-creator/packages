@@ -4,6 +4,11 @@
 
 `image` is the canvas tool, its prompt `instructions`: `aspect_ratio`, `megapixels`, `negative_prompt` and `seed`; HiDiffusion runs above 1 MP.
 
+`upscale` (the Upscale tool on a picture box) makes the box's picture larger, at 2, 4 or 8 MP: img2img over the picture
+Lanczos-upscaled to the canvas, the last `denoise` (0.2) of 30 DPM++ 2M Karras steps, no HiDiffusion. Downscaled back from
+8 MP, 29-30 dB PSNR to the input on a photo and a woodblock print, against SeedVR2's 26.5 and 30.3 (se-123). `megapixels`,
+`denoise` and `seed`.
+
 Write the request in a file, `request.yaml`:
 
 ```yaml

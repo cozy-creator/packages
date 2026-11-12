@@ -20,6 +20,7 @@ import json
 from collections.abc import Callable
 from typing import TypedDict, cast
 
+import numpy as np
 import torch
 from cozy_runtime import rng
 from cozy_runtime.attention import Attention
@@ -386,6 +387,20 @@ class MossImage(Model[MossGraph]):
             )
             return out.last_hidden_state[0].cpu()  # type: ignore[no-any-return]
 
+    @uses_components("vae")
+    def encode_image(self, image: Image.Image) -> torch.Tensor:
+        """`decode` inverted: the picture's VAE mode in 2x2 patches, BatchNorm-normalized, [1, 128, H/16, W/16]
+        in f32 on the CPU."""
+        vae = self.graph.components["vae"]
+        with torch.inference_mode():
+            pixels = torch.from_numpy(np.array(image.convert("RGB"))).permute(2, 0, 1).float() / 127.5 - 1.0
+            z = vae.encode(pixels[None].to(str(self.device), vae.dtype)).latent_dist.mode().float()
+            b, c, h, w = z.shape
+            z = z.view(b, c, h // 2, 2, w // 2, 2).permute(0, 1, 3, 5, 2, 4).reshape(b, c * 4, h // 2, w // 2)
+            bn, eps = vae.bn, vae.config["batch_norm_eps"]
+            std = (bn.running_var.float() + eps).sqrt().view(1, -1, 1, 1).to(z.device)  # type: ignore[union-attr]  # tracked
+            return ((z - bn.running_mean.float().to(z.device).view(1, -1, 1, 1)) / std).cpu()  # type: ignore[union-attr]  # tracked
+
     @uses_components("transformer")
     def denoise(
         self,
@@ -399,6 +414,8 @@ class MossImage(Model[MossGraph]):
         seed: int,
         progress: Callable[[int, int], None],
         tel: Telemetry,
+        start: torch.Tensor | None = None,
+        strength: float = 1.0,
     ) -> torch.Tensor:
         """Upstream's sampler: f32 noise from `seed` on the CPU, CFG against `negative` with block 22
         skipped in its branch, Euler (`MossScheduler`) in f32. Returns the latents [1, 128, H/16, W/16]
@@ -413,8 +430,16 @@ class MossImage(Model[MossGraph]):
         fused = device.type == "cuda" and not native()
         scheduler = construct(MossScheduler, self.graph.scheduler_config)
         scheduler.set_timesteps(steps, device=device)
+        # With `start` (`encode_image`), img2img: the steps whose sigma is above `strength` are skipped and the
+        # state begins as `start` noised to the first kept sigma.
+        first = 0 if start is None else min(int((scheduler.sigmas[:-1] > strength).sum()), len(scheduler.timesteps) - 1)
+        if start is not None:
+            scheduler.set_begin_index(first)
         with torch.no_grad():
             latents = rng.noise((1, transformer.latent_channels, rows, columns), seed, device=device)
+            if start is not None:
+                sigma = float(scheduler.sigmas[first])
+                latents = (1 - sigma) * start.to(device=device, dtype=latents.dtype) + sigma * latents
             texts, ropes = [], []
             for text in (positive, *([] if negative is None else [negative])):
                 context = text[None].to(device)
@@ -423,6 +448,8 @@ class MossImage(Model[MossGraph]):
                 ropes.append(transformer.rotations(phase) if fused else transformer.table(phase))
             timesteps = scheduler.timesteps
             for i, t in enumerate(timesteps):
+                if i < first:
+                    continue
                 velocity = transformer(latents, t[None], texts, ropes)
                 prediction = velocity[0]
                 if len(velocity) > 1:

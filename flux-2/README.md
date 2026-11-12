@@ -12,6 +12,11 @@ speed generates an image, or edits the pictures its prompt mentions (up to ten, 
 `image` is the canvas tool, its prompt `instructions`, one box for [dev]: `turbo` (on by default) adds the Turbo LoRA; `aspect_ratio`,
 `megapixels`, `seed`, and `prompt_upsampling` under Advanced, on by default. The LoRA and the upsampler load only when a render asks for them.
 
+`upscale` (the Upscale tool on a picture box) makes the box's picture larger, at 2 or 4 MP: [dev] Turbo edits it with the
+picture Lanczos-upscaled to the canvas as the reference and, below `denoise` (0.6), as the start. Downscaled back, 34 dB
+PSNR to the input on a photo and a woodblock print, against SeedVR2's 26.5 and 30.3; at `denoise` 1 it redraws (19-20 dB,
+se-123). `megapixels`, `denoise` and `seed`.
+
 The function sets the regime: `generate` runs a [klein] as Base, `generate_turbo` as distilled, so give each its
 own checkpoint. Klein 4B (Apache-2.0,
 8 GB of weights at int8) is the choice for consumer cards:
