@@ -31,7 +31,8 @@ and checks every mention names something, so a package only replaces `<key>` wit
 | hunyuan-image-3 | `图N` | Tencent's documented prompts |
 | hidream-o1 | its name | no convention upstream |
 | minimax-h3 | `<Picture N>`, `<Video N>`, `<Audio N>` per segment; see its README | MiniMax's reference guide |
-| anima, ideogram-4, krea-2, moss-image, sdxl | (takes no pictures) | text to image only |
+| moss-image | its name; several as `image N` | no convention upstream: Moss-Image-Edit's instructions say "the image" |
+| anima, ideogram-4, krea-2, sdxl | (takes no pictures) | text to image only |
 
 ```python
 from cozy_runtime.author import Image, ImageRequest, Prompt

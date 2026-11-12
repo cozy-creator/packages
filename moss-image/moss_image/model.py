@@ -58,6 +58,8 @@ MAX_TOKENS = 4096
 PATCH = 16
 #: Upstream's default guidance: the negative branch skips this block (zero-based).
 UNCOND_SKIP = frozenset({22})
+#: A block's keys and values of the references, each [1, N, heads, head_dim].
+type Reference = tuple[torch.Tensor, torch.Tensor]
 
 
 class RMSNorm(torch.nn.Module):
@@ -159,7 +161,10 @@ class Block(torch.nn.Module):
         #: How its last call ran the modulated norms and SiTU, for the run record.
         self.served = {"norms": "", "situ": ""}
 
-    def forward(self, x: torch.Tensor, rope: torch.Tensor, modulation: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, rope: torch.Tensor, modulation: torch.Tensor,
+                references: Reference | None = None, keep: list[Reference] | None = None) -> torch.Tensor:
+        """`references`: the references' keys and values here (`MossTransformer.references`), which every query
+        also attends to; `keep` collects this block's own keys and values (the references' pass)."""
         shift_a, scale_a, gate_a, shift_f, scale_f, gate_f = modulation.unbind(1)
         proj = self.proj
         qkv = proj["q"], proj["k"], proj["v"]
@@ -170,6 +175,10 @@ class Block(torch.nn.Module):
             q, k = rms_rope_split_half(q, k, rope, self.q_norm.weight, self.k_norm.weight, self.q_norm.eps)
         else:
             q, k = rotate(self.q_norm(q), rope), rotate(self.k_norm(k), rope)
+        if keep is not None:
+            keep.append((k, v))
+        if references is not None:
+            k, v = torch.cat((k, references[0]), 1), torch.cat((v, references[1]), 1)
         x.addcmul_(proj["o"](self.attn(q, k, v).flatten(2)), gate_a[:, None])
         hidden = proj["ffn_up_gate"](modulated(x, self.norm2, scale_f, shift_f, (proj["ffn_up_gate"],)))
         activated: torch.Tensor | PreQuantized | None = int8_rows(hidden, (proj["ffn_down"],), activation="situ")
@@ -217,6 +226,34 @@ class MossTransformer(torch.nn.Module):
         return torch.cat((image, self.text_positions(text_length, device)), 0)
 
     @staticmethod
+    def reference_positions(shapes: list[tuple[int, int]], device: torch.device) -> torch.Tensor:
+        """(r, f, h, w) of each reference's tokens: reference i on r = i + 1 and f = 0, its grid centred (ComfyUI's
+        `MOSSImage.rope`)."""
+        out = []
+        for index, (height, width) in enumerate(shapes):
+            h, w = torch.meshgrid(torch.arange(height, device=device), torch.arange(width, device=device), indexing="ij")
+            grid = torch.stack((torch.full_like(h, index + 1), torch.zeros_like(h), h, w), -1).flatten(0, 1).float()
+            grid[:, 2] -= (height - 1) / 2
+            grid[:, 3] -= (width - 1) / 2
+            out.append(grid)
+        return torch.cat(out, 0)
+
+    def references(self, latents: list[torch.Tensor], fused: bool) -> list[Reference]:
+        """Each block's keys and values of the references `latents` [1, 128, h, w] (Moss-Image-Edit): free of noise
+        at t = 0 and attending only to each other, so they depend on themselves alone and are computed once a
+        request (ComfyUI's `MOSSImage.preprocess_refs`)."""
+        device = latents[0].device
+        x = torch.cat([self.video_embedder(latent.flatten(2).transpose(1, 2).to(DTYPE)) for latent in latents], 1)
+        phase = self.phase(self.reference_positions([(latent.shape[2], latent.shape[3]) for latent in latents], device))
+        rope = self.rotations(phase) if fused else self.table(phase)
+        modulation, _ = self.modulation(torch.zeros(1, device=device))
+        kept: list[Reference] = []
+        x = x.contiguous()
+        for block in self.layers:
+            x = block(x, rope, modulation, keep=kept)
+        return kept
+
+    @staticmethod
     def text_positions(text_length: int, device: torch.device) -> torch.Tensor:
         text = torch.zeros(text_length, 4, device=device, dtype=torch.float32)
         text[:, 1] = torch.arange(text_length, device=device)
@@ -257,15 +294,17 @@ class MossTransformer(torch.nn.Module):
         return out.float()
 
     def forward(self, latents: torch.Tensor, timestep: torch.Tensor, texts: list[torch.Tensor],
-                ropes: list[torch.Tensor]) -> list[torch.Tensor]:
+                ropes: list[torch.Tensor], references: list[Reference] | None = None) -> list[torch.Tensor]:
         """Each prompt's f32 velocity [1, C, H, W] of `latents` at `timestep` [1]: its text stream and
         RoPE, the conditional prompt first. The prompts pass through each block in turn, so a streamed
-        block comes in once per step; a later prompt skips `UNCOND_SKIP`, upstream's unconditional branch."""
+        block comes in once per step; a later prompt skips `UNCOND_SKIP`, upstream's unconditional branch.
+        Both attend to `references` (`references`), as Moss-Image-Edit's sampling conditions both."""
         modulation, head = self.modulation(timestep)
         video = self.video_embedder(latents.flatten(2).transpose(1, 2).to(DTYPE).contiguous())
         streams = [torch.cat((video, text), 1) for text in texts]
         for index, block in enumerate(self.layers):
-            streams = [x if branch and index in UNCOND_SKIP else block(x, rope, modulation)
+            held = None if references is None else references[index]
+            streams = [x if branch and index in UNCOND_SKIP else block(x, rope, modulation, held)
                        for branch, (x, rope) in enumerate(zip(streams, ropes, strict=True))]
         return [self.velocity(x, head, latents.shape[2], latents.shape[3]) for x in streams]
 
@@ -418,10 +457,11 @@ class MossImage(Model[MossGraph]):
         tel: Telemetry,
         start: torch.Tensor | None = None,
         strength: float = 1.0,
+        references: list[torch.Tensor] | None = None,
     ) -> torch.Tensor:
         """Upstream's sampler: f32 noise from `seed` on the CPU, CFG against `negative` with block 22
         skipped in its branch, Euler (`MossScheduler`) in f32. Returns the latents [1, 128, H/16, W/16]
-        on the CPU.
+        on the CPU. `references` (`encode_image`'s, Moss-Image-Edit's) condition both branches.
 
         Each prompt's text stream and RoPE are built once, before the loop; with CFG both branches
         pass through each block in turn inside one call of the transformer, so a streamed block comes in
@@ -442,6 +482,7 @@ class MossImage(Model[MossGraph]):
             if start is not None:
                 sigma = float(scheduler.sigmas[first])
                 latents = (1 - sigma) * start.to(device=device, dtype=latents.dtype) + sigma * latents
+            held = None if not references else transformer.references([r.to(device) for r in references], fused)
             texts, ropes = [], []
             for text in (positive, *([] if negative is None else [negative])):
                 context = text[None].to(device)
@@ -452,7 +493,7 @@ class MossImage(Model[MossGraph]):
             for i, t in enumerate(timesteps):
                 if i < first:
                     continue
-                velocity = transformer(latents, t[None], texts, ropes)
+                velocity = transformer(latents, t[None], texts, ropes, held)
                 prediction = velocity[0]
                 if len(velocity) > 1:
                     prediction = velocity[1] + guidance * (velocity[0] - velocity[1])

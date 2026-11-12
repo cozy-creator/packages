@@ -6,6 +6,15 @@ hidden state, decoded by FLUX.2's VAE with its small decoder.
 
 `image` is the canvas tool, its prompt `instructions`: `aspect_ratio`, `megapixels`, `negative_prompt` and `seed`.
 
+**Edits.** A prompt that mentions pictures (`<amy> in a red coat`, up to 4) runs under chinoll's Moss-Image-Edit LoRA
+(`chinoll/moss-image-edit`, built in: the request names no LoRA): each picture, its long edge at most 512, is a
+noise-free reference at t = 0 attending only to the references, computed once a request; the image and both
+CFG branches attend to it. 30 Euler steps at CFG 4 against an empty negative, at the first picture's ratio and 1 MP,
+as ComfyUI's Moss-Image-Edit workflows. One picture reads as its name, several as `image N`. Caller LoRAs stack with it.
+
+`image_to_image` remakes a picture from a prompt: `strength` (0.6) is the noise it starts under, 50-step schedule at
+CFG 3; `megapixels` unset keeps its size.
+
 `upscale` (the Upscale tool on a picture box) makes the box's picture larger, at 2 or 4 MP: img2img over the picture
 Lanczos-upscaled to the canvas, 50-step schedule and CFG 3 from `denoise` (0.4) down. Downscaled back, 29 dB PSNR to the
 input on a photo and a woodblock print, against SeedVR2's 26.5 and 30.3 (se-123). `megapixels`, `denoise` and `seed`.
@@ -13,6 +22,8 @@ input on a photo and a woodblock print, against SeedVR2's 26.5 and 30.3 (se-123)
 | function | checkpoint | default steps | guidance |
 | --- | --- | --- | --- |
 | `generate` | MOSS-Image-SFT | 50 | 3.0 (CFG; the negative branch skips block 22) |
+| `generate` with pictures | MOSS-Image-SFT + Moss-Image-Edit | 30 | 4.0 |
+| `image_to_image` | MOSS-Image-SFT | 50 × `strength` | 3.0 |
 
 Upstream ships no distilled checkpoint, so there is no `generate_turbo`. MOSS-Image-Base, the LoRA
 training base, runs with the same function: `model.model=moss-image-base@<release>`.
