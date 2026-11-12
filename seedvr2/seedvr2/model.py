@@ -181,6 +181,8 @@ class RestorationModel(Model[Graph]):
         (t, h, w, c) on the device, sampled from `generator`. The VAE moves one slice of frames
         at a time."""
         latent = _vae(self.graph).encode(pixels[None], generator).latent[0]
+        if latent.ndim == 3:  # upstream squeezes a single frame's time axis
+            latent = latent.unsqueeze(1)
         return latent.movedim(0, -1).to(str(self.device)) * SCALE
 
     @uses_components("dit", "conditioning")
