@@ -4,7 +4,7 @@ Runtime-executed."""
 from __future__ import annotations
 
 from functools import partial
-from typing import Annotated
+from typing import TYPE_CHECKING, Annotated
 
 import msgspec
 from cozy_runtime.author import Adjustments, App, Context, Outputs, Seed, Telemetry
@@ -21,7 +21,10 @@ from cozy_runtime.image import (
 )
 
 from . import quantize as quantize  # its recipes
-from .model import PATCH, QwenImage, QwenImageLoRA, QwenImageTransformer
+from .model import PATCH, QwenImage, QwenImageLoRA, QwenImageTransformer, text_rows
+
+if TYPE_CHECKING:
+    from PIL.Image import Image as Picture
 
 app = App()
 
@@ -69,6 +72,15 @@ def _said(prompt: Prompt[Image], adj: Adjustments) -> tuple[str, list[Image]]:
     return said, [prompt.references[key] for key in keys]
 
 
+def _read(adj: Adjustments, field: str, model: QwenImage, text: str, pictures: list[Picture], rows: int) -> str:
+    """`text` as the edit reads it beside its pictures (`QwenImage.edit_prompt`), with a warning when its end goes."""
+    kept, keep, given = model.edit_prompt(text, pictures, rows)
+    if keep < given:
+        adj.warn(field, f"Qwen-Image-Edit reads {keep} of its {given} tokens beside {len(pictures)} pictures, "
+                        f"so it goes without the rest")
+    return kept
+
+
 def _render(
     ctx: Context,
     model: QwenImage,
@@ -96,6 +108,11 @@ def _render(
         with tel.stage("encoding reference images"):
             references = model.encode_references(images)
     with tel.stage("encoding prompt"):
+        if references is not None:
+            rows = text_rows([(1, height // PATCH, width // PATCH), *references[1]])
+            prompt = _read(adj, "prompt", model, prompt, images, rows)
+            if guidance > 1:
+                negative = _read(adj, "negative_prompt", model, negative, images, rows)
         embeds, mask = model.encode(prompt, images)
         unconditional = model.encode(negative, images) if guidance > 1 else None
     ctx.raise_if_cancelled()
