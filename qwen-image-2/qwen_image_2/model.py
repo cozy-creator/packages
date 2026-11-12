@@ -269,12 +269,14 @@ class Components(TypedDict):
 
 
 def _vae(config: Config) -> AutoencoderKLQwenImage21:
-    """A checkpoint's `vae`, in the dtype it stores. Runtime pages a model by its `_no_split_modules`; Diffusers names
-    none for this VAE, so its 1.35 GB of F32 weights, encoder included, stayed resident through a decode and left a 3 GB
-    card short for the decode's activations. Each residual, attention and resample block is one page instead (every one
-    is called as a module, also by `_decoded`)."""
+    """A checkpoint's `vae`, in the dtype it stores: its section of the config, or the whole config of a checkpoint that
+    holds the VAE alone (Runtime gives a lone component's unsectioned). Runtime pages a model by its `_no_split_modules`;
+    Diffusers names none for this VAE, so its 1.35 GB of F32 weights, encoder included, stayed resident through a decode
+    and left a 3 GB card short for the decode's activations. Each residual, attention and resample block is one page
+    instead (every one is called as a module, also by `_decoded`)."""
+    section = config.section("vae") if "vae" in config.keys() else config
     with transformer_init.no_init_weights():
-        vae: AutoencoderKLQwenImage21 = construct(AutoencoderKLQwenImage21, config.section("vae").mapping())
+        vae: AutoencoderKLQwenImage21 = construct(AutoencoderKLQwenImage21, section.mapping())
     _to(vae, _stored(config, "vae", vae))
     vae._no_split_modules = [  # type: ignore[assignment]  # Diffusers declares None
         "QwenImage21ResidualBlock",
