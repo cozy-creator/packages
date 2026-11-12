@@ -28,6 +28,7 @@ from cozy_runtime.author import (
     OutputError,
     Telemetry,
     memoize,
+    preview,
     uses_components,
 )
 from diffusers.models.autoencoders.autoencoder_kl_flux2 import AutoencoderKLFlux2
@@ -327,6 +328,7 @@ class Flux2(Model[Flux2Graph]):
                 if cfg:
                     unconditional, conditional = pred.chunk(2)
                     pred = unconditional + guidance * (conditional - unconditional)
+                preview(lambda: x - now * pred, "flux2", grid=(rows, columns))
                 x = x + (pred.float() * (then - now)).to(pred.dtype)
                 progress(i, steps)
         return x.cpu()

@@ -1641,6 +1641,7 @@ class OfficialH3Pipeline:
             lambda step: _attention_layout(block_state, step, sol_dense_steps=sol_dense_steps, tau=tau),
             sol_dense_steps,
             on_step,
+            grid=(int(state.values.get("num_latent_frames", 0)), int(state.values.get("latent_height", 0)) // 2, int(state.values.get("latent_width", 0)) // 2),
             overlay=cast("Overlay | None", (block_state.attention_kwargs or {}).get(OVERLAY_KWARG)),  # stored there only
             cache=cache,
         )

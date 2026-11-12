@@ -24,6 +24,7 @@ from cozy_runtime.author import (
     OutputError,
     Serving,
     memoize,
+    preview,
     uses_components,
 )
 from cozy_runtime.accel.kernels import Plan
@@ -357,6 +358,7 @@ class Krea2(Model[Krea2Graph]):
                 if len(velocity) > 1:
                     prediction = prediction + guidance * (prediction - velocity[1])
                 # The state stays bf16, as the pipeline's with a bf16 final layer.
+                preview(lambda: latents - scheduler.sigmas[i] * prediction, "qwen-image", grid=(rows, columns))
                 latents = scheduler.step(prediction, t, latents, return_dict=False)[0].to(DTYPE)
                 progress(i, steps)
         return latents.cpu()

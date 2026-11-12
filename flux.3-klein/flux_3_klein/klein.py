@@ -29,6 +29,7 @@ from cozy_runtime.author import (
     Serving,
     Telemetry,
     memoize,
+    preview,
     retained,
     uses_components,
 )
@@ -432,6 +433,7 @@ class Klein(Model[KleinGraph]):
                     else:
                         unconditional, conditional = velocities
                         velocity = unconditional + guidance * (conditional - unconditional)
+                    preview(lambda: x - now * velocity, "flux2", grid=(rows, columns))
                     x = x + (then - now) * velocity
                     progress(i, steps)
         return x.cpu()

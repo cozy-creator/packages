@@ -15,7 +15,7 @@ import torch
 import torch.nn.functional as F
 from cozy_runtime import rng
 from cozy_runtime.accel import hold_dtype
-from cozy_runtime.author import Config, Loader, Model, OutputError, Telemetry, uses_components
+from cozy_runtime.author import Config, Loader, Model, OutputError, Telemetry, preview, uses_components
 from diffusers.configuration_utils import ConfigMixin
 from diffusers.models.autoencoders.autoencoder_kl_flux2 import AutoencoderKLFlux2
 from diffusers.models.transformers.transformer_ideogram4 import Ideogram4Transformer2DModel
@@ -182,6 +182,7 @@ class Ideogram4(Model[IdeogramGraph]):
                 positive = tf(image, prefix, t_model, *positive_rope).to(torch.float32)
                 negative = uncond(image, None, t_model, *negative_rope).to(torch.float32)
                 velocity = guidance[i] * positive + (1.0 - guidance[i]) * negative
+                preview(lambda: latents + scheduler.sigmas[i] * velocity, "flux2", grid=(rows, columns))
                 latents = scheduler.step(-velocity, t, latents, return_dict=False)[0]
                 progress(i, steps)
         return latents.cpu()

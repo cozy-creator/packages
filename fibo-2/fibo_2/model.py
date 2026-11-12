@@ -24,6 +24,7 @@ from cozy_runtime.author import (
     Serving,
     Telemetry,
     memoize,
+    preview,
     uses_components,
 )
 from diffusers.configuration_utils import ConfigMixin
@@ -253,6 +254,7 @@ class Fibo2(Model[FiboGraph]):
                 noise_pred = predictions[0]
                 if cfg:
                     noise_pred = predictions[1] + guidance * (noise_pred - predictions[1])
+                preview(lambda: latents - scheduler.sigmas[i] * noise_pred, "flux2")
                 latents = scheduler.step(noise_pred, timesteps[i], latents, return_dict=False)[0]  # type: ignore[arg-type]  # Diffusers annotates the legacy FloatTensor
                 progress(i, steps)
         return latents.cpu()

@@ -64,6 +64,7 @@ from cozy_runtime.author import (
     Telemetry,
     UnsupportedInput,
     memoize,
+    preview,
     retained,
     uses_components,
 )
@@ -466,6 +467,7 @@ class QwenImage21Model(Model[QwenImage21Graph]):
                 for i, t in enumerate(timesteps):
                     noise = transformer(latents, joint=(times[i : i + 1], embeds, references, *joint.inputs()),
                                         projection=None if heads is None else heads[i])
+                    preview(lambda: latents - euler.sigmas[i] * noise, "qwen-image-2", grid=(height // 16, width // 16))
                     latents = euler.step(noise, t, latents, return_dict=False)[0]
                     progress(i, steps)
                 return latents
@@ -503,6 +505,7 @@ class QwenImage21Model(Model[QwenImage21Graph]):
                 for i in range(1, steps):
                     cached = (times[i : i + 1], layout.rotary_emb, layout.modulation_mask, kv_cache.prefix())
                     noise = transformer(latents, cached=cached, projection=None if heads is None else heads[i])
+                    preview(lambda: latents - euler.sigmas[i] * noise, "qwen-image-2", grid=(height // 16, width // 16))
                     latents = euler.step(noise, timesteps[i], latents, return_dict=False)[0]
                     progress(i, steps)
         return latents
