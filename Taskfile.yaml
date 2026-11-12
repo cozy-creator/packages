@@ -29,8 +29,9 @@ tasks:
   # into dist/ instead, and leaves the checkout as it was.
   # `--rc` (cl-922), on a checkout of the open RC's branch: a package built for the RC's Runtime, at a PEP 440 prerelease
   # version (`0.10.0rc1`), published live from that branch: every hub's unversioned default and every released client skip
-  # a prerelease, and a dev home's rental on the RC's Runtime takes it. Its Triton sets compile with the RC's Runtime
-  # (cozy-runtime's prerelease rc-<x.y.z>); a lock it changes is pushed to the RC branch; nothing cascades.
+  # a prerelease, and a dev home's rental on the RC's Runtime takes it. It declares that Runtime as its floor, locked by URL
+  # (`cozy-runtime>=0.46.0.dev2250,<0.47`, scripts/rc-floor.py), and its Triton sets compile with it (cozy-runtime's
+  # prerelease rc-<x.y.z>); the pyproject and lock it changes are pushed to the RC branch; nothing cascades.
   publish:
     desc: "Publish candidates from master to every hub (yanked), then cascade to their in-repo dependents: task publish -- [--dry-run] [--rc] qwen-image-2"
     cmds:
@@ -51,10 +52,14 @@ tasks:
             echo "$(ver "$r")" | grep -qE '^[0-9.]+(a|b|rc)[0-9]+$|\.dev[0-9]+$' \
               || { echo "$r $(ver "$r"): --rc publishes a prerelease (0.10.0rc1), which released clients skip; bump it first" >&2; exit 2; }
           done
-          # The RC's Runtime, which its rentals run and its Triton sets compile with.
-          runtime=$(curl -fsSL "https://github.com/cozy-creator/cozy-runtime/releases/download/rc-${branch#rc/}/SHA256SUMS" | awk '/manylinux_2_28_x86_64\.whl$/ {print $2; exit}')
-          [ -n "$runtime" ] || { echo "cozy-runtime has no rc-${branch#rc/} build yet (its rc-dev.yaml)" >&2; exit 1; }
-          runtime="https://github.com/cozy-creator/cozy-runtime/releases/download/rc-${branch#rc/}/$runtime"
+          # The RC's Runtime, which its rentals run and its Triton sets compile with, and its pure wheel, which each root
+          # declares as its floor and locks by URL (scripts/rc-floor.py, cl-952): a machine runs it only on that Runtime.
+          base="https://github.com/cozy-creator/cozy-runtime/releases/download/rc-${branch#rc/}"
+          sums=$(curl -fsSL "$base/SHA256SUMS")
+          runtime=$(awk '/manylinux_2_28_x86_64\.whl$/ {print $2; exit}' <<< "$sums")
+          pure=$(awk '/-py3-none-any\.whl$/ {print $2; exit}' <<< "$sums")
+          [ -n "$runtime" ] && [ -n "$pure" ] || { echo "cozy-runtime has no rc-${branch#rc/} build with its pure wheel yet (its rc-dev.yaml)" >&2; exit 1; }
+          runtime="$base/$runtime" pure="$base/$pure"
         fi
         [ -n "$dry" ] || { git fetch -q origin "$branch"; git merge -q --ff-only FETCH_HEAD; }
         start=$(git rev-parse HEAD); here=$PWD; work=$(mktemp -d); shipped=
@@ -163,7 +168,7 @@ tasks:
         }
         for p in $(for p in */pyproject.toml; do p=${p%/pyproject.toml}; pkg "$p" || continue; echo "$p $p"; deps "$p" | sed "s|\$| $p|"; done | tsort); do
           pkg "$p" || continue
-          case $roots in *" $p "*) up=; relock "$p"; release "$p"; continue ;; esac
+          case $roots in *" $p "*) up=; [ -z "$rc" ] || python3 -I scripts/rc-floor.py "$p/pyproject.toml" "$pure"; relock "$p"; release "$p"; continue ;; esac
           [ -z "$rc" ] || continue
           up=$(for q in $(deps "$p"); do case $changed in *" $q "*) echo "$q" ;; esac; done)
           [ -n "$up" ] || continue
