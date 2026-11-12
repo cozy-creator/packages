@@ -12,9 +12,6 @@ Video with sound from MiniMax H3, as three tools. Each is a box on a canvas and 
 For other packages, **`render_shot`** is `generate` with their LoRAs on every segment (`{shot, loras: [{model,
 strength}]}`), returning only the video, as [orbit](../orbit/README.md) puts ORB360 on its shot.
 
-And one image function, **`image`**: PrunaAI's [P-H3-Image](https://huggingface.co/PrunaAI/P-H3-Image), a fine-tune of
-H3's FL2VA DiT ([P-H3-Image](#p-h3-image)).
-
 Checkpoint preparation now ships in the same package, under `minimax_h3.preparation`:
 the BF16/FP8 producers, AdaLN operations, Turbo and Regenerate LoRA preparation, and
 quantization recipes use the same application and version as these media tools.
@@ -113,25 +110,3 @@ The result is `video` (768p mp4), `latents` (its own, which a pickup resumes and
 
 GPU: one RTX 4090 works (int8, streaming); an 80 GB card is faster. Measured on one H100 at
 30 steps: about 3 minutes for 5 s and 16 minutes for 14 s; turbo runs 8 steps.
-
-## P-H3-Image
-
-`image`, the Image tool, renders `prunaai/p-h3-image` (PrunaAI's mirror) in 8 steps without CFG: text to image, or an
-edit of the pictures its `instructions` mention. The first mentioned is edited and the rest are references (up to 8), each mention
-read as `<Picture N>`. It runs on H3's DiT code, loop and kernels (`minimax_h3/image.py`).
-
-```sh
-cozy run minimax-h3/image instructions='A 1970s film frame of a night market in the rain' aspect_ratio=16:9
-cozy run minimax-h3/image instructions='Give the woman in <portrait> the hat from <hat>'   # in a project
-```
-
-- **Size.** Text to image defaults to 8 MP at 1:1 (2912x2912). `aspect_ratio` and `megapixels` give the card's
-  presets (16:9 is 3872x2176), 1 to 16 MP on a 32 px grid. An edit defaults to Picture 1's size held to 4-8 MP;
-  the VAE reads each picture at its own size held to 1-8 MP.
-- **`prompt_upsampling`** (on): Pruna's upsampler (Qwen3.5-9B) writes the full prompt, or the edit's brief of what
-  to keep. Off, the instructions render as written; an edit's opens with `Edit <Picture 1>.`. The result's `prompt` is
-  what rendered.
-- **Lanes.** `bf16-full` is Pruna's upload as it is; `bf16` replaces the DiT's AdaLN projections with tables
-  (`cozy run minimax-h3/p-h3-image-pruned <bf16-full> prunaai/p-h3-image`); `int8`, `fp8` and `nvfp4` are
-  recipes over `bf16` (`cozy model quantize <bf16 commit> --lane int8 --package minimax-h3`).
-

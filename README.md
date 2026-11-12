@@ -21,6 +21,7 @@ dependencies or qualifying a worker image.
 | `ideogram-4/` | Ideogram 4 text-to-image from JSON captions, with layout regions and rendered text (Ideogram Non-Commercial model licence) |
 | `moss-image/` | OpenMOSS MOSS-Image text-to-image with layout boxes for objects and text (Apache-2.0) |
 | `krea-2/` | Krea 2 text-to-image: Raw (`generate`) and its 8-step Turbo (`generate_turbo`), with caller LoRAs (Krea 2 Community License) |
+| `p-h3-image/` | P-H3-Image, Pruna AI's image model: text to image and edits of up to 8 pictures at 8 MP in 8 steps (MiniMax H3 Community License) |
 | `relayvsr/` | RelayVSR streaming 4x video upscaling, a fast alternative to SeedVR2 (Apache-2.0) |
 | `orbit/` | Orbit: a picture's subject seen from all the way round, one clockwise turn by `minimax-h3` under ORB360 |
 | `qwen3.6/` | Qwen3.6-35B-A3B and 27B: questions about text, images and videos, on Runtime's shared Qwen-VL code (Apache-2.0) |

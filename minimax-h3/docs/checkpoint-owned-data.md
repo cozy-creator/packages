@@ -32,8 +32,3 @@ DiT weights and plans, so unused processor data is not required there. Assetless
 inputs refuse before an output writer opens. Runtime's `Output.inherit` preserves
 all source component assets for fresh lanes; a retable Writer preserves its base
 assets and replaces only the requested timestep plans.
-
-P-H3-Image is a separate model. Its existing `prunaai/p-h3-image@0.1.0` checkpoints
-already contain their own `processor` and `prompt_upsampler_processor` components.
-Those consumers read the selected checkpoint's assets directly; they do not use
-the official H3 folded processor namespace or its base-model guards.

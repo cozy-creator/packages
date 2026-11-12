@@ -864,6 +864,3 @@ from .regenerate import regenerate_lora  # noqa: E402
 
 # New bytes: the rank-576 factors cast to bf16 (6.2 GB) and the refine tables.
 app.entrypoint(regenerate_lora, name="regenerate-lora", weights=(WeightsOutput("bf16", 7 << 30),))
-
-# P-H3-Image's pruned lane function and quantized recipes.
-from . import image as _image_lanes  # noqa: E402, F401
