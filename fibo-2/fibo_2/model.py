@@ -8,8 +8,8 @@ adapt the DiT through Runtime's PEFT layers (`serving.loras`).
 
 from __future__ import annotations
 
+import io
 from collections.abc import Callable
-from importlib.resources import files
 from typing import TypedDict, cast
 
 import numpy as np
@@ -41,9 +41,9 @@ from transformers import (
 )
 from transformers import initialization as transformer_init
 
-#: The fonts Bria's training drew the caption's text images with, after Pillow's built-in font
-#: (`fonts/` of `briaai/Fibo-2.0-dev`).
-FONTS = tuple(str(files(__package__).joinpath("fonts", name)) for name in ("Aileron-Regular.otf", "DejaVuSans.ttf"))
+#: The fonts Bria's training drew the caption's text images with, after Pillow's built-in font: the checkpoint's
+#: copy of `fonts/` of `briaai/Fibo-2.0-dev`, held by its root component.
+FONTS = ("model/fonts/Aileron-Regular.otf", "model/fonts/DejaVuSans.ttf")
 #: The VAE's dtype on a GPU, as ComfyUI runs FLUX.2's VAE: its activations fit fp16 (dtype audit M1).
 VAE_DTYPE = torch.float16
 
@@ -112,9 +112,7 @@ class FiboGraph:
         text_encoder.lm_head = torch.nn.Identity()
         self.scheduler_config: dict[str, object] = config.section("scheduler").mapping()
         # The processor folder's config file, which TensorFS keeps as its component's config.
-        self.processor_config: dict[str, object] = (
-            config.section("processor").mapping() if "processor" in config.keys() else {}
-        )
+        self.processor_config: dict[str, object] = config.section("processor").mapping()
 
 
 class Components(TypedDict):
@@ -141,10 +139,12 @@ class Fibo2(Model[FiboGraph]):
 
     graph: FiboGraph
     processor: Qwen3VLProcessor
+    fonts: tuple[bytes, ...]
 
     def load(self, loader: Loader) -> None:
         self.graph = loader.construct(FiboGraph)
         self.processor = cast(Qwen3VLProcessor, vlm.processor(loader.assets, "processor/", self.graph.processor_config))  # Qwen3-VL's folder
+        self.fonts = tuple(loader.assets.read(name) for name in FONTS)
 
     def _pipeline(self, component: str) -> _Staged:
         pipe = _Staged(
@@ -176,7 +176,8 @@ class Fibo2(Model[FiboGraph]):
         try:
             with torch.inference_mode():
                 pipe(prompt=prompt, image=images or None, width=width, height=height, guidance_scale=guidance,
-                     negative_prompt=negative, fonts=list(FONTS), output_type="latent")
+                     negative_prompt=negative, fonts=[io.BytesIO(font) for font in self.fonts],
+                     output_type="latent")
         except _Encoded:
             first, *rest = pipe.encoded
             roles = {"prompt": first}

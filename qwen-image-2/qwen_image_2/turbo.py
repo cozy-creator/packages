@@ -97,6 +97,8 @@ class FunAccLoRA(Model[FunAccGraph]):
         reference_images: list[Image.Image] | None = None,
         reference_latents: torch.Tensor | None = None,
         image_pad_mask: torch.Tensor | None = None,
+        start: torch.Tensor | None = None,
+        strength: float = 1.0,
     ) -> torch.Tensor:
         """`base.denoise` with this overlay armed on its DiT, on Fun Acc's grid and per-step heads."""
         transformer = base.graph.components["transformer"]
@@ -106,7 +108,7 @@ class FunAccLoRA(Model[FunAccGraph]):
             return base.denoise(
                 embeds, mask, width=width, height=height, steps=steps, seed=seed, progress=progress,
                 sigmas=SIGMAS, scheduler=SCHEDULER, heads=heads, reference_images=reference_images,
-                reference_latents=reference_latents, image_pad_mask=image_pad_mask,
+                reference_latents=reference_latents, image_pad_mask=image_pad_mask, start=start, strength=strength,
             )
         finally:
             transformer._cozy_overlay = None

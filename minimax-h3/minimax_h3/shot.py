@@ -33,6 +33,7 @@ from cozy_runtime.fields import (
     Total,
     Video,
 )
+from cozy_runtime.image import ratio_of
 from cozy_runtime.media import (
     AudioFile,
     DecodedAudioChunk,
@@ -51,7 +52,7 @@ from safetensors.torch import load as load_tensors
 
 from minimax_h3 import shot_latents
 from minimax_h3.continuation import AUDIO_TICKS_PER_S, Carry, ContinuationPlan, audio_ticks, carries, decode_context
-from minimax_h3.official import FPS, MAX_FRAMES, clip_size, shown_width, within_ratio
+from minimax_h3.official import FPS, MAX_CANVAS_RATIO, MAX_FRAMES, clip_size, shown_width, within_ratio
 from story import _HEADER, MENTION, MIN_CLIP_SECONDS, StoryReference, description_span, name_key, without_sections
 
 #: An output's or latents' byte bound: TensorD's output allowance reads it (256 MiB where none is declared), and the
@@ -107,7 +108,8 @@ class Shot(msgspec.Struct, kw_only=True):
     beats: Annotated[list[Beat], Count(min=1)]
     soundscape: Annotated[Prompt[Image | Video | Audio], Placeholder("N/A")] = Prompt()
     music: Annotated[Prompt[Image | Video | Audio], Placeholder("N/A")] = Prompt()
-    aspect_ratio: Annotated[AspectRatio, Ratios("16:9")] | None = None
+    #: Unset is Auto: a first or last frame's shape, else a take's or plate's, else 16:9; never a reference picture's.
+    aspect_ratio: Annotated[AspectRatio, Ratios(min=1 / MAX_CANVAS_RATIO, max=MAX_CANVAS_RATIO)] | None = None
     first_frame: ShotImage | None = None
     last_frame: ShotImage | None = None
     turbo: bool = True
@@ -491,9 +493,11 @@ def segment_seed(seed: int | None, request_id: str, index: int) -> int:
     return int.from_bytes(hashlib.sha256(f"{request_id}/h3/shot/{index}".encode()).digest()[:4], "big")
 
 
-def is_native(width: int, height: int) -> bool:
-    """Whether a shape is about H3's own 1344x768."""
-    return abs(Fraction(width, height) - Fraction(*NATIVE)) <= Fraction(1, 20)
+def ratio_frame(aspect_ratio: str) -> tuple[int, int]:
+    """An asked `W:H` as a frame of that exact shape, large enough for `canvas` to round on."""
+    width, height = ratio_of(aspect_ratio)
+    scale = math.ceil(4096 / min(width, height))
+    return width * scale, height * scale
 
 
 def canvas(frame: tuple[int, int], joined: bool) -> tuple[tuple[int, int], list[str]]:

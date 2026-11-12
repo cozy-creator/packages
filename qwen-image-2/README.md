@@ -17,6 +17,11 @@ returned. Seeds range from 0 through 9007199254740991 (the interoperable 53-bit
 integer range); omitting one chooses a random seed in that range. Inputs: `prompt` (its text and the pictures it mentions), `aspect_ratio` (any W:H), `megapixels` (any size, 1024² pixels each), `seed`, `prompt_upsampling` and `creativity`. The full model runs 40 steps, Turbo 4 on Fun Acc's
 grid, with its own output head each step and an F32 state (`qwenimage21_pdd.py`). Qwen runs no CFG, so it has no `guidance` or `negative_prompt`. Unknown fields are ignored with a warning. The result is `image`, `width`, `height`, `seed` and `prompt`, the prompt the image was made from.
 
+`upscale` (the Upscale tool on a picture box) makes the box's picture larger, at 2 or 4 MP: Turbo edits it with the picture
+as its reference and, Lanczos-upscaled to the canvas, below `denoise` (0.2) as the start. Downscaled back, 29 dB PSNR to
+the input on a photo and a woodblock print, against SeedVR2's 26.5 and 30.3; at `denoise` 1 it redraws (16-19 dB, se-123).
+`megapixels`, `denoise` and `seed`.
+
 ## Prompt upsampling
 
 Qwen ships two prompt enhancers with Qwen-Image-2.1 ([`prompt_rewrite/`](https://github.com/QwenLM/Qwen-Image-2.1/tree/ab96caa944157ca28a4f36b695c3047549f48f98/prompt_rewrite)),

@@ -10,6 +10,11 @@ cozy run p-h3-image/generate instructions='A 1970s film frame of a night market 
 cozy run p-h3-image/generate instructions='Give the woman in <portrait> the hat from <hat>'   # in a project
 ```
 
+**`upscale`** (the Upscale tool on a picture box) makes the box's picture larger, up to 16 MP (8 by default): an edit at
+that size with the picture Lanczos-upscaled to the canvas as Picture 1, and below `denoise` (0.85: the last 3 of the 8
+steps) as the start too. It keeps the picture: downscaled back, 32-33 dB PSNR to the input on a photo and a woodblock
+print, where SeedVR2 measures 26.5 and 30.3 (se-123). `megapixels`, `denoise` and `seed`.
+
 - **Size.** Text to image defaults to 8 MP at 1:1 (2912x2912). `aspect_ratio` and `megapixels` give the card's
   presets (16:9 is 3872x2176), 1 to 16 MP on a 32 px grid. An edit defaults to Picture 1's size held to 4-8 MP; the
   VAE reads each picture at its own size held to 1-8 MP.

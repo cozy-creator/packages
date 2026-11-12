@@ -6,5 +6,4 @@ Commons Attribution-NonCommercial 4.0 International licence (CC BY-NC 4.0),
 https://creativecommons.org/licenses/by-nc/4.0/legalcode, for non-commercial use. Commercial use is
 subject to a commercial agreement with Bria: https://platform.bria.ai/licensing/pricing?model=fibo-2.
 
-This package holds no model weights and grants no rights to them. The fonts in `fonts/` are those Bria
-trained with (`fonts/` of `briaai/Fibo-2.0-dev`), under their own licences beside them.
+This package holds no model weights or fonts and grants no rights to them.

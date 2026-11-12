@@ -7,13 +7,14 @@ from typing import Annotated
 
 import msgspec
 from cozy_runtime.author import Adjustments, Context, Outputs, Seed, Telemetry
-from cozy_runtime.fields import Advanced, AspectRatio, Image, Prompt, Range, Ratios
+from cozy_runtime.fields import Advanced, AspectRatio, FileBound, Image, Prompt, Range, Ratios
+from cozy_runtime.media import ImageFile
 from cozy_runtime.image import MEGAPIXEL, ImageRequest, ImageResult, Sizes
 from PIL import Image as PILImage
 
 from . import lanes as lanes  # the `pruned` lane function and the quantized lanes' recipes
 from .application import app as app
-from .model import CANVAS_MIN_PIXELS, GRID, IMAGE_COMPONENTS, MAX_PICTURES, PICTURE_PIXELS, STEPS, PH3Image, resized, size_in_range
+from .model import CANVAS_MIN_PIXELS, GRID, IMAGE_COMPONENTS, MAX_PICTURES, PICTURE_PIXELS, SIGMAS, STEPS, PH3Image, resized, size_in_range
 from .upsampler import UPSAMPLER_COMPONENTS, PH3Upsampler, aspect_label
 
 MODEL = "prunaai/p-h3-image@0.2.0"
@@ -96,3 +97,47 @@ def generate(ctx: Context, payload: ImageBox, model: PH3Image, upsampler: PH3Ups
         asset = out.save_image(picture, format="png")
     tel.log("p-h3-image", width=width, height=height, pictures=len(pictures), megapixels=round(width * height / MEGAPIXEL, 2))
     return ImageResult(asset, width, height, seed, prompt)
+
+
+#: What P-H3-Image is asked of a picture it upscales.
+UPSCALE_PROMPT = ("Upscale <Picture 1> to a higher resolution. Keep the picture exactly as it is: the same composition, "
+                  "framing, colours, lighting and every detail; only make it sharper and more finely detailed.")
+
+
+class UpscaleInput(msgspec.Struct, kw_only=True):
+    #: `upscale`: the picture, the box's own version.
+    image: Annotated[ImageFile, FileBound(max_decoded_bytes=256 << 20)]
+    #: `upscale`: the picture's ratio at this size (`SIZES.fit`), up to 16; 8, the model's own.
+    megapixels: Annotated[float, Range(1, 16, step=1, unit="MP")] = DEFAULT_MEGAPIXELS
+    #: `upscale`: the steps whose sigma is above this are skipped, the picture standing in (`PH3Image.denoise`'s
+    #: `start`); 1 redraws it from noise. 0.85 runs the last 3 of 8 (se-123).
+    denoise: Annotated[float, msgspec.Meta(gt=0, le=1), Advanced()] = 0.85
+    seed: Seed | None = None
+
+
+@app.tool(label="Upscale", named="image", defaults={"model": MODEL}, components={"model": IMAGE_COMPONENTS},
+          memoize=True)  # fmt: skip
+def upscale(ctx: Context, payload: UpscaleInput, model: PH3Image, out: Outputs, tel: Telemetry,
+            adj: Adjustments) -> ImageResult:
+    """The picture larger: an edit of it at the size asked, Picture 1 Lanczos-upscaled to the canvas both as the
+    condition and, below `denoise`, as the start."""
+    with tel.stage("reading picture"):
+        picture = payload.image.read().convert("RGB")
+    width, height = SIZES.fit(adj, picture.size, payload.megapixels * MEGAPIXEL)
+    seed = _Request(seed=payload.seed).drawn_seed()
+    with tel.stage("encoding pictures"):
+        conditions = model.encode_pictures([resized(picture, (width, height))])
+    first = min(sum(sigma > payload.denoise for sigma in SIGMAS[:-1]), STEPS - 1)
+    with tel.stage("encoding prompt"):
+        embeds, tags = model.encode_text(UPSCALE_PROMPT, [picture])
+    ctx.raise_if_cancelled()
+    with tel.stage("generating image"):
+        latents = model.denoise(embeds, tags, conditions, width=width, height=height, seed=seed,
+                                on_step=lambda step: ctx.progress(step, STEPS),
+                                start=conditions[0] if first else None, first=first)  # fmt: skip
+    with tel.stage("decoding image"):
+        image = model.decode(latents)
+    with tel.stage("saving image"):
+        asset = out.save_image(image, format="png")
+    tel.log("upscale", source=f"{picture.width}x{picture.height}", width=width, height=height, steps=STEPS - first)
+    return ImageResult(asset, width, height, seed, UPSCALE_PROMPT)

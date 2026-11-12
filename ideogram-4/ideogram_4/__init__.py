@@ -107,7 +107,7 @@ def refusal_card(image: PILImage.Image) -> bool:
             and float((np.abs(luma - field) <= 8).mean()) >= 0.85)
 
 
-_DEFAULTS = {"model": "ideogram-ai/ideogram-4@0.1.0", "text_encoder": "qwen/qwen3-vl-8b-instruct@0.1.1",
+_DEFAULTS = {"model": "ideogram-ai/ideogram-4@0.1.1", "text_encoder": "qwen/qwen3-vl-8b-instruct@0.1.1",
              "upsampler": "qwen/qwen3-vl-8b-instruct@0.1.1"}
 _COMPONENTS = {"model": ("transformer", "unconditional_transformer", "vae"), "text_encoder": ("model",),
                "upsampler": ("model",)}

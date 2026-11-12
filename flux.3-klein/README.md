@@ -12,6 +12,11 @@ Each makes an image from the prompt, or edits and composes up to ten pictures it
 first mentions them. `image` is the canvas tool, "FLUX.3 Klein", its prompt `instructions`: one box, Turbo (the distilled model) or Base, upsampled unless Advanced's `prompt_upsampling` is off,
 which loads only the checkpoint a render asks for.
 
+`upscale` (the Upscale tool on a picture box) makes the box's picture larger, at 2 or 4 MP: the distilled Klein edits it
+with the picture Lanczos-upscaled to the canvas as the reference and, below `denoise` (0.35), as the start. Downscaled
+back, 31-32 dB PSNR to the input on a photo and a woodblock print, against SeedVR2's 26.5 and 30.3; at `denoise` 1 it
+redraws (18-23 dB, se-123). `megapixels`, `denoise` and `seed`.
+
 Write the request in a file, `request.yaml`:
 
 ```yaml
@@ -127,7 +132,7 @@ cozy model upload run:<run> atomicchat/flux-3-klein-upsampler-abliterated --lane
 ```
 
 Klein never builds Qwen3-VL's vision tower, its last four layers or its head, so it never loads those
-tensors either. BFL's upsampler system prompts ship in `flux_3_klein/system_prompts.json`.
+tensors either. BFL's upsampler system prompts are the upsampler checkpoint's `system_prompts.json`.
 
 ## The int8 lane
 

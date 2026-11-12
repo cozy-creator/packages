@@ -59,11 +59,8 @@ class Transformer(Ideogram4Transformer2DModel):
 
 class IdeogramGraph:
     def __init__(self, config: Config) -> None:
-        # Ideogram's official fp8 release carries no transformer configs: Diffusers' defaults are its geometry.
         dits = {
-            name: _to(construct(
-                Ideogram4Transformer2DModel, config.section(name).mapping() if name in config.keys() else {}
-            ), torch.bfloat16)
+            name: _to(construct(Ideogram4Transformer2DModel, config.section(name).mapping()), torch.bfloat16)
             for name in ("transformer", "unconditional_transformer")
         }
         for model in dits.values():

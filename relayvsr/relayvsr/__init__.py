@@ -18,7 +18,6 @@ from cozy_runtime.media import DecodedAudioChunk, DecodedMediaHeader, DecodedVid
 
 from .flash import Condition, History
 from .model import RelayModel, frame_tensor
-from .wan import Ring
 
 app = App()
 
@@ -90,7 +89,7 @@ def finish(x: torch.Tensor, width: int, height: int, fitted: tuple[int, int], ca
 @app.tool(
     label="Upscale",
     named="video",
-    defaults={"model": "kopper/relayvsr@0.1.1"},
+    defaults={"model": "kopper/relayvsr@0.2.0"},
     memoize=True,
 )
 def upscale(
@@ -119,7 +118,7 @@ def upscale(
     device, dtype = torch.device(str(model.device)), model.dtype
     total = round(probe.duration * probe.frame_rate) if probe.frame_rate else 0
     generator = rng.generator(payload.seed)
-    ring = Ring()
+    ring = model.ring()
     count = 0
 
     def events() -> Iterator[DecodedMediaHeader | DecodedVideoFrame | DecodedAudioChunk]:

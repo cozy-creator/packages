@@ -12,6 +12,11 @@ speed generates an image, or edits the pictures its prompt mentions (up to ten, 
 `image` is the canvas tool, its prompt `instructions`, one box for [dev]: `turbo` (on by default) adds the Turbo LoRA; `aspect_ratio`,
 `megapixels`, `seed`, and `prompt_upsampling` under Advanced, on by default. The LoRA and the upsampler load only when a render asks for them.
 
+`upscale` (the Upscale tool on a picture box) makes the box's picture larger, at 2 or 4 MP: [dev] Turbo edits it with the
+picture Lanczos-upscaled to the canvas as the reference and, below `denoise` (0.6), as the start. Downscaled back, 34 dB
+PSNR to the input on a photo and a woodblock print, against SeedVR2's 26.5 and 30.3; at `denoise` 1 it redraws (19-20 dB,
+se-123). `megapixels`, `denoise` and `seed`.
+
 The function sets the regime: `generate` runs a [klein] as Base, `generate_turbo` as distilled, so give each its
 own checkpoint. Klein 4B (Apache-2.0,
 8 GB of weights at int8) is the choice for consumer cards:
@@ -75,14 +80,15 @@ Upload each repository as it is, as lane `bf16`:
 
 ```sh
 cozy model upload hf://black-forest-labs/FLUX.2-dev@26afe3a78bb242c0a8bb181dcc8937bb16e5c66c black-forest-labs/flux-2-dev --lane bf16 --on <machine>
-cozy model upload hf://fal/FLUX.2-dev-Turbo@9ee51cd87578162cf8d02355a870bc5f4570045c fal/flux-2-dev-turbo --lane bf16 --on <machine>
+cozy lora upload hf://fal/FLUX.2-dev-Turbo@9ee51cd87578162cf8d02355a870bc5f4570045c/flux.2-turbo-lora.safetensors fal/flux-2-dev-turbo --lane bf16 --mirror --on <machine>
 cozy model upload hf://black-forest-labs/FLUX.2-klein-9B@92196c8e11f7b6cf2b7493e037d8c5345c559216 flux-2-klein-9b --lane bf16 --on <machine>
 cozy model upload hf://black-forest-labs/FLUX.2-klein-base-9B@32773329fbe7e81a90ef971740e8ba4b0364ecf3 flux-2-klein-9b-base --lane bf16 --on <machine>
 cozy model upload hf://black-forest-labs/FLUX.2-klein-4B@e7b7dc27f91deacad38e78976d1f2b499d76a294 flux-2-klein-4b --lane bf16 --on <machine>
 cozy model upload hf://black-forest-labs/FLUX.2-klein-base-4B@a3b4f4849157f664bdbc776fd7453c2783562f4d flux-2-klein-4b-base --lane bf16 --on <machine>
 ```
 
-The Turbo LoRA stays one separate 16-bit model: Runtime bakes it into [dev]'s resident weights at load.
+The Turbo LoRA stays one separate 16-bit model, its factors and their shapes the checkpoint's: Runtime bakes it
+into [dev]'s resident weights at load.
 
 ## Lanes
 
