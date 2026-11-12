@@ -139,6 +139,9 @@ _DESCRIPTION = re.compile(r"^[ \t]*(?:integrated[ _-]*multimodal|detailed)[ _-]*
 #: model reads the words for what: cozy never takes one for a cut.
 _TIMED = re.compile(r"^[ \t]*(\[Shot[ \t]*\d+\][ \t]*)?At[ \t]+(\d+):(\d+(?:\.\d+)?)[ \t]*,?[ \t]*", re.I | re.M)
 _OWN_SHOT = re.compile(r"\[Shot[ \t]*\d+\]", re.I)
+#: A first word that is plainly a word, which a block opening a later segment with no time capitalizes as a sentence's.
+#: Anything else goes as written: a LoRA trigger (`vfx_edit:`, `orb360`) is read by its exact case (se-124: `Vfx_edit:`).
+_PLAIN_WORD = re.compile(r"[a-z]+(?:'[a-z]+)?[,.;!?]?(?:\s|$)")
 FIRST_SHOT = re.compile(r"\[Shot[ \t]*1\]", re.I)
 #: A join lands on H3's 17-frame grid, so a picked-up video can end just short of the timestamp the next call opens on:
 #: within this, that block opens it, and the earlier ones stay history.
@@ -417,7 +420,8 @@ def segment_texts(prompt: str, starts: Sequence[float], *, continued: bool = Fal
                 if at == opens or start < at < end:
                     lead = carry.head_frames / FPS if index or carried else 0.0
                     time = f"At {clock(at - start + lead)}, " if at > max(opens, start) else ""
-                    lines.append(f"{'[Shot 1] ' if marked else ''}{time}{said if time else said[:1].upper() + said[1:]}")
+                    sentence = not time and _PLAIN_WORD.match(said) is not None
+                    lines.append(f"{'[Shot 1] ' if marked else ''}{time}{said[:1].upper() + said[1:] if sentence else said}")
             number = iter(range(1, len(body) + 2))
             description = _OWN_SHOT.sub(lambda _: f"[Shot {next(number)}]", "\n".join(line for line in lines if line))
             text = "\n\n".join(filter(None, (body[:begin].rstrip() + ("\n" if begin else "") + description, body[stop:].strip())))
