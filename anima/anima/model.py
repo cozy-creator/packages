@@ -12,7 +12,7 @@ from typing import Any, NamedTuple, Protocol, TypedDict, cast
 import torch
 from cozy_runtime import rng
 from cozy_runtime.accel import fusion, hold_dtype, stepcache
-from cozy_runtime.author import Config, Loader, Model, ModelAssets, Telemetry, preview, uses_components
+from cozy_runtime.author import Config, Loader, Model, ModelAssets, Serving, Telemetry, preview, uses_components
 from cozy_runtime.accel.kernels import Plan
 from diffusers.configuration_utils import ConfigMixin
 from diffusers.models.autoencoders.autoencoder_kl_qwenimage import AutoencoderKLQwenImage
@@ -105,6 +105,9 @@ class AnimaModel(Model[AnimaPipeline]):
     """Touches its components through their forward passes only, so an encoded lane may
     replace DiT linears with native leaves (the fp8 lane's whole point on sm89). The filled
     transformer runs the fused CUDA plan wherever this process supports it."""
+
+    #: Caller LoRAs on the DiT and its LLM adapter, at any strength: the Runtime bakes them into the weights.
+    serving = Serving(loras=("transformer", "text_conditioner"))
 
     pipe: AnimaPipeline
 
