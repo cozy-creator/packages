@@ -198,6 +198,15 @@ SITES: dict[str, tuple[int, int]] = {
 }
 #: The output projection's (out, in).
 PROJ_OUT = (64, 4096)
+#: Positive rows of the DiT's frame rotary table (Diffusers' `QwenImage21Rope`): each text token takes one, each
+#: reference its longer latent side, the target the next. Past them it reads the negative half, then fails on the device.
+ROPE_POSITIONS = 8192
+
+
+def reference_grids(images: Sequence[Image.Image]) -> list[tuple[int, int]]:
+    """Each reference's latent grid (rows, columns) as `denoise` lays it out, at its 1 MP conditioning size."""
+    sizes = [calculate_dimensions(1024 * 1024, image.width / image.height)[:2] for image in images]  # type: ignore[no-untyped-call]  # Diffusers' own
+    return [(height // 16, width // 16) for width, height in sizes]
 
 
 def _armed(transformer: nn.Module, path: str) -> lora.Factors | None:
@@ -382,6 +391,32 @@ class QwenImage21Model(Model[QwenImage21Graph]):
                 prompt, device=torch.device(str(self.device))
             )
         return embeds, mask
+
+    def fit_prompt(self, prompt: str, grids: Sequence[tuple[int, int]]) -> tuple[str, int, int]:
+        """`prompt` as the DiT's frame rotary table holds it beside references of these latent `grids`: the
+        encoded template's text tokens, the prompt's among them, and each reference's longer side, then the target
+        (`ROPE_POSITIONS`). Upstream encodes any length and fails past the table. With the tokens kept and given."""
+        pipeline = self._pipeline()
+        tokenizer = self.processor.tokenizer
+        template = pipeline.prompt_template_t2i
+        if grids:  # as `_get_qwen_prompt_embeds` builds it
+            picture = "<image{}><|vision_start|><|image_pad|><|vision_end|>"
+            pictures = " ".join(picture.format(n) for n in range(1, len(grids) + 1))
+            template = pipeline.prompt_template_ti2i.replace(picture.format(1), pictures)
+        room = ROPE_POSITIONS - 1 - sum(max(grid) for grid in grids)
+
+        def length(text: str) -> int:
+            """The text tokens the DiT reads of `text`: the template's after its system prefix, no picture's."""
+            tokens: list[int] = tokenizer(template.format(text or " "))["input_ids"]
+            return sum(token != pipeline._img_token_id for token in tokens[pipeline._drop_idx :])
+
+        ids: list[int] = tokenizer(prompt)["input_ids"]
+        kept, keep = prompt, len(ids)
+        # A cut can tokenize longer at its edge: measured again until it fits.
+        while keep > 0 and (over := length(kept) - room) > 0:
+            keep = max(keep - over, 0)
+            kept = tokenizer.decode(ids[:keep])
+        return kept, keep, len(ids)
 
     @memoize
     @uses_components("vae")
