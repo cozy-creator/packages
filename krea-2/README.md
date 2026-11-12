@@ -80,8 +80,8 @@ Turbo: 1.15), bf16 noise from `seed` drawn on the CPU, and the VAE in bf16. Two 
   tokens keep their positions and values, the DiT reads text at rotary position 0, and the masked keys
   carried nothing. It saves the padding's compute, and with no mask every attention kernel can serve.
   On tiny real modules in f32 the package's latents equal the pipeline's to 1.7e-6 (bf16: its rounding).
-- Only the text encoder's layers 0–34 are built; layer 35, the final norm and the vision tower are never
-  read.
+- Only the text encoder's layers 0–34 are built; layer 35 and the final norm are never read. Its vision
+  tower runs only for a prompt with pictures.
 
 The steps are a plain loop over Diffusers' `FlowMatchEulerDiscreteScheduler`. Each step is `Krea2Transformer2DModel.forward` op for op, with what
 no step changes built once: each prompt's text fusion and projection, and its rotary tables. With CFG the
