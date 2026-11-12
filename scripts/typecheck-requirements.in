@@ -3,7 +3,7 @@
 # the typed Runtime the packages build on and the TensorFS whose typed stubs it reads (git revs until they publish).
 mypy
 cozy-runtime[adapters,media] @ git+https://github.com/cozy-creator/cozy-runtime@df45d1b32bf91a1a92a524e010601466dce4103c
-tensorfs==0.24.0
+tensorfs==0.24.2
 torch @ https://download.pytorch.org/whl/cpu/torch-2.15.0%2Bcpu-cp312-cp312-manylinux_2_28_x86_64.whl
 torchvision
 triton
