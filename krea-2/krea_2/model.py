@@ -45,7 +45,13 @@ from diffusers.models.autoencoders.autoencoder_kl_qwenimage import (
     QwenImageRMS_norm,
     QwenImageUpsample,
 )
-from diffusers.models.transformers.transformer_krea2 import Krea2Transformer2DModel, Krea2TransformerBlock
+from diffusers.models.transformers.transformer_krea2 import (
+    Krea2FinalLayer,
+    Krea2TextProjection,
+    Krea2TimestepEmbedding,
+    Krea2Transformer2DModel,
+    Krea2TransformerBlock,
+)
 from diffusers.schedulers.scheduling_flow_match_euler_discrete import FlowMatchEulerDiscreteScheduler
 from diffusers.pipelines.krea2.pipeline_krea2 import calculate_shift, retrieve_timesteps
 from PIL import Image
@@ -334,12 +340,13 @@ class Transformer(Krea2Transformer2DModel):
         what no step changes (`Krea2._stream`). A branch's pictures before the target share the step's
         modulation; those after it take time 0's. The prompts pass through each block in turn, so a
         streamed block comes in once per step."""
-        # The embedders and the final layer run in their stored F32; the blocks in bf16.
-        temb = self.time_embed(timestep, dtype=_dtype(self.time_embed))
+        # The embedders and the final layer run in each linear's stored dtype (F32 in Krea's checkpoints); the
+        # blocks in bf16.
+        temb = _timestep(self.time_embed, timestep)
         modulation = self.time_mod_proj(F.gelu(temb, approximate="tanh").to(_dtype(self.time_mod_proj)))
         both = modulation
         if any(stream.after is not None for stream in streams):
-            rest = self.time_embed(torch.zeros_like(timestep), dtype=_dtype(self.time_embed))
+            rest = _timestep(self.time_embed, torch.zeros_like(timestep))
             rest = self.time_mod_proj(F.gelu(rest, approximate="tanh").to(_dtype(self.time_mod_proj)))
             both = torch.cat((modulation, rest))
         image = self.embed(latents, control)
@@ -352,7 +359,7 @@ class Transformer(Krea2Transformer2DModel):
             hidden = [block(h, modulation if split is None else both, stream.rotary, stream.mask, split)
                       for h, stream, split in zip(hidden, streams, splits, strict=True)]
         size = int(image.shape[1])
-        return [self.final_layer(h[:, stream.target:stream.target + size], temb.to(_dtype(self.final_layer)))
+        return [_final(self.final_layer, h[:, stream.target:stream.target + size], temb)
                 for h, stream in zip(hidden, streams, strict=True)]
 
 
@@ -420,7 +427,38 @@ def unpack(latents: torch.Tensor, height: int, width: int) -> torch.Tensor:
 
 
 def _dtype(module: nn.Module) -> torch.dtype:
-    return next(module.parameters()).dtype
+    """The dtype `module` computes in: its own weight's (a checkpoint may store a layer's weights and its
+    neighbours' in different dtypes), else a float leaf's activations, bf16."""
+    weight = getattr(module, "weight", None)
+    dtype = weight.dtype if isinstance(weight, torch.Tensor) else next(module.parameters()).dtype
+    return dtype if dtype in (torch.float32, torch.bfloat16, torch.float16) else DTYPE
+
+
+def _timestep(embedding: Krea2TimestepEmbedding, timestep: torch.Tensor) -> torch.Tensor:
+    """`Krea2TimestepEmbedding.forward`, each linear reading its own dtype."""
+    half = embedding.embed_dim // 2
+    freqs = torch.exp(-math.log(1e4) * torch.arange(half, dtype=torch.float32, device=timestep.device) / half)
+    args = (timestep.float() * 1e3)[:, None, None] * freqs
+    emb = torch.cat([torch.cos(args), torch.sin(args)], dim=-1)
+    hidden = embedding.linear_1(emb.to(_dtype(embedding.linear_1)))
+    out: torch.Tensor = embedding.linear_2(F.gelu(hidden, approximate="tanh").to(_dtype(embedding.linear_2)))
+    return out
+
+
+def _text_in(projection: Krea2TextProjection, hidden: torch.Tensor) -> torch.Tensor:
+    """`Krea2TextProjection.forward`: the norm in its weight's dtype, each linear in its own."""
+    hidden = projection.norm(hidden.to(_dtype(projection.norm)))
+    hidden = projection.linear_1(hidden.to(_dtype(projection.linear_1)))
+    out: torch.Tensor = projection.linear_2(F.gelu(hidden, approximate="tanh").to(_dtype(projection.linear_2)))
+    return out
+
+
+def _final(layer: Krea2FinalLayer, hidden: torch.Tensor, temb: torch.Tensor) -> torch.Tensor:
+    """`Krea2FinalLayer.forward`: the modulation in its table's dtype, the projection in its own."""
+    table = layer.scale_shift_table
+    scale, shift = (temb.to(table.dtype) + table).chunk(2, dim=1)
+    out: torch.Tensor = layer.linear(((1.0 + scale) * layer.norm(hidden) + shift).to(_dtype(layer.linear)))
+    return out
 
 
 def fused_text(transformer: Krea2Transformer2DModel, text: torch.Tensor) -> torch.Tensor:
@@ -435,8 +473,7 @@ def fused_text(transformer: Krea2Transformer2DModel, text: torch.Tensor) -> torc
     hidden = fusion.projector(hidden.to(_dtype(fusion.projector))).squeeze(-1).to(text.dtype)
     for block in fusion.refiner_blocks:
         hidden = block(hidden)
-    out: torch.Tensor = transformer.txt_in(hidden.to(_dtype(transformer.txt_in)))
-    return out.to(text.dtype)
+    return _text_in(transformer.txt_in, hidden).to(text.dtype)
 
 
 class Krea2(Model[Krea2Graph]):
