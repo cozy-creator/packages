@@ -46,18 +46,20 @@ steps 8–50, guidance 1–10. Out of range clamps with a `clamp` adjustment. Th
 - **Image to image:** `image` is the start picture, `strength` (default 0.9) how much of it is redrawn: below about
   0.8 it keeps the picture's colours and outfit whatever the words say.
 - **Control maps:** `control` is a list of `{image, kind, strength}`, each map at any size (it is fitted to the
-  output), through kohya's ControlNet-LLLite for its kind:
+  output), through its kind's adapter:
 
   | kind | map | adapter |
   |---|---|---|
-  | `sketch`, `lineart` | lines or a scribble | `kohya-ss/lllite-any-test-like` (Base 1.0) |
-  | `depth` | a depth map | `kohya-ss/lllite-depth` (Preview3) |
-  | `pose` | an OpenPose skeleton | `kohya-ss/lllite-pose` (Preview3; follows loosely) |
-  | `inpaint` | the picture with the area to redraw transparent | `kohya-ss/lllite-inpainting` (Base 1.0) |
+  | `pose` | a DWPose/OpenPose skeleton on black | `claquasse/control-pose` (Claquasse's control-LoRA, Base 1.0) |
+  | `sketch`, `lineart` | lines or a scribble | `kohya-ss/lllite-any-test-like` (kohya's ControlNet-LLLite, Base 1.0) |
+  | `depth` | a depth map | `kohya-ss/lllite-depth` (LLLite, Preview3) |
+  | `inpaint` | the picture with the area to redraw transparent | `kohya-ss/lllite-inpainting` (LLLite, Base 1.0) |
 
-  An inpaint redraws only the transparent area: the rest is put back every step. Its start is the map's picture,
-  fully redrawn there, or `image` at `strength`. `canny` has no Anima adapter yet, so it is ignored with a note.
-  Another kohya LLLite file works by pinning its slot: `model.pose=toyxyz/controlnet-lllite-3dpose`.
+  The pose adapter also brings its own LoRA on the DiT and the LLM adapter, applied only while a pose steers.
+  An inpaint redraws the transparent area and blends into the rest, which keeps its own pixels: the edge is
+  redrawn in a ring about 40 px wide. Its start is the map's picture, fully redrawn there, or `image` at
+  `strength`. `canny` has no Anima adapter yet, so it is ignored with a note. Another kohya LLLite file works by
+  pinning an LLLite kind's slot (`depth`, `lineart`, `sketch`, `inpaint`).
 
 ```yaml
 prompt: masterpiece, best quality, <amy> reading in a library
