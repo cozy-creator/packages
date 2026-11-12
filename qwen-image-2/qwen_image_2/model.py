@@ -22,6 +22,7 @@ from PIL import Image
 from torch import nn
 from torch.nn import functional as F
 from diffusers.configuration_utils import ConfigMixin
+from diffusers.image_processor import VaeImageProcessor
 from diffusers.schedulers.scheduling_flow_match_euler_discrete import FlowMatchEulerDiscreteScheduler
 from diffusers.models.autoencoders.autoencoder_kl_qwenimage21 import (
     AutoencoderKLQwenImage21,
@@ -249,19 +250,8 @@ class QwenImage21Graph:
                     Qwen3VLConfig(**config.section("text_encoder").mapping()),
                     dtype=torch.bfloat16,
                 ),
-                "vae": construct(AutoencoderKLQwenImage21, config.section("vae").mapping()),
+                "vae": _vae(config),
             }
-        vae = self.components["vae"]
-        _to(vae, _stored(config, "vae", vae))
-        # Runtime pages a model by its `_no_split_modules`; Diffusers names none for this VAE, so
-        # its 1.35 GB of F32 weights, encoder included, stayed resident through a decode and left
-        # a 3 GB card short for the decode's activations. Each residual, attention and resample
-        # block is one page instead (every one is called as a module, also by `_decoded`).
-        vae._no_split_modules = [  # type: ignore[assignment]  # Diffusers declares None
-            "QwenImage21ResidualBlock",
-            "QwenImage21AttentionBlock",
-            "QwenImage21Resample",
-        ]
         # The pipeline reads hidden states only, so the 1.24 GB language-model head is not
         # built; Runtime skips its stored weight.
         self.components["text_encoder"].lm_head = torch.nn.Identity()
@@ -276,6 +266,35 @@ class Components(TypedDict):
     transformer: Transformer
     text_encoder: Qwen3VLForConditionalGeneration
     vae: AutoencoderKLQwenImage21
+
+
+def _vae(config: Config) -> AutoencoderKLQwenImage21:
+    """A checkpoint's `vae`, in the dtype it stores: its section of the config, or the whole config of a checkpoint that
+    holds the VAE alone (Runtime gives a lone component's unsectioned). Runtime pages a model by its `_no_split_modules`;
+    Diffusers names none for this VAE, so its 1.35 GB of F32 weights, encoder included, stayed resident through a decode
+    and left a 3 GB card short for the decode's activations. Each residual, attention and resample block is one page
+    instead (every one is called as a module, also by `_decoded`)."""
+    section = config.section("vae") if "vae" in config.keys() else config
+    with transformer_init.no_init_weights():
+        vae: AutoencoderKLQwenImage21 = construct(AutoencoderKLQwenImage21, section.mapping())
+    _to(vae, _stored(config, "vae", vae))
+    vae._no_split_modules = [  # type: ignore[assignment]  # Diffusers declares None
+        "QwenImage21ResidualBlock",
+        "QwenImage21AttentionBlock",
+        "QwenImage21Resample",
+    ]
+    return vae
+
+
+class VAEComponents(TypedDict):
+    vae: AutoencoderKLQwenImage21
+
+
+class QwenImage21VAEGraph:
+    """The `vae` of a checkpoint that holds one: Qwen-Image-2.1's own, or a fine-tune of it."""
+
+    def __init__(self, config: Config) -> None:
+        self.components: VAEComponents = {"vae": _vae(config)}
 
 
 def construct[M: ConfigMixin](cls: type[M], config: dict[str, object]) -> M:
@@ -348,26 +367,7 @@ class QwenImage21Model(Model[QwenImage21Graph]):
         self.processor = cast(Qwen3VLProcessor, vlm.processor(loader.assets, "processor/", self.graph.processor_config))  # Qwen3-VL's
 
     def execution_plan(self, plan: Plan) -> str:
-        vae = self.graph.components["vae"]
-        installed = (
-            fusion.install(plan, BLOCK, self.graph.components["transformer"]),
-            fusion.install_norms(plan, VAE_NORM, self.graph.components["vae"]),
-            fusion.install_lone_frame(plan, VAE_FRAME, vae.decoder, vae.post_quant_conv),
-        )
-        return "+".join(identity for identity in installed if identity)
-
-    def hold_vae(self, tel: Telemetry) -> None:
-        """Run the VAE in bf16 where the GPU computes it natively, as ComfyUI stages it and as Turbo
-        stores it; the base release stores F32, whose decode took 2.0 s on an 8 GB RTX 3070 against
-        ComfyUI's 0.93 s. The Runtime casts the stored bytes when it next fills them; call this
-        before any VAE scope opens."""
-        vae = self.graph.components["vae"]
-        device = torch.device(str(self.device))
-        if device.type != "cuda" or not torch.cuda.is_bf16_supported(including_emulation=False):
-            return
-        if next(vae.parameters()).dtype != VAE_DTYPE:
-            hold_dtype(vae, VAE_DTYPE)
-            tel.log("vae representation", dtype="bfloat16")
+        return fusion.install(plan, BLOCK, self.graph.components["transformer"]) or ""
 
     def _pipeline(
         self, sigmas: Sequence[float] | None = None, scheduler: Mapping[str, object] | None = None
@@ -417,46 +417,6 @@ class QwenImage21Model(Model[QwenImage21Graph]):
             keep = max(keep - over, 0)
             kept = tokenizer.decode(ids[:keep])
         return kept, keep, len(ids)
-
-    @memoize
-    @uses_components("vae")
-    def encode_reference_images(self, images: list[Image.Image]) -> tuple[list[Image.Image], torch.Tensor]:
-        """Encode each reference once, using Diffusers' 1 MP conditioning size."""
-        vae = self.graph.components["vae"]
-        device = torch.device(str(self.device))
-        pipeline = self._pipeline()
-        resized, packed = [], []
-        with torch.inference_mode():
-            for image in images:
-                image = image.convert("RGBA")
-                width, height, _ = calculate_dimensions(1024 * 1024, image.width / image.height)  # type: ignore[no-untyped-call]  # Diffusers' own, unannotated
-                resized.append(pipeline.image_processor.resize(image, width=width, height=height))
-                pixels = (
-                    pipeline.image_processor.preprocess(image, width=width, height=height)
-                    .unsqueeze(2)
-                    .to(device=device, dtype=vae.dtype)
-                )
-                encoded = _encoded(vae, pixels)
-                packed.append(
-                    pipeline._pack_latents(  # type: ignore[no-untyped-call]  # Diffusers' own, unannotated
-                        encoded, 1, pipeline.latent_channels, encoded.shape[3], encoded.shape[4]
-                    ).cpu()
-                )
-        return resized, torch.cat(packed, dim=1)
-
-    @uses_components("vae")
-    def encode_canvas(self, image: Image.Image) -> torch.Tensor:
-        """The picture at its own size as the DiT's packed normalized latents (`denoise`'s `start`)."""
-        vae = self.graph.components["vae"]
-        device = torch.device(str(self.device))
-        pipeline = self._pipeline()
-        with torch.inference_mode():
-            pixels = pipeline.image_processor.preprocess(image.convert("RGBA"), width=image.width, height=image.height)
-            encoded = _encoded(vae, pixels.unsqueeze(2).to(device=device, dtype=vae.dtype))
-            packed: torch.Tensor = pipeline._pack_latents(  # type: ignore[no-untyped-call]  # Diffusers' own, unannotated
-                encoded, 1, pipeline.latent_channels, encoded.shape[3], encoded.shape[4]
-            )
-            return packed.cpu()
 
     @memoize
     @uses_components("text_encoder")
@@ -607,6 +567,71 @@ class QwenImage21Model(Model[QwenImage21Graph]):
                     progress(i, steps)
         return latents
 
+
+class QwenImage21VAE(Model[QwenImage21VAEGraph]):
+    """Qwen-Image-2.1's VAE, its own slot (`vae`): the checkpoint's `vae`, whichever checkpoint holds one. Its latents
+    are the DiT's, packed and normalized as `QwenImage21Pipeline` packs them."""
+
+    graph: QwenImage21VAEGraph
+    processor: VaeImageProcessor
+
+    def load(self, loader: Loader) -> None:
+        self.graph = loader.construct(QwenImage21VAEGraph)
+        # `QwenImage21Pipeline`'s: 16x, its latent channels the VAE's.
+        channels = self.graph.components["vae"].config["z_dim"]
+        self.processor = VaeImageProcessor(vae_scale_factor=16, vae_latent_channels=channels)
+
+    def execution_plan(self, plan: Plan) -> str:
+        vae = self.graph.components["vae"]
+        installed = (
+            fusion.install_norms(plan, VAE_NORM, vae),
+            fusion.install_lone_frame(plan, VAE_FRAME, vae.decoder, vae.post_quant_conv),
+        )
+        return "+".join(identity for identity in installed if identity)
+
+    def hold(self, tel: Telemetry) -> None:
+        """Run the VAE in bf16 where the GPU computes it natively, as ComfyUI stages it and as Turbo
+        stores it; the base release stores F32, whose decode took 2.0 s on an 8 GB RTX 3070 against
+        ComfyUI's 0.93 s. The Runtime casts the stored bytes when it next fills them; call this
+        before any VAE scope opens."""
+        vae = self.graph.components["vae"]
+        device = torch.device(str(self.device))
+        if device.type != "cuda" or not torch.cuda.is_bf16_supported(including_emulation=False):
+            return
+        if next(vae.parameters()).dtype != VAE_DTYPE:
+            hold_dtype(vae, VAE_DTYPE)
+            tel.log("vae representation", dtype="bfloat16")
+
+    @memoize
+    @uses_components("vae")
+    def encode_reference_images(self, images: list[Image.Image]) -> tuple[list[Image.Image], torch.Tensor]:
+        """Encode each reference once, using Diffusers' 1 MP conditioning size."""
+        vae = self.graph.components["vae"]
+        device = torch.device(str(self.device))
+        resized, packed = [], []
+        with torch.inference_mode():
+            for image in images:
+                image = image.convert("RGBA")
+                width, height, _ = calculate_dimensions(1024 * 1024, image.width / image.height)  # type: ignore[no-untyped-call]  # Diffusers' own, unannotated
+                resized.append(cast(Image.Image, self.processor.resize(image, width=width, height=height)))  # a picture in, a picture out
+                pixels = (
+                    self.processor.preprocess(image, width=width, height=height)
+                    .unsqueeze(2)
+                    .to(device=device, dtype=vae.dtype)
+                )
+                encoded = _encoded(vae, pixels)
+                packed.append(_packed(encoded).cpu())
+        return resized, torch.cat(packed, dim=1)
+
+    @uses_components("vae")
+    def encode_canvas(self, image: Image.Image) -> torch.Tensor:
+        """The picture at its own size as the DiT's packed normalized latents (`denoise`'s `start`)."""
+        vae = self.graph.components["vae"]
+        device = torch.device(str(self.device))
+        with torch.inference_mode():
+            pixels = self.processor.preprocess(image.convert("RGBA"), width=image.width, height=image.height)
+            return _packed(_encoded(vae, pixels.unsqueeze(2).to(device=device, dtype=vae.dtype))).cpu()
+
     @uses_components("vae")
     def decode(self, latents: torch.Tensor, *, width: int, height: int) -> torch.Tensor:
         vae = self.graph.components["vae"]
@@ -617,6 +642,14 @@ class QwenImage21Model(Model[QwenImage21Graph]):
             mean = latents.new_tensor(vae.config["latents_mean"]).view(1, vae.config["z_dim"], 1, 1, 1)
             std = latents.new_tensor(vae.config["latents_std"]).view(1, vae.config["z_dim"], 1, 1, 1)
             return _decoded(vae, latents * std + mean).clamp(-1.0, 1.0)[:, :, 0]
+
+
+def _packed(latents: torch.Tensor) -> torch.Tensor:
+    """One frame's normalized latents as the DiT's tokens (`QwenImage21Pipeline._pack_latents`)."""
+    packed: torch.Tensor = QwenImage21Pipeline._pack_latents(  # type: ignore[no-untyped-call]  # Diffusers' own, unannotated
+        latents, 1, latents.shape[1], latents.shape[3], latents.shape[4]
+    )
+    return packed
 
 
 def _encoded(vae: AutoencoderKLQwenImage21, pixels: torch.Tensor) -> torch.Tensor:

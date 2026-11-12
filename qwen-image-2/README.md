@@ -61,8 +61,12 @@ chat model towards a refusal. Each is one setting away from Qwen's own:
 | `rewriter` | `darrellbest/qwen-image-2.1-pe-i2i-abliterated` ([darrellbest](https://huggingface.co/darrellbest/Qwen-Image-2.1-PE-I2I-Heretic)) | `model.rewriter=qwen/qwen-image-2.1-pe-i2i@0.1.0` |
 
 `text_encoder` is its own slot, one for every function: it reads the `text_encoder` of a Qwen-Image-2.1 checkpoint,
-so any of them serves it (`qwen-image-2.1`'s is Qwen3-VL-8B-Instruct unmodified). `model` reads only the DiT and the
-VAE.
+so any of them serves it (`qwen-image-2.1`'s is Qwen3-VL-8B-Instruct unmodified). `model` reads only the DiT.
+
+`vae` is its own slot too, one for every function: it reads a checkpoint's `vae`, which encodes the pictures and decodes
+the image. It is the base model's own by default; `model.vae=madebyollin/texture-fix-vae` takes madebyollin's
+[fine-tune of it](https://huggingface.co/madebyollin/texture-fix-vae-for-qwen-image-2.1) (cleaner textures, no
+checkerboard).
 
 Outputs use lossless WebP to preserve the same decoded pixels and alpha while reducing the
 bytes returned to the client. A canvas with either side at least 16384 pixels uses PNG,
