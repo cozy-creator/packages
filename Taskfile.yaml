@@ -133,6 +133,7 @@ tasks:
         done
         # The lock `cozy package publish` makes (scripts/lock.sh), against $lock's root index.
         relock() { LOCK_HUB=$lock scripts/lock.sh "$@"; }
+        ups() { for q in "$@"; do printf ' --upgrade-package=%s' "$q"; done; }
         pairs() { awk -F'"' '/^name = /{n=$2} /^version = /{print n, $2}'; }
         # The Triton sets the package's import declares, compiled on this CPU for every card row with the Runtime its lock
         # pins (scripts/triton.sh), ship in the release, so a fresh machine's first request runs its fused plans.
@@ -206,7 +207,7 @@ tasks:
           case $roots in *" $p "*)
             # Only the version changes: the final, then the lock, taking the roots it calls at theirs.
             [ -n "$rc" ] || [ "$(ver "$p")" = "$(final "$p")" ] || uv version -q --frozen --project "$p" "$(final "$p")"
-            relock "$p" $(printf ' --upgrade-package=%s' $up $(raised "$p"))
+            relock "$p" $(ups $up $(raised "$p"))
             if ! pinned "$p"; then
               [ -n "$dry" ] || { echo "$p: the relock did not take $up at their released versions" >&2; exit 1; }
               echo "$p: dry run, so it locks the Hub's $up, not the unpublished version here"
@@ -223,7 +224,7 @@ tasks:
             uv version -q --bump patch --frozen --project "$p"; on=$(held "$p"); [ -n "$on" ] || break
           done
           [ -z "$on" ] || { echo "$p: ten patch versions past master are all taken; bump it by hand" >&2; exit 1; }
-          relock "$p" $(printf ' --upgrade-package=%s' $up $(raised "$p"))
+          relock "$p" $(ups $up $(raised "$p"))
           if ! pinned "$p"; then
             [ -n "$dry" ] || { echo "$p: the relock did not take $up at their released versions" >&2; exit 1; }
             echo "$p: dry run, so it locks the Hub's $up, not the unpublished master version"
