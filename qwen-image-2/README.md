@@ -256,7 +256,7 @@ image = await call(
 The Hub package is the first-party `qwen-image-2` (no owner); its callables are `generate`,
 `generate_turbo` and the tool `image`. Their default models are `qwen/qwen-image-2.1@0.1.0` and,
 for Turbo, `alibaba-pai/qwen-image-2.1-fun-acc@0.1.1`; all read
-`atomicchat/qwen-image-2.1-text-encoder-abliterated@0.1.0` (`text_encoder`),
+`atomicchat/qwen-image-2.1-text-encoder-abliterated@0.2.0` (`text_encoder`, its text encoder alone),
 `darrellbest/qwen-image-2.1-pe-i2i-abliterated@0.1.0` (`rewriter`) and
 `pottokao/qwen-image-2.1-pe-t2i-abliterated@0.1.0` (`expander`).
 A plain `generate(...)` is an ordinary in-process Python call; `call` runs it as its own job on

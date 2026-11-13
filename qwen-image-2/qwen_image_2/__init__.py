@@ -203,10 +203,10 @@ def _generate(
 #: own by default, or another Qwen-Image-2.1 VAE (`model.vae=madebyollin/texture-fix-vae`).
 _FULL = {"expander": "pottokao/qwen-image-2.1-pe-t2i-abliterated@0.1.0", "model": "qwen/qwen-image-2.1@0.1.0",
          "rewriter": "darrellbest/qwen-image-2.1-pe-i2i-abliterated@0.1.0",
-         "text_encoder": "atomicchat/qwen-image-2.1-text-encoder-abliterated@0.1.0", "vae": "qwen/qwen-image-2.1@0.1.0"}
+         "text_encoder": "atomicchat/qwen-image-2.1-text-encoder-abliterated@0.2.0", "vae": "qwen/qwen-image-2.1@0.1.0"}
 _TURBO = {"expander": "pottokao/qwen-image-2.1-pe-t2i-abliterated@0.1.0", "model": "qwen/qwen-image-2.1@0.1.0",
           "rewriter": "darrellbest/qwen-image-2.1-pe-i2i-abliterated@0.1.0",
-          "text_encoder": "atomicchat/qwen-image-2.1-text-encoder-abliterated@0.1.0",
+          "text_encoder": "atomicchat/qwen-image-2.1-text-encoder-abliterated@0.2.0",
           "turbo_lora": "alibaba-pai/qwen-image-2.1-fun-acc@0.1.1", "vae": "qwen/qwen-image-2.1@0.1.0"}
 _COMPONENTS = {"expander": ("model",), "model": ("transformer",), "rewriter": ("model",),
                "text_encoder": ("text_encoder",), "vae": ("vae",)}
@@ -305,7 +305,7 @@ class UpscaleInput(msgspec.Struct, kw_only=True):
     seed: Seed | None = None
 
 
-_UPSCALE = {"model": "qwen/qwen-image-2.1@0.1.0", "text_encoder": "atomicchat/qwen-image-2.1-text-encoder-abliterated@0.1.0",
+_UPSCALE = {"model": "qwen/qwen-image-2.1@0.1.0", "text_encoder": "atomicchat/qwen-image-2.1-text-encoder-abliterated@0.2.0",
             "turbo_lora": "alibaba-pai/qwen-image-2.1-fun-acc@0.1.1", "vae": "qwen/qwen-image-2.1@0.1.0"}
 
 
