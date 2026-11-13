@@ -83,14 +83,11 @@ class RequestState:
     rope: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None
     parallel_rotary: dict[object, tuple[torch.Tensor, torch.Tensor]] = field(default_factory=dict)
     replay_inputs: dict[tuple[object, ...], Statistics] = field(default_factory=dict)
-    # The attention modules whose `Carry` slot a call of the current denoise loop has written.
-    carried: set[int] = field(default_factory=set)
 
     def end_loop(self) -> None:
         """One loop's key means, rotary presentation and Kitchen's packed table of it go after the
         loop's last step (`end_loop`, from `steps`), so none stays through the decode after it."""
         self.statistics.clear()
-        self.carried.clear()
         self.parallel_rotary.clear()
         self.replay_inputs.clear()
         backend = sys.modules.get("comfy_kitchen.backends.cuda")
@@ -152,8 +149,6 @@ def present(
     }
     if not states:
         return
-    for state in states.values():
-        state.carried.clear()  # this loop's slots start unwritten
     first, *others = states.values()
     # Sharded, `rotary` holds this GPU's rows; the calls attend whole sequences, with the tables
     # `retain_rotary` kept before the split, under the key the DiT's blocks carry (the token
@@ -376,12 +371,10 @@ def produce(
             output: torch.Tensor = call.original(hidden_states, rotary_emb, attention_mask)
         finally:
             KEY_MEAN.reset(token)
-        if seed is not None and seed.heads >= attn.heads:
-            if carry is not None:
-                state.carried.add(id(attn))
-            else:  # what `previous_statistics` reads at the first sparse step; its values stay its own
-                geometry = (layout.live_tokens, attn.heads, layout.protected_prefix)
-                state.statistics[key] = (layout.step, geometry, seed.slot, None)
+        if seed is not None and seed.heads >= attn.heads and carry is None:
+            # what `previous_statistics` reads at the first sparse step; its values stay its own
+            geometry = (layout.live_tokens, attn.heads, layout.protected_prefix)
+            state.statistics[key] = (layout.step, geometry, seed.slot, None)
         return output
     # The input (an owned one taken here) is the helper's alone: it goes as it returns, before
     # the out projection's output comes.
@@ -415,9 +408,8 @@ class _Means:
             self.prior, _ = previous_statistics(
                 state, key, call.layout.step, geometry, replay_safe=PRODUCERS[name].context_parallel
             )
-        else:  # a rolling step reads the slot the previous step's call wrote
-            rolling = self.carry.rolling and id(attn) in state.carried
-            self.prior = self.carry.slots[id(attn)] if rolling else None
+        else:  # a rolling step reads the slot the previous step's call (or the seeding step) wrote
+            self.prior = self.carry.slots[id(attn)] if self.carry.rolling else None
 
     def keep(self, window: slice[int | None], mean: torch.Tensor) -> None:
         if self.mean is None:
@@ -430,7 +422,6 @@ class _Means:
             state.statistics[self.key] = (self.call.layout.step, self.geometry, self.mean, None)
         else:
             self.carry.slots[id(attn)].copy_(self.mean)  # type: ignore[arg-type]  # keep() ran: a call keeps before it closes
-            state.carried.add(id(attn))
 
 
 class _Heads:
@@ -522,7 +513,14 @@ def _attend(
     if parallel:
         output, reuse = _parallel_produce(call, hidden_states, name, key)
     else:
-        freqs = rope_presentation(rotary_emb, tokens, state)
+        held = state.rope
+        # Inside a denoise loop the presentation is the loop's own (`present`), at one address
+        # for every step, whatever tensors carry the rotary tables in: a recorded step reads it.
+        freqs = (
+            held[2]
+            if _CARRY.get() is not None and held is not None and held[2].shape[0] == tokens
+            else rope_presentation(rotary_emb, tokens, state)
+        )
         means = _Means(call, key, name, (tokens, attn.heads, layout.protected_prefix))
         heads = _Heads.of(call, means, hidden_states, freqs)
         if heads is None:
@@ -680,16 +678,6 @@ def validate(module: object) -> None:
                 raise ValueError("Kitchen producer cannot replay an unknown projection hook")
 
 
-def stateless(layout: AttentionLayout) -> bool:
-    """A dense step that seeds no key means: every site only calls its own processor (`produce`),
-    so the Runtime may record the DiT call and replay it. The last dense step seeds them, and a
-    sparse step reads and writes them."""
-    if layout.sparse:
-        return False
-    carry = _CARRY.get()
-    return not (carry.seeding if carry is not None else layout.step == layout.dense_until_step - 1)
-
-
 def _register(name: str, base: str, *, context_parallel: bool = False) -> AttentionProducer:
     return register_attention(
         AttentionProducer(
@@ -700,7 +688,6 @@ def _register(name: str, base: str, *, context_parallel: bool = False) -> Attent
             requires=("sol_attn_chunked",),
             state=RequestState,
             context_parallel=context_parallel,
-            stateless=stateless,
         )
     )
 
