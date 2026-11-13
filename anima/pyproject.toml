@@ -1,6 +1,6 @@
 [project]
 name = "anima"
-version = "0.10.0rc2"
+version = "0.10.0rc3"
 description = "Anima anime images for Cozy: text, pictures and control maps"
 requires-python = ">=3.12,<3.15"
 dependencies = [

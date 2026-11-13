@@ -136,8 +136,8 @@ VAE_NORM = fusion.ChannelNorm(
 #: (Diffusers pads two zero frames and convolves all 27 taps), and its nearest upsampling in its own
 #: dtype, not F32.
 VAE_FRAME = fusion.LoneFrame(QwenImageCausalConv3d, upsample=QwenImageUpsample)
-#: Anima Base 1.0's transformer, the one the norm and RoPE shapes below are reviewed for: its
-#: constructor arguments. The Runtime's config drops the saving library's `_`-keys (#1786), and
+#: Anima Base 1.0's transformer, the one the fused kernel's norm and RoPE shapes are reviewed for:
+#: its constructor arguments. The Runtime's config drops the saving library's `_`-keys (#1786), and
 #: comparing them refused this plan on every construction since.
 _TRANSFORMER_CONFIG = {
     "adaln_lora_dim": 256,
@@ -161,6 +161,14 @@ _TRANSFORMER_CONFIG = {
     "text_embed_dim": 1024,
     "use_crossattn_projection": False,
 }
+#: Its sizes: the plan's block forward reads them from the filled transformer's own config, so an
+#: Anima of Base 1.0's graph at any size runs it, adapters and all; only the fused kernel needs
+#: Base 1.0's.
+_SIZES = frozenset({
+    "adaln_lora_dim", "attention_head_dim", "crossattn_proj_in_channels", "encoder_hidden_states_channels",
+    "img_context_dim_out", "img_context_num_tokens", "in_channels", "max_size", "mlp_ratio", "num_attention_heads",
+    "num_layers", "out_channels", "rope_scale", "text_embed_dim",
+})
 
 
 class PlanRefusal(RuntimeError):
@@ -183,7 +191,7 @@ def apply(pipe: AnimaPipeline) -> tuple[str, str]:
     if not decode:
         _unchanged(vae, _install_vae_plan)
     exact = _plan_refusal(pipe)
-    fused = exact or _capability()
+    fused = exact or _sized(pipe) or _capability()
     if not exact:
         _unchanged(pipe.components["transformer"], partial(_install_transformer_plan, kernel=not fused))
     return fused, decode
@@ -279,10 +287,29 @@ def _plan_refusal(pipe: AnimaPipeline) -> str:
     transformer = pipe.components["transformer"]
     if type(transformer) is not CosmosTransformer3DModel:
         return f"the transformer is {type(transformer).__qualname__}, not CosmosTransformer3DModel"
-    arguments = {k: v for k, v in dict(transformer.config).items() if not k.startswith("_")}
-    if json.loads(json.dumps(arguments)) != _TRANSFORMER_CONFIG:
-        return "the filled Cosmos transformer config is not the Anima Base 1.0 config"
+    arguments = _arguments(transformer)
+    graph = {k: v for k, v in _TRANSFORMER_CONFIG.items() if k not in _SIZES}
+    if arguments.keys() != _TRANSFORMER_CONFIG.keys() or {k: arguments[k] for k in graph} != graph:
+        return "the filled Cosmos transformer config is not Anima Base 1.0's graph"
     return ""
+
+
+def _sized(pipe: AnimaPipeline) -> str:
+    """Why the fused kernel does not take this transformer's sizes, or "" when they are Base 1.0's."""
+    arguments = _arguments(pipe.components["transformer"])
+    if arguments == _TRANSFORMER_CONFIG:
+        return ""
+    return (
+        f"the fused kernel is reviewed for Anima Base 1.0's sizes, not {arguments['num_layers']} blocks of "
+        f"{arguments['num_attention_heads']} heads of {arguments['attention_head_dim']}"
+    )
+
+
+def _arguments(transformer: CosmosTransformer3DModel) -> dict[str, object]:
+    """The transformer's constructor arguments as JSON reads them (tuples as lists)."""
+    arguments = {k: v for k, v in dict(transformer.config).items() if not k.startswith("_")}
+    loaded: dict[str, object] = json.loads(json.dumps(arguments))
+    return loaded
 
 
 def _tensor_census(module: torch.nn.Module) -> tuple[tuple[object, ...], tuple[object, ...]]:
@@ -301,7 +328,7 @@ def _tensor_census(module: torch.nn.Module) -> tuple[tuple[object, ...], tuple[o
 
 
 class _RopeMatrix:
-    """One call-scoped conversion shared by all 28 self-attention blocks."""
+    """One call-scoped conversion shared by every self-attention block."""
 
     def __init__(self) -> None:
         self.value: torch.Tensor | None = None
@@ -677,21 +704,25 @@ def _patch_forward(embed: CosmosPatchEmbed, hidden_states: torch.Tensor, *, scop
 
 
 def _install_transformer_plan(transformer: CosmosTransformer3DModel, *, kernel: bool) -> None:
-    """The plan's forwards; with `kernel`, the fused self-attention kernel and its rotary table."""
+    """The plan's forwards; with `kernel`, the fused self-attention kernel and its rotary table. Its
+    shapes are the transformer's config's: Base 1.0's 28 blocks of 16 heads of 128."""
     rope = _RopeMatrix()
     scope = _Scope()
+    config = transformer.config
+    layers, head = int(config["num_layers"]), int(config["attention_head_dim"])
+    width = int(config["num_attention_heads"]) * head
     blocks = cast("tuple[CosmosTransformerBlock, ...]", tuple(transformer.transformer_blocks))  # checked below
-    if len(blocks) != 28 or any(type(block) is not CosmosTransformerBlock for block in blocks):
+    if len(blocks) != layers or any(type(block) is not CosmosTransformerBlock for block in blocks):
         raise PlanRefusal(
             "anima_optimization_block_shape",
-            "the exact Anima plan requires 28 unmodified Diffusers CosmosTransformerBlock rows",
+            f"the Anima plan requires its config's {layers} unmodified Diffusers CosmosTransformerBlock rows",
         )
     norms = tuple(module for module in transformer.modules() if type(module) is RMSNorm)
     shapes = sorted((tuple(norm.dim), norm.eps) for norm in norms)
-    if shapes != sorted([((128,), 1e-5)] * 112 + [((2048,), 1e-6)]):
+    if shapes != sorted([((head,), 1e-5)] * (4 * layers) + [((width,), 1e-6)]):
         raise PlanRefusal(
             "anima_optimization_norm_shape",
-            "the exact Anima plan requires 112 head-width RMSNorms at eps=1e-5 and one "
+            f"the Anima plan requires {4 * layers} head-width RMSNorms at eps=1e-5 and one "
             "model-width RMSNorm at eps=1e-6",
         )
     if any(norm.weight is None or norm.bias is not None for norm in norms):

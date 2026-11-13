@@ -37,11 +37,33 @@ from transformers.initialization import no_init_weights
 T = TypeVar("T")
 #: An as-is upload's one component.
 COMPONENT = "model"
-#: Anima Base's DiT: 28 blocks of width 2048, 16 heads of 128; its LLM adapter's blocks.
-BLOCKS, WIDTH, HEADS = 28, 2048, 16
-ADAPTER_BLOCKS = 6
+#: Anima Base's DiT, 28 blocks of width 2048, and its LLM adapter's 6 blocks: an adapter's geometry where its
+#: checkpoint's tensors are not known (a construction from its config alone). Else each adapter reads its blocks and
+#: widths off its own file (`_depth`).
+BASE_BLOCKS, BASE_WIDTH, BASE_ADAPTER_BLOCKS = 28, 2048, 6
 #: The SigLIP2 input the IP-Adapter was trained on: a 512² letterbox.
 SIGLIP_SIZE = 512
+
+
+def _stored(config: Config, key: str) -> bool:
+    """Whether the checkpoint stores `key`: the Runtime refuses a missing one (`config_tensor_missing`)."""
+    try:
+        return bool(config.tensor_dtype(key, default=""))
+    except Exception as exc:  # the Runtime's ConformanceError, which `cozy_runtime.author` doesn't export
+        if getattr(exc, "code", None) == "config_tensor_missing":
+            return False
+        raise
+
+
+def _depth(config: Config, key: Callable[[int], str], base: int = BASE_BLOCKS) -> int:
+    """How many blocks a file adapts: block n's `key(n)` stored for each n below it (`base` where its tensors are not
+    known). A file without block 0's is refused (`config_tensor_missing`)."""
+    if not config.tensor_dtype(key(0), default=""):
+        return base
+    count = 1
+    while _stored(config, key(count)):
+        count += 1
+    return count
 
 
 # ---------------------------------------------------------------- SigLIP2
@@ -106,11 +128,14 @@ class ImageEncoder(Model[EncoderGraph]):
 
 
 class _IPBlock(nn.Module):
+    """A block's image keys and values, and its gate over the timestep embedding: `inner` is the DiT's width, which
+    the term it adds to the block's output has."""
+
     def __init__(self, tokens: int, inner: int) -> None:
         super().__init__()
         self.ip_k_proj = nn.Linear(tokens, inner)
         self.ip_v_proj = nn.Linear(tokens, inner)
-        self.adaln_ip = nn.Sequential(nn.SiLU(), nn.Linear(WIDTH, WIDTH))
+        self.adaln_ip = nn.Sequential(nn.SiLU(), nn.Linear(inner, inner))
 
 
 class _Factors(nn.Module):
@@ -127,12 +152,12 @@ class _Factors(nn.Module):
 
 
 class _CrossLoRA(nn.Module):
-    def __init__(self, text: int, rank: int) -> None:
+    def __init__(self, width: int, text: int, rank: int) -> None:
         super().__init__()
-        self.q_proj = _Factors(WIDTH, WIDTH, rank)
-        self.k_proj = _Factors(text, WIDTH, rank)
-        self.v_proj = _Factors(text, WIDTH, rank)
-        self.output_proj = _Factors(WIDTH, WIDTH, rank)
+        self.q_proj = _Factors(width, width, rank)
+        self.k_proj = _Factors(text, width, rank)
+        self.v_proj = _Factors(text, width, rank)
+        self.output_proj = _Factors(width, width, rank)
 
 
 class _Scoped(nn.Module):
@@ -150,15 +175,15 @@ class IPGraph:
             if str(said.get(flag, "False")).lower() == "true":
                 raise UnsupportedInput(f"this IP-Adapter was trained with {flag}, a variant Anima does not run",
                                        code="ip_adapter_variant")
-        inner, tokens = config.tensor_shape(f"{COMPONENT}.blocks.0.ip_k_proj.weight", default=(WIDTH, 768))
-        config.tensor_shape(f"{COMPONENT}.blocks.{BLOCKS - 1}.ip_k_proj.weight", default=(inner, tokens))
+        inner, tokens = config.tensor_shape(f"{COMPONENT}.blocks.0.ip_k_proj.weight", default=(BASE_WIDTH, 768))
+        blocks = _depth(config, lambda n: f"{COMPONENT}.blocks.{n}.ip_k_proj.weight")
         rank, text = config.tensor_shape(
             f"{COMPONENT}.lora.base_model.model.blocks.0.cross_attn.k_proj.lora_A.weight", default=(32, 1024)
         )
         root = nn.Module()
-        self.blocks = [_IPBlock(tokens, inner) for _ in range(BLOCKS)]
+        self.blocks = [_IPBlock(tokens, inner) for _ in range(blocks)]
         root.blocks = nn.ModuleList(self.blocks)
-        self.crosses = [_CrossLoRA(text, rank) for _ in range(BLOCKS)]
+        self.crosses = [_CrossLoRA(inner, text, rank) for _ in range(blocks)]
         crosses = nn.ModuleList(_Scoped("cross_attn", cross) for cross in self.crosses)
         root.lora = _Scoped("base_model", _Scoped("model", _Scoped("blocks", crosses)))
         #: alpha over rank, as PEFT scales; the references apply alpha = rank.
@@ -193,12 +218,13 @@ class References:
         return self.adapter.crosses[index]
 
     def term(self, index: int, query: torch.Tensor, timestep: torch.Tensor) -> torch.Tensor:
-        """Block `index`'s image attention for `query` [b, heads, s, 128] (the block's normalized cross-attention
-        query), gated by `adaln_ip` of the timestep embedding: [b, s, 2048]."""
+        """Block `index`'s image attention for `query` [b, heads, s, head] (the block's normalized cross-attention
+        query, in the DiT's heads), gated by `adaln_ip` of the timestep embedding: [b, s, width]."""
         block = self.adapter.blocks[index]
         tokens = self.tokens.to(query.dtype)
-        key = block.ip_k_proj(tokens).unflatten(2, (HEADS, -1)).transpose(1, 2)
-        value = block.ip_v_proj(tokens).unflatten(2, (HEADS, -1)).transpose(1, 2)
+        heads = query.shape[1]
+        key = block.ip_k_proj(tokens).unflatten(2, (heads, -1)).transpose(1, 2)
+        value = block.ip_v_proj(tokens).unflatten(2, (heads, -1)).transpose(1, 2)
         batch = query.shape[0]
         attended = F.scaled_dot_product_attention(query, key.expand(batch, -1, -1, -1), value.expand(batch, -1, -1, -1))
         gate = block.adaln_ip(timestep.to(query.dtype))
@@ -331,12 +357,15 @@ class LLLiteGraph:
                               int(_metadata(said, "cond_resblocks", "1")), dilations)
         root = nn.Module()
         root.lllite_conditioning1 = self.trunk = trunk
+        first = TARGETS[atomics[0]][0]
+        _, width = config.tensor_shape(f"{COMPONENT}.lllite_dit_blocks_0_{first}.down.weight", default=(mlp, BASE_WIDTH))
+        blocks = _depth(config, lambda n: f"{COMPONENT}.lllite_dit_blocks_{n}_{first}.down.weight")
         #: (block, target) -> its shift, by the target names the DiT's block forward asks for.
         self.shifts: dict[tuple[int, str], _Shift] = {}
-        for index in range(BLOCKS):
+        for index in range(blocks):
             for atomic in atomics:
                 for target in TARGETS[atomic]:
-                    shift = _Shift(WIDTH, cond, mlp)
+                    shift = _Shift(width, cond, mlp)
                     root.add_module(f"lllite_dit_blocks_{index}_{target}", shift)
                     self.shifts[(index, target)] = shift
         self.components: dict[str, nn.Module] = {COMPONENT: root.to(torch.bfloat16)}
@@ -384,11 +413,12 @@ class Shifts:
 # ---------------------------------------------------------------- Claquasse's pose control-LoRA
 
 
-def _pose_sites() -> dict[str, tuple[str, str]]:
-    """Each LoRA site in the file's names (ComfyUI's, under `diffusion_model.`): the component and the linear it
-    adapts there, by Diffusers' names (TensorFS's `anima.single_file`)."""
+def _pose_sites(blocks: int, adapter_blocks: int) -> dict[str, tuple[str, str]]:
+    """Each LoRA site in the file's names (ComfyUI's, under `diffusion_model.`) over `blocks` DiT blocks and
+    `adapter_blocks` of the LLM adapter: the component and the linear it adapts there, by Diffusers' names
+    (TensorFS's `anima.single_file`)."""
     sites: dict[str, tuple[str, str]] = {}
-    for n in range(BLOCKS):
+    for n in range(blocks):
         native, ours = f"blocks.{n}", f"transformer_blocks.{n}"
         for attention, attn in (("self_attn", "attn1"), ("cross_attn", "attn2")):
             for p in "qkv":
@@ -399,7 +429,7 @@ def _pose_sites() -> dict[str, tuple[str, str]]:
                 sites[f"{native}.adaln_modulation_{part}.{i}"] = ("transformer", f"{ours}.{norm}.linear_{i}")
         sites[f"{native}.mlp.layer1"] = ("transformer", f"{ours}.ff.net.0.proj")
         sites[f"{native}.mlp.layer2"] = ("transformer", f"{ours}.ff.net.2")
-    for n in range(ADAPTER_BLOCKS):
+    for n in range(adapter_blocks):
         block = f"blocks.{n}"
         for attention in ("self_attn", "cross_attn"):
             for p in ("q_proj", "k_proj", "v_proj", "o_proj"):
@@ -427,15 +457,18 @@ class PoseGraph:
         file = f"{COMPONENT}.diffusion_model"
         root = nn.Module()
         key = f"{file}.control_embedder.proj.weight"
-        outputs, inputs = config.tensor_shape(key, default=(WIDTH, 64))
+        outputs, inputs = config.tensor_shape(key, default=(BASE_WIDTH, 64))
         self.embedder = nn.Linear(inputs, outputs, dtype=_DTYPES[config.tensor_dtype(key, default="f32")])
         _put(root, "diffusion_model.control_embedder.proj", self.embedder)
         #: Each component's factors by its linear's path there, as `lora.Sites` arms them.
         self.sites: dict[str, dict[str, lora.Pair]] = {"transformer": {}, "text_conditioner": {}}
-        for native, (component, path) in _pose_sites().items():
+        blocks = _depth(config, lambda n: f"{file}.blocks.{n}.self_attn.q_proj.lora_A.weight")
+        adapter_blocks = _depth(config, lambda n: f"{file}.llm_adapter.blocks.{n}.self_attn.q_proj.lora_A.weight",
+                                BASE_ADAPTER_BLOCKS)
+        for native, (component, path) in _pose_sites(blocks, adapter_blocks).items():
             down, up = f"{file}.{native}.lora_A.weight", f"{file}.{native}.lora_B.weight"
-            rank, fan_in = config.tensor_shape(down, default=(16, WIDTH))
-            fan_out, _ = config.tensor_shape(up, default=(WIDTH, rank))
+            rank, fan_in = config.tensor_shape(down, default=(16, BASE_WIDTH))
+            fan_out, _ = config.tensor_shape(up, default=(BASE_WIDTH, rank))
             # No stored alpha: ComfyUI's loader then scales by 1.
             pair = lora.Pair(fan_in, fan_out, rank).to(_DTYPES[config.tensor_dtype(down, default="bf16")])
             _put(root, f"diffusion_model.{native}", pair)
