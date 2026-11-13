@@ -13,3 +13,6 @@ __pycache__/
 
 # `task publish -- --dry-run` wheels
 /dist/
+
+# Triton sets built into a source checkout for a run from it (scripts/triton.sh)
+_triton/
