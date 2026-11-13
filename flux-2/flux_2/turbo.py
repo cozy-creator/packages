@@ -79,10 +79,10 @@ class Flux2TurboLoRA(Model[TurboGraph]):
     @uses_components(COMPONENT)
     def applied(self, transformer: nn.Module, body: Callable[[], T]) -> T:
         """`body` with this overlay armed on [dev]'s `transformer`."""
-        if not hasattr(transformer, "_cozy_turbo"):
+        if not hasattr(transformer, "turbo_overlay"):
             raise ValueError("the Turbo LoRA adapts FLUX.2 [dev] only")
-        transformer._cozy_turbo = self.graph.sites  # type: ignore[assignment]  # a plain attribute: nn.Module keeps non-tensors as such
+        transformer.turbo_overlay = self.graph.sites  # type: ignore[assignment]  # a plain attribute: nn.Module keeps non-tensors as such
         try:
             return body()
         finally:
-            transformer._cozy_turbo = None  # type: ignore[assignment]  # a plain attribute
+            transformer.turbo_overlay = None  # type: ignore[assignment]  # a plain attribute
