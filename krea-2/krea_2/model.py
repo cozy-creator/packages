@@ -30,6 +30,7 @@ from cozy_runtime.author import (
     Model,
     ModelAssets,
     OutputError,
+    UnsupportedInput,
     Serving,
     memoize,
     preview,
@@ -89,7 +90,7 @@ VISION_PATCH, VISION_MERGE, VISION_FRAMES = 16, 2, 2
 VISION_PIXELS = (65536, 16777216)
 IMAGE_PAD = "<|image_pad|>"
 VISION = "<|vision_start|>" + IMAGE_PAD + "<|vision_end|>"
-#: Adapters armed at once: an edit's and a control's (`Krea2.denoise`'s `overlays`).
+#: Adapters armed at once: an edit's and a control's (`Krea2DiT.denoise`'s `overlays`).
 SLOTS = 2
 
 
@@ -335,7 +336,7 @@ class Transformer(Krea2Transformer2DModel):
     def forward(self, latents: torch.Tensor, timestep: torch.Tensor, streams: list[Stream],
                 control: torch.Tensor | None = None) -> list[torch.Tensor]:
         """Each prompt's velocity at `timestep` [1] (0-1): `Krea2Transformer2DModel.forward` op for op past
-        what no step changes (`Krea2._stream`). A branch's pictures before the target share the step's
+        what no step changes (`Krea2DiT._stream`). A branch's pictures before the target share the step's
         modulation; those after it take time 0's. The prompts pass through each block in turn, so a
         streamed block comes in once per step."""
         # The embedders and the final layer run in each linear's stored dtype (F32 in Krea's checkpoints); the
@@ -362,42 +363,106 @@ class Transformer(Krea2Transformer2DModel):
 
 
 def _armed(transformer: nn.Module, slot: int, path: str) -> lora.Factors | None:
-    """An armed adapter's factors at `path` in `slot` (`Krea2.denoise`'s `overlays`), else None."""
+    """An armed adapter's factors at `path` in `slot` (`Krea2DiT.denoise`'s `overlays`), else None."""
     armed: list[Mapping[str, lora.Factors] | None] = getattr(transformer, "_cozy_overlays", [None] * SLOTS)
     sites = armed[slot]
     return None if sites is None else sites.get(path)
 
 
-class Krea2Graph:
+def _section(config: Config, name: str, alone: str) -> Config:
+    """`config`'s section `name`. A checkpoint of one component gives its config unsectioned (Runtime): `alone` says
+    what goes with this one."""
+    if name not in config.keys():
+        raise UnsupportedInput(f"this checkpoint holds no {name} section: {alone}", code="artifact_components")
+    return config.section(name)
+
+
+def _transformer(config: Config) -> Transformer:
+    """A checkpoint's `transformer`, each linear serving an armed adapter's factors (`adapters.Adapter`), one hook per
+    slot."""
+    section = _section(config, "transformer", "a transformer goes with its scheduler (`<model>:transformer,scheduler`)")
+    with no_init_weights():
+        transformer = construct(Krea2Transformer2DModel, section.mapping())
+    transformer.__class__ = Transformer
+    for block in transformer.transformer_blocks:
+        block.__class__ = Block
+    dit = cast(Transformer, transformer)  # its class, set above
+    dit._cozy_overlays = [None] * SLOTS  # a plain attribute: nn.Module keeps a list as such
+    for path, module in dit.named_modules():
+        if isinstance(module, nn.Linear):
+            for slot in range(SLOTS):
+                module.register_forward_hook(lora.Hook(partial(_armed, dit, slot, path)))
+    as_stored(config, "transformer", transformer)
+    return dit.eval()
+
+
+def _text_encoder(config: Config) -> TextEncoder:
+    section = _section(config, "text_encoder", "a text encoder goes with its tokenizer (`<model>:text_encoder,tokenizer`)")
+    with no_init_weights():
+        encoder = TextEncoder(Qwen3VLConfig(**section.mapping()), max(TAPS))
+    return encoder.eval()
+
+
+def _vae(config: Config) -> AutoencoderKLQwenImage:
+    """A checkpoint's `vae`: its section of the config, or the whole config of a checkpoint of the VAE alone (Runtime
+    gives a lone component's unsectioned)."""
+    section = config.section("vae") if "vae" in config.keys() else config
+    with no_init_weights():
+        vae: AutoencoderKLQwenImage = construct(AutoencoderKLQwenImage, section.mapping())
+    as_stored(config, "vae", vae)
+    vae.eval()
+    return vae
+
+
+class DiTComponents(TypedDict):
+    transformer: Transformer
+
+
+class Krea2DiTGraph:
+    """The `transformer` of a Krea 2 checkpoint and its scheduler, whole or a model of that part alone (xs-192)."""
+
     def __init__(self, config: Config) -> None:
-        with no_init_weights():
-            transformer = construct(Krea2Transformer2DModel, config.section("transformer").mapping())
-            encoder = TextEncoder(Qwen3VLConfig(**config.section("text_encoder").mapping()), max(TAPS))
-            vae = construct(AutoencoderKLQwenImage, config.section("vae").mapping())
-        transformer.__class__ = Transformer
-        for block in transformer.transformer_blocks:
-            block.__class__ = Block
-        # Every linear of the DiT serves an armed adapter's factors (`adapters.Adapter`), one hook per slot.
-        dit = cast(Transformer, transformer)  # its class, set above
-        dit._cozy_overlays = [None] * SLOTS  # a plain attribute: nn.Module keeps a list as such
-        for path, module in dit.named_modules():
-            if isinstance(module, nn.Linear):
-                for slot in range(SLOTS):
-                    module.register_forward_hook(lora.Hook(partial(_armed, dit, slot, path)))
-        as_stored(config, "transformer", transformer)
-        as_stored(config, "vae", vae)
-        self.components: Components = {
-            "transformer": cast(Transformer, transformer).eval(),  # its class, set above
-            "text_encoder": encoder.eval(),
-            "vae": vae.eval(),
-        }
-        self.scheduler_config: Mapping[str, object] = config.section("scheduler").mapping()
+        self.components: DiTComponents = {"transformer": _transformer(config)}
+        self.scheduler_config: Mapping[str, object] = _section(
+            config, "scheduler", "a transformer goes with its scheduler (`<model>:transformer,scheduler`)"
+        ).mapping()
+
+
+class TextEncoderComponents(TypedDict):
+    text_encoder: TextEncoder
+
+
+class Krea2TextEncoderGraph:
+    """The `text_encoder` of a Krea 2 checkpoint, whole or a model of that part alone (xs-192)."""
+
+    def __init__(self, config: Config) -> None:
+        self.components: TextEncoderComponents = {"text_encoder": _text_encoder(config)}
+
+
+class VAEComponents(TypedDict):
+    vae: AutoencoderKLQwenImage
+
+
+class Krea2VAEGraph:
+    """The `vae` of a checkpoint that holds one: Krea 2's own, or another of its shape (xs-192)."""
+
+    def __init__(self, config: Config) -> None:
+        self.components: VAEComponents = {"vae": _vae(config)}
 
 
 class Components(TypedDict):
     transformer: Transformer
     text_encoder: TextEncoder
     vae: AutoencoderKLQwenImage
+
+
+class Krea2Graph:
+    """A whole Krea 2 pipeline in one construction: what the quantize recipe reads."""
+
+    def __init__(self, config: Config) -> None:
+        self.components: Components = {
+            "transformer": _transformer(config), "text_encoder": _text_encoder(config), "vae": _vae(config),
+        }
 
 
 def construct[M: ConfigMixin](cls: type[M], config: dict[str, object]) -> M:
@@ -496,119 +561,21 @@ def fused_text(transformer: Krea2Transformer2DModel, text: torch.Tensor) -> torc
     return _text_in(transformer.txt_in, hidden).to(text.dtype)
 
 
-class Krea2(Model[Krea2Graph]):
-    """One Krea 2 checkpoint, Raw or Turbo. Their configs are identical and the pipeline's `is_distilled` is
-    not in the model's config, so the caller names the regime (`denoise(distilled=)`). A function binds it
-    twice: `model` for its DiT and VAE, `text_encoder` for its Qwen3-VL (`encode`, `encode_pictures`)."""
+class Krea2DiT(Model[Krea2DiTGraph]):
+    """Krea 2's DiT, Raw or Turbo, the `model` slot: a checkpoint's `transformer` and its scheduler, whole or a model of
+    that part alone (xs-192). Their configs are identical and the pipeline's `is_distilled` is not in the model's
+    config, so the caller names the regime (`denoise(distilled=)`)."""
 
     #: Caller LoRAs on the DiT, at any strength: the Runtime bakes them into the weights.
     serving = Serving(loras=("transformer",))
 
-    graph: Krea2Graph
-    tokenizer: PreTrainedTokenizerFast
-    prompt_frame: Frame
+    graph: Krea2DiTGraph
 
     def load(self, loader: Loader) -> None:
-        self.graph = loader.construct(Krea2Graph)
-        self.tokenizer = build_tokenizer(loader.assets)
-        self.prompt_frame = frame(loader.assets, self.tokenizer)
+        self.graph = loader.construct(Krea2DiTGraph)
 
     def execution_plan(self, plan: Plan) -> str:
-        vae = self.graph.components["vae"]
-        encoder = vae.encoder
-        # Not the encoder's temporal downsamplers: their `time_conv` only ever runs on a next frame's cache.
-        frame = (
-            *(block for block in encoder.down_blocks if not isinstance(block, QwenImageResample)),
-            encoder.conv_in, encoder.mid_block, encoder.conv_out, vae.quant_conv,
-            vae.decoder, vae.post_quant_conv,
-        )
-        installed = (
-            fusion.install(plan, BLOCK, self.graph.components["transformer"]),
-            fusion.install_norms(plan, VAE_NORM, vae),
-            fusion.install_lone_frame(plan, VAE_FRAME, *frame),
-        )
-        return "+".join(identity for identity in installed if identity)
-
-    def hold_vae(self) -> None:
-        """Encode and decode in `VAE_DTYPE` on CUDA; the CPU keeps the stored F32. The Runtime casts the VAE's
-        stored F32 when it next fills it. Called before any VAE scope opens."""
-        if torch.device(str(self.device)).type == "cuda":
-            hold_dtype(self.graph.components["vae"], VAE_DTYPE)
-
-    @memoize
-    @uses_components("text_encoder")
-    def encode(self, prompt: str) -> torch.Tensor:
-        """The DiT's text conditioning [1, S, 12, 2560] (bf16, on the CPU): the prompt in the checkpoint's
-        chat template (`frame`), at most 512 tokens after its system prefix, the 12 tapped hidden states.
-
-        Diffusers pads the prompt to 512 tokens and masks the padding, with positions counting real
-        tokens only; the DiT reads text keys at rotary position 0 and masks padded ones. Unpadded, the
-        same tokens get the same positions and every real token the same values, without the padding's
-        compute or a mask (which leaves only SDPA among attention kernels)."""
-        encoder = self.graph.components["text_encoder"].language_model
-        device = torch.device(str(self.device))
-        framed = self.prompt_frame
-        tokens = self.tokenizer(
-            framed.prefix + prompt, truncation=True,
-            max_length=TEXT_TOKENS + framed.prefix_tokens - framed.suffix_tokens,
-        ).input_ids + self.tokenizer(framed.suffix).input_ids
-        ids = torch.tensor([tokens], device=device)
-        positions = torch.arange(ids.shape[1], device=device).view(1, 1, -1).expand(3, 1, -1)
-        with torch.inference_mode():
-            hidden = encoder(input_ids=ids, position_ids=positions, output_hidden_states=True,
-                             use_cache=False).hidden_states
-            stacked = torch.stack([hidden[i] for i in TAPS], dim=2)[:, framed.prefix_tokens:]
-        return stacked.to(DTYPE).cpu()
-
-    @memoize
-    @uses_components("text_encoder")
-    def encode_pictures(self, prompt: str, pictures: tuple[Image.Image, ...], labels: bool) -> torch.Tensor:
-        """`encode` with `pictures` read by Qwen3-VL's vision tower in the user's turn, before the prompt, each
-        `Picture N: ` first with `labels` (ai-toolkit's edits) or bare (Identity Edit), as Transformers' Qwen3-VL
-        reads them (DeepStack included). The pictures come at the size the adapter reads them; their tokens
-        stay in the conditioning, after the system prefix (`frame`). [1, S, 12, 2560] bf16, on the CPU."""
-        encoder = self.graph.components["text_encoder"]
-        device = torch.device(str(self.device))
-        heads = "".join(f"Picture {n}: {VISION}" if labels else VISION for n in range(1, len(pictures) + 1))
-        framed = self.prompt_frame
-        words = self.tokenizer(prompt).input_ids[:TEXT_TOKENS - framed.suffix_tokens]
-        pad = encoder.image_token_id
-        patches, grids = zip(*(vision_patches(picture) for picture in pictures), strict=True)
-        ids: list[int] = []
-        sizes = iter(rows * columns // VISION_MERGE**2 for _, rows, columns in grids)
-        for token in self.tokenizer(framed.prefix + heads).input_ids + words + self.tokenizer(framed.suffix).input_ids:
-            ids.extend([pad] * next(sizes) if token == pad else [token])
-        positions = mrope(ids, pad, grids).to(device)
-        tokens = torch.tensor([ids], device=device)
-        visual = tokens == pad
-        with torch.inference_mode():
-            seen = encoder.visual(torch.cat(patches).to(device, DTYPE), grid_thw=torch.tensor(grids, device=device))
-            language = encoder.language_model
-            embeds = language.embed_tokens(tokens)
-            embeds = embeds.masked_scatter(visual[..., None], seen.pooler_output.to(embeds.dtype))
-            hidden = language(inputs_embeds=embeds, position_ids=positions, visual_pos_masks=visual,
-                              deepstack_visual_embeds=list(seen.deepstack_features), output_hidden_states=True,
-                              use_cache=False).hidden_states
-            stacked = torch.stack([hidden[i] for i in TAPS], dim=2)[:, framed.prefix_tokens:]
-        return stacked.to(DTYPE).cpu()
-
-    @memoize
-    @uses_components("vae")
-    def encode_image(self, picture: Image.Image) -> torch.Tensor:
-        """`decode` inverted: a picture already at its size (16 px grid) through the VAE's encoder, its mode,
-        normalized: [1, 16, H/8, W/8] F32 on the CPU. Diffusers' `encode` of one frame without its feature
-        cache (each convolution's input kept for a next frame an image never has)."""
-        vae = self.graph.components["vae"]
-        device = torch.device(str(self.device))
-        z_dim = int(vae.config["z_dim"])
-        with torch.inference_mode():
-            pixels = torch.from_numpy(np.asarray(picture.convert("RGB"), dtype=np.float32)).permute(2, 0, 1) / 127.5 - 1
-            moments = vae.quant_conv(vae.encoder(pixels[None, :, None].to(device, vae.dtype)))
-            z = moments[:, :z_dim, 0].float()
-            mean = z.new_tensor(vae.config["latents_mean"]).view(1, -1, 1, 1)
-            std = z.new_tensor(vae.config["latents_std"]).view(1, -1, 1, 1)
-            out: torch.Tensor = ((z - mean) / std).cpu()
-            return out
+        return fusion.install(plan, BLOCK, self.graph.components["transformer"]) or ""
 
     def _stream(self, branch: Branch, rows: int, columns: int, device: torch.device) -> Stream:
         """What no step changes of one branch: its fused text, its pictures through `img_in` (clean, so
@@ -717,6 +684,125 @@ class Krea2(Model[Krea2Graph]):
                 progress(i, steps)
         return latents.cpu()
 
+
+class Krea2TextEncoder(Model[Krea2TextEncoderGraph]):
+    """Krea 2's Qwen3-VL, the `text_encoder` slot: a checkpoint's `text_encoder` and its tokenizer, whole or a model of
+    that part alone (xs-192)."""
+
+    graph: Krea2TextEncoderGraph
+    tokenizer: PreTrainedTokenizerFast
+    prompt_frame: Frame
+
+    def load(self, loader: Loader) -> None:
+        self.graph = loader.construct(Krea2TextEncoderGraph)
+        self.tokenizer = build_tokenizer(loader.assets)
+        self.prompt_frame = frame(loader.assets, self.tokenizer)
+
+    @memoize
+    @uses_components("text_encoder")
+    def encode(self, prompt: str) -> torch.Tensor:
+        """The DiT's text conditioning [1, S, 12, 2560] (bf16, on the CPU): the prompt in the checkpoint's
+        chat template (`frame`), at most 512 tokens after its system prefix, the 12 tapped hidden states.
+
+        Diffusers pads the prompt to 512 tokens and masks the padding, with positions counting real
+        tokens only; the DiT reads text keys at rotary position 0 and masks padded ones. Unpadded, the
+        same tokens get the same positions and every real token the same values, without the padding's
+        compute or a mask (which leaves only SDPA among attention kernels)."""
+        encoder = self.graph.components["text_encoder"].language_model
+        device = torch.device(str(self.device))
+        framed = self.prompt_frame
+        tokens = self.tokenizer(
+            framed.prefix + prompt, truncation=True,
+            max_length=TEXT_TOKENS + framed.prefix_tokens - framed.suffix_tokens,
+        ).input_ids + self.tokenizer(framed.suffix).input_ids
+        ids = torch.tensor([tokens], device=device)
+        positions = torch.arange(ids.shape[1], device=device).view(1, 1, -1).expand(3, 1, -1)
+        with torch.inference_mode():
+            hidden = encoder(input_ids=ids, position_ids=positions, output_hidden_states=True,
+                             use_cache=False).hidden_states
+            stacked = torch.stack([hidden[i] for i in TAPS], dim=2)[:, framed.prefix_tokens:]
+        return stacked.to(DTYPE).cpu()
+
+    @memoize
+    @uses_components("text_encoder")
+    def encode_pictures(self, prompt: str, pictures: tuple[Image.Image, ...], labels: bool) -> torch.Tensor:
+        """`encode` with `pictures` read by Qwen3-VL's vision tower in the user's turn, before the prompt, each
+        `Picture N: ` first with `labels` (ai-toolkit's edits) or bare (Identity Edit), as Transformers' Qwen3-VL
+        reads them (DeepStack included). The pictures come at the size the adapter reads them; their tokens
+        stay in the conditioning, after the system prefix (`frame`). [1, S, 12, 2560] bf16, on the CPU."""
+        encoder = self.graph.components["text_encoder"]
+        device = torch.device(str(self.device))
+        heads = "".join(f"Picture {n}: {VISION}" if labels else VISION for n in range(1, len(pictures) + 1))
+        framed = self.prompt_frame
+        words = self.tokenizer(prompt).input_ids[:TEXT_TOKENS - framed.suffix_tokens]
+        pad = encoder.image_token_id
+        patches, grids = zip(*(vision_patches(picture) for picture in pictures), strict=True)
+        ids: list[int] = []
+        sizes = iter(rows * columns // VISION_MERGE**2 for _, rows, columns in grids)
+        for token in self.tokenizer(framed.prefix + heads).input_ids + words + self.tokenizer(framed.suffix).input_ids:
+            ids.extend([pad] * next(sizes) if token == pad else [token])
+        positions = mrope(ids, pad, grids).to(device)
+        tokens = torch.tensor([ids], device=device)
+        visual = tokens == pad
+        with torch.inference_mode():
+            seen = encoder.visual(torch.cat(patches).to(device, DTYPE), grid_thw=torch.tensor(grids, device=device))
+            language = encoder.language_model
+            embeds = language.embed_tokens(tokens)
+            embeds = embeds.masked_scatter(visual[..., None], seen.pooler_output.to(embeds.dtype))
+            hidden = language(inputs_embeds=embeds, position_ids=positions, visual_pos_masks=visual,
+                              deepstack_visual_embeds=list(seen.deepstack_features), output_hidden_states=True,
+                              use_cache=False).hidden_states
+            stacked = torch.stack([hidden[i] for i in TAPS], dim=2)[:, framed.prefix_tokens:]
+        return stacked.to(DTYPE).cpu()
+
+
+class Krea2VAE(Model[Krea2VAEGraph]):
+    """Krea 2's VAE, the `vae` slot: a checkpoint's `vae`, whichever checkpoint holds one (xs-192)."""
+
+    graph: Krea2VAEGraph
+
+    def load(self, loader: Loader) -> None:
+        self.graph = loader.construct(Krea2VAEGraph)
+
+    def execution_plan(self, plan: Plan) -> str:
+        vae = self.graph.components["vae"]
+        encoder = vae.encoder
+        # Not the encoder's temporal downsamplers: their `time_conv` only ever runs on a next frame's cache.
+        frame = (
+            *(block for block in encoder.down_blocks if not isinstance(block, QwenImageResample)),
+            encoder.conv_in, encoder.mid_block, encoder.conv_out, vae.quant_conv,
+            vae.decoder, vae.post_quant_conv,
+        )
+        installed = (
+            fusion.install_norms(plan, VAE_NORM, vae),
+            fusion.install_lone_frame(plan, VAE_FRAME, *frame),
+        )
+        return "+".join(identity for identity in installed if identity)
+
+    def hold_vae(self) -> None:
+        """Encode and decode in `VAE_DTYPE` on CUDA; the CPU keeps the stored F32. The Runtime casts the VAE's
+        stored F32 when it next fills it. Called before any VAE scope opens."""
+        if torch.device(str(self.device)).type == "cuda":
+            hold_dtype(self.graph.components["vae"], VAE_DTYPE)
+
+    @memoize
+    @uses_components("vae")
+    def encode_image(self, picture: Image.Image) -> torch.Tensor:
+        """`decode` inverted: a picture already at its size (16 px grid) through the VAE's encoder, its mode,
+        normalized: [1, 16, H/8, W/8] F32 on the CPU. Diffusers' `encode` of one frame without its feature
+        cache (each convolution's input kept for a next frame an image never has)."""
+        vae = self.graph.components["vae"]
+        device = torch.device(str(self.device))
+        z_dim = int(vae.config["z_dim"])
+        with torch.inference_mode():
+            pixels = torch.from_numpy(np.asarray(picture.convert("RGB"), dtype=np.float32)).permute(2, 0, 1) / 127.5 - 1
+            moments = vae.quant_conv(vae.encoder(pixels[None, :, None].to(device, vae.dtype)))
+            z = moments[:, :z_dim, 0].float()
+            mean = z.new_tensor(vae.config["latents_mean"]).view(1, -1, 1, 1)
+            std = z.new_tensor(vae.config["latents_std"]).view(1, -1, 1, 1)
+            out: torch.Tensor = ((z - mean) / std).cpu()
+            return out
+
     @uses_components("vae")
     def decode(self, latents: torch.Tensor, *, width: int, height: int) -> Image.Image:
         """Diffusers' decode of the one frame (`_decoded`), its pixels quantized on the device as
@@ -737,6 +823,16 @@ class Krea2(Model[Krea2Graph]):
                 )
             pixels = ((image.clamp(-1, 1) * 0.5 + 0.5).clamp(0, 1) * 255).round().to(torch.uint8)
             return Image.fromarray(pixels.permute(1, 2, 0).contiguous().cpu().numpy())
+
+
+class Krea2(Model[Krea2Graph]):
+    """A whole Krea 2 checkpoint in one construction, Raw or Turbo: what the quantize recipe reads (`quantize.py`). A
+    function's slots read its parts: `Krea2DiT`, `Krea2TextEncoder` and `Krea2VAE`."""
+
+    graph: Krea2Graph
+
+    def load(self, loader: Loader) -> None:
+        self.graph = loader.construct(Krea2Graph)
 
 
 def _decoded(vae: AutoencoderKLQwenImage, z: torch.Tensor) -> torch.Tensor:
