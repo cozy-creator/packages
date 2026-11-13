@@ -66,7 +66,9 @@ ComfyUI's cfg 1.
 ## Text encoder
 
 `text_encoder` is its own slot: it reads the Qwen3-VL-4B of any Krea 2 checkpoint, the function's own by default
-(Raw's and Turbo's are byte-identical); `model` reads only the DiT and VAE. Quiho's abliterated encoder
+(Raw's and Turbo's are byte-identical); `model` reads only the DiT, and `vae` the VAE. Each slot builds only what it
+reads, so a model of that part alone serves it: a transformer with its scheduler for `model`, a text encoder with its
+tokenizer for `text_encoder` (`cozy model upload <model>:transformer,scheduler`). Quiho's abliterated encoder
 ([Krea2_NSFW_Uncensored_Complete](https://huggingface.co/Quiho/Krea2_NSFW_Uncensored_Complete),
 `quiho/qwen3-vl-4b-abliterated`) is Qwen3-VL-4B with its refusal direction removed:
 
