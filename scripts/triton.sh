@@ -4,7 +4,7 @@
 # object is h3, its sets are minimax_h3's), under `out` (default: the package's own directory). A release ships them
 # (`task publish`); a gate or session running the package from source builds them into its checkout first, so the source
 # Calcifer uploads carries the same kernels and its first request serves them as a Hub install's does.
-# They compile with the Runtime the package's lock pins (or the wheel given, a URL or file: an RC's), and Torch $IMAGE_TORCH,
+# They compile with the Runtime the package's lock pins (an RC build: the RC's newest; or the wheel given, a URL or file), Torch $IMAGE_TORCH,
 # the Hub's worker image's: that Runtime and Triton key them. Only the Runtime's prebuild entry is called, so a Runtime that
 # moves it fails here rather than shipping nothing (se-117). A package whose source constructs no TritonKernels builds nothing.
 set -euo pipefail
@@ -15,10 +15,17 @@ m=$(sed -n '/cozy\.application/,/^\[/s/^default = "\([A-Za-z0-9_.]*\):.*/\1/p' "
 [ -n "$m" ] || { echo "$p: no cozy.application entry point" >&2; exit 1; }
 e=$(mktemp -d); trap 'rm -rf "$e"' EXIT
 bind=(); ! grep -qs '= { *index = "tensorhub"' "$p/pyproject.toml" || bind=(--index "tensorhub=${LOCK_HUB:-https://tensorhub.com}/v1/index/_/simple/")
-(cd "$p" && UV_PROJECT_ENVIRONMENT=$e/env uv sync -q --frozen --no-dev --python 3.12 "${bind[@]}")
+(cd "$p" && UV_PROJECT_ENVIRONMENT=$e/env uv sync -q --frozen --no-dev --python 3.12 --no-install-package cozy-runtime "${bind[@]}")
 # shellcheck disable=SC2086 # the requirements, one word each
 VIRTUAL_ENV=$e/env uv pip install -q $torch
-[ -z "$runtime" ] || VIRTUAL_ENV=$e/env uv pip install -q --no-deps "cozy-runtime @ $runtime"
+# The lock's Runtime from PyPI; one it took from the open RC (by URL, xs-194) is the RC's newest, which its machines run: the
+# wheel it named is gone after the next Runtime merge.
+if [ -z "$runtime" ]; then
+  locked=$(grep -A2 -x 'name = "cozy-runtime"' "$p/uv.lock" | sed -n 's/^version = "\(.*\)"$/\1/p' | head -1)
+  if grep -A2 -x 'name = "cozy-runtime"' "$p/uv.lock" | grep -q '^source = { url = '; then runtime=$("$(dirname "$0")/rc-runtime.sh" native)
+  else runtime=cozy-runtime==$locked; fi
+fi
+case $runtime in cozy-runtime==*) VIRTUAL_ENV=$e/env uv pip install -q --no-deps "$runtime" ;; *) VIRTUAL_ENV=$e/env uv pip install -q --no-deps "cozy-runtime @ $runtime" ;; esac
 # Sets built before, for older source, go: a machine would take their manifest for this source's.
 find "$out" -type d -name _triton -prune -exec rm -rf {} + 2>/dev/null || true
 prebuild='import importlib, sys

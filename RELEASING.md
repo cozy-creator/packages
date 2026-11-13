@@ -35,9 +35,16 @@ task publish -- --rc sdxl             # on a checkout of rc/<x.y.z>; sdxl's vers
 ```
 
 It publishes the prerelease live as it is. Released clients and each Hub's unversioned default skip prereleases. Its
-floor is the one its source declares; a package that needs what only the RC's Runtime has declares that build and locks
-it by URL (`cozy-runtime>=0.47.0.dev2260,<0.48`, `[tool.uv.sources] cozy-runtime = { url = "…/rc-<x.y.z>/….whl" }`). Its
 Triton sets compile with the RC's Runtime. A lock the relock changes goes into the RC branch as a pull request, queued.
+
+## The RC's Runtime
+
+A package runs on its machine's Runtime: an RC machine, and every gate, runs the open RC's newest build. A package that
+needs what only that Runtime has names its floor, never a wheel: `cozy-runtime>=0.47.0.dev0,<0.48` (the RC's minor). No
+release meets it yet, so a lock (`task lock`, Calcifer's) takes the RC's newest build, binding its wheel in a private copy
+only. A Runtime merge replaces that wheel, and nothing fetches a lock's copy of its URL again: Calcifer relocks a source run
+onto the newest build, a machine installs its own Runtime over a lock's, and `scripts/triton.sh` builds with the newest.
+Nothing needs relocking. Once 0.47.0 is on PyPI, the same floor locks it there.
 
 Complete the [dependency qualification checklist](DEPENDENCIES.md) first. Worker images
 are OS/CUDA/PyTorch bases named by tag; the CLI updates the machine, Runtime and TensorFS
