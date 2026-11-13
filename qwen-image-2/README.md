@@ -62,6 +62,9 @@ chat model towards a refusal. Each is one setting away from Qwen's own:
 
 `text_encoder` is its own slot, one for every function: it reads the `text_encoder` of a Qwen-Image-2.1 checkpoint,
 so any of them serves it (`qwen-image-2.1`'s is Qwen3-VL-8B-Instruct unmodified). `model` reads only the DiT.
+Each slot builds only what it reads, so a model of that part alone serves it: a transformer with its scheduler for
+`model`, a text encoder with its processor for `text_encoder` (`cozy model upload <model>:transformer,scheduler`); the
+other parts come from the other slots' models.
 
 `vae` is its own slot too, one for every function: it reads a checkpoint's `vae`, which encodes the pictures and decodes
 the image. It is the base model's own by default; `model.vae=madebyollin/texture-fix-vae` takes madebyollin's
@@ -253,7 +256,7 @@ image = await call(
 The Hub package is the first-party `qwen-image-2` (no owner); its callables are `generate`,
 `generate_turbo` and the tool `image`. Their default models are `qwen/qwen-image-2.1@0.1.0` and,
 for Turbo, `alibaba-pai/qwen-image-2.1-fun-acc@0.1.1`; all read
-`atomicchat/qwen-image-2.1-text-encoder-abliterated@0.1.0` (`text_encoder`),
+`atomicchat/qwen-image-2.1-text-encoder-abliterated@0.2.0` (`text_encoder`, its text encoder alone),
 `darrellbest/qwen-image-2.1-pe-i2i-abliterated@0.1.0` (`rewriter`) and
 `pottokao/qwen-image-2.1-pe-t2i-abliterated@0.1.0` (`expander`).
 A plain `generate(...)` is an ordinary in-process Python call; `call` runs it as its own job on

@@ -15,7 +15,7 @@ from cozy_runtime.media import ImageFile
 from PIL import Image as PILImage
 
 from . import quantize as quantize  # its recipes
-from .model import QwenImage21Model, QwenImage21VAE, reference_grids
+from .model import QwenImage21DiT, QwenImage21TextEncoder, QwenImage21VAE, reference_grids
 from .rewriter import Creativity, Enhancer, rewrite
 from .turbo import FunAccLoRA
 
@@ -129,9 +129,9 @@ def _generate(
     ctx: Context,
     payload: GenerateInput,
     expander: Enhancer,
-    model: QwenImage21Model,
+    model: QwenImage21DiT,
     rewriter: Enhancer,
-    text_encoder: QwenImage21Model,
+    text_encoder: QwenImage21TextEncoder,
     vae: QwenImage21VAE,
     out: Outputs,
     tel: Telemetry,
@@ -203,10 +203,10 @@ def _generate(
 #: own by default, or another Qwen-Image-2.1 VAE (`model.vae=madebyollin/texture-fix-vae`).
 _FULL = {"expander": "pottokao/qwen-image-2.1-pe-t2i-abliterated@0.1.0", "model": "qwen/qwen-image-2.1@0.1.0",
          "rewriter": "darrellbest/qwen-image-2.1-pe-i2i-abliterated@0.1.0",
-         "text_encoder": "atomicchat/qwen-image-2.1-text-encoder-abliterated@0.1.0", "vae": "qwen/qwen-image-2.1@0.1.0"}
+         "text_encoder": "atomicchat/qwen-image-2.1-text-encoder-abliterated@0.2.0", "vae": "qwen/qwen-image-2.1@0.1.0"}
 _TURBO = {"expander": "pottokao/qwen-image-2.1-pe-t2i-abliterated@0.1.0", "model": "qwen/qwen-image-2.1@0.1.0",
           "rewriter": "darrellbest/qwen-image-2.1-pe-i2i-abliterated@0.1.0",
-          "text_encoder": "atomicchat/qwen-image-2.1-text-encoder-abliterated@0.1.0",
+          "text_encoder": "atomicchat/qwen-image-2.1-text-encoder-abliterated@0.2.0",
           "turbo_lora": "alibaba-pai/qwen-image-2.1-fun-acc@0.1.1", "vae": "qwen/qwen-image-2.1@0.1.0"}
 _COMPONENTS = {"expander": ("model",), "model": ("transformer",), "rewriter": ("model",),
                "text_encoder": ("text_encoder",), "vae": ("vae",)}
@@ -219,9 +219,9 @@ def generate(
     ctx: Context,
     payload: GenerateInput,
     expander: Enhancer,
-    model: QwenImage21Model,
+    model: QwenImage21DiT,
     rewriter: Enhancer,
-    text_encoder: QwenImage21Model,
+    text_encoder: QwenImage21TextEncoder,
     vae: QwenImage21VAE,
     out: Outputs,
     tel: Telemetry,
@@ -236,9 +236,9 @@ def generate_turbo(
     ctx: Context,
     payload: GenerateInput,
     expander: Enhancer,
-    model: QwenImage21Model,
+    model: QwenImage21DiT,
     rewriter: Enhancer,
-    text_encoder: QwenImage21Model,
+    text_encoder: QwenImage21TextEncoder,
     turbo_lora: FunAccLoRA,
     vae: QwenImage21VAE,
     out: Outputs,
@@ -273,9 +273,9 @@ def image(
     ctx: Context,
     payload: ImageBox,
     expander: Enhancer,
-    model: QwenImage21Model,
+    model: QwenImage21DiT,
     rewriter: Enhancer,
-    text_encoder: QwenImage21Model,
+    text_encoder: QwenImage21TextEncoder,
     turbo_lora: FunAccLoRA,
     vae: QwenImage21VAE,
     out: Outputs,
@@ -300,18 +300,18 @@ class UpscaleInput(msgspec.Struct, kw_only=True):
     image: Annotated[ImageFile, FileBound(max_decoded_bytes=256 << 20)]
     #: `upscale`: the picture's ratio at this size (`SIZES.fit`), up to Qwen's 4 MP.
     megapixels: Literal[2, 4] = 4
-    #: `QwenImage21Model.denoise`'s `strength`: the noise the picture starts under; 1 redraws it from noise (se-123).
+    #: `QwenImage21DiT.denoise`'s `strength`: the noise the picture starts under; 1 redraws it from noise (se-123).
     denoise: Annotated[float, msgspec.Meta(gt=0, le=1), Advanced()] = 0.2
     seed: Seed | None = None
 
 
-_UPSCALE = {"model": "qwen/qwen-image-2.1@0.1.0", "text_encoder": "atomicchat/qwen-image-2.1-text-encoder-abliterated@0.1.0",
+_UPSCALE = {"model": "qwen/qwen-image-2.1@0.1.0", "text_encoder": "atomicchat/qwen-image-2.1-text-encoder-abliterated@0.2.0",
             "turbo_lora": "alibaba-pai/qwen-image-2.1-fun-acc@0.1.1", "vae": "qwen/qwen-image-2.1@0.1.0"}
 
 
 @app.tool(label="Upscale", named="image", defaults=_UPSCALE,
           components={"model": ("transformer",), "text_encoder": ("text_encoder",), "vae": ("vae",)}, memoize=True)  # fmt: skip
-def upscale(ctx: Context, payload: UpscaleInput, model: QwenImage21Model, text_encoder: QwenImage21Model,
+def upscale(ctx: Context, payload: UpscaleInput, model: QwenImage21DiT, text_encoder: QwenImage21TextEncoder,
             turbo_lora: FunAccLoRA, vae: QwenImage21VAE, out: Outputs, tel: Telemetry, adj: Adjustments) -> ImageResult:
     """The picture larger: Qwen Image 2 Turbo edits it at the size asked, the picture its reference and, Lanczos-upscaled
     to the canvas, below `denoise` its start."""
