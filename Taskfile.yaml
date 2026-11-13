@@ -4,8 +4,6 @@ silent: true
 vars:
   LOCK_HUB: https://tensorhub.com # committed locks resolve against production
   HUBS: https://tensorhub.com http://127.0.0.1:8819
-  IMAGE_TORCH: torch==2.15.0 torchvision==0.29.2 # what the Hub's current worker image carries (its tag): a lock carries none (cl-715)
-  YANKED: --yanked # `YANKED=` publishes live: a release proven before its publish (0.22.1's hard cut)
 
 tasks:
   typecheck:
@@ -18,39 +16,55 @@ tasks:
     cmds:
       - LOCK_HUB={{.LOCK_HUB}} scripts/lock.sh {{.CLI_ARGS}}
 
-  # First-party packages publish at the root namespace (`--root`, Hub admins). Locks pin first-party callees exactly, so each release of X is followed by one of every package
-  # whose pyproject takes X from the Hub (`{ index = "tensorhub" }`): relocked to it, patch-bumped, pushed to master, then published.
-  # Every release is a candidate: published yanked, in one Hub call (an exact pin installs it; the unversioned default skips
-  # it). The release agent tests it by hand (cozy-creator's release gate, the printed pins) and records the result; then
-  # `task promote` un-yanks the gated releases (tracker design ci-v2, pre-release and promotion). Nothing here starts a
-  # test. A dependent relocks to a yanked callee only when it pins it with ==. A version any hub already holds is never
-  # published or yanked: a root at one refuses before anything is published, a dependent bumps to the next free patch.
+
+  # First-party packages publish at the root namespace (`--root`, Hub admins), only after their release gate passed and the
+  # software their floor needs is Latest (tracker design ci-v2, pre-release and promotion; Paul 11-13: nothing untested on
+  # tensorhub.com). cozy-creator's release-gate/promote.sh runs `task publish -- --gated <the gate's packages_ref>`: every
+  # package whose final no hub holds, each refused unless master's source of it is the gated source. A root's prerelease
+  # version (`0.13.0rc2`) is published as its final (`0.13.0`): only the version changes, committed with its lock.
+  # Locks pin first-party callees exactly, so a root relocks to the roots it takes, and each release of X is followed by one
+  # of every package whose pyproject takes X from the Hub (`{ index = "tensorhub" }`): relocked to it, patch-bumped, pushed
+  # to master, then published. A version any hub holds is never published again: a root at one refuses before anything is
+  # published, a dependent bumps to the next free patch.
   # `--dry-run` does all of it on this checkout but the push to master and the Hub publish, builds each release's wheel
   # into dist/ instead, and leaves the checkout as it was.
-  # `--rc` (cl-922), on a checkout of the open RC's branch: a package built for the RC's Runtime, at a PEP 440 prerelease
-  # version (`0.10.0rc1`), published live from that branch: every hub's unversioned default and every released client skip
-  # a prerelease, and a dev home's rental on the RC's Runtime takes it. Its floor is the one its source declares (a release
-  # like 0.46.0 keeps it lockable by a dependent such as orbit), and its Triton sets compile with the RC's Runtime
-  # (cozy-runtime's prerelease rc-<x.y.z>). The RC branch takes changes only through its merge queue, so a lock the relock
-  # changes goes to it as a pull request, queued; nothing cascades. A push the remote refuses fails at once.
+  # `--hub <url>`: CI's throwaway Hub (cozy-creator release-gate suite `publish`): the roots and the in-repo packages they
+  # take, finals, locked against that Hub's index and published there only; nothing pushed, the checkout left as it was.
+  # `--rc` (cl-922), early access Paul asks for, after the RC passed its full release gate: on a checkout of the open RC's
+  # branch, a package at a PEP 440 prerelease version (`0.10.0rc1`), published live as it is: every hub's unversioned
+  # default and every released client skip a prerelease. Its floor is the one its source declares, and its Triton sets
+  # compile with the RC's Runtime (cozy-runtime's prerelease rc-<x.y.z>). The RC branch takes changes only through its
+  # merge queue, so a lock the relock changes goes to it as a pull request, queued; nothing cascades.
   publish:
-    desc: "Publish candidates from master to every hub (yanked), then cascade to their in-repo dependents: task publish -- [--dry-run] [--rc] qwen-image-2"
+    desc: "Publish finals from master to every hub, then cascade to their in-repo dependents: task publish -- [--dry-run] [--hub URL] [--rc] (--gated REF | qwen-image-2...)"
     cmds:
       - |
-        set -euo pipefail; dry=; rc=; roots=" "
-        for a in {{.CLI_ARGS}}; do case $a in --dry-run) dry=1 ;; --rc) rc=1 ;; *) roots="$roots$a " ;; esac; done; changed=$roots
+        set -euo pipefail; dry=; rc=; hub=; gated=; roots=" "; next=
+        for a in {{.CLI_ARGS}}; do
+          case $next in hub) hub=$a; next=; continue ;; gated) gated=$a; next=; continue ;; esac
+          case $a in --dry-run) dry=1 ;; --rc) rc=1 ;; --hub) next=hub ;; --gated) next=gated ;; *) roots="$roots$a " ;; esac
+        done
+        usage="usage: task publish -- [--dry-run] [--hub URL] [--rc] (--gated REF | <package>...)"
         pkg() { grep -qs cozy.application "$1/pyproject.toml"; }
         ver() { grep -m1 '^version = ' "$1/pyproject.toml" | cut -d'"' -f2; }
-        for r in $roots; do pkg "$r" || { echo "usage: task publish -- [--dry-run] [--rc] <package>..." >&2; exit 2; }; done
+        # final <package>: its version without a prerelease part (0.13.0rc2 → 0.13.0), what users get.
+        final() { ver "$1" | sed -E 's/(a|b|rc)[0-9]+$//; s/\.dev[0-9]+$//'; }
+        [ -z "$next" ] && { [ -z "$gated" ] || [ "$roots" = " " ]; } && { [ -n "$gated" ] || [ "$roots" != " " ]; } || { echo "$usage" >&2; exit 2; }
+        [ -z "$gated" ] || [ -z "$rc$hub" ] || { echo "--gated is the promotion's: no --rc or --hub" >&2; exit 2; }
+        for r in $roots; do pkg "$r" || { echo "$usage" >&2; exit 2; }; done
         git diff --quiet HEAD || { echo "commit or discard tracked changes first" >&2; exit 1; }
-        branch=master; yanked={{.YANKED}}; runtime=
+        branch=master; runtime=; lock={{.LOCK_HUB}}; hubs="{{.HUBS}}"; keep=$dry
+        if [ -n "$hub" ]; then
+          case $hub in *tensorhub.com*) echo "--hub is a throwaway Hub; tensorhub.com takes only a gated set's finals (--gated)" >&2; exit 2 ;; esac
+          lock=$hub; hubs=$hub; keep=1
+        fi
         if [ -n "$rc" ]; then
           # The RC branch this checkout is on, or follows.
-          branch=$(git rev-parse --abbrev-ref HEAD); yanked=
+          branch=$(git rev-parse --abbrev-ref HEAD)
           case $branch in rc/*) ;; *) branch=$(git rev-parse --abbrev-ref '@{u}' 2>/dev/null || true); branch=${branch#origin/} ;; esac
           case $branch in rc/*) ;; *) echo "--rc publishes from a checkout of the open RC's branch (rc/<x.y.z>), or one that follows it" >&2; exit 2 ;; esac
           for r in $roots; do
-            echo "$(ver "$r")" | grep -qE '^[0-9.]+(a|b|rc)[0-9]+$|\.dev[0-9]+$' \
+            [ "$(ver "$r")" != "$(final "$r")" ] \
               || { echo "$r $(ver "$r"): --rc publishes a prerelease (0.10.0rc1), which released clients skip; bump it first" >&2; exit 2; }
           done
           # The RC's Runtime, which its rentals run and its Triton sets compile with.
@@ -60,83 +74,74 @@ tasks:
           [ -n "$runtime" ] || { echo "cozy-runtime has no rc-${branch#rc/} build yet (its rc-dev.yaml)" >&2; exit 1; }
           runtime="$base/$runtime"
         fi
-        [ -n "$dry" ] || { git fetch -q origin "$branch"; git merge -q --ff-only FETCH_HEAD; }
+        [ -n "$keep" ] || { git fetch -q origin "$branch"; git merge -q --ff-only FETCH_HEAD; }
         start=$(git rev-parse HEAD); here=$PWD; work=$(mktemp -d); shipped=
         finish() {  # no `return`: Task's shell runs on past it in a trap
-          git checkout -q -- .; if [ -n "$dry" ]; then git reset -q --keep "$start"; fi; rm -rf "$work"
+          git checkout -q -- .; if [ -n "$keep" ]; then git reset -q --keep "$start"; fi; rm -rf "$work"
           if [ -z "$shipped" ]; then :
           elif [ -n "$dry" ]; then echo "dry run, nothing pushed or published: $shipped (wheels in dist/)"
+          elif [ -n "$hub" ]; then echo "published on $hub only, nothing pushed: $shipped"
           elif [ -n "$rc" ]; then echo "prereleases for $branch's Runtime: $shipped"
-          else echo "$([ -n "$yanked" ] && echo "candidates (yanked)" || echo "published live"): $shipped
-        gate: gh workflow run release-gate.yml -R cozy-creator/cozy-creator -f suites=packages -f pins=$shipped -f only=$(echo "$shipped" | sed "s/@[^,]*//g")
-        then: task promote GATE=<passing release-gate run id>  (a hand gate: GATE=<its dirs> RECORD=<URL of its recorded result>)"
-          fi
+          else echo "published live: $shipped"; fi
         }
         trap finish EXIT
         deps() { sed -n 's/^\([A-Za-z0-9._-]*\) = { *index = "tensorhub".*/\1/p' "$1/pyproject.toml"; }
-        pinned() { for q in $up; do grep -A1 -x "name = \"$q\"" "$1/uv.lock" | grep -qx "version = \"$(ver "$q")\"" || return 1; done; }
+        pinned() { for q in $up; do grep -A1 -x "name = \"$q\"" "$1/uv.lock" | grep -qx "version = \"$(out "$q")\"" || return 1; done; }
         locked() { grep -A1 -x "name = \"$2\"" "$1/uv.lock" | sed -n 's/^version = "\(.*\)"$/\1/p'; }
         floor() { grep -oE "\"$2(\[[^]]*\])?>=[0-9][0-9.]*" "$1/pyproject.toml" | head -1 | sed 's/.*>=//'; }
         # A callee whose Runtime/TensorFS floor is above what the dependent locks takes the dependent's lock up too.
         raised() { for q in $up; do for d in cozy-runtime tensorfs; do f=$(floor "$q" "$d"); l=$(locked "$1" "$d")
           [ -n "$f" ] && [ -n "$l" ] && [ "$(printf '%s\n' "$f" "$l" | sort -V | head -1)" != "$f" ] && echo "$d"; done; done | sort -u; }
-        # The CLI lists a package's latest release, not every release (`cozy package ls`; cozy 0.24.0 has no `package info`). A version
-        # at or below it is held; a yanked one above it shows only when its publish answers `already published` (`ship`).
+        # The CLI lists a package's latest release, not every release (`cozy package ls`). A version at or below it is held.
         atmost() { [ "$(printf '%s\n' "$1" "$2" | sort -V | head -1)" = "$1" ]; }
         latest() {  # latest <package> <hub>: empty with no release there. A hub that cannot answer stops everything.
           out=$(COZY_HUB_URL="$2" cozy package ls "$1" --json --limit 200 2>/dev/null) || { echo "$2 cannot list $1: nothing more published" >&2; exit 1; }
           jq -r --arg p "_/$1" --arg q "$1" '[.packages[] | select(.package == $p or .package == $q)][0].latest_release // empty' <<< "$out"
         }
-        published() { l=$(latest "$1" {{.LOCK_HUB}}); [ -n "$l" ] && atmost "$(ver "$1")" "$l"; }
-        # held <package>: the hubs whose latest release is at or above its master version.
+        # What a publish would release: the prerelease as it is with --rc, else its final.
+        out() { if [ -n "$rc" ]; then ver "$1"; else final "$1"; fi; }
+        published() { l=$(latest "$1" "$lock"); [ -n "$l" ] && atmost "$(out "$1")" "$l"; }
+        # held <package>: the hubs whose latest release is at or above the version it would release.
         held() {
-          for h in {{.HUBS}}; do
+          for h in $hubs; do
             l=$(latest "$1" "$h")
             # if, not &&: Task's shell exits on a false && inside a function's loop.
-            if [ -n "$l" ] && atmost "$(ver "$1")" "$l"; then printf '%s ' "$h"; fi
+            if [ -n "$l" ] && atmost "$(out "$1")" "$l"; then printf '%s ' "$h"; fi
           done
         }
-        # A version a hub already holds is never published or yanked again: bump it on master first.
+        all() { for p in */pyproject.toml; do p=${p%/pyproject.toml}; if pkg "$p"; then echo "$p"; fi; done; }
+        if [ -n "$gated" ]; then
+          # The gate ran $gated's source; master's must be it for every package it releases.
+          git cat-file -e "$gated^{commit}" 2>/dev/null || git fetch -q origin "$gated"
+          for p in $(all); do
+            [ -z "$(held "$p")" ] || continue
+            git diff --quiet "$gated" HEAD -- "$p" || { echo "$p on master is not the gated source ($gated): gate it again; nothing published" >&2; exit 1; }
+            roots="$roots$p "
+          done
+          [ "$roots" != " " ] || { echo "every package at $gated is published already" >&2; exit 0; }
+          echo "the gated set's finals: $roots"
+        fi
+        if [ -n "$hub" ]; then  # and the in-repo packages they take, which that Hub has not
+          for _ in 1 2 3 4 5; do for r in $roots; do for q in $(deps "$r"); do
+            if pkg "$q" && [ -z "$(held "$q")" ]; then case $roots in *" $q "*) ;; *) roots="$roots$q " ;; esac; fi
+          done; done; done
+        fi
+        changed=$roots
+        # A version a hub already holds is never published again: bump it on master first.
         for r in $roots; do on=$(held "$r")
-          [ -z "$on" ] || { echo "$r $(ver "$r") already exists on $on: bump its version on master; nothing published" >&2; exit 1; }
+          [ -z "$on" ] || { echo "$r $(out "$r") already exists on $on: bump its version on master; nothing published" >&2; exit 1; }
         done
-        # The lock `cozy package publish` makes (scripts/lock.sh). A root relocks with no upgrade, so master holds the lock it
-        # publishes; a package with none gets one.
-        relock() { LOCK_HUB={{.LOCK_HUB}} scripts/lock.sh "$@"; }
+        # The lock `cozy package publish` makes (scripts/lock.sh), against $lock's root index.
+        relock() { LOCK_HUB=$lock scripts/lock.sh "$@"; }
+        ups() { for q in "$@"; do printf ' --upgrade-package=%s' "$q"; done; }
         pairs() { awk -F'"' '/^name = /{n=$2} /^version = /{print n, $2}'; }
-        # The Triton sets the package's import declares, compiled on this CPU for every card row, ship in the release: each
-        # into `_triton` beside the top-level module that declares it (its home, where machines look), which need not be the
-        # object's (minimax-h3: object h3, sets in minimax_h3). They compile with the Runtime the package's lock pins, which
-        # keys them and is the one machines run it on. Only the Runtime's prebuild entry is called, so a Runtime that moves
-        # it fails here rather than shipping nothing (Runtime 0.43.1 moved the set registry: se-117).
-        prebuild='import importlib, sys
-        from pathlib import Path
-        importlib.import_module(sys.argv[1])
-        from cozy_runtime.internal import triton_kernels, triton_prebuild
-        here, out = Path.cwd().resolve(), Path(sys.argv[2])
-        for home, module in sorted(sys.modules.copy().items()):
-            file = getattr(module, "__file__", None)
-            if "." in home or not file or not Path(file).resolve().is_relative_to(here):
-                continue
-            said = triton_prebuild.build(out / Path(file).resolve().parent.relative_to(here) / triton_kernels.SHIPPED, None, home)
-            rows = said["sets"]
-            left = sorted(row for row, took in rows.items() if isinstance(took, str))
-            if rows:
-                print("%s: %d kernels, %d KiB, %d of %d set rows" % (home, said["kernels"], said["bytes"] // 1024, len(rows) - len(left), len(rows)), file=sys.stderr)
-            for row in left:
-                print("  %s %s" % (row, rows[row]), file=sys.stderr)
-            if rows and not said["kernels"]:
-                sys.exit(home + ": its Triton sets compiled for no card row")'
-        kernels() { m=$(sed -n '/cozy\.application/,/^\[/s/^default = "\([A-Za-z0-9_.]*\):.*/\1/p' "$1/pyproject.toml"); e=$work/.env-$1
-          bind=; [ -z "$(deps "$1")" ] || bind="--index tensorhub={{.LOCK_HUB}}/v1/index/_/simple/"
-          (cd "$1" && UV_PROJECT_ENVIRONMENT=$e uv sync -q --frozen --no-dev --python 3.12 $bind)
-          VIRTUAL_ENV=$e uv pip install -q {{.IMAGE_TORCH}}
-          [ -z "$runtime" ] || VIRTUAL_ENV=$e uv pip install -q --no-deps "cozy-runtime @ $runtime"
-          (cd "$1" && CUDA_VISIBLE_DEVICES= nice -n 19 "$e/bin/python" -I -c "$prebuild" "$m" "$work/.kernels/$1") >/dev/null; }
+        # The Triton sets the package's import declares, compiled on this CPU for every card row with the Runtime its lock
+        # pins (scripts/triton.sh), ship in the release, so a fresh machine's first request runs its fused plans.
+        kernels() { LOCK_HUB=$lock scripts/triton.sh "$1" "$work/.kernels/$1" "$runtime"; }
         ship() {
-          on=$(held "$1"); [ -z "$on" ] || { echo "$1 $(ver "$1") already exists on $on: not published, not yanked" >&2; exit 1; }
+          on=$(held "$1"); [ -z "$on" ] || { echo "$1 $(ver "$1") already exists on $on: not published" >&2; exit 1; }
           kernels "$1"
-          for h in {{.HUBS}}; do
+          for h in $hubs; do
             rm -rf "${work:?}/$1"; git archive HEAD "$1" | tar -x -C "$work"
             [ ! -d "$work/.kernels/$1" ] || cp -r "$work/.kernels/$1/." "$work/$1/"
             if [ -n "$dry" ]; then
@@ -146,7 +151,7 @@ tasks:
               unzip -p "$w" '*/_triton/manifest.json' 2>/dev/null | jq -r '[.kernels[]] | group_by(.set)[] | "  \(.[0].set): " + (group_by(.sm) | map("sm\(.[0].sm) \(length)") | join(", "))' || true
               break
             fi
-            said=$(cd "$work/$1" && COZY_HUB_URL="$h" cozy package publish --root $yanked --json) || exit 1
+            said=$(cd "$work/$1" && COZY_HUB_URL="$h" cozy package publish --root --json) || exit 1
             status=$(jq -r .status <<< "$said"); echo "$1 $(ver "$1") on $h: $status"
             case $status in published*) ;; *) echo "$h holds $1 $(ver "$1") already ($status): bump its version on master" >&2; exit 1 ;; esac
           done
@@ -185,8 +190,8 @@ tasks:
             git show "HEAD:$1/uv.lock" 2>/dev/null | pairs > "$work/before" || true; pairs < "$1/uv.lock" > "$work/after"
             echo "$1 $(ver "$1"): lock$(diff "$work/before" "$work/after" | sed -n 's/^\([<>]\) / \1 /p' | tr '\n' ';')"
             git commit -q -m "$1 $(ver "$1"): lock$(for q in $up; do printf ' %s %s' "$q" "$(ver "$q")"; done)" -- "$1"
-            if [ -n "$dry" ]; then
-              [ -z "$rc" ] || echo "$1 $(ver "$1"): dry run, so no pull request into $branch carries its lock"
+            if [ -n "$keep" ]; then
+              [ -z "$rc" ] || [ -n "$hub" ] || echo "$1 $(ver "$1"): dry run, so no pull request into $branch carries its lock"
             elif [ -n "$rc" ]; then
               propose "$1"
             else
@@ -197,19 +202,29 @@ tasks:
         }
         for p in $(for p in */pyproject.toml; do p=${p%/pyproject.toml}; pkg "$p" || continue; echo "$p $p"; deps "$p" | sed "s|\$| $p|"; done | tsort); do
           pkg "$p" || continue
-          case $roots in *" $p "*) up=; relock "$p"; release "$p"; continue ;; esac
-          [ -z "$rc" ] || continue
-          up=$(for q in $(deps "$p"); do case $changed in *" $q "*) echo "$q" ;; esac; done)
+          # The roots it takes; on a throwaway Hub, every in-repo package it takes (each there at its final).
+          up=$(for q in $(deps "$p"); do case $changed in *" $q "*) echo "$q" ;; *) if [ -n "$hub" ] && pkg "$q"; then echo "$q"; fi ;; esac; done)
+          case $roots in *" $p "*)
+            # Only the version changes: the final, then the lock, taking the roots it calls at theirs.
+            [ -n "$rc" ] || [ "$(ver "$p")" = "$(final "$p")" ] || uv version -q --frozen --project "$p" "$(final "$p")"
+            relock "$p" $(ups $up $(raised "$p"))
+            if ! pinned "$p"; then
+              [ -n "$dry" ] || { echo "$p: the relock did not take $up at their released versions" >&2; exit 1; }
+              echo "$p: dry run, so it locks the Hub's $up, not the unpublished version here"
+            fi
+            release "$p"; continue ;;
+          esac
+          [ -z "$rc$hub" ] || continue
           [ -n "$up" ] || continue
           changed="$changed$p "
-          published "$p" || { echo "$p $(ver "$p") on master is unpublished: publish it with what it takes, task publish --$roots$p" >&2; exit 1; }
+          published "$p" || { echo "$p $(out "$p") on master is unpublished: publish it with what it takes, task publish --$roots$p" >&2; exit 1; }
           ! pinned "$p" || { echo "$p $(ver "$p") is released and already locks $up: nothing to cascade; release it by hand" >&2; exit 1; }
           # The next patch version no hub holds.
           for _ in 1 2 3 4 5 6 7 8 9 10; do
             uv version -q --bump patch --frozen --project "$p"; on=$(held "$p"); [ -n "$on" ] || break
           done
           [ -z "$on" ] || { echo "$p: ten patch versions past master are all taken; bump it by hand" >&2; exit 1; }
-          relock "$p" $(printf ' --upgrade-package=%s' $up $(raised "$p"))
+          relock "$p" $(ups $up $(raised "$p"))
           if ! pinned "$p"; then
             [ -n "$dry" ] || { echo "$p: the relock did not take $up at their released versions" >&2; exit 1; }
             echo "$p: dry run, so it locks the Hub's $up, not the unpublished master version"
@@ -217,14 +232,3 @@ tasks:
           release "$p"
         done
 
-  # The release gate passed these candidates: cozy-creator's release-gate/promote.sh, the one promotion, makes the
-  # gated set users' (its pins the unversioned default on every hub that holds them).
-  promote:
-    desc: "Promote a passed gate's set: task promote GATE=<passing release-gate run id> [-- --dry-run] (hand gate: GATE=<dirs> RECORD=<URL>)"
-    requires:
-      vars: [GATE]
-    cmds:
-      - |
-        set -euo pipefail; creator=${CREATOR:-../cozy-creator}
-        record=(); [ -z "{{.RECORD}}" ] || record=(--record "{{.RECORD}}")
-        "$creator/release-gate/promote.sh" {{.CLI_ARGS}} "${record[@]}" {{.GATE}}
