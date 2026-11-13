@@ -86,7 +86,7 @@ tasks:
         }
         trap finish EXIT
         deps() { sed -n 's/^\([A-Za-z0-9._-]*\) = { *index = "tensorhub".*/\1/p' "$1/pyproject.toml"; }
-        pinned() { for q in $up; do grep -A1 -x "name = \"$q\"" "$1/uv.lock" | grep -qx "version = \"$(ver "$q")\"" || return 1; done; }
+        pinned() { for q in $up; do grep -A1 -x "name = \"$q\"" "$1/uv.lock" | grep -qx "version = \"$(out "$q")\"" || return 1; done; }
         locked() { grep -A1 -x "name = \"$2\"" "$1/uv.lock" | sed -n 's/^version = "\(.*\)"$/\1/p'; }
         floor() { grep -oE "\"$2(\[[^]]*\])?>=[0-9][0-9.]*" "$1/pyproject.toml" | head -1 | sed 's/.*>=//'; }
         # A callee whose Runtime/TensorFS floor is above what the dependent locks takes the dependent's lock up too.
@@ -123,7 +123,7 @@ tasks:
         fi
         if [ -n "$hub" ]; then  # and the in-repo packages they take, which that Hub has not
           for _ in 1 2 3 4 5; do for r in $roots; do for q in $(deps "$r"); do
-            if pkg "$q"; then case $roots in *" $q "*) ;; *) roots="$roots$q " ;; esac; fi
+            if pkg "$q" && [ -z "$(held "$q")" ]; then case $roots in *" $q "*) ;; *) roots="$roots$q " ;; esac; fi
           done; done; done
         fi
         changed=$roots
@@ -201,7 +201,8 @@ tasks:
         }
         for p in $(for p in */pyproject.toml; do p=${p%/pyproject.toml}; pkg "$p" || continue; echo "$p $p"; deps "$p" | sed "s|\$| $p|"; done | tsort); do
           pkg "$p" || continue
-          up=$(for q in $(deps "$p"); do case $changed in *" $q "*) echo "$q" ;; esac; done)
+          # The roots it takes; on a throwaway Hub, every in-repo package it takes (each there at its final).
+          up=$(for q in $(deps "$p"); do case $changed in *" $q "*) echo "$q" ;; *) if [ -n "$hub" ] && pkg "$q"; then echo "$q"; fi ;; esac; done)
           case $roots in *" $p "*)
             # Only the version changes: the final, then the lock, taking the roots it calls at theirs.
             [ -n "$rc" ] || [ "$(ver "$p")" = "$(final "$p")" ] || uv version -q --frozen --project "$p" "$(final "$p")"
