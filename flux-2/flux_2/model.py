@@ -135,8 +135,8 @@ def _conditioning_only(encoder: nn.Module, depth: int) -> None:
 
 
 def _armed(transformer: nn.Module, path: str) -> lora.Factors | None:
-    """The Turbo overlay's factors at `path` while `turbo.applied` arms it (`_cozy_turbo`)."""
-    armed = getattr(transformer, "_cozy_turbo", None)
+    """The Turbo overlay's factors at `path` while `turbo.applied` arms it (`turbo_overlay`)."""
+    armed = getattr(transformer, "turbo_overlay", None)
     return None if armed is None else armed.get(path)
 
 
@@ -152,7 +152,7 @@ class Flux2Graph:
             vae = construct(AutoencoderKLFlux2, config.section("vae").mapping())
         _conditioning_only(encoder, max(TEXT_LAYERS[family]))
         if transformer.config["guidance_embeds"]:  # [dev]: its Turbo LoRA's sites
-            transformer._cozy_turbo = None
+            transformer.turbo_overlay = None
             for path, module in transformer.named_modules():
                 if isinstance(module, nn.Linear):
                     module.register_forward_hook(lora.Hook(partial(_armed, transformer, path)))
