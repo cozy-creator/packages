@@ -22,6 +22,7 @@ from PIL import Image
 from torch import nn
 from torch.nn import functional as F
 from diffusers.configuration_utils import ConfigMixin
+from diffusers.pipelines.pipeline_utils import DiffusionPipeline
 from diffusers.image_processor import VaeImageProcessor
 from diffusers.schedulers.scheduling_flow_match_euler_discrete import FlowMatchEulerDiscreteScheduler
 from diffusers.models.autoencoders.autoencoder_kl_qwenimage21 import (
@@ -230,61 +231,89 @@ def _stored(config: Config, component: str, module: torch.nn.Module) -> torch.dt
     return dtype
 
 
-#: The config sections a Qwen Image 2.1 checkpoint holds: its weighted components, and what two of them run with.
-_SECTIONS = ("transformer", "text_encoder", "vae", "scheduler", "processor")
+def _section(config: Config, name: str, alone: str) -> Config:
+    """`config`'s section `name`. A checkpoint of one component gives its config unsectioned (Runtime), and none of
+    these is read alone: `alone` says what goes with it."""
+    if name not in config.keys():
+        raise UnsupportedInput(f"this checkpoint holds no {name} section: {alone}", code="artifact_components")
+    return config.section(name)
 
 
-class QwenImage21Graph:
-    """What a checkpoint holds of Qwen Image 2.1, each component built from its own section of the config: a whole
-    pipeline's three, or a part's (a transformer with its scheduler, a text encoder with its processor). A slot fills only
-    the components it reads; another part comes from the checkpoint its own slot names (xs-192)."""
+def _transformer(config: Config) -> Transformer:
+    """A checkpoint's `transformer`, hooked for an armed overlay."""
+    # Construction dtype leaves derived buffers F32, as upstream loads them: the DiT's
+    # timestep `freqs` and the text encoder's RoPE. A cast of the built module would round them.
+    section = _section(config, "transformer", "a transformer goes with its scheduler (`<model>:transformer,scheduler`)")
+    with transformer_init.no_init_weights(), local_torch_dtype(torch.bfloat16):
+        built = construct(QwenImage21Transformer2DModel, section.mapping())
+    built.__class__ = Transformer
+    transformer = cast(Transformer, built)  # its class, set above
+    transformer._cozy_overlay = None
+    for path in SITES:
+        transformer.get_submodule(path).register_forward_hook(lora.Hook(partial(_armed, transformer, path)))
+    return transformer
+
+
+def _text_encoder(config: Config) -> Qwen3VLForConditionalGeneration:
+    """A checkpoint's `text_encoder`. The pipeline reads hidden states only, so the 1.24 GB language-model head is not
+    built; Runtime skips its stored weight."""
+    section = _section(config, "text_encoder", "a text encoder goes with its processor (`<model>:text_encoder,processor`)")
+    with transformer_init.no_init_weights():
+        encoder: Qwen3VLForConditionalGeneration = AutoModelForImageTextToText.from_config(  # type: ignore[no-untyped-call]  # Transformers' auto classes are unannotated
+            Qwen3VLConfig(**section.mapping()), dtype=torch.bfloat16
+        )
+    encoder.lm_head = torch.nn.Identity()
+    return encoder
+
+
+class DiTComponents(TypedDict):
+    transformer: Transformer
+
+
+class QwenImage21DiTGraph:
+    """The `transformer` of a checkpoint that holds one, and its scheduler: Qwen-Image-2.1's, Turbo's or a fine-tune's,
+    whole or a model of that part alone (xs-192)."""
 
     def __init__(self, config: Config) -> None:
-        held = set(config.keys())
-        if not held & set(_SECTIONS):
-            # Runtime gives a lone component's config unsectioned, and none is read alone here.
-            raise UnsupportedInput(
-                "this checkpoint holds one component; Qwen Image reads a transformer with its scheduler "
-                "(`<model>:transformer,scheduler`) and a text encoder with its processor (`<model>:text_encoder,processor`)",
-                code="artifact_components",
-            )
-        self.components: Components = {}
-        # Construction dtype leaves derived buffers F32, as upstream loads them: the DiT's
-        # timestep `freqs` and the text encoder's RoPE. A cast of the built module would round them.
-        with transformer_init.no_init_weights():
-            if "transformer" in held:
-                with local_torch_dtype(torch.bfloat16):
-                    built = construct(QwenImage21Transformer2DModel, config.section("transformer").mapping())
-                built.__class__ = Transformer
-                transformer = cast(Transformer, built)  # its class, set above
-                transformer._cozy_overlay = None
-                for path in SITES:
-                    transformer.get_submodule(path).register_forward_hook(lora.Hook(partial(_armed, transformer, path)))
-                self.components["transformer"] = transformer
-            if "text_encoder" in held:
-                encoder: Qwen3VLForConditionalGeneration = AutoModelForImageTextToText.from_config(  # type: ignore[no-untyped-call]  # Transformers' auto classes are unannotated
-                    Qwen3VLConfig(**config.section("text_encoder").mapping()),
-                    dtype=torch.bfloat16,
-                )
-                # The pipeline reads hidden states only, so the 1.24 GB language-model head is not
-                # built; Runtime skips its stored weight.
-                encoder.lm_head = torch.nn.Identity()
-                self.components["text_encoder"] = encoder
-            if "vae" in held:
-                self.components["vae"] = _vae(config)
-        self.scheduler_config: dict[str, object] | None = (
-            config.section("scheduler").mapping() if "scheduler" in held else None
-        )
-        # The processor folder's config file, which TensorFS keeps as its component's config.
-        self.processor_config: dict[str, object] = (
-            config.section("processor").mapping() if "processor" in held else {}
-        )
+        self.components: DiTComponents = {"transformer": _transformer(config)}
+        self.scheduler_config: dict[str, object] = _section(
+            config, "scheduler", "a transformer goes with its scheduler (`<model>:transformer,scheduler`)"
+        ).mapping()
 
 
-class Components(TypedDict, total=False):
+class TextEncoderComponents(TypedDict):
+    text_encoder: Qwen3VLForConditionalGeneration
+
+
+def _processor_config(config: Config) -> dict[str, object]:
+    """The processor folder's config file, which TensorFS keeps as its component's config."""
+    return config.section("processor").mapping() if "processor" in config.keys() else {}
+
+
+class QwenImage21TextEncoderGraph:
+    """The `text_encoder` of a checkpoint that holds one, and its processor's config: whole or a model of that part
+    alone (xs-192)."""
+
+    def __init__(self, config: Config) -> None:
+        self.components: TextEncoderComponents = {"text_encoder": _text_encoder(config)}
+        self.processor_config = _processor_config(config)
+
+
+class Components(TypedDict):
     transformer: Transformer
     text_encoder: Qwen3VLForConditionalGeneration
     vae: AutoencoderKLQwenImage21
+
+
+class QwenImage21Graph(QwenImage21DiTGraph):
+    """A whole pipeline's three components in one construction: what the quantize recipes read and calibrate."""
+
+    def __init__(self, config: Config) -> None:
+        super().__init__(config)
+        self.components: Components = {
+            **self.components, "text_encoder": _text_encoder(config), "vae": _vae(config),
+        }
+        self.processor_config = _processor_config(config)
 
 
 def _vae(config: Config) -> AutoencoderKLQwenImage21:
@@ -372,95 +401,91 @@ class _StagedPipeline(QwenImage21Pipeline):
         return self.device_placed
 
 
-class QwenImage21Model(Model[QwenImage21Graph]):
-    #: The 32 DiT blocks attend at 8 bits (comfy-kitchen INT8 on RTX 40-class cards): attention is two thirds
-    #: of a 4 MP step; a 16-bit request attends exactly. Caller LoRAs on the DiT, at any strength: the Runtime
-    #: bakes them into the weights.
-    serving = Serving(attention_bits={"transformer.transformer_blocks.": 8}, loras=("transformer",))
+def _text_pipeline(device: torch.device, encoder: Qwen3VLForConditionalGeneration, processor: Qwen3VLProcessor) -> _StagedPipeline:
+    """Diffusers' pipeline over a text encoder and its processor alone: what encoding a prompt reads (xs-192)."""
+    pipeline = _StagedPipeline(
+        transformer=None,  # type: ignore[arg-type]  # Diffusers takes None for a module it isn't given
+        text_encoder=encoder,
+        vae=None,  # type: ignore[arg-type]
+        processor=processor,
+        scheduler=None,  # type: ignore[arg-type]
+    )
+    pipeline.device_placed = device
+    return pipeline
 
-    graph: QwenImage21Graph
-    #: Qwen3-VL's, with the text encoder it tokenizes for; none beside a transformer alone.
-    processor: Qwen3VLProcessor | None
+
+class _Sampling(QwenImage21Pipeline):
+    """What a DiT's denoising reads of Diffusers' pipeline: its scheduler, 16x latent grid and `prepare_latents`. Not
+    upstream's `__init__`, which tokenizes with the processor a DiT's checkpoint doesn't hold (xs-192)."""
+
+    def __init__(self, scheduler: FlowMatchEulerDiscreteScheduler) -> None:
+        DiffusionPipeline.__init__(self)
+        self.register_modules(scheduler=scheduler)  # type: ignore[no-untyped-call]  # Diffusers' register_modules is unannotated
+        self.vae_scale_factor = 16
+
+
+def _encode(
+    pipeline: _StagedPipeline, encoder: Qwen3VLForConditionalGeneration, prompt: str, images: list[Image.Image] | None
+) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
+    """The instruction, with its ordered reference images when given, as one condition."""
+    with torch.inference_mode(), _last_layer_only(encoder):
+        if images is None:
+            embeds, mask, _ = pipeline.encode_prompt(prompt, device=pipeline.device_placed)
+            return embeds, mask, None
+        encoded: tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None] = pipeline.encode_prompt(
+            prompt, image=images, device=pipeline.device_placed  # type: ignore[arg-type]  # pictures, of its input union
+        )
+    return encoded
+
+
+def _fit_prompt(pipeline: _StagedPipeline, processor: Qwen3VLProcessor, prompt: str, grids: Sequence[tuple[int, int]]) -> tuple[str, int, int]:
+    """`prompt` as the DiT's frame rotary table holds it beside references of these latent `grids`: the
+    encoded template's text tokens, the prompt's among them, and each reference's longer side, then the target
+    (`ROPE_POSITIONS`). Upstream encodes any length and fails past the table. With the tokens kept and given."""
+    tokenizer = processor.tokenizer
+    template = pipeline.prompt_template_t2i
+    if grids:  # as `_get_qwen_prompt_embeds` builds it
+        picture = "<image{}><|vision_start|><|image_pad|><|vision_end|>"
+        pictures = " ".join(picture.format(n) for n in range(1, len(grids) + 1))
+        template = pipeline.prompt_template_ti2i.replace(picture.format(1), pictures)
+    room = ROPE_POSITIONS - 1 - sum(max(grid) for grid in grids)
+
+    def length(text: str) -> int:
+        """The text tokens the DiT reads of `text`: the template's after its system prefix, no picture's."""
+        tokens: list[int] = tokenizer(template.format(text or " "))["input_ids"]
+        return sum(token != pipeline._img_token_id for token in tokens[pipeline._drop_idx :])
+
+    ids: list[int] = tokenizer(prompt)["input_ids"]
+    kept, keep = prompt, len(ids)
+    # A cut can tokenize longer at its edge: measured again until it fits.
+    while keep > 0 and (over := length(kept) - room) > 0:
+        keep = max(keep - over, 0)
+        kept = tokenizer.decode(ids[:keep])
+    return kept, keep, len(ids)
+
+
+class QwenImage21TextEncoder(Model[QwenImage21TextEncoderGraph]):
+    """Qwen-Image-2.1's text encoder, its own slot (`text_encoder`): the checkpoint's `text_encoder` and its processor,
+    whichever checkpoint holds them (xs-192)."""
+
+    graph: QwenImage21TextEncoderGraph
+    processor: Qwen3VLProcessor
 
     def load(self, loader: Loader) -> None:
-        self.graph = loader.construct(build_qwen_image21)
-        self.processor = None
-        if "text_encoder" in self.graph.components:
-            self.processor = cast(Qwen3VLProcessor, vlm.processor(loader.assets, "processor/", self.graph.processor_config))
+        self.graph = loader.construct(QwenImage21TextEncoderGraph)
+        self.processor = cast(Qwen3VLProcessor, vlm.processor(loader.assets, "processor/", self.graph.processor_config))  # Qwen3-VL's
 
-    def execution_plan(self, plan: Plan) -> str:
-        transformer = self.graph.components.get("transformer")
-        return "" if transformer is None else fusion.install(plan, BLOCK, transformer) or ""
-
-    def _pipeline(
-        self, sigmas: Sequence[float] | None = None, scheduler: Mapping[str, object] | None = None
-    ) -> _StagedPipeline:
-        """`scheduler`: fields an overlay's sampling sets over the checkpoint's scheduler. Each component this checkpoint
-        doesn't hold is none: a slot's part reads only its own."""
-        held = self.graph.components
-        pipeline = _StagedPipeline(
-            transformer=held.get("transformer"),  # type: ignore[arg-type]  # Diffusers takes None for a module it isn't given
-            text_encoder=held.get("text_encoder"),  # type: ignore[arg-type]
-            vae=held.get("vae"),  # type: ignore[arg-type]
-            processor=self.processor,  # type: ignore[arg-type]
-            scheduler=None if self.graph.scheduler_config is None  # type: ignore[arg-type]
-            else construct(FlowMatchEulerDiscreteScheduler, {**self.graph.scheduler_config, **(scheduler or {})}),
-            sample_sigmas=None if sigmas is None else list(sigmas),
-        )
-        pipeline.device_placed = torch.device(str(self.device))
-        return pipeline
-
-    def _processor(self) -> Qwen3VLProcessor:
-        self._encoder()
-        return cast(Qwen3VLProcessor, self.processor)  # built with the text encoder
-
-    def _encoder(self) -> Qwen3VLForConditionalGeneration:
-        encoder = self.graph.components.get("text_encoder")
-        if encoder is None:
-            raise UnsupportedInput("this checkpoint holds no text encoder: name one for `text_encoder`", code="artifact_components")
-        return encoder
-
-    def _transformer(self) -> Transformer:
-        transformer = self.graph.components.get("transformer")
-        if transformer is None:
-            raise UnsupportedInput("this checkpoint holds no transformer: name one for `model`", code="artifact_components")
-        return transformer
+    def _pipeline(self) -> _StagedPipeline:
+        return _text_pipeline(torch.device(str(self.device)), self.graph.components["text_encoder"], self.processor)
 
     @memoize
     @uses_components("text_encoder")
     def encode(self, prompt: str) -> tuple[torch.Tensor, torch.Tensor | None]:
-        encoder = self._encoder()
-        with torch.inference_mode(), _last_layer_only(encoder):
-            embeds, mask, _ = self._pipeline().encode_prompt(
-                prompt, device=torch.device(str(self.device))
-            )
+        embeds, mask, _ = _encode(self._pipeline(), self.graph.components["text_encoder"], prompt, None)
         return embeds, mask
 
     def fit_prompt(self, prompt: str, grids: Sequence[tuple[int, int]]) -> tuple[str, int, int]:
-        """`prompt` as the DiT's frame rotary table holds it beside references of these latent `grids`: the
-        encoded template's text tokens, the prompt's among them, and each reference's longer side, then the target
-        (`ROPE_POSITIONS`). Upstream encodes any length and fails past the table. With the tokens kept and given."""
-        pipeline = self._pipeline()
-        tokenizer = self._processor().tokenizer
-        template = pipeline.prompt_template_t2i
-        if grids:  # as `_get_qwen_prompt_embeds` builds it
-            picture = "<image{}><|vision_start|><|image_pad|><|vision_end|>"
-            pictures = " ".join(picture.format(n) for n in range(1, len(grids) + 1))
-            template = pipeline.prompt_template_ti2i.replace(picture.format(1), pictures)
-        room = ROPE_POSITIONS - 1 - sum(max(grid) for grid in grids)
-
-        def length(text: str) -> int:
-            """The text tokens the DiT reads of `text`: the template's after its system prefix, no picture's."""
-            tokens: list[int] = tokenizer(template.format(text or " "))["input_ids"]
-            return sum(token != pipeline._img_token_id for token in tokens[pipeline._drop_idx :])
-
-        ids: list[int] = tokenizer(prompt)["input_ids"]
-        kept, keep = prompt, len(ids)
-        # A cut can tokenize longer at its edge: measured again until it fits.
-        while keep > 0 and (over := length(kept) - room) > 0:
-            keep = max(keep - over, 0)
-            kept = tokenizer.decode(ids[:keep])
-        return kept, keep, len(ids)
+        return _fit_prompt(self._pipeline(), self.processor, prompt, grids)
 
     @memoize
     @uses_components("text_encoder")
@@ -468,12 +493,29 @@ class QwenImage21Model(Model[QwenImage21Graph]):
         self, prompt: str, images: list[Image.Image]
     ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
         """Encode the instruction and ordered reference images as one condition."""
-        encoder = self._encoder()
-        with torch.inference_mode(), _last_layer_only(encoder):
-            encoded: tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None] = self._pipeline().encode_prompt(
-                prompt, image=images, device=torch.device(str(self.device))  # type: ignore[arg-type]  # pictures, of its input union
-            )
-        return encoded
+        return _encode(self._pipeline(), self.graph.components["text_encoder"], prompt, images)
+
+
+class QwenImage21DiT(Model[QwenImage21DiTGraph]):
+    """Qwen-Image-2.1's DiT, the `model` slot: the checkpoint's `transformer` and its scheduler, whichever checkpoint
+    holds them, whole or a model of that part alone (xs-192)."""
+
+    #: The 32 DiT blocks attend at 8 bits (comfy-kitchen INT8 on RTX 40-class cards): attention is two thirds
+    #: of a 4 MP step; a 16-bit request attends exactly. Caller LoRAs on the DiT, at any strength: the Runtime
+    #: bakes them into the weights.
+    serving = Serving(attention_bits={"transformer.transformer_blocks.": 8}, loras=("transformer",))
+
+    graph: QwenImage21DiTGraph
+
+    def load(self, loader: Loader) -> None:
+        self.graph = loader.construct(QwenImage21DiTGraph)
+
+    def execution_plan(self, plan: Plan) -> str:
+        return fusion.install(plan, BLOCK, self.graph.components["transformer"]) or ""
+
+    def _pipeline(self, scheduler: Mapping[str, object] | None = None) -> _Sampling:
+        """`scheduler`: fields an overlay's sampling sets over the checkpoint's scheduler."""
+        return _Sampling(construct(FlowMatchEulerDiscreteScheduler, {**self.graph.scheduler_config, **(scheduler or {})}))
 
     @uses_components("transformer")
     def denoise(
@@ -508,15 +550,12 @@ class QwenImage21Model(Model[QwenImage21Graph]):
         else the pipeline's uniform spacing; `scheduler`, an overlay's fields over the checkpoint's.
         `heads`: a parallel decoder's output projection per step (PDD), whose prediction, and so the
         state, is F32."""
-        transformer = self._transformer()
+        transformer = self.graph.components["transformer"]
         if not transformer.config["causal_condition"]:
             raise UnsupportedInput("Qwen Image 2.1 denoises with causal conditioning", code="artifact_config")
         device = torch.device(str(self.device))
-        pipeline = self._pipeline(sigmas, scheduler)
+        pipeline = self._pipeline(scheduler)
         euler = pipeline.scheduler
-        if euler is None:
-            raise UnsupportedInput("this checkpoint holds no scheduler: a transformer goes with its own (`<model>:transformer,scheduler`)",
-                                   code="artifact_components")
         blocks = transformer.transformer_blocks
         multiple_of = pipeline.vae_scale_factor * 2
         width = width // multiple_of * multiple_of
@@ -613,6 +652,28 @@ class QwenImage21Model(Model[QwenImage21Graph]):
                     latents = euler.step(noise, timesteps[i], latents, return_dict=False)[0]
                     progress(i, steps)
         return latents
+
+
+class QwenImage21Model(QwenImage21DiT):
+    """A whole Qwen-Image-2.1 pipeline in one construction, encoding and denoising on one checkpoint: what the quantize
+    recipes read and calibrate (`quantize.py`). A tool's slots read its parts: `QwenImage21DiT`, `QwenImage21TextEncoder`
+    and `QwenImage21VAE`."""
+
+    graph: QwenImage21Graph
+    processor: Qwen3VLProcessor
+
+    def load(self, loader: Loader) -> None:
+        self.graph = loader.construct(build_qwen_image21)
+        self.processor = cast(Qwen3VLProcessor, vlm.processor(loader.assets, "processor/", self.graph.processor_config))  # Qwen3-VL's
+
+    def _text(self) -> _StagedPipeline:
+        return _text_pipeline(torch.device(str(self.device)), self.graph.components["text_encoder"], self.processor)
+
+    @memoize
+    @uses_components("text_encoder")
+    def encode(self, prompt: str) -> tuple[torch.Tensor, torch.Tensor | None]:
+        embeds, mask, _ = _encode(self._text(), self.graph.components["text_encoder"], prompt, None)
+        return embeds, mask
 
 
 class QwenImage21VAE(Model[QwenImage21VAEGraph]):

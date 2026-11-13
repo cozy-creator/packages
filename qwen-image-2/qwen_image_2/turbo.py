@@ -24,7 +24,7 @@ from cozy_runtime.author import Config, Loader, Model, Serving, UnsupportedInput
 from PIL import Image
 from torch import nn
 
-from .model import PROJ_OUT, SITES, QwenImage21Model
+from .model import PROJ_OUT, SITES, QwenImage21DiT
 
 #: The upload's one component (TensorFS's `qwenimage21.lora`).
 COMPONENT = "transformer"
@@ -116,7 +116,7 @@ class FunAccLoRA(Model[FunAccGraph]):
     @uses_components(COMPONENT)
     def denoise(
         self,
-        base: QwenImage21Model,
+        base: QwenImage21DiT,
         embeds: torch.Tensor,
         mask: torch.Tensor | None,
         *,
@@ -132,7 +132,7 @@ class FunAccLoRA(Model[FunAccGraph]):
         strength: float = 1.0,
     ) -> torch.Tensor:
         """`base.denoise` with this overlay armed on its DiT, on Fun Acc's grid and per-step heads."""
-        transformer = base._transformer()
+        transformer = base.graph.components["transformer"]
         heads = cast(torch.Tensor, self.graph.heads.heads).to(device=torch.device(str(base.device))).clone()  # its Parameter
         transformer._cozy_overlay = self.graph.sites
         try:
