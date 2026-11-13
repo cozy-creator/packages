@@ -123,17 +123,17 @@ class Adapter(Model[AdapterGraph]):
         (Patil's `--lora-scale` scales the LoRA alone)."""
         for factors in self.graph.sites.values():
             factors.scale = factors.unit * strength
-        overlays = transformer._cozy_overlays
+        overlays = transformer.adapter_overlays
         overlays[slot] = self.graph.sites
-        projection = self.graph.projection
-        if projection is not None:
-            transformer._cozy_projection = (projection.weight, projection.bias)
+        control = self.graph.projection is not None
+        if control:  # the graph, one object per adapter: a recorded step's read guard holds across calls
+            transformer.control_adapter = self.graph
         try:
             return body()
         finally:
             overlays[slot] = None
-            if projection is not None:
-                transformer._cozy_projection = None
+            if control:
+                transformer.control_adapter = None
 
 
 def armed(adapters: list[tuple[Adapter, float]], transformer: Transformer, body: Callable[[], T]) -> T:
