@@ -70,11 +70,12 @@ def checked_loop() -> Iterator[None]:
 
 class _Armed[S]:
     """One module's turbo source for the forward in flight; a plain object, so placing it
-    on a module registers nothing and the DiT's state dict is what it was."""
+    on a module registers nothing and the DiT's state dict is what it was. A head's `step` is
+    its evaluation's index on the device (`H3Transformer._engage`)."""
 
     __slots__ = ("source", "step")
 
-    def __init__(self, source: S, step: int = 0) -> None:
+    def __init__(self, source: S, step: torch.Tensor | None = None) -> None:
         self.source = source
         self.step = step
 
@@ -329,7 +330,7 @@ class H3Transformer(MiniMaxH3Transformer3DModel):
                 temb = self.time_proj(timestep)
                 temb = self.time_embedder(temb.to(get_parameter_dtype(self.time_embedder)))
             else:  # the overlay's own table rows, which its tables read in every block
-                temb = self._arming.overlay.rows(timestep)
+                temb = self._arming.overlay.rows(timestep, checked=not looped)
             adaln_indices = timestep_indices * MINIMAX_H3_MODALITY_NUM + token_tags
             for block in self.transformer_blocks:
                 if torch.is_grad_enabled() and self.gradient_checkpointing:
@@ -445,7 +446,13 @@ class H3Transformer(MiniMaxH3Transformer3DModel):
         modulation has no tables: it computes every timestep's."""
         return None
 
-    def _engage(self, overlay: Overlay, step: int) -> None:
+    def _engage(self, overlay: Overlay, step: int | torch.Tensor) -> None:
+        """Arm `overlay` for the forwards to come: its tables in every block, and its heads at
+        evaluation `step`. A loop arms once with a device index (a 0-dim int64 tensor) and sets
+        it before each step (`steps.denoise_official`): its forwards then differ by no module
+        state, so one recorded forward replays for every step."""
+        if not isinstance(step, torch.Tensor):
+            step = torch.full((), step, dtype=torch.int64, device=self.proj_in.weight.device)
         self._arming = OverlayArming(overlay, step)
         for index, block in enumerate(self.transformer_blocks):
             _modulation(block)._armed = _Armed(_overlay_tables(overlay, index))

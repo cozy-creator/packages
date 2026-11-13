@@ -102,9 +102,12 @@ class TurboHeads(nn.Module):
         )
         self.bias = nn.Parameter(torch.empty(evaluations, out_features, dtype=torch.float32))
 
-    def forward(self, hidden_states: torch.Tensor, step: int) -> torch.Tensor:
+    def forward(self, hidden_states: torch.Tensor, step: torch.Tensor) -> torch.Tensor:
+        """`step`: the evaluation's index, a 0-dim int64 tensor on the device, so one recorded
+        forward serves every evaluation."""
         inputs = hidden_states.reshape(-1, hidden_states.shape[-1])
-        weight, bias = self.weight[step], self.bias[step]
+        index = step.reshape(1)
+        weight, bias = self.weight.index_select(0, index)[0], self.bias.index_select(0, index)[0]
         output = hidden_states.new_empty((*hidden_states.shape[:-1], weight.shape[0]))
         flat = output.view(-1, weight.shape[0])
         for start in range(0, int(inputs.shape[0]), _HEAD_ROW_CHUNK):
@@ -276,11 +279,12 @@ class Overlay(nn.Module):
             if isinstance(module, LoRAFactors):
                 yield name, module
 
-    def rows(self, timestep: torch.Tensor) -> torch.Tensor:
-        """Global turbo table rows of exact float32 timesteps; off-plan values refuse."""
+    def rows(self, timestep: torch.Tensor, *, checked: bool = True) -> torch.Tensor:
+        """Global turbo table rows of exact float32 timesteps; off-plan values refuse. A loop
+        that checked every step's rows before it (`checked=False`) reads no value back."""
         values = timestep.to(dtype=torch.float32).reshape(-1, 1)
         matches = values == self.timesteps.reshape(1, -1)
-        if not bool(torch.all(matches.sum(dim=1) == 1)):
+        if checked and not bool(torch.all(matches.sum(dim=1) == 1)):
             raise ValueError(
                 f"timestep rows are not covered exactly by the {self.bank} plan: "
                 f"{timestep.detach().float().cpu().tolist()}",
@@ -290,11 +294,12 @@ class Overlay(nn.Module):
 
 class OverlayArming:
     """What one DiT forward under an overlay's bank reads: set from the forward's own
-    `attention_kwargs` (or its denoise loop), cleared when the forward ends, never request state."""
+    `attention_kwargs` (or its denoise loop), cleared when the forward ends, never request state.
+    `step` is the turbo evaluation's head index on the device."""
 
     __slots__ = ("overlay", "step")
 
-    def __init__(self, overlay: Overlay, step: int) -> None:
+    def __init__(self, overlay: Overlay, step: torch.Tensor) -> None:
         self.overlay = overlay
         self.step = step
 
