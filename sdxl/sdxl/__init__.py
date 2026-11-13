@@ -140,49 +140,49 @@ class HiDiffusionUNet(UNet2DConditionModel):
     step (`cozy_step`), and each window block (`_windowed`) takes its shift from the request's
     seed, step and its own index: a block runs the same however often it runs."""
 
-    _cozy_base_num_upsamplers: int
-    _cozy_hidiffusion_active: bool
+    _base_num_upsamplers: int
+    _hidiffusion_active: bool
     _num_timesteps: int
     name_or_path: str
     info: HiDiffusionInfo
     cozy_step = 0
-    _cozy_seed = 0
+    _hidiffusion_seed = 0
 
     def begin_denoise_request(self, steps: int, hidiffusion: bool, seed: int) -> None:
         if steps <= 0:
             raise ValueError("HiDiffusion requires a positive timestep count")
-        active = bool(getattr(self, "_cozy_hidiffusion_active", False))
+        active = bool(getattr(self, "_hidiffusion_active", False))
         if hidiffusion != active:
             if hidiffusion:
-                self.num_upsamplers = self._cozy_base_num_upsamplers
+                self.num_upsamplers = self._base_num_upsamplers
                 apply_hidiffusion(self)
                 window = 0
                 for block in [m for m in self.modules() if hasattr(m, "_parent")]:
                     hook: Callable[[nn.Module, tuple[object, ...]], None]
                     if hasattr(block, "max_timestep"):
-                        hook = self._cozy_count
+                        hook = self._count_step
                     else:
                         block.__class__ = _windowed(block._parent)
-                        hook, window = functools.partial(self._cozy_draw, window), window + 1
+                        hook, window = functools.partial(self._draw_shift, window), window + 1
                     self.info["hooks"].append(block.register_forward_pre_hook(hook))
             else:
                 remove_hidiffusion(self)
-                self.num_upsamplers = self._cozy_base_num_upsamplers
-            self._cozy_hidiffusion_active = hidiffusion
+                self.num_upsamplers = self._base_num_upsamplers
+            self._hidiffusion_active = hidiffusion
         if not hidiffusion:
             return
-        self._num_timesteps, self._cozy_seed = steps, seed
+        self._num_timesteps, self._hidiffusion_seed = steps, seed
         self.info["size"] = self.info["upsample_size"] = None
         for module in self.modules():
             if hasattr(module, "max_timestep"):
                 module.max_timestep = steps  # type: ignore[assignment]  # HiDiffusion's block attribute
 
-    def _cozy_count(self, block: nn.Module, *_: object) -> None:
+    def _count_step(self, block: nn.Module, *_: object) -> None:
         block.timestep = self.cozy_step  # type: ignore[assignment]  # HiDiffusion's block attribute
 
-    def _cozy_draw(self, index: int, block: nn.Module, *_: object) -> None:
+    def _draw_shift(self, index: int, block: nn.Module, *_: object) -> None:
         """HiDiffusion's `torch.rand(1)`, from the request's stream at this step and window."""
-        draw = (self._cozy_seed * 1_000_003 + self.cozy_step * 1_009 + index) % 2**63
+        draw = (self._hidiffusion_seed * 1_000_003 + self.cozy_step * 1_009 + index) % 2**63
         block.cozy_draw = float(torch.rand(1, generator=rng.generator(draw)))  # type: ignore[assignment]  # `Windowed`'s
 
 
@@ -316,8 +316,8 @@ class SdxlPipeline:
         # HiDiffusion recognizes this constructed SDXL UNet by its module keys. Keep the
         # package free of a catalog/model identifier and let that structural check decide.
         unet.name_or_path = ""
-        unet._cozy_base_num_upsamplers = unet.num_upsamplers
-        unet._cozy_hidiffusion_active = False
+        unet._base_num_upsamplers = unet.num_upsamplers
+        unet._hidiffusion_active = False
         self.scheduler_config: dict[str, object] = dict(mapping["scheduler"])
         self.vae_scale: float = float(mapping["vae"]["scaling_factor"])
 
@@ -429,7 +429,8 @@ class SdxlModel(Model[SdxlPipeline]):
             for i, t in enumerate(scheduler.timesteps.tolist()):
                 if i < first_step:
                     continue
-                unet.cozy_step = i
+                if hidiffusion:  # its hooks read the step; the plain UNet reads nothing of it
+                    unet.cozy_step = i
                 noise = guided(unet, scheduler.scale_model_input(latents, t), scheduler.timesteps[i], prompt,
                                pooled, time_ids, guidance)
                 preview(lambda: (latents - (1 - scheduler.alphas_cumprod[t]) ** 0.5 * noise) / scheduler.alphas_cumprod[t] ** 0.5, "sdxl")
