@@ -60,7 +60,7 @@ class Transformer(QwenImage21Transformer2DModel):
     output projection for this step (PDD), whose prediction is F32."""
 
     #: The armed overlay's factors by site (`turbo.FunAccLoRA`), else None.
-    _cozy_overlay: Mapping[str, Factors] | None
+    lora_overlay: Mapping[str, Factors] | None
 
     def forward(
         self, hidden_states: torch.Tensor, *args: object, cached: Cached | None = None,

@@ -212,8 +212,8 @@ def reference_grids(images: Sequence[Image.Image]) -> list[tuple[int, int]]:
 
 
 def _armed(transformer: nn.Module, path: str) -> lora.Factors | None:
-    """The overlay's factors at `path` while one is armed (`_cozy_overlay`), else None."""
-    armed = getattr(transformer, "_cozy_overlay", None)
+    """The overlay's factors at `path` while one is armed (`lora_overlay`), else None."""
+    armed = getattr(transformer, "lora_overlay", None)
     return None if armed is None else armed.get(path)
 
 
@@ -248,7 +248,7 @@ def _transformer(config: Config) -> Transformer:
         built = construct(QwenImage21Transformer2DModel, section.mapping())
     built.__class__ = Transformer
     transformer = cast(Transformer, built)  # its class, set above
-    transformer._cozy_overlay = None
+    transformer.lora_overlay = None
     for path in SITES:
         transformer.get_submodule(path).register_forward_hook(lora.Hook(partial(_armed, transformer, path)))
     return transformer
