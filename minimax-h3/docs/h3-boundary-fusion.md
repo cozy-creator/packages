@@ -8,6 +8,9 @@ H3's Q/K/V fan-out through existing Runtime contracts. Branch:
 
 Runtime source inspected: `af2a4753cb70598b75405942901e4f8f3b24eda6`. No native interface,
 attention-kernel internals, graph ownership, model precision, or automatic kernel selection changes.
+Integration base: packages `rc/0.26.0` at `a5ef0e20730e817d64e53b4d82c627741bc418d2`, merged
+into the clean task branch. The source change reserves `minimax-h3 0.13.0rc6` (se-134); the
+Runtime dependency floor is unchanged. The package is not published.
 
 ## Remaining boundaries, ranked
 
@@ -60,6 +63,11 @@ Hardware: RTX 4070 Laptop, SM89, 8 GB; Torch 2.15.0+cu132; published Runtime 0.4
 That wheel's `accel/kernels.py` and `accel/rows.py` byte-match the inspected Runtime revision above.
 Native startup verification passed. Package `scripts/typecheck.sh` passes with zero known errors;
 Ruff and `git diff --check` pass.
+The same typecheck commands also pass against the integration base's pinned dependencies
+(Runtime `a90a31f830389ec7f2fc7ff1ffebb6ca9512843a`), in a separate environment preserving the
+GPU probe's dependencies. `uv build --wheel` builds 0.13.0rc6; the wheel's glue source is
+byte-identical to the GPU-tested file and the research files are not shipped. Wheel SHA-256:
+`032f3743e59d2f38b9f5c4e9acf58e77bd80dcef3628272e2fd61fff5ce58918`.
 
 With 4096 tokens, hidden width 5376, 16 synthetic heads of dimension 128, and two 8-head windows:
 
