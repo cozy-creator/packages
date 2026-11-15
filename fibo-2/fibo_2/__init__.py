@@ -7,9 +7,10 @@ import re
 from typing import Annotated
 
 import msgspec
-from cozy_runtime.author import Adjustments, App, Context, Outputs, Seed, Telemetry, UnsupportedInput
+from cozy_runtime.author import Adjustments, App, Context, Seed, Telemetry, UnsupportedInput
 from cozy_runtime.fields import Advanced, AspectRatio, Image, Prompt, Ratios
 from cozy_runtime.image import Guidance, ImageRequest, ImageResult, NegativePrompt, Sizes, Steps, held
+from cozy_runtime.media import ImageFile
 from PIL import Image as PILImage
 
 from .model import Fibo2
@@ -118,7 +119,6 @@ def _generate(
     model: Fibo2,
     upsampler: Captioner,
     edit_upsampler: Captioner,
-    out: Outputs,
     tel: Telemetry,
     adj: Adjustments,
 ) -> ImageResult:
@@ -155,7 +155,7 @@ def _generate(
     with tel.stage("decoding image"):
         image = model.decode(tokens)
     with tel.stage("saving image"):
-        asset = out.save_image(image, format="png")
+        asset = ImageFile.from_image(image, format="png")
     return ImageResult(asset, image.width, image.height, seed, caption)
 
 
@@ -172,17 +172,17 @@ _COMPONENTS = {"model": _MODEL, "upsampler": ("model",), "edit_upsampler": ("mod
 @app.entrypoint(defaults={"model": _DEV, "upsampler": _VLM, "edit_upsampler": _EDIT_VLM}, components=_COMPONENTS,
                 on_demand=("upsampler", "edit_upsampler"), memoize=True)
 def generate(ctx: Context, payload: GenerateInput, edit_upsampler: Captioner, model: Fibo2, upsampler: Captioner,
-             out: Outputs, tel: Telemetry, adj: Adjustments) -> ImageResult:
+             tel: Telemetry, adj: Adjustments) -> ImageResult:
     """Fibo 2.0 Dev, 50 steps with CFG 5: text to image, or an edit of up to four ordered pictures."""
-    return _generate(ctx, "generate", payload, model, upsampler, edit_upsampler, out, tel, adj)
+    return _generate(ctx, "generate", payload, model, upsampler, edit_upsampler, tel, adj)
 
 
 @app.entrypoint(defaults={"model": _TURBO, "upsampler": _VLM, "edit_upsampler": _EDIT_VLM}, components=_COMPONENTS,
                 on_demand=("upsampler", "edit_upsampler"), memoize=True)
 def generate_turbo(ctx: Context, payload: TurboInput, edit_upsampler: Captioner, model: Fibo2,
-                   upsampler: Captioner, out: Outputs, tel: Telemetry, adj: Adjustments) -> ImageResult:
+                   upsampler: Captioner, tel: Telemetry, adj: Adjustments) -> ImageResult:
     """Fibo 2.0 Edit Turbo, 4 steps without guidance: text to image, or an edit of up to four ordered pictures."""
-    return _generate(ctx, "generate_turbo", payload, model, upsampler, edit_upsampler, out, tel, adj)
+    return _generate(ctx, "generate_turbo", payload, model, upsampler, edit_upsampler, tel, adj)
 
 
 class ImageBox(msgspec.Struct, kw_only=True):
@@ -204,9 +204,9 @@ class ImageBox(msgspec.Struct, kw_only=True):
           components={"model": _MODEL, "full": _MODEL, "upsampler": ("model",), "edit_upsampler": ("model",)},
           on_demand=("edit_upsampler", "full", "model", "upsampler"), memoize=True)
 def image(ctx: Context, payload: ImageBox, edit_upsampler: Captioner, full: Fibo2, model: Fibo2, upsampler: Captioner,
-          out: Outputs, tel: Telemetry, adj: Adjustments) -> ImageResult:
+          tel: Telemetry, adj: Adjustments) -> ImageResult:
     """Fibo 2.0 on a canvas: Edit Turbo, or Dev."""
     kind, function, dit = (TurboInput, "generate_turbo", model) if payload.turbo else (GenerateInput, "generate", full)
     request = kind(prompt=payload.instructions, aspect_ratio=payload.aspect_ratio,
                    seed=payload.seed, prompt_upsampling=payload.prompt_upsampling)
-    return _generate(ctx, function, request, dit, upsampler, edit_upsampler, out, tel, adj)
+    return _generate(ctx, function, request, dit, upsampler, edit_upsampler, tel, adj)

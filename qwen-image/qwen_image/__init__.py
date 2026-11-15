@@ -7,7 +7,7 @@ from functools import partial
 from typing import TYPE_CHECKING, Annotated
 
 import msgspec
-from cozy_runtime.author import Adjustments, App, Context, Outputs, Seed, Telemetry
+from cozy_runtime.author import Adjustments, App, Context, Seed, Telemetry
 from cozy_runtime.fields import AspectRatio, Image, Prompt, Ratios
 from cozy_runtime.image import (
     Guidance,
@@ -19,6 +19,7 @@ from cozy_runtime.image import (
     Steps,
     held,
 )
+from cozy_runtime.media import ImageFile
 
 from . import quantize as quantize  # its recipes
 from .model import PATCH, QwenImage, QwenImageLoRA, QwenImageTransformer, text_rows
@@ -86,7 +87,6 @@ def _render(
     model: QwenImage,
     dit: QwenImage | QwenImageTransformer,
     lora: QwenImageLoRA | None,
-    out: Outputs,
     tel: Telemetry,
     adj: Adjustments,
     payload: TurboInput,
@@ -130,11 +130,11 @@ def _render(
     with tel.stage("decoding image"):
         image = model.decode(latents, width=width, height=height)
     with tel.stage("saving image"):
-        asset = out.save_image(image, format="png")
+        asset = ImageFile.from_image(image, format="png")
     return ImageResult(asset, width, height, seed, prompt)
 
 
-def _full(ctx: Context, payload: GenerateInput, edit_model: QwenImageTransformer, model: QwenImage, out: Outputs,
+def _full(ctx: Context, payload: GenerateInput, edit_model: QwenImageTransformer, model: QwenImage,
           tel: Telemetry, adj: Adjustments) -> ImageResult:
     edit = bool(payload.prompt.references)
     steps = held(adj, "steps", payload.steps or (EDIT_STEPS if edit else TEXT_STEPS), 2, 100,
@@ -143,16 +143,16 @@ def _full(ctx: Context, payload: GenerateInput, edit_model: QwenImageTransformer
     negative = payload.negative_prompt
     if negative is None:
         negative = EDIT_NEGATIVE if edit else TEXT_NEGATIVE
-    return _render(ctx, model, edit_model if edit else model, None, out, tel, adj, payload,
+    return _render(ctx, model, edit_model if edit else model, None, tel, adj, payload,
                    steps=steps, guidance=guidance, negative=negative)
 
 
 def _turbo(ctx: Context, payload: TurboInput, edit_model: QwenImageTransformer, edit_turbo_lora: QwenImageLoRA,
-           model: QwenImage, turbo_lora: QwenImageLoRA, out: Outputs, tel: Telemetry, adj: Adjustments) -> ImageResult:
+           model: QwenImage, turbo_lora: QwenImageLoRA, tel: Telemetry, adj: Adjustments) -> ImageResult:
     steps = held(adj, "steps", payload.steps or TURBO_STEPS, 1, 100)
     edit = bool(payload.prompt.references)
     dit, lora = (edit_model, edit_turbo_lora) if edit else (model, turbo_lora)
-    return _render(ctx, model, dit, lora, out, tel, adj, payload, steps=steps, guidance=1.0, negative="")
+    return _render(ctx, model, dit, lora, tel, adj, payload, steps=steps, guidance=1.0, negative="")
 
 
 _BASE = "qwen/qwen-image-2512@0.1.1"
@@ -167,21 +167,21 @@ _COMPONENTS = {"edit_model": ("transformer",)}
 # its LoRA, are fetched and built by the first request with references.
 @app.entrypoint(defaults={"model": _BASE, "edit_model": _EDIT}, components=_COMPONENTS, on_demand=("edit_model",),
                 memoize=True)
-def generate(ctx: Context, payload: GenerateInput, edit_model: QwenImageTransformer, model: QwenImage, out: Outputs,
+def generate(ctx: Context, payload: GenerateInput, edit_model: QwenImageTransformer, model: QwenImage,
              tel: Telemetry, adj: Adjustments) -> ImageResult:
     """Qwen-Image-2512 from text (50 steps), or Qwen-Image-Edit-2511 with pictures (40 steps).
 
     Both with true CFG 4.0."""
-    return _full(ctx, payload, edit_model, model, out, tel, adj)
+    return _full(ctx, payload, edit_model, model, tel, adj)
 
 
 @app.entrypoint(defaults=_TURBO_DEFAULTS, components=_COMPONENTS, on_demand=("edit_model", "edit_turbo_lora"),
                 memoize=True)
 def generate_turbo(ctx: Context, payload: TurboInput, edit_model: QwenImageTransformer, edit_turbo_lora: QwenImageLoRA,
-                   model: QwenImage, turbo_lora: QwenImageLoRA, out: Outputs, tel: Telemetry,
+                   model: QwenImage, turbo_lora: QwenImageLoRA, tel: Telemetry,
                    adj: Adjustments) -> ImageResult:
     """Each DiT with lightx2v's 8-step Lightning LoRA for it: 8 steps, no CFG."""
-    return _turbo(ctx, payload, edit_model, edit_turbo_lora, model, turbo_lora, out, tel, adj)
+    return _turbo(ctx, payload, edit_model, edit_turbo_lora, model, turbo_lora, tel, adj)
 
 
 class ImageBox(msgspec.Struct, kw_only=True):
@@ -200,10 +200,10 @@ class ImageBox(msgspec.Struct, kw_only=True):
 @app.tool(label="Image", named="image", defaults=_TURBO_DEFAULTS, components=_COMPONENTS,
           on_demand=("edit_model", "edit_turbo_lora", "turbo_lora"), memoize=True)  # fmt: skip
 def image(ctx: Context, payload: ImageBox, edit_model: QwenImageTransformer, edit_turbo_lora: QwenImageLoRA,
-          model: QwenImage, turbo_lora: QwenImageLoRA, out: Outputs, tel: Telemetry, adj: Adjustments) -> ImageResult:
+          model: QwenImage, turbo_lora: QwenImageLoRA, tel: Telemetry, adj: Adjustments) -> ImageResult:
     """Qwen Image on a canvas: Lightning, or the full models."""
     request = GenerateInput(prompt=payload.instructions, aspect_ratio=payload.aspect_ratio,
                             seed=payload.seed)  # fmt: skip
     if payload.turbo:
-        return _turbo(ctx, request, edit_model, edit_turbo_lora, model, turbo_lora, out, tel, adj)
-    return _full(ctx, request, edit_model, model, out, tel, adj)
+        return _turbo(ctx, request, edit_model, edit_turbo_lora, model, turbo_lora, tel, adj)
+    return _full(ctx, request, edit_model, model, tel, adj)

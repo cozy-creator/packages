@@ -184,10 +184,10 @@ def frames_of(video: VideoFile) -> Iterator[DecodedVideoFrame]:
                 yield event
 
 
-def frame_image(video: VideoFile, index: int, out: Outputs) -> ImageFile:
+def frame_image(video: VideoFile, index: int) -> ImageFile:
     """Frame `index` of `video`, saved as a picture a call can take."""
     decoded = video.read(start=Fraction(index, FPS), end=Fraction(index + 1, FPS), audio=False)
-    return out.save_image(PILImage.frombytes("RGB", (decoded.width, decoded.height), decoded.frames_rgb[0]))
+    return ImageFile.from_image(PILImage.frombytes("RGB", (decoded.width, decoded.height), decoded.frames_rgb[0]), format="png")
 
 
 def orbit_shot(payload: Orbit, subject: str, text: str, *, pinned: bool) -> PackageShot:
@@ -199,7 +199,7 @@ def orbit_shot(payload: Orbit, subject: str, text: str, *, pinned: bool) -> Pack
                        loras=[ShotLoRA(model=ORB360)])  # fmt: skip
 
 
-async def pinned(payload: Orbit, subject: str, text: str, out: Outputs, tel: Telemetry) -> Turned:
+async def pinned(payload: Orbit, subject: str, text: str, tel: Telemetry) -> Turned:
     """Ref2VA under ORB360 with the picture as its first and last frame: its last frame is the turn's end."""
     with tel.scope("Turn"):
         made = await call(render_shot, orbit_shot(payload, subject, text, pinned=True))
@@ -225,7 +225,7 @@ async def bridged(payload: Orbit, subject: str, text: str, out: Outputs, tel: Te
              "and perfectly rigid. No zoom, dolly, camera roll, cuts, lighting changes or scene changes.\n\n"
              "overall_soundscape:\nN/A\n\nnon_diegetic_music:\nN/A")  # fmt: skip
     beat = Beat(duration=MIN_DURATION_S, description=Prompt(text=words))
-    shot = Shot(beats=[beat], first_frame=frame_image(made.video, start, out), last_frame=frame_image(made.video, 0, out),
+    shot = Shot(beats=[beat], first_frame=frame_image(made.video, start), last_frame=frame_image(made.video, 0),
                 seed=payload.seed)  # fmt: skip
     with tel.scope("Loop join"):
         bridge = await call(render_shot, PackageShot(shot=shot))
@@ -277,7 +277,7 @@ async def orbit(ctx: Context, payload: Orbit, out: Outputs, tel: Telemetry) -> O
     plain = backdrop(payload.picture)
     text = caption(subject, frames, plain)
     if ENDS == "pinned":
-        turned = await pinned(payload, subject, text, out, tel)
+        turned = await pinned(payload, subject, text, tel)
     else:
         turned = await bridged(payload, subject, text, out, tel)
     with tel.stage("writing the turn"):
