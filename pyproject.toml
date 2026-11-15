@@ -18,6 +18,8 @@ include = [
     "minimax-h3",
     "moss-image",
     "p-h3-image",
+    "pan2",
+    "ltx-2.5",
     "qwen3.5",
     "qwen3.6",
     "qwen-image",
@@ -41,6 +43,8 @@ extraPaths = [
     "minimax-h3",
     "moss-image",
     "p-h3-image",
+    "pan2",
+    "ltx-2.5",
     "qwen3.5",
     "qwen3.6",
     "qwen-image",
@@ -63,12 +67,12 @@ python_version = "3.12"
 files = [
     "anima", "birefnet", "qwen3.5", "seedvr2", "minimax-h3", "sdxl", "qwen-image-2", "qwen-image", "flux-2",
     "flux.3-klein", "fibo-2", "hidream-o1", "hunyuan-image-3", "ideogram-4", "moss-image", "qwen3.6", "krea-2",
-    "relayvsr", "orbit", "p-h3-image", "scripts", "examples",
+    "relayvsr", "orbit", "p-h3-image", "pan2", "ltx-2.5", "scripts", "examples",
 ]
 mypy_path = [
     "typings", "anima", "birefnet", "fibo-2", "flux-2", "flux.3-klein", "hidream-o1", "hunyuan-image-3", "ideogram-4",
     "krea-2", "minimax-h3", "moss-image", "qwen3.5", "qwen3.6", "qwen-image", "qwen-image-2",
-    "relayvsr", "orbit", "p-h3-image", "sdxl", "seedvr2",
+    "relayvsr", "orbit", "p-h3-image", "pan2", "ltx-2.5", "sdxl", "seedvr2",
 ]
 strict = true
 warn_unreachable = true
@@ -113,7 +117,7 @@ ignore_errors = true
 [tool.ruff]
 line-length = 100
 src = [
-    "anima", "minimax-h3", "sdxl", "qwen-image-2", "qwen-image", "flux.3-klein", "fibo-2", "moss-image", "scripts", "examples",
+    "anima", "minimax-h3", "sdxl", "qwen-image-2", "qwen-image", "flux.3-klein", "fibo-2", "moss-image", "pan2", "ltx-2.5", "scripts", "examples",
 ]
 exclude = [".venv", "birefnet/birefnet/upstream", "seedvr2/seedvr2/upstream", "hunyuan-image-3/hunyuan_image_3/tencent"]
 
