@@ -164,8 +164,8 @@ wheels = [
 
 [[package]]
 name = "cozy-runtime"
-version = "0.47.0.dev2284+g58748689"
-source = { url = "https://github.com/cozy-creator/cozy-runtime/releases/download/rc-0.26.0/cozy_runtime-0.47.0.dev2284+g58748689-py3-none-any.whl" }
+version = "0.47.0.dev2285+g49ddb196"
+source = { url = "https://github.com/cozy-creator/cozy-runtime/releases/download/rc-0.26.0/cozy_runtime-0.47.0.dev2285+g49ddb196-py3-none-any.whl" }
 dependencies = [
     { name = "msgspec" },
     { name = "numpy" },
@@ -174,7 +174,7 @@ dependencies = [
     { name = "tensorfs" },
 ]
 wheels = [
-    { url = "https://github.com/cozy-creator/cozy-runtime/releases/download/rc-0.26.0/cozy_runtime-0.47.0.dev2284+g58748689-py3-none-any.whl", hash = "sha256:d73d75c1276d8c97f028e8138d0d5f29d1101426bde9bfac96de986e97ccfbda" },
+    { url = "https://github.com/cozy-creator/cozy-runtime/releases/download/rc-0.26.0/cozy_runtime-0.47.0.dev2285+g49ddb196-py3-none-any.whl", hash = "sha256:fd8ec5600f28efc1ceaafca21d9af19f9701d0544b2df1102025f35de9b67d5d" },
 ]
 
 [package.optional-dependencies]
@@ -373,8 +373,8 @@ wheels = [
 
 [[package]]
 name = "minimax-h3"
-version = "0.13.0rc7"
-source = { url = "https://github.com/cozy-creator/packages/releases/download/xs-198-h3-0.13.0rc7-6136efa9/minimax_h3-0.13.0rc7-py3-none-any.whl" }
+version = "0.13.0rc8"
+source = { url = "https://github.com/cozy-creator/packages/releases/download/xs-198-h3-0.13.0rc8-fa7d5146/minimax_h3-0.13.0rc8-py3-none-any.whl" }
 dependencies = [
     { name = "cozy-runtime", extra = ["adapters", "media"] },
     { name = "diffusers" },
@@ -391,7 +391,7 @@ dependencies = [
     { name = "transformers" },
 ]
 wheels = [
-    { url = "https://github.com/cozy-creator/packages/releases/download/xs-198-h3-0.13.0rc7-6136efa9/minimax_h3-0.13.0rc7-py3-none-any.whl", hash = "sha256:1a948ef7d2b13caff4f68fc62680192062565be8e1735e33b8adcb35f46127cc" },
+    { url = "https://github.com/cozy-creator/packages/releases/download/xs-198-h3-0.13.0rc8-fa7d5146/minimax_h3-0.13.0rc8-py3-none-any.whl", hash = "sha256:89d9d0e1dddfc68c489600287e8596c43029b4615b36944e126d1fd273bce101" },
 ]
 
 [package.metadata]
@@ -500,8 +500,8 @@ cozy-calls = [
 
 [package.metadata]
 requires-dist = [
-    { name = "cozy-runtime", extras = ["media"], url = "https://github.com/cozy-creator/cozy-runtime/releases/download/rc-0.26.0/cozy_runtime-0.47.0.dev2284+g58748689-py3-none-any.whl" },
-    { name = "minimax-h3", extras = ["cozy-calls"], marker = "extra == 'cozy-calls'", url = "https://github.com/cozy-creator/packages/releases/download/xs-198-h3-0.13.0rc7-6136efa9/minimax_h3-0.13.0rc7-py3-none-any.whl" },
+    { name = "cozy-runtime", extras = ["media"], url = "https://github.com/cozy-creator/cozy-runtime/releases/download/rc-0.26.0/cozy_runtime-0.47.0.dev2285+g49ddb196-py3-none-any.whl" },
+    { name = "minimax-h3", extras = ["cozy-calls"], marker = "extra == 'cozy-calls'", url = "https://github.com/cozy-creator/packages/releases/download/xs-198-h3-0.13.0rc8-fa7d5146/minimax_h3-0.13.0rc8-py3-none-any.whl" },
     { name = "msgspec", specifier = ">=0.19" },
     { name = "numpy", specifier = ">=1.26" },
     { name = "pillow", specifier = ">=12" },

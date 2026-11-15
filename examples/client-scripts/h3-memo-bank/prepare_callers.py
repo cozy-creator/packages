@@ -24,6 +24,8 @@ body = json.dumps(artifact, sort_keys=True, separators=(",", ":"))
 code = '''# /// script
 # requires-python = ">=3.12,<3.13"
 # dependencies = ["cozy-runtime>=0.47.0.dev0,<0.48", "minimax-h3>=0.13.0rc8", "msgspec>=0.19"]
+# [tool.uv.sources]
+# minimax-h3 = { index = "tensorhub" }
 # ///
 import msgspec
 from cozy_runtime.author import App, ModelArtifact
@@ -43,7 +45,7 @@ if args.tools_source is not None:
     selected = args.tools_source.resolve()
     if not (selected / "pyproject.toml").is_file():
         raise SystemExit("tools source must be one real private package directory")
-    code = code.replace("# ///\nimport msgspec", "# [tool.uv.sources]\n# minimax-h3 = {path = " + json.dumps(str(selected)) + ", editable = true}\n# ///\nimport msgspec")
+    code = code.replace('# minimax-h3 = { index = "tensorhub" }', "# minimax-h3 = {path = " + json.dumps(str(selected)) + ", editable = true}")
 args.out.mkdir(parents=True, exist_ok=True)
 (args.out / "compute.py").write_text(code)
 (args.out / "caller_edited.py").write_text(code + "\n# Same library operations, new caller.\n")

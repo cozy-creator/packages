@@ -73,6 +73,11 @@ python3 prepare_callers.py adoption.json
 cozy run ~/.cozy/outputs/h3-bank-qualification/compute.py --describe
 ```
 
+Before the H3 hard-cut release is published on the Hub, pass
+`--tools-source /ABSOLUTE/PATH/RC_PACKAGES/minimax-h3` to the generator. The generated
+callers require H3 0.13.0rc8 and the Runtime 0.47 SDK; the source override keeps RC
+qualification on that exact checkout.
+
 The adoption script refuses pruned inputs and produces a real native receipt with
 zero tensor payload production. A bound Model is an attempt capability; it cannot
 be passed directly to a managed child. `prepare_callers.py` therefore requires an
