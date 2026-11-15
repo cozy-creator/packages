@@ -6,7 +6,7 @@ with its 8-step first stage and 3-step spatial refinement, at 24 fps.
 
 ```yaml
 prompt: A small robot taps a ceramic mug with a spoon, listens to the ringing sound, then waves at the camera. Warm workshop lighting, a slow camera push, clear metallic taps and gentle room tone.
-duration_s: 5
+duration_s: 20
 resolution: 1080p
 seed: 20261115
 ```
@@ -36,4 +36,10 @@ separate comparison. See the [source assessment](../research/ltx-2.5/README.md).
 The model uses the **LTX-2.x Community License**, including its use and redistribution terms;
 the upstream inference code is Apache-2.0. Retain the model license and notices with weights.
 
-Status: initial implementation; checkpoint normalization and real GPU qualification are in progress.
+Real CLI renders cover synchronized sound, first-frame conditioning, portrait output and the
+maximum 20-second path on H200. See the [execution report](../research/video-models/2026-11-15.md)
+for exact cohorts and the separate publication/installed-package gates.
+
+The [CPU importer](../examples/client-scripts/ingest-ltx25.py) reproduces the pinned Distilled
+checkpoint with BF16 transformer/video and F32 audio VAE/vocoder. It runs before serving;
+`HF_TOKEN` supplies gated source access, or `--token-stdin` reads it from standard input.

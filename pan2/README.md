@@ -6,7 +6,7 @@ at the model's native 1248x704 size. The maximum is 20 seconds (481 frames).
 
 ```yaml
 prompt: A red ceramic cup stands on a wooden table. A hand lifts it, pours water into a clear glass, then puts the cup down. One continuous close shot in natural window light.
-duration_s: 10
+duration_s: 20
 seed: 20261115
 ```
 
@@ -32,4 +32,6 @@ PAN2 code and weights are Apache-2.0, with upstream notices retained. The option
 `pan2-guardrail` package is separate from this generator. See the [assessment](../research/pan2/README.md)
 for pinned sources, component/dtype details and remaining execution evidence.
 
-Status: initial implementation; model ingestion and real GPU qualification are in progress.
+Real CLI renders cover the native 10-second and maximum 20-second paths on H200. See the
+[execution report](../research/video-models/2026-11-15.md) for exact cohorts, timings, UI checks,
+comparison caveats and the separate publication/installed-package gates.
