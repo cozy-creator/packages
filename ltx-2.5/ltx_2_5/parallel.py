@@ -9,10 +9,10 @@ from typing import cast
 import torch
 from diffusers.models._modeling_parallel import ContextParallelInput, ContextParallelModelPlan, ContextParallelOutput, ParallelConfig
 from diffusers.models.attention_dispatch import (
-    all_to_all_single_any_o_async, all_to_all_single_any_qkv_async, dispatch_attention_fn,
+    AttentionBackendName, all_to_all_single_any_o_async, all_to_all_single_any_qkv_async, dispatch_attention_fn,
 )
 from diffusers.models.transformers.transformer_ltx2 import (
-    LTX2Attention, LTX2VideoTransformer3DModel, apply_interleaved_rotary_emb, apply_split_rotary_emb,
+    LTX2Attention, LTX2VideoTransformer3DModel, LTX2VideoTransformerBlock, apply_interleaved_rotary_emb, apply_split_rotary_emb,
 )
 
 
@@ -37,7 +37,7 @@ def plan(rope_type: str) -> ContextParallelModelPlan:
 class CrossAttention:
     """Local queries against replicated text, or Ulysses over unequal video/audio streams."""
 
-    _attention_backend: str | None = None
+    _attention_backend: AttentionBackendName | None = None
     _parallel_config: ParallelConfig | None = None
 
     def __init__(self, *, prompt: bool) -> None:
@@ -64,7 +64,7 @@ class CrossAttention:
         heads, rows = query.shape[2], query.shape[1]
         if not self.prompt and self._parallel_config is not None:
             cp = self._parallel_config.context_parallel_config
-            assert cp is not None and cp.ring_degree == 1
+            assert cp is not None and cp._ulysses_mesh is not None and cp.ring_degree == 1
             group = cp._ulysses_mesh.get_group()
             q_wait = all_to_all_single_any_qkv_async(query, group)
             k_wait = all_to_all_single_any_qkv_async(key, group)
@@ -81,11 +81,10 @@ class CrossAttention:
 
 
 def install(model: LTX2VideoTransformer3DModel) -> None:
-    model._cp_plan = plan(str(model.config["rope_type"]))
-    for block in model.transformer_blocks:
-        # Prompt KV and masks stay whole; each GPU computes only its own video/audio query rows.
-        block.attn2.set_processor(CrossAttention(prompt=True))
-        block.audio_attn2.set_processor(CrossAttention(prompt=True))
-        # Unlike self-attention, these calls have different Q and KV sequence lengths.
-        block.audio_to_video_attn.set_processor(CrossAttention(prompt=False))
-        block.video_to_audio_attn.set_processor(CrossAttention(prompt=False))
+    model._cp_plan = {name: value for name, value in plan(str(model.config["rope_type"])).items()}
+    for module in model.transformer_blocks:
+        block = cast(LTX2VideoTransformerBlock, module)
+        # Prompt KV/masks stay whole. Cross-modality calls exchange unequal Q and KV lengths.
+        for attention, prompt in ((block.attn2, True), (block.audio_attn2, True),
+                                  (block.audio_to_video_attn, False), (block.video_to_audio_attn, False)):
+            attention.set_processor(CrossAttention(prompt=prompt))  # type: ignore[arg-type]  # Diffusers' closed processor union excludes user processors.
