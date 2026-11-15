@@ -496,7 +496,6 @@ app.entrypoint(
     bf16_full,
     name="bf16-full",
     weights=(WeightsOutput("bf16-full", max_new_bytes=MAX_FULL_BYTES + MAX_VIDEO_VAE_BYTES),),
-    accelerator=False,
 )
 
 
@@ -526,6 +525,7 @@ async def vae(ctx: Context, *, source: Weights, tel: Telemetry) -> ModelArtifact
 app.entrypoint(
     bf16_pruned,
     name="bf16-pruned",
+    accelerator=True,
     weights=(WeightsOutput("bf16", max_new_bytes=MAX_PRUNED_BYTES + MAX_VIDEO_VAE_BYTES),),
 )
 # A curve's tables are k-wide GEMMs: CPU.
@@ -533,18 +533,17 @@ app.entrypoint(
     curve_pruned,
     name="curve-pruned",
     weights=(WeightsOutput("bf16", max_new_bytes=MAX_PRUNED_BYTES + MAX_VIDEO_VAE_BYTES),),
-    accelerator=False,
 )
 app.entrypoint(
     fp8_pruned,
     name="fp8-pruned",
+    accelerator=True,
     weights=(WeightsOutput("fp8", max_new_bytes=MAX_QUANTIZED_LANE_BYTES),),
 )
 app.entrypoint(
     vae,
     name="vae",
     weights=(WeightsOutput("vae", max_new_bytes=MAX_VIDEO_VAE_BYTES),),
-    accelerator=False,
 )
 
 
@@ -818,6 +817,7 @@ async def retable(
 app.entrypoint(
     retable,
     name="retable",
+    accelerator=True,
     weights=(
         WeightsOutput("adaln-pruned", max_new_bytes=MAX_PRUNED_BYTES),
         WeightsOutput("tables", max_new_bytes=MAX_PRUNED_BYTES),
@@ -830,11 +830,11 @@ app.entrypoint(
     _adaln_operations.select_adaln_weights,
     name="select-adaln-weights",
     weights=(WeightsOutput("model", 1 << 20),),
-    accelerator=False,
 )
 app.entrypoint(
     _adaln_operations.compute_adaln_tables,
     name="compute-adaln-tables",
+    accelerator=True,
     weights=(WeightsOutput("model", MAX_TABLE_BYTES),),
 )
 app.entrypoint(
@@ -845,22 +845,20 @@ app.entrypoint(
         WeightsOutput("fl2va-weights", 1 << 20),
         WeightsOutput("ref2va-weights", 1 << 20),
     ),
-    accelerator=False,
 )
 
 app.entrypoint(
     _adaln_operations.retable_adaln,
     name="retable-adaln",
     weights=(WeightsOutput("model", 1 << 20),),
-    accelerator=False,
 )
 
 
 from .turbo import turbo_lora  # noqa: E402
 
-app.entrypoint(turbo_lora, name="turbo-lora", weights=(WeightsOutput("pdd8", 1 << 29),))
+app.entrypoint(turbo_lora, name="turbo-lora", accelerator=True, weights=(WeightsOutput("pdd8", 1 << 29),))
 
 from .regenerate import regenerate_lora  # noqa: E402
 
 # New bytes: the rank-576 factors cast to bf16 (6.2 GB) and the refine tables.
-app.entrypoint(regenerate_lora, name="regenerate-lora", weights=(WeightsOutput("bf16", 7 << 30),))
+app.entrypoint(regenerate_lora, name="regenerate-lora", accelerator=True, weights=(WeightsOutput("bf16", 7 << 30),))
