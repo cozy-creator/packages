@@ -71,10 +71,16 @@ class TimestepEmbedder(torch.nn.Module):
         self.mlp = torch.nn.Sequential(
             torch.nn.Linear(frequencies, hidden), torch.nn.SiLU(), torch.nn.Linear(hidden, hidden)
         )
+        # The sinusoid's frequencies by device: made once on the host, as ever, and moved once, so
+        # a recorded step reads them in place instead of copying them in at every call.
+        self.freqs: dict[torch.device, torch.Tensor] = {}
 
     def forward(self, t: torch.Tensor) -> torch.Tensor:
-        half = self.frequencies // 2
-        freqs = torch.exp(-math.log(10000) * torch.arange(half, dtype=torch.float32) / half).to(t.device)
+        freqs = self.freqs.get(t.device)
+        if freqs is None:
+            half = self.frequencies // 2
+            host = torch.exp(-math.log(10000) * torch.arange(half, dtype=torch.float32) / half)
+            freqs = self.freqs[t.device] = host.to(t.device)
         args = (t * 1000)[:, None].float() * freqs[None]
         embedding = torch.cat([torch.cos(args), torch.sin(args)], dim=-1)
         first = cast(torch.nn.Linear, self.mlp[0])  # the Sequential's first layer, built above

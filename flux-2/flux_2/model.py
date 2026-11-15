@@ -10,7 +10,6 @@ fills the modules and owns their residency.
 from __future__ import annotations
 
 import json
-from functools import partial
 from itertools import pairwise
 import math
 from collections.abc import Callable, Mapping, Sequence
@@ -134,12 +133,6 @@ def _conditioning_only(encoder: nn.Module, depth: int) -> None:
         setattr(inner, "multi_modal_projector", None)  # noqa: B010
 
 
-def _armed(transformer: nn.Module, path: str) -> lora.Factors | None:
-    """The Turbo overlay's factors at `path` while `turbo.applied` arms it (`_cozy_turbo`)."""
-    armed = getattr(transformer, "_cozy_turbo", None)
-    return None if armed is None else armed.get(path)
-
-
 class Flux2Graph:
     def __init__(self, config: Config) -> None:
         text = config.section("text_encoder").mapping()
@@ -151,11 +144,8 @@ class Flux2Graph:
             encoder = text_encoder(text)
             vae = construct(AutoencoderKLFlux2, config.section("vae").mapping())
         _conditioning_only(encoder, max(TEXT_LAYERS[family]))
-        if transformer.config["guidance_embeds"]:  # [dev]: its Turbo LoRA's sites
-            transformer._cozy_turbo = None
-            for path, module in transformer.named_modules():
-                if isinstance(module, nn.Linear):
-                    module.register_forward_hook(lora.Hook(partial(_armed, transformer, path)))
+        #: [dev]'s Turbo LoRA arms every linear of its transformer (`turbo.applied`).
+        self.sites = lora.Sites(transformer) if transformer.config["guidance_embeds"] else None
         self.family = family
         # The VAE is built as stored (f32 in BFL's `ae`, bf16 in Diffusers' repositories); a GPU
         # serves it at `VAE_DTYPE` (`Flux2.hold_vae`).

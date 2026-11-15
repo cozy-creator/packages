@@ -104,7 +104,7 @@ def _generate(ctx: Context, payload: TurboInput, model: Flux2, turbo: Flux2Turbo
         guidance=guidance, seed=seed, progress=ctx.progress,
     )
     with tel.stage("generating image"):
-        latents = turbo.applied(model.graph.components["transformer"], denoise) if turbo else denoise()
+        latents = turbo.applied(model.graph.sites, denoise) if turbo else denoise()
     with tel.stage("decoding image"):
         image = model.decode(latents, width=width, height=height)
     with tel.stage("saving image"):
@@ -204,7 +204,7 @@ def upscale(ctx: Context, payload: UpscaleInput, model: Flux2, turbo_lora: Flux2
     denoise = partial(model.denoise, embeds, None, references, width=width, height=height, timesteps=timesteps,
                       guidance=2.5, seed=seed, progress=ctx.progress, start=start)  # fmt: skip
     with tel.stage("generating image"):
-        latents = turbo_lora.applied(model.graph.components["transformer"], denoise)
+        latents = turbo_lora.applied(model.graph.sites, denoise)
     with tel.stage("decoding image"):
         image = model.decode(latents, width=width, height=height)
     with tel.stage("saving image"):

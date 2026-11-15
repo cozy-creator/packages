@@ -680,6 +680,16 @@ def validate(module: object) -> None:
                 raise ValueError("Kitchen producer cannot replay an unknown projection hook")
 
 
+def stateless(layout: AttentionLayout) -> bool:
+    """A dense step that seeds no key means: every site only calls its own processor (`produce`),
+    so the Runtime may record the DiT call and replay it. The last dense step seeds them, and a
+    sparse step reads and writes them."""
+    if layout.sparse:
+        return False
+    carry = _CARRY.get()
+    return not (carry.seeding if carry is not None else layout.step == layout.dense_until_step - 1)
+
+
 def _register(name: str, base: str, *, context_parallel: bool = False) -> AttentionProducer:
     return register_attention(
         AttentionProducer(
@@ -690,6 +700,7 @@ def _register(name: str, base: str, *, context_parallel: bool = False) -> Attent
             requires=("sol_attn_chunked",),
             state=RequestState,
             context_parallel=context_parallel,
+            stateless=stateless,
         )
     )
 
