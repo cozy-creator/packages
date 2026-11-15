@@ -10,8 +10,8 @@ dependencies = [
     "pillow>=12",
 ]
 
-[dependency-groups]
-cozy-calls = ["minimax-h3>=0.12.0rc2"]
+[project.optional-dependencies]
+cozy-calls = ["minimax-h3[cozy-calls]>=0.12.0rc2"]
 
 [project.entry-points."cozy.application"]
 default = "orbit:app"
