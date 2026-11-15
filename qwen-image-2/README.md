@@ -231,10 +231,10 @@ account names that index in its `pyproject.toml` and never spells its URL:
 
 ```toml
 [project]
-dependencies = ["cozy-runtime>=0.47.0.dev0,<0.48"]
+dependencies = ["cozy-runtime>=0.48.0.dev0,<0.49"]
 
 [project.optional-dependencies]
-cozy-calls = ["qwen-image-2[cozy-calls]>=0.11.0rc6"]
+cozy-calls = ["qwen-image-2[cozy-calls]>=0.12.0rc1"]
 
 [tool.uv.sources]
 qwen-image-2 = { index = "tensorhub" }

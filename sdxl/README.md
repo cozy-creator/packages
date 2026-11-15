@@ -2,10 +2,10 @@
 
 `generate` makes one image from a text prompt with Stable Diffusion XL 1.0 (VAE fix).
 
-`0.11.0rc2` returns its final image with `ImageFile.from_image` and requires the matching
-Runtime 0.47 RC containing that constructor (Runtime PR #2188). Before this package ships,
-refresh its lock against that published SDK artifact; the older Runtime 0.46 lock cannot
-run this version. Image generation keeps WebP and upscaling keeps PNG.
+`0.12.0rc2` returns final images with `ImageFile.from_image` and requires Runtime 0.48.
+The Cozy 0.27 lock selects the reviewed Runtime 0.48/TensorFS 0.27 artifacts. Model
+qualification remains part of the coordinated release gate. Generation keeps WebP and
+upscaling keeps PNG.
 
 `image` is the canvas tool, its prompt `instructions`: `aspect_ratio`, `megapixels`, `negative_prompt` and `seed`; HiDiffusion runs above 1 MP.
 

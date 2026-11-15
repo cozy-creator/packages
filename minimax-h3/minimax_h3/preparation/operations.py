@@ -120,13 +120,11 @@ async def precompute_adaln(
         ComputeAdalnInput(task="ref2va", plan_digest=selected_ref.plan_digest),
         models={"source": ModelChoice(ref=selected_ref.projection)},
     )
-    attach = retable_adaln if generating_model is not None else apply_adaln
-    return await call(
-        attach,
-        AdalnInput(),
-        models={
-            "source": ModelChoice(ref=model),
-            "fl2va": ModelChoice(ref=fl),
-            "ref2va": ModelChoice(ref=ref),
-        },
-    )
+    attached_models = {
+        "source": ModelChoice(ref=model),
+        "fl2va": ModelChoice(ref=fl),
+        "ref2va": ModelChoice(ref=ref),
+    }
+    if generating_model is not None:
+        return await call(retable_adaln, AdalnInput(), models=attached_models)
+    return await call(apply_adaln, AdalnInput(), models=attached_models)

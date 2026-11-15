@@ -68,24 +68,33 @@ cozy run /ABSOLUTE/PATH/adopt_full.py --describe
 cozy run /ABSOLUTE/PATH/adopt_full.py \
   'model.source=minimaxai/minimax-h3@sha256:f1e86cb6b4935fbf9e79d90ee87366b6d13e2280b1846b4e9bfa0a00242793eb' \
   --on ROOT_OWNED_WORKER --json
-# Retain stdout as adoption.json, then:
-python3 prepare_callers.py adoption.json
-cozy run ~/.cozy/outputs/h3-bank-qualification/compute.py --describe
+# Retain stdout as adoption.json. With the Runtime 0.48 SDK in this Python environment:
+cozy-runtime --dir /ABSOLUTE/PATH/PACKAGES/minimax-h3 --json describe > h3-interface.json
+python3 prepare_callers.py adoption.json \
+  --tools-source /ABSOLUTE/PATH/PACKAGES/minimax-h3 --interface h3-interface.json \
+  --out ~/.cozy/outputs/h3-bank-qualification-027
+cozy run ~/.cozy/outputs/h3-bank-qualification-027/compute --describe
 ```
 
-Before the H3 hard-cut release is published on the Hub, pass
-`--tools-source /ABSOLUTE/PATH/RC_PACKAGES/minimax-h3` to the generator. The generated
-callers require H3 0.13.0rc8 and the Runtime 0.47 SDK; the source override keeps RC
-qualification on that exact checkout.
+The selected H3 0.14 source and supplied interface must match. The generator checks
+that through public `describe`, then uses public `calls` to generate every foreign
+operation reference. It copies `precompute_adaln` verbatim from the selected source,
+with its globals bound to those references. `provenance.json` records the source
+commit and file hashes, helper, interface, SDK and generated-caller digests.
+
+The five generated package directories require Runtime 0.48. H3 is an exact-version
+`cozy-calls` dependency with the selected source override; caller execution imports
+no H3 implementation. Use a frozen tracked checkout, and regenerate after changing
+the selected source or interface. These private callers are never published. The
+generator refuses an existing output directory so earlier evidence remains intact.
 
 The adoption script refuses pruned inputs and produces a real native receipt with
 zero tensor payload production. A bound Model is an attempt capability; it cannot
 be passed directly to a managed child. `prepare_callers.py` therefore requires an
 actual completed CLI ModelArtifact result and never invents a producer/receipt.
 It emits full compute, single-task FL compute, caller-only edit, schedule40 and
-wrong-plan callers under normal
-outputs. A private tools checkout may be supplied for same-version code/plan tests;
-that generated private path is never published.
+wrong-plan callers under normal outputs. A private tools checkout supports
+same-version code/plan tests without installing its compute dependencies in callers.
 
 Already passed: the actual adoption-script dry-run and the published
 `minimax-h3/select-adaln-weights` dry-run against the exact full source.
@@ -95,7 +104,7 @@ was fabricated merely to make a dry-run appear complete.
 ## Finite proof sequence
 
 1. **Positive production plus compatible partial recovery.** Start the first
-   `compute.py` on the full source. Observe the FL2VA bank's own native operation
+   `compute` package on the full source. Observe the FL2VA bank's own native operation
    identity, then stop only that accepted operation after its first completed
    block checkpoint. Cancel it, then resubmit with an edited caller.
    An observer may hold the exact native checkpoint boundary, but must be scoped
@@ -105,14 +114,14 @@ was fabricated merely to make a dry-run appear complete.
    read is 63,340,032 bytes, not another 520,418,304-byte first block. Record
    `h3.adaln.source_bytes`, `h3.adaln.reused_tables`, all native part writes,
    checkpoint identities, attempt causes and complete results.
-2. **Completed caller reuse.** Run `caller_edited.py`. The public helper composes
+2. **Completed caller reuse.** Run `caller_edited`. The public helper composes
    two select, two compute and one attach calls. Require zero new body attempts
    for all five leaves, exact computation/result/receipt identity, and no new
    generator reads or table writes. Confirm the first compute really ran; existing
    table bytes in the film checkpoint are not proof of a positive bank execution.
-3. **Public schedule equivalence and wrong-plan refusal.** Run `schedule40.py`:
+3. **Public schedule equivalence and wrong-plan refusal.** Run `schedule40`:
    the expected result is reuse, because 30/40/50 all select the same approved
-   union bank. Run `wrong_plan.py`: require named `adaln_plan` refusal before
+   union bank. Run `wrong_plan`: require named `adaln_plan` refusal before
    table/source-payload work. The minimum public setting is 30, but it still
    computes all 207 union timesteps; a one-timestep production bank is unavailable.
 4. **Same-version callee invalidation.** Use one owned private copy of the exact
@@ -128,7 +137,7 @@ was fabricated merely to make a dry-run appear complete.
    and its digest differs from the source model's plan. Use this as a negative
    plan control only; never write it into a production model or call it a
    production positive bank. Positive changed-plan production remains dependent
-   on an independently reviewed new production plan. `compute_fl.py` obtains the
+   on an independently reviewed new production plan. `compute_fl` obtains the
    exact plan digest from its source selection reply to qualify a single task. Never substitute
    a30→40 wrapper-argument change for plan invalidation.
 
@@ -149,8 +158,10 @@ No image/video inference or partial denoising is memoized here. Bank correctness
 full-vs-table numerical equivalence and whole-model perceptual quality are distinct
 gates. Trusted cross-machine memo mappings remain outside this phase.
 
-Validation: both ordinary CLI dry-runs pass, including the adoption rerun on
+Historical validation: both ordinary CLI dry-runs passed, including the adoption rerun on
 CLI `0.0.0-f9654a7190aa`. Geometry is source-derived and the coverage fixture passes
 the structural parser while failing the production launch pin as expected. The
-caller generator was syntax-checked using a genuine historical small-fixture
+previous caller generator was syntax-checked using a genuine historical small-fixture
 receipt; those generated test callers were not submitted and are not H3 proof.
+The 0.27 caller composition still needs a new genuine adoption receipt, matching
+Runtime 0.48/TensorFS 0.27 artifacts and ordinary CLI qualification.
