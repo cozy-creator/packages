@@ -8,6 +8,7 @@ from typing import TypedDict, cast
 
 import numpy as np
 import torch
+from cozy_runtime.accel import sequence_parallel
 from cozy_runtime.author import Config, Loader, Model, ModelAssets, Serving, device, memoize, uses_components
 from diffusers.models.autoencoders.autoencoder_kl_ltx2_audio import AutoencoderKLLTX2Audio
 from diffusers.models.autoencoders.autoencoder_kl_ltx2 import AutoencoderKLLTX2Video
@@ -25,6 +26,7 @@ from torch import nn
 from transformers import AddedToken, Gemma4UnifiedConfig, Gemma4UnifiedForConditionalGeneration, GemmaTokenizer
 
 from .vae import VideoVAE
+from .parallel import install
 
 FPS = 24
 SIGMAS = (1.0, 0.99375, 0.9875, 0.98125, 0.975, 0.909375, 0.725, 0.421875)
@@ -104,6 +106,7 @@ class Graph:
             "vocoder": LTX2VocoderWithBWE.from_config(config.section("vocoder").mapping()).float().eval(),
             "latent_upsampler": stored(LTX2LatentUpsamplerModel.from_config(config.section("latent_upsampler").mapping()), "latent_upsampler", config),
         }
+        install(self.components["transformer"])
         self.scheduler_config = config.section("scheduler").mapping()
 
 
@@ -121,6 +124,7 @@ class ImagePipeline(LTX2ImageToVideoPipeline):
         return torch.device(str(device()))
 
 
+@sequence_parallel(degrees=(2, 4, 8))
 class Ltx25(Model[Graph]):
     serving = Serving(min_bits=16, attention_bits=16)
     graph: Graph
