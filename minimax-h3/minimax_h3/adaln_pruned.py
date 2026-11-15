@@ -8,16 +8,16 @@ same operation order, at the timesteps the checkpoint labels, and holds no proje
 
 An overlay (`overlay.py`: PDD-8 turbo, the Regenerate refine) attaches beside the DiT and is
 served per forward: the forward that names its bank in `attention_kwargs`, or runs inside a
-denoise loop that engaged it, reads the overlay's tables, heads and low-rank factors through the
-same modules; every other forward reads the base modulation, FULL or tabled.
+denoise loop that engaged it, reads the overlay's tables and heads through the same modules and
+its low-rank factors on the DiT's `lora.Sites`; every other forward reads the base modulation,
+FULL or tabled.
 """
 
 from __future__ import annotations
 
 import inspect
-from functools import partial
 from collections.abc import Iterator, Mapping, Sequence
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from contextvars import ContextVar
 from typing import Any, ClassVar, cast
 
@@ -43,7 +43,6 @@ from .overlay import (
     Overlay,
     OverlayArming,
     OverlayTables,
-    armed,
 )
 
 
@@ -268,7 +267,10 @@ class H3Transformer(MiniMaxH3Transformer3DModel):
             head = cast(nn.Linear, getattr(self, name))
             setattr(self, name, _SelectableHead(head.in_features, head.out_features))
         self._arming: OverlayArming | None = None
-        self._lora_hooks_installed = False
+        #: Where an overlay's factors are armed (`install_lora_consumers`), and the arming held
+        #: from `_engage` to `_release`.
+        self.sites: lora.Sites | None = None
+        self._lora = ExitStack()
 
     @apply_lora_scale("attention_kwargs")  # type: ignore[untyped-decorator]
     def forward(  # type: ignore[misc]  # untyped after Diffusers' unannotated `apply_lora_scale`
@@ -373,15 +375,19 @@ class H3Transformer(MiniMaxH3Transformer3DModel):
         )
 
     def install_lora_consumers(self) -> None:
-        """Install once during turbo-capable construction, before Runtime fill/fusion."""
-        if self._lora_hooks_installed:
+        """Install once during turbo-capable construction, before Runtime fill/fusion: the
+        overlay families' linears in every block (`LORA_FAMILIES`) as `lora.Sites`."""
+        if self.sites is not None:
             return
-        for path, site in self.named_modules():
-            if path.startswith(
-                ("token_refiner.refiner_blocks.", "transformer_blocks.")
-            ) and path.endswith(LORA_FAMILIES):
-                site.register_forward_hook(lora.Hook(partial(armed, self, path)))
-        self._lora_hooks_installed = True
+        self.sites = lora.Sites(
+            self,
+            [
+                path
+                for path, _ in self.named_modules()
+                if path.startswith(("token_refiner.refiner_blocks.", "transformer_blocks."))
+                and path.endswith(LORA_FAMILIES)
+            ],
+        )
 
     def _arm(
         self,
@@ -417,7 +423,7 @@ class H3Transformer(MiniMaxH3Transformer3DModel):
                 if (
                     not isinstance(overlay, Overlay)
                     or overlay.bank != bank
-                    or not self._lora_hooks_installed
+                    or self.sites is None
                 ):
                     raise ValueError(
                         f"bank {bank!r} requires an overlay-capable base and that bank's "
@@ -451,8 +457,12 @@ class H3Transformer(MiniMaxH3Transformer3DModel):
         evaluation `step`. A loop arms once with a device index (a 0-dim int64 tensor) and sets
         it before each step (`steps.denoise_official`): its forwards then differ by no module
         state, so one recorded forward replays for every step."""
+        if self.sites is None:
+            raise ValueError("an overlay arms only an overlay-capable base (`install_lora_consumers`)")
         if not isinstance(step, torch.Tensor):
             step = torch.full((), step, dtype=torch.int64, device=self.proj_in.weight.device)
+        self._lora.close()
+        self._lora.enter_context(self.sites.applied(overlay.factors))
         self._arming = OverlayArming(overlay, step)
         for index, block in enumerate(self.transformer_blocks):
             _modulation(block)._armed = _Armed(_overlay_tables(overlay, index))
@@ -467,6 +477,7 @@ class H3Transformer(MiniMaxH3Transformer3DModel):
 
     def _release(self) -> None:
         """Every forward starts disarmed, whatever the previous one left behind."""
+        self._lora.close()
         self._arming = None
         for block in self.transformer_blocks:
             _modulation(block)._armed = None

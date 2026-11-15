@@ -14,8 +14,7 @@ numerics are the Diffusers/Runtime ones.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
-from typing import TYPE_CHECKING
+from collections.abc import Callable
 
 import torch
 import torch.nn.functional as F
@@ -25,9 +24,6 @@ from diffusers.models.transformers.transformer_qwenimage21 import (
     QwenImage21Transformer2DModel,
     _qwenimage21_prefix_segments,
 )
-
-if TYPE_CHECKING:
-    from cozy_runtime.accel.lora import Factors
 
 #: A layer's prefix keys and values.
 KV = tuple[torch.Tensor, torch.Tensor]
@@ -58,9 +54,6 @@ class Transformer(QwenImage21Transformer2DModel):
     (t, rotary table, target mask, each layer's prefix K/V), or `joint` = (t, text embeds, reference
     latents, *`_Joint.inputs()`). `t` is [1], already over 1000. `projection`: a parallel decoder's
     output projection for this step (PDD), whose prediction is F32."""
-
-    #: The armed overlay's factors by site (`turbo.FunAccLoRA`), else None.
-    _cozy_overlay: Mapping[str, Factors] | None
 
     def forward(
         self, hidden_states: torch.Tensor, *args: object, cached: Cached | None = None,

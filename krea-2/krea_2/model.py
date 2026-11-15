@@ -7,8 +7,8 @@ its form. Runtime constructs and fills the modules and owns their residency.
 
 Krea 2 takes no pictures upstream; its community adapters (`adapters.py`) add them as clean VAE tokens in the
 DiT's sequence (`Reference`), as Qwen3-VL vision tokens in its text (`encode_pictures`), or as a control
-latent beside each image token (`denoise(control=)`). An adapter's LoRA reaches the DiT through permanent
-hooks (`cozy_runtime.lora.Hook`), which Runtime bakes into the resident weights while it is armed.
+latent beside each image token (`denoise(control=)`). An adapter's LoRA is armed on one of the DiT's
+`lora.Sites`, and Runtime bakes it into the resident weights while it is armed.
 """
 
 from __future__ import annotations
@@ -17,7 +17,6 @@ import json
 import math
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
-from functools import partial
 from typing import TYPE_CHECKING, NamedTuple, TypedDict, cast
 
 import numpy as np
@@ -90,7 +89,7 @@ VISION_PATCH, VISION_MERGE, VISION_FRAMES = 16, 2, 2
 VISION_PIXELS = (65536, 16777216)
 IMAGE_PAD = "<|image_pad|>"
 VISION = "<|vision_start|>" + IMAGE_PAD + "<|vision_end|>"
-#: Adapters armed at once: an edit's and a control's (`Krea2DiT.denoise`'s `overlays`).
+#: Adapters armed at once: an edit's and a control's, each on its own `lora.Sites` (`Krea2DiTGraph.sites`).
 SLOTS = 2
 
 
@@ -316,8 +315,6 @@ def grid(frame: float, rows: int, columns: int, origin: tuple[float, float], dev
 class Transformer(Krea2Transformer2DModel):
     """`Krea2Transformer2DModel` whose forward is one sampling step for every prompt of a request."""
 
-    #: Each slot's armed adapter, its factors by linear (`adapters.Adapter.applied`), else None.
-    _cozy_overlays: list[Mapping[str, lora.Factors] | None]
     #: A control adapter's expanded input projection while it is armed (`adapters.Adapter.applied`): its
     #: weight [6144, 128] over each image token and its control token side by side, and its bias.
     _cozy_projection: tuple[torch.Tensor, torch.Tensor] | None = None
@@ -362,13 +359,6 @@ class Transformer(Krea2Transformer2DModel):
                 for h, stream in zip(hidden, streams, strict=True)]
 
 
-def _armed(transformer: nn.Module, slot: int, path: str) -> lora.Factors | None:
-    """An armed adapter's factors at `path` in `slot` (`Krea2DiT.denoise`'s `overlays`), else None."""
-    armed: list[Mapping[str, lora.Factors] | None] = getattr(transformer, "_cozy_overlays", [None] * SLOTS)
-    sites = armed[slot]
-    return None if sites is None else sites.get(path)
-
-
 def _section(config: Config, name: str, alone: str) -> Config:
     """`config`'s section `name`. A checkpoint of one component gives its config unsectioned (Runtime): `alone` says
     what goes with this one."""
@@ -378,22 +368,15 @@ def _section(config: Config, name: str, alone: str) -> Config:
 
 
 def _transformer(config: Config) -> Transformer:
-    """A checkpoint's `transformer`, each linear serving an armed adapter's factors (`adapters.Adapter`), one hook per
-    slot."""
+    """A checkpoint's `transformer`."""
     section = _section(config, "transformer", "a transformer goes with its scheduler (`<model>:transformer,scheduler`)")
     with no_init_weights():
         transformer = construct(Krea2Transformer2DModel, section.mapping())
     transformer.__class__ = Transformer
     for block in transformer.transformer_blocks:
         block.__class__ = Block
-    dit = cast(Transformer, transformer)  # its class, set above
-    dit._cozy_overlays = [None] * SLOTS  # a plain attribute: nn.Module keeps a list as such
-    for path, module in dit.named_modules():
-        if isinstance(module, nn.Linear):
-            for slot in range(SLOTS):
-                module.register_forward_hook(lora.Hook(partial(_armed, dit, slot, path)))
     as_stored(config, "transformer", transformer)
-    return dit.eval()
+    return cast(Transformer, transformer.eval())  # its class, set above
 
 
 def _text_encoder(config: Config) -> TextEncoder:
@@ -422,7 +405,10 @@ class Krea2DiTGraph:
     """The `transformer` of a Krea 2 checkpoint and its scheduler, whole or a model of that part alone (xs-192)."""
 
     def __init__(self, config: Config) -> None:
-        self.components: DiTComponents = {"transformer": _transformer(config)}
+        transformer = _transformer(config)
+        #: One `lora.Sites` per adapter armed at once, each over every linear (`adapters.armed`).
+        self.sites = tuple(lora.Sites(transformer) for _ in range(SLOTS))
+        self.components: DiTComponents = {"transformer": transformer}
         self.scheduler_config: Mapping[str, object] = _section(
             config, "scheduler", "a transformer goes with its scheduler (`<model>:transformer,scheduler`)"
         ).mapping()

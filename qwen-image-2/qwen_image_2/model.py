@@ -5,15 +5,14 @@ constructs and fills the modules and owns their residency; no Diffusers weight l
 placement, or offload hook takes part in serving.
 
 A caller's LoRAs adapt the DiT through Runtime's PEFT layers (`serving.loras`). The
-Turbo overlay (`turbo.FunAccLoRA`) reaches the DiT's linears through permanent hooks
-(`cozy_runtime.lora.Hook`), which Runtime bakes into the resident weights while it is armed.
+Turbo overlay (`turbo.FunAccLoRA`) is armed on the DiT's `lora.Sites` (`SITES`); Runtime bakes it
+into the resident weights while it is armed.
 """
 
 from __future__ import annotations
 
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
-from functools import partial
 from typing import Protocol, TypedDict, cast
 
 import numpy as np
@@ -211,12 +210,6 @@ def reference_grids(images: Sequence[Image.Image]) -> list[tuple[int, int]]:
     return [(height // 16, width // 16) for width, height in sizes]
 
 
-def _armed(transformer: nn.Module, path: str) -> lora.Factors | None:
-    """The overlay's factors at `path` while one is armed (`_cozy_overlay`), else None."""
-    armed = getattr(transformer, "_cozy_overlay", None)
-    return None if armed is None else armed.get(path)
-
-
 def _stored(config: Config, component: str, module: torch.nn.Module) -> torch.dtype:
     """The one dtype the checkpoint stores `component`'s parameters in; f32 built from config alone.
     Qwen-Image-2.1 stores its VAE in f32, Turbo in bf16."""
@@ -240,18 +233,14 @@ def _section(config: Config, name: str, alone: str) -> Config:
 
 
 def _transformer(config: Config) -> Transformer:
-    """A checkpoint's `transformer`, hooked for an armed overlay."""
+    """A checkpoint's `transformer`."""
     # Construction dtype leaves derived buffers F32, as upstream loads them: the DiT's
     # timestep `freqs` and the text encoder's RoPE. A cast of the built module would round them.
     section = _section(config, "transformer", "a transformer goes with its scheduler (`<model>:transformer,scheduler`)")
     with transformer_init.no_init_weights(), local_torch_dtype(torch.bfloat16):
         built = construct(QwenImage21Transformer2DModel, section.mapping())
     built.__class__ = Transformer
-    transformer = cast(Transformer, built)  # its class, set above
-    transformer._cozy_overlay = None
-    for path in SITES:
-        transformer.get_submodule(path).register_forward_hook(lora.Hook(partial(_armed, transformer, path)))
-    return transformer
+    return cast(Transformer, built)  # its class, set above
 
 
 def _text_encoder(config: Config) -> Qwen3VLForConditionalGeneration:
@@ -275,7 +264,10 @@ class QwenImage21DiTGraph:
     whole or a model of that part alone (xs-192)."""
 
     def __init__(self, config: Config) -> None:
-        self.components: DiTComponents = {"transformer": _transformer(config)}
+        transformer = _transformer(config)
+        #: Where the Turbo overlay is armed (`turbo.FunAccLoRA`).
+        self.sites = lora.Sites(transformer, SITES)
+        self.components: DiTComponents = {"transformer": transformer}
         self.scheduler_config: dict[str, object] = _section(
             config, "scheduler", "a transformer goes with its scheduler (`<model>:transformer,scheduler`)"
         ).mapping()

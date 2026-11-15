@@ -155,8 +155,7 @@ def _generate(ctx: Context, payload: TurboInput, model: Krea2DiT, text_encoder: 
         armed_adapters.append((adapters[kind.slot], control.strength))
     ctx.raise_if_cancelled()
     with tel.stage("generating image"):
-        transformer = model.graph.components["transformer"]
-        latents = armed(armed_adapters, transformer, lambda: model.denoise(
+        latents = armed(armed_adapters, model.graph, lambda: model.denoise(
             *branches, width=width, height=height, steps=steps, guidance=guidance, seed=seed, distilled=distilled,
             progress=ctx.progress, start=initial, strength=payload.denoise or DENOISE, control=depth,
         ))

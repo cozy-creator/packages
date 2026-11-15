@@ -23,8 +23,9 @@ with the overlay absent from every forward they run.
 
 from __future__ import annotations
 
-from collections.abc import Iterator, Mapping, Sequence
-from typing import Any, ClassVar, Protocol, cast
+from collections.abc import Mapping, Sequence
+from functools import cached_property
+from typing import Any, ClassVar
 
 import torch
 from torch import nn
@@ -274,10 +275,10 @@ class Overlay(nn.Module):
             final_table_dtype=final_table_dtype,
         )
 
-    def lora_sites(self) -> Iterator[tuple[str, LoRAFactors]]:
-        for name, module in self.named_modules():
-            if isinstance(module, LoRAFactors):
-                yield name, module
+    @cached_property
+    def factors(self) -> dict[str, LoRAFactors]:
+        """Each LoRA site's factors by its path, which is its path on the DiT (`lora.Sites`)."""
+        return {n: m for n, m in self.named_modules() if isinstance(m, LoRAFactors)}
 
     def rows(self, timestep: torch.Tensor, *, checked: bool = True) -> torch.Tensor:
         """Global turbo table rows of exact float32 timesteps; off-plan values refuse. A loop
@@ -302,17 +303,3 @@ class OverlayArming:
     def __init__(self, overlay: Overlay, step: torch.Tensor) -> None:
         self.overlay = overlay
         self.step = step
-
-
-class Arming(Protocol):
-    """A base DiT that arms an overlay (`H3Transformer`, FULL or AdaLN-pruned)."""
-
-    _arming: OverlayArming | None
-
-
-def armed(owner: Arming, path: str) -> LoRAFactors | None:
-    """The armed overlay's factors at `path`, or None in a base forward."""
-    arming = owner._arming
-    if arming is None:
-        return None
-    return cast(LoRAFactors, arming.overlay.get_submodule(path))  # an overlay path names its factors
