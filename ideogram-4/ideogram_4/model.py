@@ -4,21 +4,35 @@ Two DiTs run every step: the conditional one over the caption's text tokens and 
 and the unconditional one over the image tokens alone (Ideogram's asymmetric CFG). The text encoder
 is the stock Qwen3-VL-8B-Instruct Ideogram froze, a slot of its own (`text_encoder.py`). Runtime
 constructs and fills the modules and owns their residency.
+
+On a GPU a DiT block runs as ComfyUI's Ideogram 4 does, on the Runtime's prebuilt kernels: each
+modulated pre-norm comes out of the int8 leaves' quantization pass (`int8_rows`, the norm weight
+folded into `1 + scale`), as does the SwiGLU product the down projection reads; the q/k norms and
+split-half RoPE are one kernel (`rms_rope_split_half`); each post-norm is torch's fused RMSNorm and
+its gated residual one in-place `addcmul`. Linears that are not int8 take the norms as Diffusers
+computes them, and on the CPU a block is Diffusers' composition.
 """
 
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
-from typing import TypedDict, cast
+from typing import TYPE_CHECKING, TypedDict, cast
 
 import torch
 import torch.nn.functional as F
 from cozy_runtime import rng
 from cozy_runtime.accel import hold_dtype
+from cozy_runtime.accel.kernels import PreQuantized, int8_rows, native, quantize_once, rms_rope_split_half
 from cozy_runtime.author import Config, Loader, Model, OutputError, Telemetry, preview, uses_components
 from diffusers.configuration_utils import ConfigMixin
+from diffusers.models.attention_dispatch import AttentionBackendName, dispatch_attention_fn
 from diffusers.models.autoencoders.autoencoder_kl_flux2 import AutoencoderKLFlux2
-from diffusers.models.transformers.transformer_ideogram4 import Ideogram4Transformer2DModel
+from diffusers.models.normalization import RMSNorm
+from diffusers.models.transformers.transformer_ideogram4 import (
+    Ideogram4Attention,
+    Ideogram4Transformer2DModel,
+    Ideogram4TransformerBlock,
+)
 from diffusers.schedulers.scheduling_flow_match_euler_discrete import FlowMatchEulerDiscreteScheduler
 from diffusers.image_processor import VaeImageProcessor
 from diffusers.pipelines.ideogram4.pipeline_ideogram4 import (
@@ -27,6 +41,9 @@ from diffusers.pipelines.ideogram4.pipeline_ideogram4 import (
     _resolution_aware_mu,
 )
 from PIL import Image
+
+if TYPE_CHECKING:
+    from diffusers.models._modeling_parallel import ParallelConfig
 
 #: Pixels per latent token: the VAE's 8x, then 2x2 patches.
 PATCH = 16
@@ -37,13 +54,96 @@ DTYPE = torch.bfloat16
 VAE_DTYPE = torch.float16
 
 
+#: A block's RoPE: the f32 rotation matrices `[1, tokens, 1, head_dim / 2, 2, 2]` the fused q/k kernel reads
+#: (`rms_rope_split_half`), else Diffusers' `(cos, sin)` tables in the activations' dtype.
+type Rope = torch.Tensor | tuple[torch.Tensor, torch.Tensor]
+
+
+def _weight(norm: RMSNorm) -> torch.Tensor:
+    """An Ideogram 4 RMSNorm's weight: every one is affine."""
+    return cast(torch.Tensor, norm.weight)
+
+
+def _rotate_half(x: torch.Tensor) -> torch.Tensor:
+    half = x.shape[-1] // 2
+    return torch.cat((-x[..., half:], x[..., :half]), dim=-1)
+
+
+def _modulated(x: torch.Tensor, norm: RMSNorm, scale: torch.Tensor,
+               consumers: tuple[torch.nn.Module, ...]) -> torch.Tensor | PreQuantized:
+    """`norm(x) * (1 + scale)` for `consumers`: quantized for them in the norm's one pass when they are
+    int8 leaves (the norm weight folded into the scale, as ComfyUI's `int8_linear_rms_modulated`), else
+    as Diffusers computes it."""
+    folded = (_weight(norm).float() * (1 + scale.float()) - 1).to(x.dtype)
+    rows = int8_rows(x, consumers, norm="rms", eps=norm.eps, scale=folded)
+    if rows is None:
+        eager: torch.Tensor = norm(x) * (1.0 + scale)
+        return eager
+    return rows
+
+
+def _gated(x: torch.Tensor, norm: RMSNorm, branch: torch.Tensor, gate: torch.Tensor) -> torch.Tensor:
+    """`x + tanh(gate) * norm(branch)`: on a GPU torch's fused RMSNorm, then one in-place `addcmul`."""
+    if not x.is_cuda:
+        eager: torch.Tensor = x + torch.tanh(gate) * norm(branch)
+        return eager
+    normed = F.rms_norm(branch, (branch.shape[-1],), _weight(norm), norm.eps)
+    return x.addcmul_(normed, torch.tanh(gate))
+
+
+class Processor:
+    """`Ideogram4AttnProcessor` for rows its block may hand quantized (`int8_rows`), the q/k norms
+    and split-half RoPE one kernel when the RoPE is rotation matrices. A Runtime attention site: the
+    Runtime sets each one's kernel."""
+
+    _attention_backend: AttentionBackendName | None = None
+    _parallel_config: ParallelConfig | None = None
+
+    def __call__(
+        self, attn: Ideogram4Attention, hidden_states: torch.Tensor | PreQuantized,
+        attention_mask: torch.Tensor | None, image_rotary_emb: Rope,
+    ) -> torch.Tensor:
+        heads = (attn.num_heads, attn.head_dim)
+        with quantize_once(hidden_states if isinstance(hidden_states, torch.Tensor) else None):
+            q, k, v = (p(hidden_states).unflatten(-1, heads) for p in (attn.to_q, attn.to_k, attn.to_v))
+        if isinstance(image_rotary_emb, torch.Tensor):
+            q, k = rms_rope_split_half(
+                q, k, image_rotary_emb, _weight(attn.norm_q), _weight(attn.norm_k), attn.norm_q.eps
+            )
+        else:
+            cos, sin = (t.unsqueeze(2) for t in image_rotary_emb)
+            q, k = (norm(t) for norm, t in ((attn.norm_q, q), (attn.norm_k, k)))
+            q, k = (t * cos + _rotate_half(t) * sin for t in (q, k))
+        attended = dispatch_attention_fn(
+            q, k, v, attn_mask=attention_mask, backend=self._attention_backend,
+            parallel_config=self._parallel_config,
+        )
+        out: torch.Tensor = attn.to_out[0](attended.flatten(2, 3))
+        return out
+
+
+class Block(Ideogram4TransformerBlock):
+    """`Ideogram4TransformerBlock`, its norms, modulation, RoPE and SwiGLU fused (module docstring)."""
+
+    def forward(
+        self, hidden_states: torch.Tensor, attention_mask: torch.Tensor | None, image_rotary_emb: Rope,
+        adaln_input: torch.Tensor,
+    ) -> torch.Tensor:
+        scale_msa, gate_msa, scale_mlp, gate_mlp = self.adaln_modulation(adaln_input).chunk(4, dim=-1)
+        attn, ff = self.attention, self.feed_forward
+        rows = _modulated(hidden_states, self.attention_norm1, scale_msa, (attn.to_q, attn.to_k, attn.to_v))
+        x = _gated(hidden_states, self.attention_norm2, attn(rows, attention_mask, image_rotary_emb), gate_msa)
+        rows = _modulated(x, self.ffn_norm1, scale_mlp, (ff.w1, ff.w3))
+        with quantize_once(rows if isinstance(rows, torch.Tensor) else None):
+            gate, up = ff.w1(rows), ff.w3(rows)
+        product = int8_rows(gate, (ff.w2,), activation="swiglu", up=up)
+        return _gated(x, self.ffn_norm2, ff.w2(F.silu(gate) * up if product is None else product), gate_mlp)
+
+
 class Transformer(Ideogram4Transformer2DModel):
     """`Ideogram4Transformer2DModel` whose forward is one velocity past the text rows no step changes."""
 
-    def forward(
-        self, image: torch.Tensor, prefix: torch.Tensor | None, t: torch.Tensor, cos: torch.Tensor,
-        sin: torch.Tensor,
-    ) -> torch.Tensor:
+    def forward(self, image: torch.Tensor, prefix: torch.Tensor | None, t: torch.Tensor, rope: Rope) -> torch.Tensor:
         """`Ideogram4Transformer2DModel.forward` past its text rows: the image tokens embedded beside
         `prefix` (`_text_rows`; None: image tokens alone), the blocks, and the final layer over the
         image rows. One unpadded caption is one segment, so attention is full and takes no mask:
@@ -53,7 +153,7 @@ class Transformer(Ideogram4Transformer2DModel):
             hidden = torch.cat([prefix, hidden], dim=1)
         adaln = F.silu(self.adaln_proj(self.t_embedding(t).unsqueeze(1)))
         for block in self.layers:
-            hidden = block(hidden, None, (cos, sin), adaln)
+            hidden = block(hidden, None, rope, adaln)
         return self.final_layer(hidden[:, hidden.shape[1] - image.shape[1] :], conditioning=adaln)  # type: ignore[no-any-return]
 
 
@@ -65,6 +165,9 @@ class IdeogramGraph:
         }
         for model in dits.values():
             model.__class__ = Transformer
+            for block in model.layers:
+                block.__class__ = Block
+                cast(Block, block).attention.set_processor(Processor())  # type: ignore[arg-type]  # the package's own
         self.components: Components = {
             "transformer": cast(Transformer, dits["transformer"]),  # its class, set above
             "unconditional_transformer": cast(Transformer, dits["unconditional_transformer"]),
@@ -114,9 +217,16 @@ def _text_rows(tf: Transformer, features: torch.Tensor) -> torch.Tensor:
     return out
 
 
-def _rotary(tf: Transformer, position_ids: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-    """The forward's MRoPE tables for `position_ids`, in its activations' dtype."""
+def _rotary(tf: Transformer, position_ids: torch.Tensor) -> Rope:
+    """The forward's MRoPE for `position_ids`: on a GPU whose Runtime carries its kernels, the f32 rotation
+    matrices of each split-half pair, as ComfyUI's `_split_half_rope_matrix` (Ideogram's tables repeat one
+    half); else Diffusers' tables in the activations' dtype."""
     cos, sin = tf.rotary_emb(position_ids)
+    if position_ids.is_cuda and not native():
+        half = cos.shape[-1] // 2
+        c, s = cos[..., :half], sin[..., :half]
+        matrices: torch.Tensor = torch.stack((c, -s, s, c), -1).unflatten(-1, (2, 2))
+        return matrices.unsqueeze(2)
     return cos.to(DTYPE), sin.to(DTYPE)
 
 
@@ -176,8 +286,8 @@ class Ideogram4(Model[IdeogramGraph]):
             for i, t in enumerate(scheduler.timesteps):
                 t_model = (1.0 - t.float() / num_train_timesteps).expand(1).to(DTYPE)
                 image = latents.to(DTYPE)
-                positive = tf(image, prefix, t_model, *positive_rope).to(torch.float32)
-                negative = uncond(image, None, t_model, *negative_rope).to(torch.float32)
+                positive = tf(image, prefix, t_model, positive_rope).to(torch.float32)
+                negative = uncond(image, None, t_model, negative_rope).to(torch.float32)
                 velocity = guidance[i] * positive + (1.0 - guidance[i]) * negative
                 preview(lambda: latents + scheduler.sigmas[i] * velocity, "flux2", grid=(rows, columns))
                 latents = scheduler.step(-velocity, t, latents, return_dict=False)[0]
