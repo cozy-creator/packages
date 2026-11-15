@@ -1,0 +1,169 @@
+{
+  "torch": "2.15.0+cu132",
+  "gpu": "NVIDIA GeForce RTX 4070 Laptop GPU",
+  "capability": [
+    8,
+    9
+  ],
+  "tokens": 4096,
+  "hidden_width": 5376,
+  "heads": 16,
+  "heads_per_window": 8,
+  "precision": "BF16 input/output, INT8 ConvRot256 payload, whole-row FP32 scale",
+  "seed": 20261115,
+  "cases": [
+    {
+      "case": "no_grad",
+      "quantizer_calls_before_after": [
+        1,
+        1
+      ],
+      "windows": 2,
+      "qkv_outputs_bit_identical": true,
+      "shared_operand_released_before_rope": false
+    },
+    {
+      "case": "inference",
+      "quantizer_calls_before_after": [
+        6,
+        2
+      ],
+      "windows": 2,
+      "qkv_outputs_bit_identical": true,
+      "shared_operand_released_before_rope": true
+    },
+    {
+      "case": "inference_armed_lora",
+      "quantizer_calls_before_after": [
+        6,
+        2
+      ],
+      "windows": 2,
+      "qkv_outputs_bit_identical": true,
+      "shared_operand_released_before_rope": true
+    },
+    {
+      "case": "prequantized",
+      "quantizer_calls_before_after": [
+        0,
+        0
+      ],
+      "windows": 2,
+      "qkv_outputs_bit_identical": true,
+      "shared_operand_released_before_rope": true
+    }
+  ],
+  "unknown_pre_hook_declines_rows": true,
+  "graph_capture_replay": {
+    "inference": {
+      "quantizer_calls_before_after": [
+        6,
+        2
+      ],
+      "replay_bit_identical": true
+    },
+    "no_grad": {
+      "quantizer_calls_before_after": [
+        6,
+        2
+      ],
+      "replay_bit_identical": true
+    }
+  },
+  "median_ms_before_after": [
+    4.300287961959839,
+    3.120512008666992
+  ],
+  "samples_ms_before_after": [
+    [
+      4.2188801765441895,
+      4.435935974121094,
+      4.775936126708984,
+      4.203519821166992,
+      4.331520080566406,
+      4.20143985748291,
+      4.290431976318359,
+      4.474880218505859,
+      4.477952003479004,
+      4.206208229064941,
+      4.3537278175354,
+      4.219903945922852,
+      4.167679786682129,
+      4.254432201385498,
+      4.241407871246338,
+      4.302847862243652,
+      4.214784145355225,
+      4.4706878662109375,
+      4.000768184661865,
+      4.705632209777832,
+      4.220928192138672,
+      4.8660478591918945,
+      4.297728061676025,
+      4.421631813049316,
+      4.017151832580566,
+      4.378399848937988,
+      4.022272109985352,
+      4.5147199630737305,
+      4.613120079040527,
+      4.496384143829346
+    ],
+    [
+      3.132512092590332,
+      3.1201279163360596,
+      3.305471897125244,
+      3.122175931930542,
+      3.120896100997925,
+      3.12227201461792,
+      3.2960000038146973,
+      3.323904037475586,
+      2.9480960369110107,
+      3.0986239910125732,
+      3.520512104034424,
+      3.060447931289673,
+      3.300352096557617,
+      3.093503952026367,
+      3.0986239910125732,
+      3.218303918838501,
+      3.0914559364318848,
+      3.0904319286346436,
+      3.067552089691162,
+      3.2174079418182373,
+      3.0699520111083984,
+      3.058687925338745,
+      3.078144073486328,
+      3.063744068145752,
+      3.104703903198242,
+      3.0750720500946045,
+      3.2849600315093994,
+      3.383296012878418,
+      3.3894400596618652,
+      3.3607680797576904
+    ]
+  ],
+  "peak_allocation_bytes_before_after": [
+    57688576,
+    57688576
+  ],
+  "quantizer_kernel_events_before_after": {
+    "False": [
+      "void cozy_int8::(anonymous namespace)::quantize_kernel<__nv_bfloat16, false, false>(__nv_bfloat16 const*, void*, float*, int, int, cozy_int8::Prologue)",
+      "void cozy_int8::(anonymous namespace)::quantize_kernel<__nv_bfloat16, false, false>(__nv_bfloat16 const*, void*, float*, int, int, cozy_int8::Prologue)",
+      "void cozy_int8::(anonymous namespace)::quantize_kernel<__nv_bfloat16, false, false>(__nv_bfloat16 const*, void*, float*, int, int, cozy_int8::Prologue)",
+      "void cozy_int8::(anonymous namespace)::quantize_kernel<__nv_bfloat16, false, false>(__nv_bfloat16 const*, void*, float*, int, int, cozy_int8::Prologue)",
+      "void cozy_int8::(anonymous namespace)::quantize_kernel<__nv_bfloat16, false, false>(__nv_bfloat16 const*, void*, float*, int, int, cozy_int8::Prologue)",
+      "void cozy_int8::(anonymous namespace)::quantize_kernel<__nv_bfloat16, false, false>(__nv_bfloat16 const*, void*, float*, int, int, cozy_int8::Prologue)"
+    ],
+    "True": [
+      "void cozy_int8::(anonymous namespace)::quantize_kernel<__nv_bfloat16, false, false>(__nv_bfloat16 const*, void*, float*, int, int, cozy_int8::Prologue)",
+      "void cozy_int8::(anonymous namespace)::quantize_kernel<__nv_bfloat16, false, false>(__nv_bfloat16 const*, void*, float*, int, int, cozy_int8::Prologue)"
+    ]
+  },
+  "materialized_quantized_bytes_before_after": [
+    132218880,
+    44072960
+  ],
+  "avoided_logical_bf16_input_bytes": 176160768,
+  "glue_sha256": "f6b8aa46f51447b1464052a9b492e7f5071eb14cb9d27725cd3c99ec53c6c616",
+  "native_gemm_sha256": "76ecc026ea46d9df52bcf333083071b19ebb00bcf17a8b41ac28acc74af7465e",
+  "boundary": "synthetic QKV projections only; excludes norm/RoPE/attention/full model"
+}
