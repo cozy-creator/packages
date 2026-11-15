@@ -1,6 +1,6 @@
 # /// script
 # requires-python = ">=3.12"
-# dependencies = ["cozy-runtime>=0.32", "msgspec>=0.19", "torch==2.14.0"]
+# dependencies = ["cozy-runtime>=0.48.0.dev0,<0.49", "msgspec>=0.19", "torch==2.14.0"]
 # ///
 """cozy_runtime.moe's grouped expert GEMV on a GPU, against each expert's own Linears (se-085).
 
@@ -139,7 +139,7 @@ def timed(call: Callable[[], object], repeats: int = 50) -> float:
     return round((time.perf_counter() - started) / repeats * 1e6, 1)
 
 
-@app.entrypoint
+@app.entrypoint(accelerator=True)
 def main(payload: Nothing, tel: Telemetry) -> Passed:
     torch.manual_seed(0)
     results: dict[str, object] = {"gpu": torch.cuda.get_device_name()}

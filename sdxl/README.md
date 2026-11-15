@@ -2,6 +2,11 @@
 
 `generate` makes one image from a text prompt with Stable Diffusion XL 1.0 (VAE fix).
 
+`0.12.0rc2` returns final images with `ImageFile.from_image` and requires Runtime 0.48.
+The package is prepared for Cozy 0.27; its retained 0.26 lock must be regenerated with the
+actual Runtime 0.48/TensorFS 0.27 artifacts before qualification or publication. Generation
+keeps WebP and upscaling keeps PNG.
+
 `image` is the canvas tool, its prompt `instructions`: `aspect_ratio`, `megapixels`, `negative_prompt` and `seed`; HiDiffusion runs above 1 MP.
 
 `upscale` (the Upscale tool on a picture box) makes the box's picture larger, at 2, 4 or 8 MP: img2img over the picture

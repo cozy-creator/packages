@@ -258,7 +258,6 @@ def upscale_image(
     ctx: Context,
     payload: UpscaleImageInput,
     model: RestorationModel,
-    out: Outputs,
     tel: Telemetry,
 ) -> UpscaleImageOutput:
     """A picture restored and upscaled by SeedVR2 7B: one frame through the video tool's restoration, as a PNG."""
@@ -281,6 +280,6 @@ def upscale_image(
         )
     ctx.raise_if_cancelled()
     with tel.stage("saving picture"):
-        saved = out.save_image(restored, format="png")
+        saved = ImageFile.from_image(restored, format="png")
     tel.log("upscale_image", source=f"{picture.width}x{picture.height}", width=width, height=height)
     return UpscaleImageOutput(saved, width, height)

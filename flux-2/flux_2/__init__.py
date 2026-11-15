@@ -7,7 +7,7 @@ from functools import partial
 from typing import Annotated, Literal
 
 import msgspec
-from cozy_runtime.author import Adjustments, App, Context, Outputs, Seed, Telemetry
+from cozy_runtime.author import Adjustments, App, Context, Seed, Telemetry
 from cozy_runtime.fields import Advanced, AspectRatio, FileBound, Image, Prompt, Ratios
 from cozy_runtime.image import MEGAPIXEL, Guidance, ImageRequest, ImageResult, Sizes, Steps, held
 from cozy_runtime.media import ImageFile
@@ -55,7 +55,7 @@ def _said(prompt: Prompt[Image], adj: Adjustments) -> tuple[str, list[Image]]:
 
 
 def _generate(ctx: Context, payload: TurboInput, model: Flux2, turbo: Flux2TurboLoRA | None,
-              upsampler: Flux2Upsampler, out: Outputs, tel: Telemetry, adj: Adjustments) -> ImageResult:
+              upsampler: Flux2Upsampler, tel: Telemetry, adj: Adjustments) -> ImageResult:
     model.hold_vae(tel)
     seed = payload.drawn_seed()
     prompt, pictures = _said(payload.prompt, adj)
@@ -108,7 +108,7 @@ def _generate(ctx: Context, payload: TurboInput, model: Flux2, turbo: Flux2Turbo
     with tel.stage("decoding image"):
         image = model.decode(latents, width=width, height=height)
     with tel.stage("saving image"):
-        asset = out.save_image(image, format="png")
+        asset = ImageFile.from_image(image, format="png")
     return ImageResult(asset, width, height, seed, prompt)
 
 
@@ -123,19 +123,19 @@ _TURBO_COMPONENTS = {"model": ("transformer", "text_encoder", "vae"), "upsampler
 
 @app.entrypoint(defaults={"model": _DEV, "upsampler": _DEV}, components=_COMPONENTS, on_demand=("upsampler",),
                 memoize=True)
-def generate(ctx: Context, payload: GenerateInput, model: Flux2, upsampler: Flux2Upsampler, out: Outputs,
+def generate(ctx: Context, payload: GenerateInput, model: Flux2, upsampler: Flux2Upsampler,
              tel: Telemetry, adj: Adjustments) -> ImageResult:
     """The full model: FLUX.2 [dev] (50 steps, guidance 4), or a [klein] Base by `model=` (50 steps, CFG 4)."""
-    return _generate(ctx, payload, model, None, upsampler, out, tel, adj)
+    return _generate(ctx, payload, model, None, upsampler, tel, adj)
 
 
 @app.entrypoint(defaults={"model": _DEV, "turbo_lora": _TURBO, "upsampler": _DEV},
                 components=_TURBO_COMPONENTS, on_demand=("upsampler", "turbo_lora"), memoize=True)
 def generate_turbo(ctx: Context, payload: TurboInput, model: Flux2, turbo_lora: Flux2TurboLoRA,
-                   upsampler: Flux2Upsampler, out: Outputs, tel: Telemetry, adj: Adjustments) -> ImageResult:
+                   upsampler: Flux2Upsampler, tel: Telemetry, adj: Adjustments) -> ImageResult:
     """The fast model: FLUX.2 [dev] with fal's Turbo LoRA (8 steps, guidance 2.5), or a [klein] by
     `model=` (4 steps)."""
-    return _generate(ctx, payload, model, turbo_lora, upsampler, out, tel, adj)
+    return _generate(ctx, payload, model, turbo_lora, upsampler, tel, adj)
 
 
 class ImageBox(msgspec.Struct, kw_only=True):
@@ -156,11 +156,11 @@ class ImageBox(msgspec.Struct, kw_only=True):
 @app.tool(label="Image", named="image", defaults={"model": _DEV, "turbo_lora": _TURBO, "upsampler": _DEV},
           components=_TURBO_COMPONENTS, on_demand=("turbo_lora", "upsampler"), memoize=True)
 def image(ctx: Context, payload: ImageBox, model: Flux2, turbo_lora: Flux2TurboLoRA, upsampler: Flux2Upsampler,
-          out: Outputs, tel: Telemetry, adj: Adjustments) -> ImageResult:
+          tel: Telemetry, adj: Adjustments) -> ImageResult:
     """FLUX.2 [dev] on a canvas: with its Turbo LoRA, which loads only when asked for, or without."""
     request = GenerateInput(prompt=payload.instructions, aspect_ratio=payload.aspect_ratio, megapixels=payload.megapixels,
                             seed=payload.seed, prompt_upsampling=payload.prompt_upsampling)  # fmt: skip
-    return _generate(ctx, request, model, turbo_lora if payload.turbo else None, upsampler, out, tel, adj)
+    return _generate(ctx, request, model, turbo_lora if payload.turbo else None, upsampler, tel, adj)
 
 
 #: What FLUX.2 is asked of a picture it upscales, in BFL's words for a picture (`_said`).
@@ -180,7 +180,7 @@ class UpscaleInput(msgspec.Struct, kw_only=True):
 
 @app.tool(label="Upscale", named="image", defaults={"model": _DEV, "turbo_lora": _TURBO},
           components={"model": _COMPONENTS["model"], "turbo_lora": ("transformer",)}, memoize=True)  # fmt: skip
-def upscale(ctx: Context, payload: UpscaleInput, model: Flux2, turbo_lora: Flux2TurboLoRA, out: Outputs,
+def upscale(ctx: Context, payload: UpscaleInput, model: Flux2, turbo_lora: Flux2TurboLoRA,
             tel: Telemetry, adj: Adjustments) -> ImageResult:
     """The picture larger: FLUX.2 [dev] Turbo edits it at the size asked, the picture Lanczos-upscaled to the canvas
     both as the reference (at most 2024² pixels, BFL's) and, below `denoise`, as the start."""
@@ -208,6 +208,6 @@ def upscale(ctx: Context, payload: UpscaleInput, model: Flux2, turbo_lora: Flux2
     with tel.stage("decoding image"):
         image = model.decode(latents, width=width, height=height)
     with tel.stage("saving image"):
-        asset = out.save_image(image, format="png")
+        asset = ImageFile.from_image(image, format="png")
     tel.log("upscale", source=f"{picture.width}x{picture.height}", width=width, height=height, denoise=payload.denoise)
     return ImageResult(asset, width, height, seed, UPSCALE_PROMPT)

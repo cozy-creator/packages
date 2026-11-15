@@ -6,7 +6,7 @@ import math
 from typing import Annotated
 
 import msgspec
-from cozy_runtime.author import Adjustments, App, Context, Outputs, Seed, Telemetry
+from cozy_runtime.author import Adjustments, App, Context, Seed, Telemetry
 from cozy_runtime.fields import AspectRatio, Image, Prompt, Ratios, name_key
 from cozy_runtime.image import (
     Box,
@@ -19,6 +19,7 @@ from cozy_runtime.image import (
     corners,
     held,
 )
+from cozy_runtime.media import ImageFile
 from PIL import Image as PILImage
 
 from .model import MAX_BOXES, HiDreamO1, Recipe, area_resize, canvas_box, placed, reference_size
@@ -115,7 +116,7 @@ def layout(
     return (width, height), placed(images, pixel_boxes, width, height, side)
 
 
-def _generate(ctx: Context, payload: TurboInput, model: HiDreamO1, out: Outputs, tel: Telemetry,
+def _generate(ctx: Context, payload: TurboInput, model: HiDreamO1, tel: Telemetry,
               adj: Adjustments) -> ImageResult:
     """Both models' body: a `GenerateInput` samples the full model, UniPC with CFG; else Dev's 28 distilled steps,
     flow-match Euler for a one-picture edit."""
@@ -144,7 +145,7 @@ def _generate(ctx: Context, payload: TurboInput, model: HiDreamO1, out: Outputs,
             guidance=guidance, seed=seed, interval=interval, progress=ctx.progress,
         )
     with tel.stage("saving image"):
-        asset = out.save_image(image, format="png")
+        asset = ImageFile.from_image(image, format="png")
     return ImageResult(asset, width, height, seed, prompt)
 
 
@@ -154,18 +155,18 @@ _COMPONENTS = {"model": ("model",)}
 
 
 @app.entrypoint(defaults={"model": _FULL}, components=_COMPONENTS, memoize=True)
-def generate(ctx: Context, payload: GenerateInput, model: HiDreamO1, out: Outputs,
+def generate(ctx: Context, payload: GenerateInput, model: HiDreamO1,
              tel: Telemetry, adj: Adjustments) -> ImageResult:
     """HiDream-O1-Image: 50 UniPC steps with CFG 5.0 over the first 40. The model HiDream recommends
     for editing."""
-    return _generate(ctx, payload, model, out, tel, adj)
+    return _generate(ctx, payload, model, tel, adj)
 
 
 @app.entrypoint(defaults={"model": _DEV}, components=_COMPONENTS, memoize=True)
-def generate_turbo(ctx: Context, payload: TurboInput, model: HiDreamO1, out: Outputs,
+def generate_turbo(ctx: Context, payload: TurboInput, model: HiDreamO1,
                    tel: Telemetry, adj: Adjustments) -> ImageResult:
     """HiDream-O1-Image-Dev: 28 distilled steps, no CFG. A one-picture edit samples flow-match Euler."""
-    return _generate(ctx, payload, model, out, tel, adj)
+    return _generate(ctx, payload, model, tel, adj)
 
 
 class ImageBox(msgspec.Struct, kw_only=True):
@@ -183,10 +184,10 @@ class ImageBox(msgspec.Struct, kw_only=True):
 @app.tool(label="Image", named="image", defaults={"full": _FULL, "model": _DEV},
           components={"full": ("model",), "model": ("model",)}, on_demand=("full", "model"),
           memoize=True)  # fmt: skip
-def image(ctx: Context, payload: ImageBox, full: HiDreamO1, model: HiDreamO1, out: Outputs, tel: Telemetry,
+def image(ctx: Context, payload: ImageBox, full: HiDreamO1, model: HiDreamO1, tel: Telemetry,
           adj: Adjustments) -> ImageResult:
     """HiDream-O1-Image on a canvas: Dev, or the full model, which loads only when asked for."""
     kind = TurboInput if payload.turbo else GenerateInput
     request = kind(prompt=payload.instructions, aspect_ratio=payload.aspect_ratio,
                    seed=payload.seed)  # fmt: skip
-    return _generate(ctx, request, model if payload.turbo else full, out, tel, adj)
+    return _generate(ctx, request, model if payload.turbo else full, tel, adj)

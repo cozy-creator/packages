@@ -248,7 +248,7 @@ def drift(
     return {"summary": summary, "final_per_prompt": {p: rows[p][layers[-1]] for p in rows}}
 
 
-@app.entrypoint
+@app.entrypoint(accelerator=True)
 def weight_drift(
     ctx: Context,
     payload: WeightRequest,
