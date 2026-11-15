@@ -1,8 +1,8 @@
 """Qwen-Image-2.1's prompt enhancers, as Qwen ships them (QwenLM/Qwen-Image-2.1@ab96caa9 `prompt_rewrite/`): two
 Qwen3.5-9B fine-tunes, `Qwen-Image-2.1-PE-I2I`, which rewrites an edit instruction from its pictures, and
 `Qwen-Image-2.1-PE-T2I`, which expands a text-to-image request. Each thinks, then answers one JSON object:
-`rewritten_prompt`, `wh_ratio` and, for an edit, `ratio_follow`. Their system prompts are the checkpoints' own
-`system_prompt.txt` (byte-identical to `prompt_rewrite/prompts/`), bundled here.
+`rewritten_prompt`, `wh_ratio` and, for an edit, `ratio_follow`. Each answers under its checkpoint's own
+`system_prompt.txt` (upstream's `prompt_rewrite/prompts/`).
 
 Sampling is upstream's (`pe_core.PROFILES`): temperature 1.0, top-p 0.95, presence penalty 1.5 (t2i) or 0 (edit).
 Runtime's sampler has no top-k, so upstream's top-k 20 is not applied. The seed is the render's: a new render rewrites
@@ -27,12 +27,11 @@ import json
 import re
 from collections.abc import Callable
 from dataclasses import dataclass
-from importlib.resources import files
 from typing import Literal
 
 import torch
 from cozy_runtime import lm
-from cozy_runtime.author import uses_components
+from cozy_runtime.author import Loader, uses_components
 from cozy_runtime.vlm import COMPONENT, Question, VisionLM
 from PIL import Image
 
@@ -55,18 +54,10 @@ _STEER: dict[str, dict[str, str]] = {
 }
 
 
-@dataclass(frozen=True)
-class _Profile:
-    presence_penalty: float
-    system: str
-
-
-def _profile(task: str, presence_penalty: float) -> _Profile:
-    text = files(__package__).joinpath(f"prompt_rewrite/system_prompt_{task}.txt").read_text(encoding="utf-8")
-    return _Profile(presence_penalty, text.strip())
-
-
-PROFILES = {"edit": _profile("edit", 0.0), "t2i": _profile("t2i", 1.5)}
+#: Upstream's presence penalty for each task.
+PRESENCE_PENALTY = {"edit": 0.0, "t2i": 1.5}
+#: The checkpoint's system prompt: Qwen's PE-T2I and PE-I2I each carry their own.
+SYSTEM_PROMPT = "system_prompt.txt"
 TEMPERATURE, TOP_P = 1.0, 0.95
 THINK_TOKENS = 128
 #: After the request, where the enhancer reads intent: it writes about 40% less (runs 38013-38036).
@@ -148,18 +139,25 @@ def parse(answer: str, pictures: int) -> Rewrite | None:
 
 
 class Enhancer(VisionLM):
-    """Runtime's Qwen-VL model, answering after a thought of at most `think` tokens."""
+    """Runtime's Qwen-VL model, answering under its checkpoint's system prompt after a thought of at most `think`
+    tokens."""
+
+    system: str
+
+    def load(self, loader: Loader) -> None:
+        super().load(loader)
+        self.system = loader.assets.read(SYSTEM_PROMPT).decode("utf-8").strip()
 
     @uses_components(COMPONENT)
     def answer(
-        self, question: Question, *, system: str, think: int, presence_penalty: float, seed: int,
+        self, question: Question, *, think: int, presence_penalty: float, seed: int,
         progress: Callable[[int, int], None],
     ) -> tuple[str, int, int]:
         """The answer, and the tokens its thought and the answer took; `progress(step, total)` is told
         the tokens decoded of its budget."""
         content = [*({"type": "image"} for _ in question.images), {"type": "text", "text": question.text}]
         chat: str = self.processor.apply_chat_template(
-            [{"role": "system", "content": system}, {"role": "user", "content": content}],  # type: ignore[arg-type, unused-ignore]  # content as parts
+            [{"role": "system", "content": self.system}, {"role": "user", "content": content}],  # type: ignore[arg-type, unused-ignore]  # content as parts
             add_generation_prompt=True, tokenize=False, enable_thinking=True,
         )
         tokenizer = self.processor.tokenizer
@@ -202,12 +200,11 @@ def rewrite(
     answer and the tokens its thought and its answer took; `progress(step, total)` is told the tokens of its budget
     decoded."""
     task = "edit" if images else "t2i"
-    profile = PROFILES[task]
     steer = _STEER[task].get(creativity, "")
     question = Question("\n\n".join(filter(None, (prompt.strip(), steer, _BRIEF[task]))),
                         [reference(image) for image in images])
     answer, thought_tokens, answer_tokens = enhancer.answer(
-        question, system=profile.system, think=THINK_TOKENS, presence_penalty=profile.presence_penalty, seed=seed,
+        question, think=THINK_TOKENS, presence_penalty=PRESENCE_PENALTY[task], seed=seed,
         progress=progress,
     )
     return parse(answer, len(images)), answer, thought_tokens, answer_tokens

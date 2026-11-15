@@ -2,15 +2,17 @@
 
 from __future__ import annotations
 
-from typing import Protocol, TypedDict
-
+import ast
+import operator
+from dataclasses import dataclass
+from typing import Protocol, TypedDict, cast
 
 import numpy as np
 import torch
-from omegaconf import OmegaConf
+from omegaconf import DictConfig, OmegaConf
 from PIL import Image, ImageOps
 from cozy_runtime import rng
-from cozy_runtime.author import Config, Cut, Loader, Model, Serving, Telemetry, split, uses_components
+from cozy_runtime.author import Config, Cut, Loader, Model, ModelAssets, Serving, Telemetry, split, uses_components
 
 from .color import Correction, correct
 from .frames import extend
@@ -19,52 +21,13 @@ from .upstream.models.dit.nablocks.mmsr_block import GROUP
 from .upstream.models.dit.nadit import NaDiT
 from .upstream.models.video_vae_v3.modules.attn_video_vae import VideoAutoencoderKLWrapper
 
-# SeedVR's configs_7b/main.yaml: separate text/video weights throughout.
-DIM, EXPAND = 3072, 4
-DIT = dict(
-    vid_in_channels=33,
-    vid_out_channels=16,
-    vid_dim=DIM,
-    txt_in_dim=5120,
-    txt_dim=DIM,
-    emb_dim=18432,
-    heads=24,
-    head_dim=128,
-    expand_ratio=EXPAND,
-    norm="rms",
-    norm_eps=1e-5,
-    ada="single",
-    qk_bias=False,
-    qk_norm="rms",
-    qk_rope=True,
-    patch_size=(1, 2, 2),
-    num_layers=36,
-    mlp_type="normal",
-    shared_mlp=False,
-    shared_qkv=False,
-    block_type=["mmdit_sr"] * 36,
-    window=[(4, 3, 3)] * 36,
-    window_method=["720pwin_by_size_bysize", "720pswin_by_size_bysize"] * 18,
-)
-VAE = dict(
-    act_fn="silu",
-    block_out_channels=(128, 256, 512, 512),
-    down_block_types=("DownEncoderBlock3D",) * 4,
-    up_block_types=("UpDecoderBlock3D",) * 4,
-    in_channels=3,
-    out_channels=3,
-    latent_channels=16,
-    layers_per_block=2,
-    norm_num_groups=32,
-    slicing_sample_min_size=4,
-    temporal_scale_num=2,
-    inflation_mode="pad",
-    spatial_downsample_factor=8,
-    temporal_downsample_factor=4,
-    use_quant_conv=False,
-    use_post_quant_conv=False,
-    freeze_encoder=False,
-)
+#: Upstream's configs (ByteDance-Seed/SeedVR e4de8c24) as the checkpoint carries them: the 7B's,
+#: and the VAE's it inherits (`__inherit__`).
+MAIN = "configs_7b/main.yaml"
+VAE_CONFIG = "models/video_vae_v3/s8_c16_t4_inflation_sd3.yaml"
+#: SeedVR2's one-step restoration: upstream's `inference_seedvr2_7b.py` runs main.yaml's diffusion
+#: with these (`generation_loop`'s defaults).
+INFERENCE = {"timesteps": {"sampling": {"steps": 1}}, "cfg": {"scale": 1.0, "rescale": 0.0}}
 
 ARCHITECTURE = "SeedVR2-7B"
 #: DiT tokens (2x2 latent px a frame) restored together at most: whole frames, 16 at 1080p, 9 at
@@ -76,9 +39,81 @@ PIECE = 131072
 #: attention's residual sum and the MLP's input and output (4 DIM a token) beside one `GROUP`'s
 #: projection and GELU (2 EXPAND DIM a token). `split`'s `holds` counts it in windows of the
 #: piece's fp16 latent, `most` elements each.
-PEAK = (4 * PIECE + 2 * EXPAND * GROUP) * DIM
-#: SeedVR's configs_7b: the VAE's latent scaling factor (no shift).
-SCALE = 0.9152
+_OPERATORS = {ast.Add: operator.add, ast.Sub: operator.sub, ast.Mult: operator.mul, ast.FloorDiv: operator.floordiv}
+
+
+def _arithmetic(text: str) -> object:
+    """Upstream's `eval` resolver over what its configs write (`6 * 3072`, `36 * [(4,3,3)]`): literals
+    and + - * //, never code."""
+
+    def value(node: ast.expr) -> object:
+        if isinstance(node, ast.BinOp) and type(node.op) in _OPERATORS:
+            return _OPERATORS[type(node.op)](value(node.left), value(node.right))
+        return ast.literal_eval(node)
+
+    return value(ast.parse(text, mode="eval").body)
+
+
+OmegaConf.register_new_resolver("eval", _arithmetic, replace=True)
+
+
+def _plain(node: object) -> object:
+    """OmegaConf's lists as the tuples upstream's code writes; mappings as dicts."""
+    if isinstance(node, dict):
+        return {k: _plain(v) for k, v in node.items() if k != "__object__"}
+    if isinstance(node, list):
+        return tuple(_plain(v) for v in node)
+    return node
+
+
+@dataclass(frozen=True)
+class Settings:
+    """What upstream's configs set: the DiT's and VAE's arguments, the VAE's latent scale and causal
+    slicing, and the diffusion the restoration runs."""
+
+    dit: dict[str, object]
+    vae: dict[str, object]
+    scale: float
+    split_size: int
+    memory_device: str
+    diffusion: dict[str, object]
+
+    @property
+    def peak(self) -> int:
+        """`PEAK` at this DiT's width and MLP expansion."""
+        dim, expand = cast(int, self.dit["vid_dim"]), cast(int, self.dit["expand_ratio"])
+        return int((4 * PIECE + 2 * expand * GROUP) * dim)
+
+
+def settings(assets: ModelAssets) -> Settings:
+    """The checkpoint's upstream configs, resolved as upstream's `load_config` does."""
+    main = cast(DictConfig, OmegaConf.create(assets.read(MAIN).decode()))
+    vae = cast(DictConfig, main.vae)
+    model = cast(DictConfig, vae.model)
+    inherited = model.pop("__inherit__")
+    if inherited != VAE_CONFIG:
+        raise ValueError(f"{MAIN}'s VAE inherits {inherited!r}, not {VAE_CONFIG!r}")
+    vae.model = OmegaConf.merge(OmegaConf.create(assets.read(VAE_CONFIG).decode()), model)
+    diffusion = OmegaConf.merge(main.diffusion, INFERENCE)
+    held = cast(dict[str, object], OmegaConf.to_container(main, resolve=True))
+    run = cast(dict[str, object], OmegaConf.to_container(diffusion, resolve=True))
+    dit = cast(dict[str, object], cast(dict[str, object], held["dit"])["model"])
+    upstream = cast(dict[str, object], held["vae"])
+    timesteps = cast(dict[str, object], run["timesteps"])
+    slicing = cast(dict[str, object], upstream["slicing"])
+    return Settings(
+        dit=cast(dict[str, object], _plain(dit)),
+        vae=cast(dict[str, object], _plain(upstream["model"])),
+        scale=float(cast(float, upstream["scaling_factor"])),
+        split_size=cast(int, slicing["split_size"]),
+        memory_device=cast(str, slicing["memory_device"]),
+        diffusion={
+            "schedule": run["schedule"],
+            "sampler": run["sampler"],
+            "timesteps": {"sampling": timesteps["sampling"], "transform": timesteps["transform"]},
+            "cfg": run["cfg"],
+        },
+    )
 
 
 class Conditioning(torch.nn.Module):
@@ -145,23 +180,21 @@ class Components(Modules):
     conditioning: Conditioning
 
 
-def modules() -> Modules:
-    dit: torch.nn.Module = NaDiT(**DIT).eval().half()
-    vae: VideoVae = VideoAutoencoderKLWrapper(**VAE).eval().half()
+def modules(held: Settings) -> Modules:
+    dit: torch.nn.Module = NaDiT(**held.dit).eval().half()
+    vae: VideoVae = VideoAutoencoderKLWrapper(**held.vae).eval().half()
     return {"dit": dit, "vae": vae}
 
 
 class Graph:
     components: Components
+    settings: Settings
 
-    def __init__(self, config: Config) -> None:
+    def __init__(self, config: Config, held: Settings) -> None:
         if config.mapping().get("architecture") != ARCHITECTURE:
             raise ValueError(f"this checkpoint is {config.mapping().get('architecture')!r}, and SeedVR2 runs the {ARCHITECTURE!r} one: leave `model` at its default")
-        self.components = {**modules(), "conditioning": Conditioning()}
-
-
-def build(config: Config) -> Graph:
-    return Graph(config)
+        self.settings = held
+        self.components = {**modules(held), "conditioning": Conditioning()}
 
 
 class RestorationModel(Model[Graph]):
@@ -173,6 +206,11 @@ class RestorationModel(Model[Graph]):
     graph: Graph
 
     def load(self, loader: Loader) -> None:
+        held = settings(loader.assets)
+
+        def build(config: Config) -> Graph:
+            return Graph(config, held)
+
         self.graph = loader.construct(build)
 
     @uses_components("vae")
@@ -183,7 +221,7 @@ class RestorationModel(Model[Graph]):
         latent = _vae(self.graph).encode(pixels[None], generator).latent[0]
         if latent.ndim == 3:  # upstream squeezes a single frame's time axis
             latent = latent.unsqueeze(1)
-        return latent.movedim(0, -1).to(str(self.device)) * SCALE
+        return latent.movedim(0, -1).to(str(self.device)) * self.graph.settings.scale
 
     @uses_components("dit", "conditioning")
     def denoise(
@@ -217,33 +255,22 @@ class RestorationModel(Model[Graph]):
 
         x = torch.cat([noise, condition], dim=-1)
         most = PIECE * 4 * x.shape[-1]
-        return split(dit, x, Cut(0), most=most, holds=-(-PEAK // most))
+        return split(dit, x, Cut(0), most=most, holds=-(-self.graph.settings.peak // most))
 
     @uses_components("vae")
     def decode(self, latent: torch.Tensor) -> torch.Tensor:
         """A restored latent to pixels, (c, t, h, w) in about [-1, 1] in host memory, one slice
         of frames at a time, in the VAE's own fp16: bf16 autocast ran its norms in F32, 1.26x
         slower and 10 dB further from the F32 decode."""
-        z = (latent / SCALE).movedim(-1, 0)[None].to("cpu", torch.float16)
+        z = (latent / self.graph.settings.scale).movedim(-1, 0)[None].to("cpu", torch.float16)
         return _vae(self.graph).decode(z).sample[0]
 
 
 def _runner(graph: Graph, device: torch.device) -> Runner:
     """Upstream's inference driver over the constructed components (configuration only)."""
-    cfg = OmegaConf.create(
-        {
-            "vae": {"model": {"temporal_downsample_factor": 4, "spatial_downsample_factor": 8}},
-            "diffusion": {
-                "schedule": {"type": "lerp", "T": 1000.0},
-                "sampler": {"type": "euler", "prediction_type": "v_lerp"},
-                "timesteps": {
-                    "sampling": {"type": "uniform_trailing", "steps": 1},
-                    "transform": True,
-                },
-                "cfg": {"scale": 1.0, "rescale": 0.0},
-            },
-        }
-    )
+    held = graph.settings
+    factors = {k: held.vae[k] for k in ("temporal_downsample_factor", "spatial_downsample_factor")}
+    cfg = OmegaConf.create({"vae": {"model": factors}, "diffusion": held.diffusion})
     runner: Runner = VideoDiffusionInfer(cfg)
     runner.dit = graph.components["dit"]
     runner.configure_diffusion(device)
@@ -252,8 +279,8 @@ def _runner(graph: Graph, device: torch.device) -> Runner:
 
 def _vae(graph: Graph) -> VideoVae:
     vae = graph.components["vae"]
-    # One latent frame a step of the causal scan, its finest; the Runtime cuts each op's rows.
-    vae.set_causal_slicing(split_size=4, memory_device="same")
+    # main.yaml's slicing: one latent frame a step of the causal scan; the Runtime cuts each op's rows.
+    vae.set_causal_slicing(split_size=graph.settings.split_size, memory_device=graph.settings.memory_device)
     return vae
 
 

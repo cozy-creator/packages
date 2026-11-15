@@ -11,9 +11,9 @@ Qwen's own inference code. Text alone is read with the text-to-image template; w
 edit template reads each at a 384² area, the VAE encodes each at a 1024² area, and the edit DiT
 denoises the target beside their tokens (`zero_cond_t`: reference tokens at t = 0).
 
-A LoRA bound in its own slot (`QwenImageLoRA`, a Lightning distillation) reaches its DiT's linears
-through permanent forward hooks. Runtime bakes the armed LoRA into the resident weights of whatever
-lane serves (`weights.LoRASource`); unbaked, the hook adds it each forward.
+A LoRA bound in its own slot (`QwenImageLoRA`, a Lightning distillation) is armed on its DiT's
+`lora.Sites`. Runtime bakes it into the resident weights of whatever lane serves; unbaked, each site
+adds it each forward.
 """
 
 from __future__ import annotations
@@ -22,7 +22,6 @@ import json
 import math
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
-from functools import partial
 from typing import TYPE_CHECKING, Any, TypedDict, cast
 
 import numpy as np
@@ -126,25 +125,9 @@ VAE_FRAME = fusion.LoneFrame(QwenImageCausalConv3d, upsample=QwenImageUpsample)
 _DTYPES = {"f32": torch.float32, "bf16": torch.bfloat16, "f16": torch.float16, "i64": torch.int64}
 
 
-class Arming:
-    """The LoRA a denoise has armed on this construction's DiT, else None (a base forward)."""
-
-    __slots__ = ("lora",)
-
-    def __init__(self) -> None:
-        self.lora: nn.Module | None = None
-
-
-def install_lora_hooks(transformer: QwenImageTransformer2DModel, arming: Arming) -> None:
-    """A permanent hook on each LoRA site: the armed LoRA's factors there, else nothing."""
-    for index, _ in enumerate(transformer.transformer_blocks):
-        for site in LORA_SITES:
-            path = f"transformer_blocks.{index}.{site}"
-            transformer.get_submodule(path).register_forward_hook(lora.Hook(partial(_armed, arming, path)))
-
-
-def _armed(arming: Arming, path: str) -> LoRAFactors | None:
-    return None if arming.lora is None else arming.lora.get_submodule(path)  # type: ignore[return-value]
+def lora_paths(blocks: int) -> list[str]:
+    """Each LoRA site's path on a DiT of `blocks` blocks, block by block."""
+    return [f"transformer_blocks.{index}.{site}" for index in range(blocks) for site in LORA_SITES]
 
 
 def construct[M: ConfigMixin](cls: type[M], config: dict[str, object]) -> M:
@@ -168,7 +151,7 @@ class QwenImageComponents(TransformerComponents):
 
 
 class TransformerGraph:
-    """A DiT construction in bf16, with its LoRA hooks and its checkpoint's scheduler."""
+    """A DiT construction in bf16, with its LoRA sites and its checkpoint's scheduler."""
 
     components: TransformerComponents
 
@@ -177,8 +160,8 @@ class TransformerGraph:
             transformer = construct(QwenImageTransformer2DModel, config.section("transformer").mapping())
         self.components = {"transformer": _to(transformer, torch.bfloat16)}
         self.scheduler_config = config.section("scheduler").mapping()
-        self.arming = Arming()
-        install_lora_hooks(transformer, self.arming)
+        #: Where a `QwenImageLoRA` is armed.
+        self.sites = lora.Sites(transformer, lora_paths(len(transformer.transformer_blocks)))
 
 
 class QwenImageGraph(TransformerGraph):
@@ -676,6 +659,8 @@ class LoRAGraph:
                 )
                 parent.add_module(leaf, LoRAFactors(*sizes, rank, weights, alpha))
             root.transformer_blocks.append(block)
+        #: Each site's factors by its path on the DiT, as its `lora.Sites` arms them.
+        self.factors = {path: cast(LoRAFactors, root.get_submodule(path)) for path in lora_paths(blocks)}
         self.components: dict[str, nn.Module] = {LORA_COMPONENT: root}
 
 
@@ -712,12 +697,8 @@ class QwenImageLoRA(Model[LoRAGraph]):
         progress: Callable[[int, int], None],
     ) -> torch.Tensor:
         """`base.denoise` with this LoRA armed on its DiT and this LoRA's sampling."""
-        arming = base.graph.arming
-        arming.lora = self.graph.components[LORA_COMPONENT]
-        try:
+        with base.graph.sites.applied(self.graph.factors):
             return base.denoise(
                 embeds, mask, negative, references, scheduler_config=self.scheduler_config,
                 width=width, height=height, steps=steps, guidance=guidance, seed=seed, progress=progress,
             )
-        finally:
-            arming.lora = None

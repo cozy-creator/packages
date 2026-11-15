@@ -14,8 +14,7 @@ numerics are the Diffusers/Runtime ones.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
-from typing import TYPE_CHECKING
+from collections.abc import Callable
 
 import torch
 import torch.nn.functional as F
@@ -26,13 +25,12 @@ from diffusers.models.transformers.transformer_qwenimage21 import (
     _qwenimage21_prefix_segments,
 )
 
-if TYPE_CHECKING:
-    from cozy_runtime.accel.lora import Factors
-
 #: A layer's prefix keys and values.
 KV = tuple[torch.Tensor, torch.Tensor]
+#: A layer's prefix K/V, read as that layer runs.
+Prefix = Callable[[int], KV]
 #: A cached step's inputs after the latents: t, the target rotary table, the target mask, each layer's prefix K/V.
-Cached = tuple[torch.Tensor, torch.Tensor, torch.Tensor, list[KV]]
+Cached = tuple[torch.Tensor, torch.Tensor, torch.Tensor, Prefix]
 #: `_Joint.inputs()`: image and text indices, text source, rotary table, target mask, key validity, segments, length.
 JointLayout = tuple[
     torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor | None,
@@ -57,9 +55,6 @@ class Transformer(QwenImage21Transformer2DModel):
     latents, *`_Joint.inputs()`). `t` is [1], already over 1000. `projection`: a parallel decoder's
     output projection for this step (PDD), whose prediction is F32."""
 
-    #: The armed overlay's factors by site (`turbo.FunAccLoRA`), else None.
-    _cozy_overlay: Mapping[str, Factors] | None
-
     def forward(
         self, hidden_states: torch.Tensor, *args: object, cached: Cached | None = None,
         joint: Joint | None = None, projection: torch.Tensor | None = None, **kwargs: object,
@@ -72,14 +67,16 @@ class Transformer(QwenImage21Transformer2DModel):
         return out
 
     def _cached(self, latents: torch.Tensor, t: torch.Tensor, rotary: torch.Tensor, target: torch.Tensor,
-                prefix: list[KV], projection: torch.Tensor | None) -> torch.Tensor:
-        """The prediction from the target tokens and the prefix's cached K/V."""
+                prefix: Prefix, projection: torch.Tensor | None) -> torch.Tensor:
+        """The prediction from the target tokens and the prefix's cached K/V, each layer's read as it runs: a retained
+        state is held on the card while its tensors live, so a step holds one layer's, not the stack's (ten 4 MP
+        references keep 758 MiB a layer, 24 GB over 32: run 47471 at 8 GiB)."""
         hidden = self.img_in(latents.to(self.dtype))
         temb = self.time_text_embed(_timestep(t), hidden)
         modulation = self.modulation(temb)
         for layer, block in enumerate(self.transformer_blocks):
             cache = QwenImage21KVLayerCache()  # type: ignore[no-untyped-call]  # Diffusers' cache __init__ is unannotated
-            cache.store(*prefix[layer])
+            cache.store(*prefix(layer))
             hidden = block(
                 hidden_states=hidden,
                 modulation=modulation,

@@ -1,39 +1,50 @@
 # First-party package releases
 
-Publish a merged package, and everything that locks it, to both Hubs:
+Nothing untested goes to tensorhub.com, not even as a prerelease (Paul, 11-13). On the open RC a changed package carries
+its next prerelease version (`0.13.0rc2`) and is tested from source: release gates and smoke sessions run
+`cozy run ./<package>/<function> --on <machine>` from a packages commit, after `scripts/triton.sh <package>` built its
+Triton sets into the checkout, so the source Calcifer uploads carries the kernels a release ships.
+
+Its final is published once, at the promotion, after every gate passed and cozy is Latest: cozy-creator's
+`release-gate/promote.sh` runs, on a checkout of master once the RC is merged into it,
 
 ```sh
-task publish -- qwen-image-2
+task publish -- --gated <the gate's packages_ref>
 ```
 
-It fast-forwards the checkout to `origin/master`, relocks each named package as its publish will (`task lock`, no
-upgrade, so master holds the lock it publishes) and publishes a `git archive` of it to each of `HUBS`, with the
-Triton sets its import declares compiled on this CPU for every card row into `_triton` beside the module that declares
-each, by the Runtime its lock pins, so a fresh machine's first request runs its fused plans without compiling.
-Then, in dependency order, each package whose pyproject takes a republished package from `tensorhub` is
-relocked to it (`task lock -- <dependent> --upgrade-package=<it>`, plus
-`cozy-runtime` or `tensorfs` when its floor is above the dependent's lock),
-patch-bumped, pushed to master and published the same way. A dependent whose
-master version is unpublished stops it too: its merged changes are not released yet.
-`task publish -- --dry-run qwen-image-2` does all of it but the push and the Hub publish, builds each wheel into
-`dist/` and leaves the checkout as it was; CI runs it as `build.yaml`'s `publish-dry-run` scope.
-Bump the package's version on master first: a version any Hub already holds is refused before
-anything is published, and nothing is ever yanked but what that run just published. A dependent
-takes the next patch version no Hub holds. After a failed run, bump and run again.
+It publishes every package whose final no Hub holds, each refused unless master's source of it is the gated source. Only
+the version changes: `0.13.0rc2` becomes `0.13.0`, relocked as its publish will (`task lock`, upgrading only the roots it
+takes from the Hub), committed to master and published live to each of `HUBS`, with its Triton sets compiled on this CPU
+for every card row (`scripts/triton.sh`, by the Runtime its lock pins) in `_triton` beside each module that declares one.
+Then, in dependency order, each package whose pyproject takes a published package from `tensorhub` is relocked to it,
+patch-bumped, pushed to master and published the same way. A version any Hub holds is refused before anything is
+published; a dependent takes the next patch no Hub holds.
 
-## Built for the open RC's Runtime (cl-922)
+- `task publish -- --dry-run <package>...` does all of it but the push and the Hub publish, builds each wheel into `dist/`
+  and leaves the checkout as it was (CI: `build.yaml`'s `publish-dry-run` scope).
+- `task publish -- --hub <url> <package>...` publishes the finals, and the in-repo packages they take, to a throwaway Hub
+  only, locked against its index, pushing nothing: CI's isolated Hub (cozy-creator release-gate suite `publish`).
 
-A package that calls what only the open RC's Runtime has (`author.preview` before Runtime 0.46) is published from the
-RC branch as a PEP 440 prerelease, live:
+## Early access (`--rc`, cl-922)
+
+Only when Paul asks for early access, and only after the RC passed its full release gate (a prerelease is tested as
+fully as a release):
 
 ```sh
-uv version --project sdxl 0.10.0rc1   # the next rcN, committed to rc/<x.y.z>
-task publish -- --rc sdxl             # on a checkout of rc/<x.y.z>
+task publish -- --rc sdxl             # on a checkout of rc/<x.y.z>; sdxl's version is a prerelease (0.10.0rc1)
 ```
 
-Released clients and each Hub's unversioned default skip prereleases; a dev home's rental runs the RC's Runtime and takes
-the newest one. Its Triton sets compile with the RC's Runtime build. At the release the package publishes its final
-version (`0.10.0`) the usual way.
+It publishes the prerelease live as it is. Released clients and each Hub's unversioned default skip prereleases. Its
+Triton sets compile with the RC's Runtime. A lock the relock changes goes into the RC branch as a pull request, queued.
+
+## The RC's Runtime
+
+A package runs on its machine's Runtime: an RC machine, and every gate, runs the open RC's newest build. A package that
+needs what only that Runtime has names its floor, never a wheel: `cozy-runtime>=0.47.0.dev0,<0.48` (the RC's minor). No
+release meets it yet, so a lock (`task lock`, Calcifer's) takes the RC's newest build, binding its wheel in a private copy
+only. A Runtime merge replaces that wheel, and nothing fetches a lock's copy of its URL again: Calcifer relocks a source run
+onto the newest build, a machine installs its own Runtime over a lock's, and `scripts/triton.sh` builds with the newest.
+Nothing needs relocking. Once 0.47.0 is on PyPI, the same floor locks it there.
 
 Complete the [dependency qualification checklist](DEPENDENCIES.md) first. Worker images
 are OS/CUDA/PyTorch bases named by tag; the CLI updates the machine, Runtime and TensorFS
@@ -75,9 +86,7 @@ When a package starts using a new Runtime API:
 1. Release and verify Runtime, including its public wheel artifacts.
 2. Set the package's minimum Runtime version to the oldest version that supplies
    the APIs it actually uses, and relock.
-3. Publish with `task publish`.
-4. Install the published release with the local Creator CLI and verify its input
-   and callable interface. Include execution qualification appropriate to the change.
+3. Gate it from source (above); it publishes at the promotion.
 
 Private development or custom-image packages can still use `cozy package publish`
 directly. Their requirements need not fit every first-party worker image. The

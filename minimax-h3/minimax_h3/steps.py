@@ -74,8 +74,11 @@ def denoise_official(
         sites = producer_sites(transformer)
         rotary = transformer.rope(position_ids)
         producer.present(sites, rotary, tags.numel())
+        # One device index of the turbo head, set before each step: the steps' forwards then
+        # share every module's state, and the Runtime replays one recorded forward for all.
+        head = torch.full((), heads[steps.start], dtype=torch.int64, device=video.device)
         if overlay is not None:
-            transformer._engage(overlay, heads[steps.start])
+            transformer._engage(overlay, head)
         dense, sparse = layout_at(0), layout_at(sol_dense_steps)
         means = {
             id(site.module): torch.zeros(cast("MiniMaxH3Attention", site.module).heads, 128, device=video.device)
@@ -98,7 +101,7 @@ def denoise_official(
                         seeding=bool(sites) and i == sol_dense_steps - 1,
                     )
                     if overlay is not None and overlay.heads:  # the same overlay, this step's heads
-                        transformer._engage(overlay, heads[i])
+                        head.fill_(heads[i])
                     layout = sparse if i >= sol_dense_steps else dense
                     with attention_scope(layout), producer.carrying(carry):
                         velocity, audio_velocity = transformer(

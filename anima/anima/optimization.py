@@ -15,19 +15,21 @@ import hashlib
 import inspect
 import json
 from collections.abc import Callable
+from functools import partial
 from types import MethodType
 from typing import TYPE_CHECKING, Protocol, cast
 
 import torch
 import torch.nn.functional as F
 from cozy_runtime import tiles
-from cozy_runtime.accel import fusion
+from cozy_runtime.accel import fusion, lora
 from cozy_runtime.author import device
 from cozy_runtime.accel.kernels import PreQuantized, int8_rows, native, quantize_once, rms_rope_split_half
 from diffusers.models.activations import GELU
 from diffusers.models.attention import FeedForward
 from diffusers.models.attention_dispatch import AttentionBackendName, dispatch_attention_fn
 from diffusers.models.attention_processor import Attention
+from diffusers.models.embeddings import apply_rotary_emb
 from diffusers.models.autoencoders.autoencoder_kl_qwenimage import (
     AutoencoderKLQwenImage,
     QwenImageCausalConv3d,
@@ -43,6 +45,7 @@ from diffusers.models.normalization import RMSNorm
 from diffusers.models.transformers.transformer_cosmos import (
     CosmosAdaLayerNormZero,
     CosmosAttnProcessor2_0,
+    CosmosPatchEmbed,
     CosmosRotaryPosEmbed,
     CosmosTransformer3DModel,
     CosmosTransformerBlock,
@@ -54,10 +57,22 @@ from diffusers.modular_pipelines.modular_pipeline import BlockState, PipelineSta
 if TYPE_CHECKING:
     from diffusers.models._modeling_parallel import ParallelConfig
 
+    from .adapters import Adapters
     from .model import AnimaPipeline
 
 #: A rotary table: the fused kernel's rotation matrices, or Diffusers' (cos, sin) pair.
 Rotary = torch.Tensor | tuple[torch.Tensor, torch.Tensor]
+
+
+class _ApplyRotary(Protocol):
+    def __call__(
+        self, x: torch.Tensor, freqs_cis: Rotary, use_real: bool = ..., use_real_unbind_dim: int = ...
+    ) -> torch.Tensor: ...
+
+
+#: Diffusers' `apply_rotary_emb` as it runs: `freqs_cis` a tensor or a (cos, sin) pair, and with `use_real` the rotated
+#: tensor back (it annotates the pair as a 1-tuple and the result as a pair).
+_rotate = cast(_ApplyRotary, apply_rotary_emb)
 
 # The extension takes DLPack arrays and a CUDA stream through nanobind and never links libtorch,
 # so any torch this package installs on serves it. It is built for CUDA 13.0: a torch built for
@@ -121,8 +136,8 @@ VAE_NORM = fusion.ChannelNorm(
 #: (Diffusers pads two zero frames and convolves all 27 taps), and its nearest upsampling in its own
 #: dtype, not F32.
 VAE_FRAME = fusion.LoneFrame(QwenImageCausalConv3d, upsample=QwenImageUpsample)
-#: Anima Base 1.0's transformer, the one the norm and RoPE shapes below are reviewed for: its
-#: constructor arguments. The Runtime's config drops the saving library's `_`-keys (#1786), and
+#: Anima Base 1.0's transformer, the one the fused kernel's norm and RoPE shapes are reviewed for:
+#: its constructor arguments. The Runtime's config drops the saving library's `_`-keys (#1786), and
 #: comparing them refused this plan on every construction since.
 _TRANSFORMER_CONFIG = {
     "adaln_lora_dim": 256,
@@ -146,6 +161,14 @@ _TRANSFORMER_CONFIG = {
     "text_embed_dim": 1024,
     "use_crossattn_projection": False,
 }
+#: Its sizes: the plan's block forward reads them from the filled transformer's own config, so an
+#: Anima of Base 1.0's graph at any size runs it, adapters and all; only the fused kernel needs
+#: Base 1.0's.
+_SIZES = frozenset({
+    "adaln_lora_dim", "attention_head_dim", "crossattn_proj_in_channels", "encoder_hidden_states_channels",
+    "img_context_dim_out", "img_context_num_tokens", "in_channels", "max_size", "mlp_ratio", "num_attention_heads",
+    "num_layers", "out_channels", "rope_scale", "text_embed_dim",
+})
 
 
 class PlanRefusal(RuntimeError):
@@ -157,17 +180,20 @@ class PlanRefusal(RuntimeError):
 
 
 def apply(pipe: AnimaPipeline) -> tuple[str, str]:
-    """Install the plan on a filled pipeline: why the transformer and why the VAE run as
-    Diffusers wrote them instead, each "" where its part installed."""
+    """Install the plan on a filled pipeline: why the transformer's fused kernel and why the VAE
+    run as Diffusers wrote them instead, each "" where its part installed. The block forward,
+    with the adapters' seams (se-127), installs wherever the reviewed Diffusers graph is the one
+    filled; the fused kernel only where this process runs it."""
     vae = pipe.components["vae"]
     decode = _digest_refusal(_VAE_DIGESTS) or (
         "" if type(vae) is AutoencoderKLQwenImage else f"the VAE is {type(vae).__qualname__}"
     )
     if not decode:
         _unchanged(vae, _install_vae_plan)
-    fused = _capability() or _plan_refusal(pipe)
-    if not fused:
-        _unchanged(pipe.components["transformer"], _install_transformer_plan)
+    exact = _plan_refusal(pipe)
+    fused = exact or _sized(pipe) or _capability()
+    if not exact:
+        _unchanged(pipe.components["transformer"], partial(_install_transformer_plan, kernel=not fused))
     return fused, decode
 
 
@@ -181,8 +207,13 @@ def _unchanged[M: torch.nn.Module](module: M, install: Callable[[M], None]) -> N
         )
 
 
+def adaptable(transformer: CosmosTransformer3DModel) -> bool:
+    """Whether `apply` installed the block forward that takes adapters on this transformer."""
+    return isinstance(getattr(transformer, "_cozy_scope", None), _Scope)
+
+
 def installed(transformer: CosmosTransformer3DModel) -> bool:
-    """Whether `apply` installed the plan on this transformer."""
+    """Whether `apply` installed the fused kernel on this transformer."""
     block = cast(CosmosTransformerBlock, transformer.transformer_blocks[0])  # its blocks
     return isinstance(block.attn1.processor, _FusedSelfAttention)
 
@@ -256,10 +287,29 @@ def _plan_refusal(pipe: AnimaPipeline) -> str:
     transformer = pipe.components["transformer"]
     if type(transformer) is not CosmosTransformer3DModel:
         return f"the transformer is {type(transformer).__qualname__}, not CosmosTransformer3DModel"
-    arguments = {k: v for k, v in dict(transformer.config).items() if not k.startswith("_")}
-    if json.loads(json.dumps(arguments)) != _TRANSFORMER_CONFIG:
-        return "the filled Cosmos transformer config is not the Anima Base 1.0 config"
+    arguments = _arguments(transformer)
+    graph = {k: v for k, v in _TRANSFORMER_CONFIG.items() if k not in _SIZES}
+    if arguments.keys() != _TRANSFORMER_CONFIG.keys() or {k: arguments[k] for k in graph} != graph:
+        return "the filled Cosmos transformer config is not Anima Base 1.0's graph"
     return ""
+
+
+def _sized(pipe: AnimaPipeline) -> str:
+    """Why the fused kernel does not take this transformer's sizes, or "" when they are Base 1.0's."""
+    arguments = _arguments(pipe.components["transformer"])
+    if arguments == _TRANSFORMER_CONFIG:
+        return ""
+    return (
+        f"the fused kernel is reviewed for Anima Base 1.0's sizes, not {arguments['num_layers']} blocks of "
+        f"{arguments['num_attention_heads']} heads of {arguments['attention_head_dim']}"
+    )
+
+
+def _arguments(transformer: CosmosTransformer3DModel) -> dict[str, object]:
+    """The transformer's constructor arguments as JSON reads them (tuples as lists)."""
+    arguments = {k: v for k, v in dict(transformer.config).items() if not k.startswith("_")}
+    loaded: dict[str, object] = json.loads(json.dumps(arguments))
+    return loaded
 
 
 def _tensor_census(module: torch.nn.Module) -> tuple[tuple[object, ...], tuple[object, ...]]:
@@ -278,7 +328,7 @@ def _tensor_census(module: torch.nn.Module) -> tuple[tuple[object, ...], tuple[o
 
 
 class _RopeMatrix:
-    """One call-scoped conversion shared by all 28 self-attention blocks."""
+    """One call-scoped conversion shared by every self-attention block."""
 
     def __init__(self) -> None:
         self.value: torch.Tensor | None = None
@@ -371,7 +421,9 @@ class _FusedSelfAttention:
         encoder_hidden_states: torch.Tensor | None = None,
         attention_mask: torch.Tensor | None = None,
         image_rotary_emb: Rotary | None = None,
+        inputs: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
     ) -> torch.Tensor:
+        """`inputs`: the query's, key's and value's own rows, where an adapter shifted them apart."""
         if encoder_hidden_states is not None or attention_mask is not None:
             raise PlanRefusal(
                 "anima_optimization_attention_shape",
@@ -382,10 +434,16 @@ class _FusedSelfAttention:
                 "anima_optimization_rope_absent",
                 "the exact Anima Cosmos self-attention call omitted rotary embeddings",
             )
-        with quantize_once(hidden_states):
+        if inputs is None:
+            with quantize_once(hidden_states):
+                query, key, value = (
+                    projection(hidden_states).unflatten(2, (attn.heads, -1)).transpose(1, 2)
+                    for projection in (attn.to_q, attn.to_k, attn.to_v)
+                )
+        else:
             query, key, value = (
-                projection(hidden_states).unflatten(2, (attn.heads, -1)).transpose(1, 2)
-                for projection in (attn.to_q, attn.to_k, attn.to_v)
+                projection(rows).unflatten(2, (attn.heads, -1)).transpose(1, 2)
+                for projection, rows in zip((attn.to_q, attn.to_k, attn.to_v), inputs, strict=True)
             )
         # The kernel reads the scales by pointer, without calling the norms that own them.
         norm_q, norm_k = cast(RMSNorm, attn.norm_q), cast(RMSNorm, attn.norm_k)  # the head-width RMSNorms the plan checked
@@ -425,7 +483,10 @@ def _native_rms_forward(module: RMSNorm, hidden_states: torch.Tensor) -> torch.T
 
 
 def _hooked(*modules: torch.nn.Module) -> bool:
-    return any(m._forward_hooks or m._forward_pre_hooks for m in modules)
+    """Whether a hook other than an overlay's changes these modules' forwards (`int8_rows` reads an overlay's)."""
+    return any(
+        m._forward_pre_hooks or any(not isinstance(h, lora.Hook) for h in m._forward_hooks.values()) for m in modules
+    )
 
 
 def _normed(
@@ -466,6 +527,97 @@ def _feed_forward(ff: FeedForward, rows: torch.Tensor | PreQuantized) -> torch.T
     return out
 
 
+class _Scope:
+    """One DiT call's adapters (se-127), set by the plan's transformer forward for its blocks."""
+
+    def __init__(self) -> None:
+        self.adapters: Adapters | None = None
+
+
+def _attention(
+    attn: Attention,
+    rows: tuple[torch.Tensor, torch.Tensor, torch.Tensor],
+    rotary: Rotary | None,
+    mask: torch.Tensor | None,
+    lora: torch.nn.Module | None = None,
+    scale: float = 1.0,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """`CosmosAttnProcessor2_0.__call__` on the query's, key's and value's own rows, with an adapter's LoRA on
+    the four projections (`lora.q_proj`, …, `lora.output_proj`): the output, and the normalized query an
+    IP-Adapter attends from. Cosmos' heads are all full, so Diffusers' K/V repeat is the identity."""
+    projections = (attn.to_q, attn.to_k, attn.to_v)
+    sites = ("q_proj", "k_proj", "v_proj")
+    query, key, value = (
+        (projection(x) if lora is None else projection(x) + scale * lora.get_submodule(site)(x))
+        .unflatten(2, (attn.heads, -1))
+        .transpose(1, 2)
+        for projection, site, x in zip(projections, sites, rows, strict=True)
+    )
+    norm_q, norm_k = cast(RMSNorm, attn.norm_q), cast(RMSNorm, attn.norm_k)  # Cosmos' rms_norm, typed None
+    query, key = norm_q(query), norm_k(key)
+    if rotary is not None:
+        query = _rotate(query, rotary, use_real=True, use_real_unbind_dim=-2)
+        key = _rotate(key, rotary, use_real=True, use_real_unbind_dim=-2)
+    output = dispatch_attention_fn(
+        query.transpose(1, 2),
+        key.transpose(1, 2),
+        value.transpose(1, 2),
+        attn_mask=mask,
+        dropout_p=0.0,
+        is_causal=False,
+    )
+    output = output.flatten(2, 3).type_as(query)
+    projected = attn.to_out[0](output)
+    if lora is not None:
+        projected = projected + scale * lora.get_submodule("output_proj")(output)
+    out: torch.Tensor = attn.to_out[1](projected)
+    return out, query
+
+
+def _adapted(
+    block: CosmosTransformerBlock,
+    adapters: Adapters,
+    index: int,
+    normalized: torch.Tensor,
+    rotary: Rotary | None,
+) -> torch.Tensor:
+    """The block's self-attention with each projection's input shifted by the control maps' LLLite."""
+    rows = cast(
+        "tuple[torch.Tensor, torch.Tensor, torch.Tensor]",
+        tuple(adapters.shift(index, f"self_attn_{p}_proj", normalized) for p in "qkv"),
+    )
+    attn1 = block.attn1
+    if isinstance(attn1.processor, _FusedSelfAttention):
+        out: torch.Tensor = attn1(rows[0], image_rotary_emb=rotary, inputs=rows)
+        return out
+    return _attention(attn1, rows, rotary, None)[0]
+
+
+def _crossed(
+    block: CosmosTransformerBlock,
+    adapters: Adapters,
+    index: int,
+    normalized: torch.Tensor,
+    text: torch.Tensor,
+    mask: torch.Tensor | None,
+    timestep: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor | None]:
+    """The block's cross-attention under the references' LoRA, and their IP term for the conditional rows."""
+    references = adapters.references
+    query = adapters.shift(index, "cross_attn_q_proj", normalized)
+    lora = None if references is None else references.cross(index)
+    scale = 1.0 if references is None else references.adapter.scale
+    out, normed = _attention(block.attn2, (query, text, text), None, mask, lora, scale)
+    if references is None or not any(adapters.rows):
+        return out, None
+    if all(adapters.rows):
+        return out, references.term(index, normed, timestep)
+    chosen = torch.tensor([i for i, c in enumerate(adapters.rows) if c], device=normed.device)
+    if timestep.shape[0] == normed.shape[0]:
+        timestep = timestep.index_select(0, chosen)
+    return out, references.term(index, normed.index_select(0, chosen), timestep)
+
+
 def _block_forward(
     block: CosmosTransformerBlock,
     hidden_states: torch.Tensor,
@@ -478,32 +630,58 @@ def _block_forward(
     controlnet_residual: torch.Tensor | None = None,
     latents: torch.Tensor | None = None,
     block_idx: int | None = None,
+    *,
+    index: int,
+    scope: _Scope,
 ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-    """`CosmosTransformerBlock.forward` with each gated residual as one `addcmul`."""
+    """`CosmosTransformerBlock.forward` with each gated residual as one `addcmul`, block `index` of
+    the DiT, and the adapters of `scope`'s call: LLLite shifts on its linears' inputs, the
+    references' LoRA on its cross-attention and their IP term after it, on the conditional rows."""
     if not isinstance(hidden_states, torch.Tensor):
         raise PlanRefusal("anima_optimization_tensor_type", "Cosmos received a non-torch tensor")
     if block.before_proj is not None:
         hidden_states = block.before_proj(hidden_states) + latents
     if extra_pos_emb is not None:
         hidden_states = hidden_states + extra_pos_emb
+    adapters = scope.adapters
     attn1, attn2, ff = block.attn1, block.attn2, block.ff
-    # Rows quantized in the norm's pass reach the projections through modules nothing hooks.
-    fused = not _hooked(attn1, attn2, ff, *ff.net)
+    # Rows quantized in the norm's pass reach the projections through modules nothing hooks or shifts.
+    fused = adapters is None and not _hooked(attn1, attn2, ff, *ff.net)
     consumers: tuple[torch.nn.Module, ...] = (attn1.to_q, attn1.to_k, attn1.to_v) if fused else ()
     normalized, gate = _normed(block.norm1, hidden_states, embedded_timestep, temb, consumers)
-    output = attn1(normalized, image_rotary_emb=image_rotary_emb)
+    if adapters is None:
+        output = attn1(normalized, image_rotary_emb=image_rotary_emb)
+    else:
+        output = _adapted(block, adapters, index, cast(torch.Tensor, normalized), image_rotary_emb)
     hidden_states = torch.addcmul(hidden_states, gate, output)
     consumers = (attn2.to_q,) if fused else ()
     normalized, gate = _normed(block.norm2, hidden_states, embedded_timestep, temb, consumers)
-    with quantize_once(encoder_hidden_states):
-        output = attn2(
-            normalized, encoder_hidden_states=encoder_hidden_states, attention_mask=attention_mask
+    term = None
+    if adapters is None:
+        with quantize_once(encoder_hidden_states):
+            output = attn2(
+                normalized, encoder_hidden_states=encoder_hidden_states, attention_mask=attention_mask
+            )
+    else:
+        rows = cast(torch.Tensor, normalized)
+        output, term = _crossed(
+            block, adapters, index, rows, encoder_hidden_states, attention_mask, embedded_timestep
         )
     hidden_states = torch.addcmul(hidden_states, gate, output)
     consumers = (cast(GELU, ff.net[0]).proj,) if fused else ()
     normalized, gate = _normed(block.norm3, hidden_states, embedded_timestep, temb, consumers)
+    if adapters is not None:
+        normalized = adapters.shift(index, "mlp_layer1", cast(torch.Tensor, normalized))
     output = _feed_forward(ff, normalized) if fused else ff(normalized)
     hidden_states = torch.addcmul(hidden_states, gate, output)
+    if term is not None:
+        # The IP-Adapter's term is trained as a residual on the whole block's output.
+        assert adapters is not None
+        if all(adapters.rows):
+            hidden_states = hidden_states + term.to(hidden_states.dtype)
+        else:
+            chosen = torch.tensor([i for i, c in enumerate(adapters.rows) if c], device=hidden_states.device)
+            hidden_states = hidden_states.index_add(0, chosen, term.to(hidden_states.dtype))
     if controlnet_residual is not None:
         if block.after_proj is not None:
             raise PlanRefusal(
@@ -516,20 +694,35 @@ def _block_forward(
     return hidden_states
 
 
-def _install_transformer_plan(transformer: CosmosTransformer3DModel) -> None:
+def _patch_forward(embed: CosmosPatchEmbed, hidden_states: torch.Tensor, *, scope: _Scope) -> torch.Tensor:
+    """`CosmosPatchEmbed.forward`, plus the pose's tokens of `scope`'s call on every row."""
+    out: torch.Tensor = CosmosPatchEmbed.forward(embed, hidden_states)
+    adapters = scope.adapters
+    if adapters is None or adapters.embedded is None:
+        return out
+    return out + adapters.embedded.to(out.dtype)
+
+
+def _install_transformer_plan(transformer: CosmosTransformer3DModel, *, kernel: bool) -> None:
+    """The plan's forwards; with `kernel`, the fused self-attention kernel and its rotary table. Its
+    shapes are the transformer's config's: Base 1.0's 28 blocks of 16 heads of 128."""
     rope = _RopeMatrix()
+    scope = _Scope()
+    config = transformer.config
+    layers, head = int(config["num_layers"]), int(config["attention_head_dim"])
+    width = int(config["num_attention_heads"]) * head
     blocks = cast("tuple[CosmosTransformerBlock, ...]", tuple(transformer.transformer_blocks))  # checked below
-    if len(blocks) != 28 or any(type(block) is not CosmosTransformerBlock for block in blocks):
+    if len(blocks) != layers or any(type(block) is not CosmosTransformerBlock for block in blocks):
         raise PlanRefusal(
             "anima_optimization_block_shape",
-            "the exact Anima plan requires 28 unmodified Diffusers CosmosTransformerBlock rows",
+            f"the Anima plan requires its config's {layers} unmodified Diffusers CosmosTransformerBlock rows",
         )
     norms = tuple(module for module in transformer.modules() if type(module) is RMSNorm)
     shapes = sorted((tuple(norm.dim), norm.eps) for norm in norms)
-    if shapes != sorted([((128,), 1e-5)] * 112 + [((2048,), 1e-6)]):
+    if shapes != sorted([((head,), 1e-5)] * (4 * layers) + [((width,), 1e-6)]):
         raise PlanRefusal(
             "anima_optimization_norm_shape",
-            "the exact Anima plan requires 112 head-width RMSNorms at eps=1e-5 and one "
+            f"the Anima plan requires {4 * layers} head-width RMSNorms at eps=1e-5 and one "
             "model-width RMSNorm at eps=1e-6",
         )
     if any(norm.weight is None or norm.bias is not None for norm in norms):
@@ -539,7 +732,7 @@ def _install_transformer_plan(transformer: CosmosTransformer3DModel) -> None:
         )
     for norm in norms:
         norm.forward = MethodType(_native_rms_forward, norm)  # type: ignore[method-assign]  # the plan's forward
-    for block in blocks:
+    for index, block in enumerate(blocks):
         if (
             block.before_proj is not None
             or block.after_proj is not None
@@ -563,20 +756,29 @@ def _install_transformer_plan(transformer: CosmosTransformer3DModel) -> None:
                 "anima_optimization_block_shape",
                 "Anima Cosmos block norms or feed-forward do not match the plan",
             )
-        block.attn1.set_processor(_FusedSelfAttention(rms_rope_split_half, rope))  # type: ignore[arg-type]  # the plan's own processor
-        block.forward = MethodType(_block_forward, block)  # type: ignore[method-assign]  # the plan's forward
-    transformer.rope.forward = MethodType(_direct_rope_forward, transformer.rope)  # type: ignore[method-assign]  # the plan's
+        if kernel:
+            block.attn1.set_processor(_FusedSelfAttention(rms_rope_split_half, rope))  # type: ignore[arg-type]  # the plan's own processor
+        block.forward = MethodType(partial(_block_forward, index=index, scope=scope), block)  # type: ignore[method-assign]  # the plan's forward
+    if kernel:
+        transformer.rope.forward = MethodType(_direct_rope_forward, transformer.rope)  # type: ignore[method-assign]  # the plan's
+    embed = transformer.patch_embed
+    embed.forward = MethodType(partial(_patch_forward, scope=scope), embed)  # type: ignore[method-assign]  # the plan's
+    transformer._cozy_scope = scope  # type: ignore[assignment]  # a plain attribute: nn.Module keeps non-tensors as such
     original = transformer.forward
 
     def forward(
-        _self: CosmosTransformer3DModel, *args: object, **kwargs: object
+        _self: CosmosTransformer3DModel, *args: object, adapters: Adapters | None = None, **kwargs: object
     ) -> tuple[torch.Tensor] | Transformer2DModelOutput:
+        """Diffusers' forward; `adapters` reach the blocks. A call with them is never a recorded graph: the
+        Runtime keys a graph on plain arguments only and runs such a call as written."""
         rope.clear()
+        scope.adapters = adapters
         try:
             out: tuple[torch.Tensor] | Transformer2DModelOutput = original(*args, **kwargs)  # type: ignore[arg-type]  # its own arguments, passed on
             return out
         finally:
             rope.clear()
+            scope.adapters = None
 
     transformer.forward = MethodType(forward, transformer)  # type: ignore[method-assign]  # the plan's forward
 
