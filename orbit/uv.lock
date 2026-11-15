@@ -15,6 +15,12 @@ supported-markers = [
 ]
 
 [manifest]
+constraints = [
+    { name = "tensorfs", marker = "platform_machine == 'arm64' and sys_platform == 'darwin'", url = "https://github.com/cozy-creator/cozy-creator/releases/download/xs-198-tensorfs-0.27.0-95d567d3/tensorfs-0.27.0%2Bdev.g95d567d3-cp311-abi3-macosx_11_0_arm64.whl" },
+    { name = "tensorfs", marker = "platform_machine == 'aarch64' and sys_platform == 'linux'", url = "https://github.com/cozy-creator/cozy-creator/releases/download/xs-198-tensorfs-0.27.0-95d567d3/tensorfs-0.27.0%2Bdev.g95d567d3-cp311-abi3-manylinux_2_28_aarch64.whl" },
+    { name = "tensorfs", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'", url = "https://github.com/cozy-creator/cozy-creator/releases/download/xs-198-tensorfs-0.27.0-95d567d3/tensorfs-0.27.0%2Bdev.g95d567d3-cp311-abi3-manylinux_2_28_x86_64.whl" },
+    { name = "tensorfs", marker = "platform_machine == 'AMD64' and sys_platform == 'win32'", url = "https://github.com/cozy-creator/cozy-creator/releases/download/xs-198-tensorfs-0.27.0-95d567d3/tensorfs-0.27.0%2Bdev.g95d567d3-cp311-abi3-win_amd64.whl" },
+]
 excludes = [
     "torch",
     "torchaudio",
@@ -164,21 +170,20 @@ wheels = [
 
 [[package]]
 name = "cozy-runtime"
-version = "0.46.0"
-source = { registry = "https://pypi.org/simple" }
+version = "0.48.0.dev0+dev.g0745417c"
+source = { url = "https://github.com/cozy-creator/cozy-runtime/releases/download/xs-198-runtime-0.48.0.dev0-0745417c/cozy_runtime-0.48.0.dev0%2Bdev.g0745417c-py3-none-any.whl" }
 dependencies = [
     { name = "msgspec" },
     { name = "numpy" },
     { name = "packaging" },
     { name = "pillow" },
-    { name = "tensorfs" },
+    { name = "tensorfs", version = "0.27.0+dev.g95d567d3", source = { url = "https://github.com/cozy-creator/cozy-creator/releases/download/xs-198-tensorfs-0.27.0-95d567d3/tensorfs-0.27.0%2Bdev.g95d567d3-cp311-abi3-macosx_11_0_arm64.whl" }, marker = "sys_platform != 'linux' and sys_platform != 'win32'" },
+    { name = "tensorfs", version = "0.27.0+dev.g95d567d3", source = { url = "https://github.com/cozy-creator/cozy-creator/releases/download/xs-198-tensorfs-0.27.0-95d567d3/tensorfs-0.27.0%2Bdev.g95d567d3-cp311-abi3-manylinux_2_28_aarch64.whl" }, marker = "platform_machine != 'x86_64' and sys_platform == 'linux'" },
+    { name = "tensorfs", version = "0.27.0+dev.g95d567d3", source = { url = "https://github.com/cozy-creator/cozy-creator/releases/download/xs-198-tensorfs-0.27.0-95d567d3/tensorfs-0.27.0%2Bdev.g95d567d3-cp311-abi3-manylinux_2_28_x86_64.whl" }, marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
+    { name = "tensorfs", version = "0.27.0+dev.g95d567d3", source = { url = "https://github.com/cozy-creator/cozy-creator/releases/download/xs-198-tensorfs-0.27.0-95d567d3/tensorfs-0.27.0%2Bdev.g95d567d3-cp311-abi3-win_amd64.whl" }, marker = "sys_platform == 'win32'" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/b3/92/4fa5e2da277474ea73ad79a4e2f0d42e7737f36fe74456eef875e4b9e8ba/cozy_runtime-0.46.0.tar.gz", hash = "sha256:0e10199074d83fcd7368d0beeb00ccf21b7243fc2fd88638d3a352fdbe05faa2", size = 2812300, upload-time = "2026-11-12T11:18:20.478Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/50/5f/2638c124f2d4bfb56d4fea4181ce1544a491f8e88fcebbc9d171c4b744bd/cozy_runtime-0.46.0-cp312-abi3-manylinux_2_28_aarch64.whl", hash = "sha256:ecc3d40956921775f7b2fc283d106958f7322b392526f1f0670ed102b915ed42", size = 34382836, upload-time = "2026-11-12T11:18:07.562Z" },
-    { url = "https://files.pythonhosted.org/packages/ba/1e/a557b235282aa42946a48fd8ad55fab63c0a263a260c2abfafc426fb93ac/cozy_runtime-0.46.0-cp312-abi3-manylinux_2_28_x86_64.whl", hash = "sha256:0d7c525f10b80e9f233573272b1f783db85ffefc5872e14be747341654241704", size = 38511580, upload-time = "2026-11-12T11:18:12.017Z" },
-    { url = "https://files.pythonhosted.org/packages/7b/5a/b4ea4e1b637a214cde12b7534164806dd8adba43a74fcdeeca4099852838/cozy_runtime-0.46.0-cp312-abi3-win_amd64.whl", hash = "sha256:a7ad150f14909d9175b6b3d1b4f9c96e4fc7f79525366841d06630760cd494ec", size = 21796814, upload-time = "2026-11-12T11:18:15.612Z" },
-    { url = "https://files.pythonhosted.org/packages/4a/b1/ee20f898f924f60f7e92f83892b2a1d306aea782d84b4f736afc44b2cd55/cozy_runtime-0.46.0-py3-none-any.whl", hash = "sha256:71495590ac575faf254eb7758d5b0f0e3d3bb457e0434d10c362155f5424c6f8", size = 2452051, upload-time = "2026-11-12T11:18:18.083Z" },
+    { url = "https://github.com/cozy-creator/cozy-runtime/releases/download/xs-198-runtime-0.48.0.dev0-0745417c/cozy_runtime-0.48.0.dev0%2Bdev.g0745417c-py3-none-any.whl", hash = "sha256:e055db35a5242ecc68160e78805d996da835fc071be9522cb512d5ae931da853" },
 ]
 
 [package.optional-dependencies]
@@ -190,6 +195,24 @@ adapters = [
 media = [
     { name = "av" },
 ]
+
+[package.metadata]
+requires-dist = [
+    { name = "av", marker = "extra == 'media'", specifier = ">=19.0.1" },
+    { name = "cozy-eval", marker = "extra == 'assessment'", specifier = ">=0.7" },
+    { name = "msgspec", specifier = ">=0.19" },
+    { name = "numpy", specifier = ">=1.26" },
+    { name = "packaging", specifier = ">=24" },
+    { name = "peft", marker = "extra == 'adapters'", specifier = ">=0.20,<0.21" },
+    { name = "pillow", specifier = ">=12" },
+    { name = "tensorfs", specifier = ">=0.27.0,<0.28" },
+    { name = "tensorfs", marker = "extra == 'model-execution'", specifier = ">=0.27.0,<0.28" },
+    { name = "tokenizers", marker = "extra == 'adapters'", specifier = ">=0.23.1" },
+    { name = "torch", marker = "extra == 'adapters'", specifier = ">=2.15" },
+    { name = "torch", marker = "extra == 'derive'", specifier = ">=2.15" },
+    { name = "transformers", marker = "extra == 'adapters'", specifier = ">=5.16.1" },
+]
+provides-extras = ["adapters", "assessment", "derive", "media", "model-execution"]
 
 [[package]]
 name = "diffusers"
@@ -359,8 +382,8 @@ wheels = [
 
 [[package]]
 name = "minimax-h3"
-version = "0.13.0rc2"
-source = { registry = "https://tensorhub.com/v1/index/_/simple/" }
+version = "0.14.0rc1"
+source = { url = "https://github.com/cozy-creator/packages/releases/download/xs-198-h3-0.14.0rc1-6afff07c/minimax_h3-0.14.0rc1-py3-none-any.whl" }
 dependencies = [
     { name = "cozy-runtime", extra = ["adapters", "media"] },
     { name = "diffusers" },
@@ -372,12 +395,34 @@ dependencies = [
     { name = "regex" },
     { name = "safetensors" },
     { name = "shellingham" },
-    { name = "tensorfs" },
+    { name = "tensorfs", version = "0.27.0+dev.g95d567d3", source = { url = "https://github.com/cozy-creator/cozy-creator/releases/download/xs-198-tensorfs-0.27.0-95d567d3/tensorfs-0.27.0%2Bdev.g95d567d3-cp311-abi3-macosx_11_0_arm64.whl" }, marker = "sys_platform != 'linux' and sys_platform != 'win32'" },
+    { name = "tensorfs", version = "0.27.0+dev.g95d567d3", source = { url = "https://github.com/cozy-creator/cozy-creator/releases/download/xs-198-tensorfs-0.27.0-95d567d3/tensorfs-0.27.0%2Bdev.g95d567d3-cp311-abi3-manylinux_2_28_aarch64.whl" }, marker = "platform_machine != 'x86_64' and sys_platform == 'linux'" },
+    { name = "tensorfs", version = "0.27.0+dev.g95d567d3", source = { url = "https://github.com/cozy-creator/cozy-creator/releases/download/xs-198-tensorfs-0.27.0-95d567d3/tensorfs-0.27.0%2Bdev.g95d567d3-cp311-abi3-manylinux_2_28_x86_64.whl" }, marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
+    { name = "tensorfs", version = "0.27.0+dev.g95d567d3", source = { url = "https://github.com/cozy-creator/cozy-creator/releases/download/xs-198-tensorfs-0.27.0-95d567d3/tensorfs-0.27.0%2Bdev.g95d567d3-cp311-abi3-win_amd64.whl" }, marker = "sys_platform == 'win32'" },
     { name = "tokenizers" },
     { name = "transformers" },
 ]
 wheels = [
-    { url = "https://tensorhub.com/v1/index/_/minimax-h3/0.13.0rc2/minimax_h3-0.13.0rc2-py3-none-any.whl", hash = "sha256:a3b56ad030f04b6f146954e2928f60af00883621de4202ce2cebdaec000e036e" },
+    { url = "https://github.com/cozy-creator/packages/releases/download/xs-198-h3-0.14.0rc1-6afff07c/minimax_h3-0.14.0rc1-py3-none-any.whl", hash = "sha256:6119074c2e7466e789aa34e865cab7c2f2f103fdb23584b562324c197479b6b4" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "cozy-runtime", extras = ["adapters", "media"], specifier = ">=0.48.0.dev0,<0.49" },
+    { name = "diffusers", specifier = ">=0.41,<0.42" },
+    { name = "hf-xet", specifier = ">=1.6.0" },
+    { name = "msgspec", specifier = ">=0.19" },
+    { name = "numpy", specifier = ">=1.26" },
+    { name = "pydantic-core", specifier = ">=2.46.4" },
+    { name = "pyyaml", specifier = ">=6.0.3" },
+    { name = "regex", specifier = ">=2026.7.19" },
+    { name = "safetensors", specifier = ">=0.8.0" },
+    { name = "shellingham", specifier = ">=1.5.4" },
+    { name = "tensorfs", specifier = ">=0.21.3" },
+    { name = "tokenizers", specifier = ">=0.23.1" },
+    { name = "torch", specifier = ">=2.6" },
+    { name = "torchvision", specifier = ">=0.21" },
+    { name = "transformers", specifier = ">=5.16.1" },
 ]
 
 [[package]]
@@ -451,24 +496,29 @@ wheels = [
 
 [[package]]
 name = "orbit"
-version = "0.2.0rc1"
+version = "0.3.0rc1"
 source = { editable = "." }
 dependencies = [
     { name = "cozy-runtime", extra = ["media"] },
-    { name = "minimax-h3" },
     { name = "msgspec" },
     { name = "numpy" },
     { name = "pillow" },
 ]
 
+[package.optional-dependencies]
+cozy-calls = [
+    { name = "minimax-h3" },
+]
+
 [package.metadata]
 requires-dist = [
-    { name = "cozy-runtime", extras = ["media"], specifier = ">=0.46.0,<0.47" },
-    { name = "minimax-h3", specifier = ">=0.12.0rc2", index = "https://tensorhub.com/v1/index/_/simple/" },
+    { name = "cozy-runtime", extras = ["media"], url = "https://github.com/cozy-creator/cozy-runtime/releases/download/xs-198-runtime-0.48.0.dev0-0745417c/cozy_runtime-0.48.0.dev0%2Bdev.g0745417c-py3-none-any.whl" },
+    { name = "minimax-h3", extras = ["cozy-calls"], marker = "extra == 'cozy-calls'", url = "https://github.com/cozy-creator/packages/releases/download/xs-198-h3-0.14.0rc1-6afff07c/minimax_h3-0.14.0rc1-py3-none-any.whl" },
     { name = "msgspec", specifier = ">=0.19" },
     { name = "numpy", specifier = ">=1.26" },
     { name = "pillow", specifier = ">=12" },
 ]
+provides-extras = ["cozy-calls"]
 
 [[package]]
 name = "packaging"
@@ -750,14 +800,46 @@ wheels = [
 
 [[package]]
 name = "tensorfs"
-version = "0.25.1"
-source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/1c/f7/e5e2e03784045c4cdcf03cb27d51ade368cdacb38c271200e2d9c447536f/tensorfs-0.25.1.tar.gz", hash = "sha256:885bdabf591230bc6607cc5ea45d1939fb754c0f2a5bcbdd903bfcb9c1b5c446", size = 2626677, upload-time = "2026-11-12T15:04:40.024Z" }
+version = "0.27.0+dev.g95d567d3"
+source = { url = "https://github.com/cozy-creator/cozy-creator/releases/download/xs-198-tensorfs-0.27.0-95d567d3/tensorfs-0.27.0%2Bdev.g95d567d3-cp311-abi3-macosx_11_0_arm64.whl" }
+resolution-markers = [
+    "platform_machine == 'arm64' and sys_platform == 'darwin'",
+]
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/ec/f0/d0c8fd91f24a3b6019f4b1653590b351e4e41afb12e3a4cce9ed6a27ce0d/tensorfs-0.25.1-cp311-abi3-macosx_11_0_arm64.whl", hash = "sha256:283679933359dda1678bee2700a811c96544b4553a217c01fbad8918a6a7dcd8", size = 15232898, upload-time = "2026-11-12T15:04:25.077Z" },
-    { url = "https://files.pythonhosted.org/packages/ba/00/87e50b25df092e0ca480f3f72ae5e255d8f42a7a2555ca300e0e58c40ab3/tensorfs-0.25.1-cp311-abi3-manylinux_2_28_aarch64.whl", hash = "sha256:fbba5408b62e73a6dc03cac78c86a72c0359bfcf8142bae60d69ecfeb6bf9c89", size = 20312159, upload-time = "2026-11-12T15:04:27.326Z" },
-    { url = "https://files.pythonhosted.org/packages/06/96/84f16832317f3e2aa90e5aa25b9bd7ae9a6cb9599b50dbe029a61cdbb3d9/tensorfs-0.25.1-cp311-abi3-manylinux_2_28_x86_64.whl", hash = "sha256:daec2e77ca294323bc454f7cbecfb0f8696edcaf1cb794af61cde29ca603bb5e", size = 21705735, upload-time = "2026-11-12T15:04:29.716Z" },
-    { url = "https://files.pythonhosted.org/packages/10/c5/56cb26d873ab86e81e5ff5f483357daa86c79af9ef2232950206e69983e7/tensorfs-0.25.1-cp311-abi3-win_amd64.whl", hash = "sha256:1c96103caf7aaf1f7b712f95ef5867ab0475166a44a01212ee29a490ca7f8512", size = 18432521, upload-time = "2026-11-12T15:04:35.459Z" },
+    { url = "https://github.com/cozy-creator/cozy-creator/releases/download/xs-198-tensorfs-0.27.0-95d567d3/tensorfs-0.27.0%2Bdev.g95d567d3-cp311-abi3-macosx_11_0_arm64.whl", hash = "sha256:36a49af6ea86ea0b6af69d0d2db095cd6bd1dcc4e6253fa94fa99a6bbfa5840b" },
+]
+
+[[package]]
+name = "tensorfs"
+version = "0.27.0+dev.g95d567d3"
+source = { url = "https://github.com/cozy-creator/cozy-creator/releases/download/xs-198-tensorfs-0.27.0-95d567d3/tensorfs-0.27.0%2Bdev.g95d567d3-cp311-abi3-manylinux_2_28_aarch64.whl" }
+resolution-markers = [
+    "platform_machine == 'aarch64' and sys_platform == 'linux'",
+]
+wheels = [
+    { url = "https://github.com/cozy-creator/cozy-creator/releases/download/xs-198-tensorfs-0.27.0-95d567d3/tensorfs-0.27.0%2Bdev.g95d567d3-cp311-abi3-manylinux_2_28_aarch64.whl", hash = "sha256:2f06e1de450146b95662e4f3a6f8253feee78157490f2c4664ebd05074a26acf" },
+]
+
+[[package]]
+name = "tensorfs"
+version = "0.27.0+dev.g95d567d3"
+source = { url = "https://github.com/cozy-creator/cozy-creator/releases/download/xs-198-tensorfs-0.27.0-95d567d3/tensorfs-0.27.0%2Bdev.g95d567d3-cp311-abi3-manylinux_2_28_x86_64.whl" }
+resolution-markers = [
+    "platform_machine == 'x86_64' and sys_platform == 'linux'",
+]
+wheels = [
+    { url = "https://github.com/cozy-creator/cozy-creator/releases/download/xs-198-tensorfs-0.27.0-95d567d3/tensorfs-0.27.0%2Bdev.g95d567d3-cp311-abi3-manylinux_2_28_x86_64.whl", hash = "sha256:650a72ddda60622966c0053129f61dd0270fe5df2c3cba21e1aa9887e6e56a2a" },
+]
+
+[[package]]
+name = "tensorfs"
+version = "0.27.0+dev.g95d567d3"
+source = { url = "https://github.com/cozy-creator/cozy-creator/releases/download/xs-198-tensorfs-0.27.0-95d567d3/tensorfs-0.27.0%2Bdev.g95d567d3-cp311-abi3-win_amd64.whl" }
+resolution-markers = [
+    "platform_machine == 'AMD64' and sys_platform == 'win32'",
+]
+wheels = [
+    { url = "https://github.com/cozy-creator/cozy-creator/releases/download/xs-198-tensorfs-0.27.0-95d567d3/tensorfs-0.27.0%2Bdev.g95d567d3-cp311-abi3-win_amd64.whl", hash = "sha256:0aff582bfbb566697f55e89a718f14ab5ed9d5548c6501557857d59de628c9e6" },
 ]
 
 [[package]]

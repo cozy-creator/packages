@@ -58,6 +58,7 @@ for platform child execution while Orbit's CPU environment installs only its own
 The `await call(render_shot, request)` expression remains the managed-call operation.
 
 Cozy 0.27 requires H3 0.14.0rc1 or newer in the `cozy-calls` extra and Runtime 0.48.
-The source is declared against the ordinary TensorHub index; no unpublished wheel URL is
-invented. Relock against the actual H3/SDK artifacts and regenerate `_h3.py` before this
-cohort is qualified. The retained 0.26 lock is historical evidence only.
+The lock selects the reviewed Runtime 0.48/TensorFS 0.27 artifacts and the immutable
+[H3 prerequisite wheel](https://github.com/cozy-creator/packages/releases/tag/xs-198-h3-0.14.0rc1-6afff07c).
+Generated references follow that exact locked artifact. This GitHub prerequisite is
+separate from TensorHub publication and the coordinated release's model qualification.
