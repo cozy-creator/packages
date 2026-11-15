@@ -8,6 +8,8 @@ from typing import TypedDict, cast
 
 import numpy as np
 import torch
+from cozy_runtime.accel import sequence_parallel
+from cozy_runtime.vlm import VisionLM
 from cozy_runtime import rng
 from cozy_runtime.author import Config, InvalidRequest, Loader, Model, ModelAssets, Serving, uses_components
 from diffusers.models.autoencoders.autoencoder_kl_wan import AutoencoderKLWan
@@ -93,6 +95,12 @@ def stage(block: PAN2TextEncoderStep | PAN2VaeEncoderStep | PAN2VaeDecoderStep, 
     return state
 
 
+@sequence_parallel(degrees=(2, 4, 8))
+class Reasoner(VisionLM):
+    """Replicated auxiliary beside the sequence-sharded simulator."""
+
+
+@sequence_parallel(degrees=(2, 4, 8))
 class Pan2(Model[Graph]):
     serving = Serving(min_bits=16, attention_bits=16)
     graph: Graph

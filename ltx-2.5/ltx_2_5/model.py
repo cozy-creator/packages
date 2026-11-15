@@ -8,7 +8,8 @@ from typing import TypedDict, cast
 
 import numpy as np
 import torch
-from cozy_runtime.author import Config, Loader, Model, ModelAssets, Serving, device, uses_components
+from cozy_runtime.accel import sequence_parallel
+from cozy_runtime.author import Config, Loader, Model, ModelAssets, Serving, device, memoize, uses_components
 from diffusers.models.autoencoders.autoencoder_kl_ltx2_audio import AutoencoderKLLTX2Audio
 from diffusers.models.autoencoders.autoencoder_kl_ltx2 import AutoencoderKLLTX2Video
 from diffusers.models.transformers.transformer_ltx2 import LTX2VideoTransformer3DModel
@@ -25,6 +26,7 @@ from torch import nn
 from transformers import AddedToken, Gemma4UnifiedConfig, Gemma4UnifiedForConditionalGeneration, GemmaTokenizer
 
 from .vae import VideoVAE
+from .parallel import install
 
 FPS = 24
 SIGMAS = (1.0, 0.99375, 0.9875, 0.98125, 0.975, 0.909375, 0.725, 0.421875)
@@ -104,6 +106,7 @@ class Graph:
             "vocoder": LTX2VocoderWithBWE.from_config(config.section("vocoder").mapping()).float().eval(),
             "latent_upsampler": stored(LTX2LatentUpsamplerModel.from_config(config.section("latent_upsampler").mapping()), "latent_upsampler", config),
         }
+        install(self.components["transformer"])
         self.scheduler_config = config.section("scheduler").mapping()
 
 
@@ -121,6 +124,7 @@ class ImagePipeline(LTX2ImageToVideoPipeline):
         return torch.device(str(device()))
 
 
+@sequence_parallel(degrees=(2, 4, 8))
 class Ltx25(Model[Graph]):
     serving = Serving(min_bits=16, attention_bits=16)
     graph: Graph
@@ -141,6 +145,7 @@ class Ltx25(Model[Graph]):
         pipe.set_progress_bar_config(disable=True)  # type: ignore[no-untyped-call]  # Diffusers leaves progress configuration unannotated.
         return pipe
 
+    @memoize
     @uses_components("text_encoder")
     def encode(self, prompt: str) -> tuple[torch.Tensor, torch.Tensor]:
         pipe = self._pipeline()
@@ -197,8 +202,14 @@ class Ltx25(Model[Graph]):
         vae = self.graph.components["vae"]
         with torch.inference_mode():
             pixels = vae.decode(latents.to(vae.dtype), None, return_dict=False)[0]
-        pixels = pixels[0].permute(1, 2, 3, 0).float().add(1).mul(127.5).round().clamp(0, 255).to(torch.uint8)
-        return cast(VideoPixels, pixels.contiguous().cpu().numpy())
+        pixels = pixels[0].permute(1, 2, 3, 0)
+        result = np.empty(tuple(pixels.shape), dtype=np.uint8)
+        # A full 20-second 1080p F32 copy is 12 GB. Pointwise conversion needs only a
+        # small frame batch; keeping it bounded preserves the exact rounded RGB8 bytes.
+        for start in range(0, len(pixels), 16):
+            chunk = pixels[start:start + 16].to(dtype=torch.float32, copy=True).add_(1).mul_(127.5).round_().clamp_(0, 255)
+            result[start:start + 16] = chunk.to(torch.uint8).cpu().numpy()
+        return cast(VideoPixels, result)
 
     @uses_components("audio_vae", "vocoder")
     def decode_audio(self, latents: torch.Tensor) -> tuple[torch.Tensor, int]:

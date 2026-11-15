@@ -13,9 +13,8 @@ from cozy_runtime import vlm
 from cozy_runtime.author import Adjustments, App, Context, Outputs, OutputError, Seed, Telemetry
 from cozy_runtime.fields import Advanced, AspectRatio, FileBound, ImagePreparation, Range, Ratios
 from cozy_runtime.media import ImageFile, VideoFile
-from cozy_runtime.vlm import VisionLM
 
-from .model import COMPONENTS, DEFAULT_STEPS, FPS, Pan2
+from .model import COMPONENTS, DEFAULT_STEPS, FPS, Pan2, Reasoner
 
 app = App()
 MODEL = "ifm/pan2@0.1.0"
@@ -75,7 +74,7 @@ def caption(text: str) -> str:
 
 @app.tool(label="PAN2", named="video", defaults={"model": MODEL, "reasoner": "qwen/qwen3.5-9b@0.2.0"},
           components={"model": COMPONENTS}, on_demand=("reasoner",), memoize=True)
-def generate(ctx: Context, payload: Generate, model: Pan2, reasoner: VisionLM, out: Outputs,
+def generate(ctx: Context, payload: Generate, model: Pan2, reasoner: Reasoner, out: Outputs,
              tel: Telemetry, adj: Adjustments) -> VideoResult:
     """PAN2's silent video, at 24 fps for up to 20 seconds. A first frame animates that scene."""
     seed = int(payload.seed) if payload.seed is not None else secrets.randbits(32)
