@@ -23,7 +23,7 @@ import sys
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "ltx-2.5"))
-from ltx_2_5.parallel import install
+from ltx_2_5.parallel import install  # noqa: E402 - run the checked-out package, without installing it.
 
 
 def ltx():
