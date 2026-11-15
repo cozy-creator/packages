@@ -55,6 +55,7 @@ from cozy_runtime.accel.kernels import (
     Launch,
     Plan,
     PreQuantized,
+    quantize_once,
     ROWWISE_FP8,
     TritonEntry,
     TritonKernels,
@@ -1043,10 +1044,21 @@ class _Heads:
         assert isinstance(window, slice)
         d = self.attn.head_dim
         start, stop = window.start * d, window.stop * d
-        query, key, value = (
-            project(self.hidden, start, stop).unflatten(-1, (-1, d))
-            for project in self.projections
-        )
+        # Match the native leaf's cases that disable implicit operand sharing: inference
+        # tensors have no mutation counter, and a recording leaf has no sibling identity.
+        # Versioned eager tensors keep their existing reuse across head windows. An explicit
+        # scope ends before RoPE/attention and never holds an operand across windows.
+        shared: torch.Tensor | None = None
+        if isinstance(self.hidden, torch.Tensor) and (
+            self.hidden.is_inference()
+            or (self.hidden.is_cuda and torch.cuda.is_current_stream_capturing())
+        ):
+            shared = self.hidden
+        with quantize_once(shared):
+            query, key, value = (
+                project(self.hidden, start, stop).unflatten(-1, (-1, d))
+                for project in self.projections
+            )
         query, key = self.processor.rope(self.attn, query, key, self.rotary)
         seed_key_mean(getattr(self.processor, "_glue", None), key, window)
         return self.processor.attend(query, key, value)
