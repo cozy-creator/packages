@@ -8,7 +8,7 @@ from typing import Annotated, Literal
 
 import msgspec
 import torch
-from cozy_runtime.author import Adjustments, App, Context, OutputError, Outputs, Seed, Telemetry
+from cozy_runtime.author import Adjustments, App, Context, OutputError, Seed, Telemetry
 from cozy_runtime.fields import Advanced, AspectRatio, FileBound, Image, MENTION, Prompt, Ratios, When
 from cozy_runtime.image import MEGAPIXEL, ImageRequest, ImageResult, Sizes, ratio_of
 from cozy_runtime.media import ImageFile
@@ -133,7 +133,6 @@ def _generate(
     rewriter: Enhancer,
     text_encoder: QwenImage21TextEncoder,
     vae: QwenImage21VAE,
-    out: Outputs,
     tel: Telemetry,
     adj: Adjustments,
     turbo: FunAccLoRA | None,
@@ -189,9 +188,7 @@ def _generate(
         decoded = vae.decode(latents, width=width, height=height)
         image = decoded_image(decoded)
     with tel.stage("saving image"):
-        # WebP cannot represent a side of 16384 pixels; retain every supported canvas.
-        output_format = "webp" if max(width, height) < 16384 else "png"
-        asset = out.save_image(image, format=output_format)
+        asset = ImageFile.from_image(image)
     return ImageResult(asset, width, height, seed, prompt)
 
 
@@ -222,12 +219,11 @@ def generate(
     rewriter: Enhancer,
     text_encoder: QwenImage21TextEncoder,
     vae: QwenImage21VAE,
-    out: Outputs,
     tel: Telemetry,
     adj: Adjustments,
 ) -> ImageResult:
     """Qwen-Image-2.1, the 40-step base model."""
-    return _generate(ctx, payload, expander, model, rewriter, text_encoder, vae, out, tel, adj, None)
+    return _generate(ctx, payload, expander, model, rewriter, text_encoder, vae, tel, adj, None)
 
 
 @app.entrypoint(defaults=_TURBO, components=_COMPONENTS, on_demand=_ON_DEMAND, memoize=True)  # fmt: skip
@@ -240,12 +236,11 @@ def generate_turbo(
     text_encoder: QwenImage21TextEncoder,
     turbo_lora: FunAccLoRA,
     vae: QwenImage21VAE,
-    out: Outputs,
     tel: Telemetry,
     adj: Adjustments,
 ) -> ImageResult:
     """Qwen-Image-2.1 with Alibaba PAI's Fun Acc: the same inputs, in 4 steps."""
-    return _generate(ctx, payload, expander, model, rewriter, text_encoder, vae, out, tel, adj, turbo_lora)
+    return _generate(ctx, payload, expander, model, rewriter, text_encoder, vae, tel, adj, turbo_lora)
 
 
 class ImageBox(msgspec.Struct, kw_only=True):
@@ -277,7 +272,6 @@ def image(
     text_encoder: QwenImage21TextEncoder,
     turbo_lora: FunAccLoRA,
     vae: QwenImage21VAE,
-    out: Outputs,
     tel: Telemetry,
     adj: Adjustments,
 ) -> ImageResult:
@@ -285,7 +279,7 @@ def image(
     request = GenerateInput(prompt=payload.instructions, aspect_ratio=payload.aspect_ratio,
                             megapixels=payload.megapixels, seed=payload.seed,
                             prompt_upsampling=payload.prompt_upsampling, creativity=payload.creativity)  # fmt: skip
-    return _generate(ctx, request, expander, model, rewriter, text_encoder, vae, out, tel, adj,
+    return _generate(ctx, request, expander, model, rewriter, text_encoder, vae, tel, adj,
                      turbo_lora if payload.turbo else None)  # fmt: skip
 
 
@@ -311,7 +305,7 @@ _UPSCALE = {"model": "qwen/qwen-image-2.1@0.1.0", "text_encoder": "atomicchat/qw
 @app.tool(label="Upscale", named="image", defaults=_UPSCALE,
           components={"model": ("transformer",), "text_encoder": ("text_encoder",), "vae": ("vae",)}, memoize=True)  # fmt: skip
 def upscale(ctx: Context, payload: UpscaleInput, model: QwenImage21DiT, text_encoder: QwenImage21TextEncoder,
-            turbo_lora: FunAccLoRA, vae: QwenImage21VAE, out: Outputs, tel: Telemetry, adj: Adjustments) -> ImageResult:
+            turbo_lora: FunAccLoRA, vae: QwenImage21VAE, tel: Telemetry, adj: Adjustments) -> ImageResult:
     """The picture larger: Qwen Image 2 Turbo edits it at the size asked, the picture its reference and, Lanczos-upscaled
     to the canvas, below `denoise` its start."""
     with tel.stage("reading picture"):
@@ -334,6 +328,6 @@ def upscale(ctx: Context, payload: UpscaleInput, model: QwenImage21DiT, text_enc
     with tel.stage("decoding image"):
         image = decoded_image(vae.decode(latents, width=width, height=height))
     with tel.stage("saving image"):
-        asset = out.save_image(image, format="png")
+        asset = ImageFile.from_image(image, format="png")
     tel.log("upscale", source=f"{picture.width}x{picture.height}", width=width, height=height)
     return ImageResult(asset, width, height, seed, UPSCALE_PROMPT)
