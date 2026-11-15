@@ -7,7 +7,7 @@ av==19.0.2
 certifi==2026.10.23
 charset-normalizer==3.5.2
 click==8.5.1
-cozy-runtime @ https://github.com/cozy-creator/cozy-runtime/releases/download/xs-198-runtime-0.48.0.dev0-116ac53c/cozy_runtime-0.48.0.dev0%2Bdev.g116ac53c-py3-none-any.whl#sha256=2866142a536a39ca669667e33a2015e7c6366f4a954d3c69d8b71cd68ef8501c
+cozy-runtime @ https://github.com/cozy-creator/cozy-runtime/releases/download/xs-198-runtime-0.48.0.dev0-aec95482/cozy_runtime-0.48.0.dev0%2Bdev.gaec95482-py3-none-any.whl#sha256=84e9156307fedf65fb4695626e5b155b9f1d197e08836310a920f71ad03f864b
 diffusers==0.42.1
 einops==0.8.2
 filelock==4.2.10

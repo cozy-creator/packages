@@ -50,8 +50,8 @@ wheels = [
 
 [[package]]
 name = "cozy-runtime"
-version = "0.48.0.dev0+dev.g116ac53c"
-source = { url = "https://github.com/cozy-creator/cozy-runtime/releases/download/xs-198-runtime-0.48.0.dev0-116ac53c/cozy_runtime-0.48.0.dev0%2Bdev.g116ac53c-py3-none-any.whl" }
+version = "0.48.0.dev0+dev.gaec95482"
+source = { url = "https://github.com/cozy-creator/cozy-runtime/releases/download/xs-198-runtime-0.48.0.dev0-aec95482/cozy_runtime-0.48.0.dev0%2Bdev.gaec95482-py3-none-any.whl" }
 dependencies = [
     { name = "msgspec" },
     { name = "numpy" },
@@ -63,7 +63,7 @@ dependencies = [
     { name = "tensorfs", version = "0.27.0+dev.g95d567d3", source = { url = "https://github.com/cozy-creator/cozy-creator/releases/download/xs-198-tensorfs-0.27.0-95d567d3/tensorfs-0.27.0%2Bdev.g95d567d3-cp311-abi3-win_amd64.whl" }, marker = "sys_platform == 'win32'" },
 ]
 wheels = [
-    { url = "https://github.com/cozy-creator/cozy-runtime/releases/download/xs-198-runtime-0.48.0.dev0-116ac53c/cozy_runtime-0.48.0.dev0%2Bdev.g116ac53c-py3-none-any.whl", hash = "sha256:2866142a536a39ca669667e33a2015e7c6366f4a954d3c69d8b71cd68ef8501c" },
+    { url = "https://github.com/cozy-creator/cozy-runtime/releases/download/xs-198-runtime-0.48.0.dev0-aec95482/cozy_runtime-0.48.0.dev0%2Bdev.gaec95482-py3-none-any.whl", hash = "sha256:84e9156307fedf65fb4695626e5b155b9f1d197e08836310a920f71ad03f864b" },
 ]
 
 [package.optional-dependencies]
@@ -262,7 +262,7 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
-    { name = "cozy-runtime", extras = ["media"], url = "https://github.com/cozy-creator/cozy-runtime/releases/download/xs-198-runtime-0.48.0.dev0-116ac53c/cozy_runtime-0.48.0.dev0%2Bdev.g116ac53c-py3-none-any.whl" },
+    { name = "cozy-runtime", extras = ["media"], url = "https://github.com/cozy-creator/cozy-runtime/releases/download/xs-198-runtime-0.48.0.dev0-aec95482/cozy_runtime-0.48.0.dev0%2Bdev.gaec95482-py3-none-any.whl" },
     { name = "msgspec", specifier = ">=0.19" },
     { name = "numpy", specifier = ">=2" },
     { name = "torch", marker = "sys_platform != 'win32'", specifier = ">=2.10" },
