@@ -45,10 +45,13 @@ def canvas(resolution: str, ratio: AspectRatio | None, first: tuple[int, int] | 
     native = (1920, 1088) if resolution == "1080p" else (1280, 704)
     if ratio is None and first is None:
         return native
-    w, h = first or native
     if ratio is not None:
-        w, h = (float(value) for value in str(ratio).split(":"))
-    r = min(2.0, max(0.5, w / h))
+        rw, rh = (float(value) for value in str(ratio).split(":"))
+        r = rw / rh
+    else:
+        w, h = first or native
+        r = w / h
+    r = min(2.0, max(0.5, r))
     area = native[0] * native[1]
     return max(64, round(math.sqrt(area * r) / 64) * 64), max(64, round(math.sqrt(area / r) / 64) * 64)
 

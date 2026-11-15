@@ -202,3 +202,125 @@ The code is Apache2; model weights use **LTX-2.x Community License**, not Apache
 - Preserve the actual checkpoint statistics, safetensor keys, config, tokenizer assets, licenses, and source revision in conversion receipts.
 - Decide whether to ship the documented Diffusers Euler path first or implement/match current reference Euler ancestral. Report the chosen path in demo evidence.
 - Measure actual supported memory/offload/backend behavior on the selected GPU; no numeric VRAM guarantee was found or established here.
+
+## Follow-up: exact ingestion and config cleanup (2026-11-15)
+
+Read-only implementation research against the installed CLI's exact Creator source `b7594d88` (`cozy 0.26.0-dev+gb7594d88`). This supersedes the earlier gated-config limitation: the parent supplied an already authorized HF credential location, and small index documents now read successfully. No ingestion, weight download, publication, rental action, or runtime code change was performed by this researcher.
+
+### Exact BF16 index rosters
+
+At Diffusers pack revision `4791a1100e0cf97f7ed5c55c12dd71dce13f9dd3`, authenticated index reads establish:
+
+| Index | Only the referenced shards | Tensor bytes |
+| --- | --- | --- |
+| `transformer/diffusion_pytorch_model.safetensors.index.json` | `diffusion_pytorch_model-00001-of-00004.safetensors` through `00004-of-00004` | 37,975,718,400 |
+| `connectors/diffusion_pytorch_model.safetensors.index.json` | `diffusion_pytorch_model-00001-of-00002.safetensors` and `00002-of-00002` | 6,344,455,168 |
+| `text_encoder/model.safetensors.index.json` | `model-00001-of-00005.safetensors` through `00005-of-00005` | 23,919,460,448 |
+
+The eight-shard transformer alternative and the monolithic connectors file must remain unselected when these indexes are selected. Actual local metadata at `.task/metadata/ltx25/text_encoder/config.json` confirms hidden size3840, 48 layers, 49 hidden-state outputs, projection input188160, Transformers5.14.1, and `gemma_version=gemma4-12b-ltx-v1`.
+
+### Why `--add` cannot repair structured config
+
+`cozy model upload --add text_encoder/config.json=clean.json` adds/replaces an **asset**, and does not change `Component.config`. Creator `b7594d88`, `crates/tensorfs/src/import/compose.rs:253–281`, `with_assets`, copies the header's component declarations and inserts into `component.assets`; class/config/tensors are untouched. Runtime consumes structured config before the model factory, so an asset of the same filename cannot remove its rejection of `ltx_source_checkpoint.base_checkpoint`.
+
+The CLI also exposes only one source string. `crates/tensord/src/published.rs:1654–1663` constructs `Request { sources: &[source.to_string()], source_variant: None, ... }`. A source's `:components` suffix cuts its **converted result**, after import, so it cannot prevent the whole source's duplicate-selection failure. `--base` composes existing headers; it does not widen that one-source selection interface.
+
+### Smallest public-API rerun
+
+Use **one `tensorfs.convert_to_cozytensors` call with an ordered source list**. Create a task-local metadata-only directory from `.task/metadata/ltx25`, with:
+
+- The same component directory names, tokenizer JSON/config/template, scheduler config, and component configs.
+- A trimmed `model_index.json` naming only `transformer`, `connectors`, `text_encoder`, `audio_vae`, `vae`, `vocoder`, `latent_upsampler`, `tokenizer`, and `scheduler` as appropriate to the package. Leave unused optional duration/enhancer/diffusion-decode components out.
+- The top-level `ltx_source_checkpoint` object removed from the **text-encoder config only**. Preserve its exact original JSON as e.g. `text_encoder/upstream-training-provenance.json`, a separate asset. Preserve the source-config digest and HF source revision in the conversion receipt too. No Runtime validation weakening is needed.
+
+Put this local metadata directory **first**, then exact pinned index/weight sources:
+
+```python
+import tensorfs
+
+upstream = "hf://Lightricks/LTX-2.5-Diffusers@4791a1100e0cf97f7ed5c55c12dd71dce13f9dd3/"
+sources = [
+    str(sanitized_metadata_directory),
+    upstream + "transformer/diffusion_pytorch_model.safetensors.index.json",
+    upstream + "connectors/diffusion_pytorch_model.safetensors.index.json",
+    upstream + "text_encoder/model.safetensors.index.json",
+    upstream + "audio_vae/diffusion_pytorch_model.safetensors",
+    upstream + "vae/diffusion_pytorch_model.safetensors",
+    upstream + "vocoder/diffusion_pytorch_model.safetensors",
+    upstream + "latent_upsampler/diffusion_pytorch_model.safetensors",
+]
+checkpoint = tensorfs.convert_to_cozytensors(
+    sources, token=hf_token, cache_dir=task_cache, progress=progress,
+)
+```
+
+This is source-derived and not executed here. The public signature is `convert_to_cozytensors(source: str | Sequence[str], *, converter=None, source_variant=None, cache_dir=None, token=None, progress=None) -> Checkpoint` (`crates/tensorfs-py/python/tensorfs/api.pyi:42–44`). An ordinary token string is passed without a `Bearer ` prefix; the native provider adds it. Do not print credentials.
+
+The mechanism is explicit in `b7594d88` source:
+
+- `crates/tensorfs/src/import/remote.rs:852–870`: selecting an exact index expands its `weight_map` to the full named checkpoint, includes that folder's config/sidecars, and excludes other loose weights. Selecting a referenced shard also expands to its entire indexed checkpoint.
+- `crates/tensorfs/src/import/mod.rs:878–908`: each source is selected independently, then members are merged by relative path. Duplicate nonweight files keep the **first** occurrence and produce a warning. Therefore the local sanitized text-encoder config wins over the original HF config without changing importer/model code.
+- `crates/tensorfs/src/import/remote.rs:615–647`: a local directory lists paths relative to that directory, matching the HF component paths.
+- `crates/tensorfs/src/import/mod.rs:768–803`: multiple groups are accepted when one supplied `model_index.json` explicitly declares their distinct component folders. Two independent weight groups inside one component folder are refused. The selected exact-index roster supplies only one group per folder.
+
+After conversion, assert the structured `checkpoint.components["text_encoder"].config` has no `ltx_source_checkpoint`, all expected components/assets are present, the exact index rosters were used, and actual tensor counts/bytes match the receipt. Then publish through the parent's existing authorized run-output/CLI flow, or use the public named Writer below with the Hub credential separately from the HF credential.
+
+### Public Writer fallback for a checkpoint already ingested
+
+`Writer(base=checkpoint)` retains base tensors/assets. Redeclaring a component changes its class/config while retaining tensors, so an existing good exact-selection checkpoint can be corrected without tensor decoding:
+
+```python
+component = checkpoint.components["text_encoder"]
+clean = dict(component.config)
+training_provenance = clean.pop("ltx_source_checkpoint", None)
+writer = tensorfs.Writer(base=checkpoint, cache_dir=task_cache)
+out = writer.component("text_encoder", cls=component.cls, config=clean,
+                       config_file=component.config_file)
+if training_provenance is not None:
+    out.asset("upstream-training-provenance.json", provenance_json_bytes)
+clean_checkpoint = writer.commit()
+```
+
+`provenance_json_bytes` should serialize the saved object before removing it. To publish directly instead, the same constructor accepts `model_id=destination, lane="bf16", endpoint=hub_endpoint, token=hub_token`; `commit()` publishes a new private checkpoint. A `dest=...` argument instead writes a complete portable file, including weights; avoid that when the intended operation is only header/config correction and publication. Signature: `Writer(dest=None, *, base=None, resume=None, model_id=None, lane=None, endpoint=None, token=None, cache_dir=None)`. `component(name, *, cls=None, config=None, config_file=None) -> ComponentWriter`. `asset(name, data: Buffer)`. `commit() -> Checkpoint`.
+
+Evidence: `crates/tensorfs-py/python/tensorfs/_ext.pyi:376–404` explicitly documents that redeclaration changes class/config while tensors stay; `crates/tensorfs/src/session/writer.rs:252–277` implements the declaration. Its commit (`:322–325`) fetches carried missing base objects before sealing, so this is not a guarantee of zero transfer for a lazy remote base; it is cheap when conversion already holds those objects locally. For a new ingestion, first-source sanitized metadata is the simpler path.
+
+### Worker-local alias to controller-authorized upload
+
+The controller's `cozy model upload /work/task/model.cozytensors ... --on fujimaru` cannot open a path that exists only on the worker. `crates/cli/src/send.rs:454–473` resolves filesystem paths on the **controller**, snapshots them as held attachments, and immediately fails if absent there. `--on` chooses execution placement rather than path interpretation.
+
+The smaller supported handoff uses a public local-model ref in the worker's actual TensorFS store:
+
+```python
+# On the worker, after conversion in the same store:
+retained = tensorfs.Writer(
+    base=checkpoint,
+    model_id="local/ltx25-distilled-bf16-import",
+    lane="bf16",
+    cache_dir="/var/lib/tensorfs",
+).commit()
+```
+
+Then, on the controller using its normal Hub authorization:
+
+```sh
+cozy model upload local/ltx25-distilled-bf16-import paul/ltx-2.5 --lane bf16 --on fujimaru
+```
+
+`Writer` forces `model_id="local/..."` to a local endpoint (`session/writer.rs:114–127`); the endpoint records its commit with `Store.update_ref(name)` (`fetch/endpoint.rs:219–237`). TensorD resolves local models through the same `Store.get_ref(model)` (`tensord/src/storage.rs:148–166`). No private store editing, portable checkpoint file, or Hub credential transfer is required.
+
+**Fujimaru root verified read-only:** its daemon PID312 held `/var/lib/tensorfs/owner.lock` when inspected via `/proc/*/fd` over authorized SSH. `/var/lib/tensorfs` is also the documented rental default, with configurable override `COZY_TENSORFS_ROOT` / `machine.store` (`api/src/config.rs:30`, `tensord/src/machine/grant.rs:58–82`). Use that exact root for both conversion and alias Writer. An unrelated task cache produces a local ref that this machine cannot resolve.
+
+`ctx.adopt_model` is not a direct-import bridge: it takes a Runtime `Output` from a declared derivation, not a raw TensorFS `Checkpoint`. Local alias plus regular model upload avoids that additional custody conversion.
+
+### RC auto-update and stable qualification
+
+There is no per-`cozy run` cohort/version override in the inspected CLI. A dev home's ordered rental follows the open RC by default. The supported machine-specific stable hold is an explicit update naming software, for example, after current machine work finishes:
+
+```sh
+cozy machine update fujimaru --runtime 0.46.0 --tensorfs 0.25.1 --tensord 0.25.0
+```
+
+This source-derived command was **not executed by this researcher**. `calcifer/src/rc.rs:210–236` records named software updates as durable manual holds; `follow_rc` exits when held (`:261`), and a held machine does not automatically move to a package's newer Runtime floor. A flagless `cozy machine update fujimaru` releases the hold. The RC CLI explicitly permits work on a released machine (`calcifer/src/update.rs:92–99`), so no shared `dev` configuration change is needed.
+
+The actual worker was observed on Runtime `0.47.0.dev2274+g44c19b44`, TensorFS `0.25.1+dev.gec4c0ef8`, cozy `0.26.0-dev+gec4c0ef8`. Source ref `44c19b44a01f9148cb31a3df383e9c8b97b34313` is available in the Runtime repository. Comparing it with `v0.46.0` gives **no differences** in `author/_loader.py`, `_config.py`, `_context.py`, or `__init__.py`; `_model.py` only adds `Residency.keep` to a protocol. In particular `Serving` and `loader.construct(factory: Callable[[Config], T]) -> T` are unchanged. Author API adaptation for that RC is unnecessary on this evidence. RC GPU execution remains a different qualification gate from released0.46 GPU execution.

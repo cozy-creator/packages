@@ -4,24 +4,19 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable
-from typing import cast
+from typing import TypedDict, cast
 
 import numpy as np
-import numpy.typing as npt
 import torch
-from cozy_runtime.accel import hold_dtype
-from cozy_runtime.accel.kernels import Plan
 from cozy_runtime.author import Config, Loader, Model, ModelAssets, Serving, device, uses_components
-from diffusers import (
-    AutoencoderKLLTX2Audio,
-    AutoencoderKLLTX2Video,
-    FlowMatchEulerDiscreteScheduler,
-    LTX2ImageToVideoPipeline,
-    LTX2LatentUpsamplePipeline,
-    LTX2Pipeline,
-    LTX2TextConnectors,
-    LTX2VideoTransformer3DModel,
-)
+from diffusers.models.autoencoders.autoencoder_kl_ltx2_audio import AutoencoderKLLTX2Audio
+from diffusers.models.autoencoders.autoencoder_kl_ltx2 import AutoencoderKLLTX2Video
+from diffusers.models.transformers.transformer_ltx2 import LTX2VideoTransformer3DModel
+from diffusers.models.condition_embedders.condition_embedder_ltx2 import LTX2TextConnectors
+from diffusers.schedulers.scheduling_flow_match_euler_discrete import FlowMatchEulerDiscreteScheduler
+from diffusers.pipelines.ltx2.pipeline_ltx2 import LTX2Pipeline
+from diffusers.pipelines.ltx2.pipeline_ltx2_image2video import LTX2ImageToVideoPipeline
+from diffusers.pipelines.ltx2.pipeline_ltx2_latent_upsample import LTX2LatentUpsamplePipeline
 from diffusers.models.latent_upscaler.latent_upscaler_ltx2 import LTX2LatentUpsamplerModel
 from diffusers.pipelines.ltx2.vocoder import LTX2VocoderWithBWE
 from PIL import Image
@@ -29,18 +24,30 @@ from tokenizers import Tokenizer
 from torch import nn
 from transformers import AddedToken, Gemma4UnifiedConfig, Gemma4UnifiedForConditionalGeneration, GemmaTokenizer
 
+from .vae import VideoVAE
+
 FPS = 24
 SIGMAS = (1.0, 0.99375, 0.9875, 0.98125, 0.975, 0.909375, 0.725, 0.421875)
 REFINE_SIGMAS = SIGMAS[-3:]
 COMPONENTS = ("transformer", "text_encoder", "connectors", "vae", "audio_vae", "vocoder", "latent_upsampler")
+VideoPixels = np.ndarray[tuple[int, int, int, int], np.dtype[np.uint8]]
 
 
-def stored(module: nn.Module, component: str, config: Config) -> nn.Module:
+def stored[T: nn.Module](module: T, component: str, config: Config) -> T:
     dtypes = {"bf16": torch.bfloat16, "f16": torch.float16, "f32": torch.float32}
     for name, parameter in module.named_parameters():
         dtype = dtypes.get(config.tensor_dtype(f"{component}.{name}", default="bf16"))
         if dtype is not None:
             parameter.data = parameter.data.to(dtype)
+    for prefix, child in module.named_modules():
+        for name, buffer in child.named_buffers(recurse=False):
+            if name in child._non_persistent_buffers_set or not buffer.is_floating_point():
+                continue
+            key = ".".join(part for part in (prefix, name) if part)
+            default = {torch.float32: "f32", torch.float64: "f64", torch.float16: "f16", torch.bfloat16: "bf16"}.get(buffer.dtype, "f32")
+            dtype = dtypes.get(config.tensor_dtype(f"{component}.{key}", default=default))
+            if dtype is not None:
+                buffer.data = buffer.data.to(dtype)
     return module.eval()
 
 
@@ -59,13 +66,32 @@ def tokenizer(assets: ModelAssets) -> GemmaTokenizer:
     return made
 
 
+class Components(TypedDict):
+    transformer: LTX2VideoTransformer3DModel
+    text_encoder: Gemma4UnifiedForConditionalGeneration
+    connectors: LTX2TextConnectors
+    vae: AutoencoderKLLTX2Video
+    audio_vae: AutoencoderKLLTX2Audio
+    vocoder: LTX2VocoderWithBWE
+    latent_upsampler: LTX2LatentUpsamplerModel
+
+
 class Graph:
+    components: Components
     def __init__(self, config: Config) -> None:
-        text = Gemma4UnifiedForConditionalGeneration(Gemma4UnifiedConfig(**config.section("text_encoder").mapping()))
+        text_settings = config.section("text_encoder").mapping()
+        language_settings = config.section("text_encoder").section("text_config").mapping()
+        softcap = language_settings.get("final_logit_softcapping")
+        # Canonical JSON writes 30.0 as 30. Gemma's strict float-only field rejects
+        # that equivalent integer spelling; restore its Python type at this boundary.
+        if type(softcap) is int:
+            language_settings["final_logit_softcapping"] = float(softcap)
+        text_settings["text_config"] = language_settings
+        text = Gemma4UnifiedForConditionalGeneration(Gemma4UnifiedConfig(**text_settings))
         # Prompt encoding uses hidden states, never vocabulary logits; this tied projection
         # is not a separate stored tensor and would otherwise allocate [tokens,vocabulary].
         text.lm_head = nn.Identity()
-        vae = AutoencoderKLLTX2Video.from_config(config.section("vae").mapping())
+        vae = VideoVAE.from_config(config.section("vae").mapping())
         vae.enable_tiling()
         self.components = {
             "transformer": stored(LTX2VideoTransformer3DModel.from_config(config.section("transformer").mapping()), "transformer", config),
@@ -73,7 +99,9 @@ class Graph:
             "connectors": stored(LTX2TextConnectors.from_config(config.section("connectors").mapping()), "connectors", config),
             "vae": stored(vae, "vae", config),
             "audio_vae": stored(AutoencoderKLLTX2Audio.from_config(config.section("audio_vae").mapping()), "audio_vae", config),
-            "vocoder": stored(LTX2VocoderWithBWE.from_config(config.section("vocoder").mapping()), "vocoder", config),
+            # The reference vocoder computes in F32. Its Cozy checkpoint stores that exact,
+            # losslessly widened representation before Runtime places any weights or buffers.
+            "vocoder": LTX2VocoderWithBWE.from_config(config.section("vocoder").mapping()).float().eval(),
             "latent_upsampler": stored(LTX2LatentUpsamplerModel.from_config(config.section("latent_upsampler").mapping()), "latent_upsampler", config),
         }
         self.scheduler_config = config.section("scheduler").mapping()
@@ -102,11 +130,6 @@ class Ltx25(Model[Graph]):
         self.graph = loader.construct(Graph)
         self.tokenizer = tokenizer(loader.assets)
 
-    def execution_plan(self, plan: Plan) -> str:
-        """The reference vocoder computes in F32; the Runtime casts at its next fill."""
-        hold_dtype(self.graph.components["vocoder"], torch.float32)
-        return "ltx25-vocoder-f32"
-
     def _pipeline(self, image: bool = False) -> LTX2Pipeline | LTX2ImageToVideoPipeline:
         c = self.graph.components
         cls = ImagePipeline if image else TextPipeline
@@ -115,7 +138,7 @@ class Ltx25(Model[Graph]):
             vae=c["vae"], audio_vae=c["audio_vae"], text_encoder=c["text_encoder"],
             tokenizer=self.tokenizer, connectors=c["connectors"], transformer=c["transformer"], vocoder=c["vocoder"],
         )
-        pipe.set_progress_bar_config(disable=True)
+        pipe.set_progress_bar_config(disable=True)  # type: ignore[no-untyped-call]  # Diffusers leaves progress configuration unannotated.
         return pipe
 
     @uses_components("text_encoder")
@@ -165,24 +188,24 @@ class Ltx25(Model[Graph]):
     @uses_components("latent_upsampler", "vae")
     def upscale(self, latents: torch.Tensor) -> torch.Tensor:
         pipe = LTX2LatentUpsamplePipeline(vae=self.graph.components["vae"], latent_upsampler=self.graph.components["latent_upsampler"])
-        pipe.set_progress_bar_config(disable=True)
+        pipe.set_progress_bar_config(disable=True)  # type: ignore[no-untyped-call]  # Diffusers leaves progress configuration unannotated.
         with torch.inference_mode():
             return cast(torch.Tensor, pipe(latents=latents, latents_normalized=False, output_type="latent", return_dict=False)[0])
 
     @uses_components("vae")
-    def decode_video(self, latents: torch.Tensor) -> npt.NDArray[np.uint8]:
-        vae = cast(AutoencoderKLLTX2Video, self.graph.components["vae"])
+    def decode_video(self, latents: torch.Tensor) -> VideoPixels:
+        vae = self.graph.components["vae"]
         with torch.inference_mode():
             pixels = vae.decode(latents.to(vae.dtype), None, return_dict=False)[0]
         pixels = pixels[0].permute(1, 2, 3, 0).float().add(1).mul(127.5).round().clamp(0, 255).to(torch.uint8)
-        return pixels.contiguous().cpu().numpy()
+        return cast(VideoPixels, pixels.contiguous().cpu().numpy())
 
     @uses_components("audio_vae", "vocoder")
     def decode_audio(self, latents: torch.Tensor) -> tuple[torch.Tensor, int]:
-        vae = cast(AutoencoderKLLTX2Audio, self.graph.components["audio_vae"])
-        vocoder = cast(LTX2VocoderWithBWE, self.graph.components["vocoder"])
+        vae = self.graph.components["audio_vae"]
+        vocoder = self.graph.components["vocoder"]
         with torch.inference_mode():
             mel = vae.decode(latents.to(vae.dtype), return_dict=False)[0]
             audio = vocoder(mel.to(vocoder.dtype))[0].float().cpu()
-        return audio, int(vocoder.config.output_sampling_rate)
+        return audio, int(vocoder.config["output_sampling_rate"])
 
