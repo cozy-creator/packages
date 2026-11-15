@@ -455,20 +455,26 @@ version = "0.2.0rc1"
 source = { editable = "." }
 dependencies = [
     { name = "cozy-runtime", extra = ["media"] },
-    { name = "minimax-h3" },
     { name = "msgspec" },
     { name = "numpy" },
     { name = "pillow" },
 ]
 
+[package.dev-dependencies]
+cozy-calls = [
+    { name = "minimax-h3" },
+]
+
 [package.metadata]
 requires-dist = [
     { name = "cozy-runtime", extras = ["media"], specifier = ">=0.46.0,<0.47" },
-    { name = "minimax-h3", specifier = ">=0.12.0rc2", index = "https://tensorhub.com/v1/index/_/simple/" },
     { name = "msgspec", specifier = ">=0.19" },
     { name = "numpy", specifier = ">=1.26" },
     { name = "pillow", specifier = ">=12" },
 ]
+
+[package.metadata.requires-dev]
+cozy-calls = [{ name = "minimax-h3", specifier = ">=0.12.0rc2", index = "https://tensorhub.com/v1/index/_/simple/" }]
 
 [[package]]
 name = "packaging"
