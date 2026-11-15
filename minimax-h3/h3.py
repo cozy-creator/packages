@@ -1543,6 +1543,7 @@ async def _render(ctx: Context, shot: Shot, out: Outputs, tel: Telemetry, *, pla
         latents = None
     carry, done, trimmed, offset = Carry(shot.carried_frames, True), 0, False, 0.0
     kept: list[int] = []  # the take's seams it keeps
+    whole = 0  # the take's segments it keeps, when its seams say
     if pickup is not None and take is not None:
         if latents is not None:
             data = latents.read_bytes()
@@ -1558,6 +1559,7 @@ async def _render(ctx: Context, shot: Shot, out: Outputs, tel: Telemetry, *, pla
                     warnings.append(f"a pickup starts where a segment does, so this keeps up to {seam / FPS:.2f} s "
                                     f"(frame {seam}), not {pickup.out_frame / FPS:.2f} s")  # fmt: skip
                 done, kept = seam, [frame for frame in held if frame < seam]
+                whole = len(kept) + 1
         else:
             end = math.ceil(take.file.probe().duration * FPS)
             done = min(pickup.out_frame, end)
@@ -1619,17 +1621,25 @@ async def _render(ctx: Context, shot: Shot, out: Outputs, tel: Telemetry, *, pla
                                   [(start - plan.prefix_frames, plan.sample_frames) for start, plan in zip(starts, plans, strict=True)])  # fmt: skip
     warnings += notes
     opened = [begun + at for at in opens]
-    texts = segment_texts(script.prompt, opened, continued=take is not None, carried=carried, duration_s=duration_s, carry=carry)
+    # The shot's own beats start where the beats' clock is 0: a later part of it is a segment opening after that.
+    texts = segment_texts(script.prompt, opened, continued=take is not None, carried=carried, duration_s=duration_s, carry=carry,
+                          beats_at=max(0.0, -offset), names=set(script.names.values()))
     files: dict[str, ImageFile | VideoFile | AudioFile] = {}
     calls: list[SegmentCall] = []
     for index, (text, start, until) in enumerate(zip(texts, opened, [*opened[1:], math.inf], strict=True)):
         own = [ref for ref in here(script, start, until) if ref.kind not in CLIPS or ref.name in windows[index]]
         # A later segment starts from the previous segment's last frame as a world state, after the shot's own pictures
-        # so their <Picture N> keep their numbers: who and what is where now (se-087: 9 of 9 seams joined cleanly).
-        anchor = [_anchor(f"Segment {index} end", script.people)] if index else []
+        # so their <Picture N> keep their numbers: who and what is where now (se-087: 9 of 9 seams joined cleanly). A redo
+        # from a seam starts from the kept segment's, named as that segment's successor names it.
+        anchor = [_anchor(f"Segment {whole + index} end", script.people)] if index or whole and carried else []
+        if anchor and not index:
+            files[anchor[0].name] = frame_at(cast(ShotVideo, take).file, done, out)
         refs, added = [*own, *anchor, *([followed] if followed else [])], frozenset(ref.name for ref in anchor)
         forced = added | ({"Plate"} if followed else set())
-        role = {"keyframes": bool(index == 0 and opening or index + 1 == count and ending), "continues": index == 0 and carried}
+        # A shot's segment that goes on from frames before it, a take's or its own last segment's, is a continuation (ref
+        # guide 3), so a redo from a seam reads as that segment did. An edit's later segments keep their tags.
+        role = {"keyframes": bool(index == 0 and opening or index + 1 == count and ending),
+                "continues": carried if index == 0 else plate is None}
         segment = segment_call(text, refs, soundscape=script.soundscape, music=script.music, index=index,
                                retained=retained, added=added, forced=forced, **role)  # fmt: skip
         if index == 0 and (plate is not None or carried) and not any(FILE[ref.kind] == "image" for ref in segment.references):
@@ -1707,7 +1717,7 @@ async def _render(ctx: Context, shot: Shot, out: Outputs, tel: Telemetry, *, pla
         context = result.context
         returned.append(result)
         warnings += result.warnings
-        files[f"Segment {index + 1} end"] = result.last_frame
+        files[f"Segment {whole + index + 1} end"] = result.last_frame
         # Each segment shows as it lands, after those before it, so its box plays all made so far while the next renders.
         if index + 1 == count and (take is None or carried):
             out.publish("video", result.video, label="Video")

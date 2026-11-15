@@ -1,0 +1,124 @@
+# Advisories known in locked pins (xs-196): `build` runs pip-audit over the locks and fails on any advisory not listed
+# here. Each goes when its pin moves past it; a new advisory fails the next build.
+# certifi 2026.7.22: fixed in 2026.10.18
+PYSEC-2026-4320
+# diskcache 5.6.3: fixed in no release yet
+PYSEC-2026-2447
+# filelock 3.32.4: fixed in 4.0.9, 4.2.1
+GHSA-567q-5qvw-pf92
+GHSA-6627-m3xw-93mp
+GHSA-69hj-f68j-2879
+GHSA-8mx5-7m5m-r77g
+GHSA-9c4x-gm8v-wgc4
+GHSA-9vhv-jxww-xfm5
+GHSA-cwqr-hh33-gh44
+GHSA-fq56-3cx3-fjxp
+GHSA-j8f7-rjxc-mr56
+GHSA-m462-7rxw-wvpg
+GHSA-rfpc-qcw5-3pc4
+GHSA-v4x8-3wr5-3wq8
+# filelock 4.0.3: fixed in 4.0.9, 4.2.1
+GHSA-567q-5qvw-pf92
+GHSA-6627-m3xw-93mp
+GHSA-69hj-f68j-2879
+GHSA-8mx5-7m5m-r77g
+GHSA-9c4x-gm8v-wgc4
+GHSA-9j6q-wvj5-jgjg
+GHSA-9vhv-jxww-xfm5
+GHSA-cwqr-hh33-gh44
+GHSA-fj95-fr6c-h845
+GHSA-fq56-3cx3-fjxp
+GHSA-j8f7-rjxc-mr56
+GHSA-m462-7rxw-wvpg
+GHSA-rfpc-qcw5-3pc4
+GHSA-v4x8-3wr5-3wq8
+# filelock 4.1.1: fixed in 4.2.1
+GHSA-2g95-wg33-c5x2
+GHSA-567q-5qvw-pf92
+GHSA-6627-m3xw-93mp
+GHSA-69hj-f68j-2879
+GHSA-8mx5-7m5m-r77g
+GHSA-9c4x-gm8v-wgc4
+GHSA-9j6q-wvj5-jgjg
+GHSA-9vhv-jxww-xfm5
+GHSA-crv4-6mhj-j5jh
+GHSA-cwqr-hh33-gh44
+GHSA-fj95-fr6c-h845
+GHSA-fq56-3cx3-fjxp
+GHSA-jqc4-5cvw-7w85
+GHSA-m462-7rxw-wvpg
+GHSA-rfpc-qcw5-3pc4
+GHSA-v4x8-3wr5-3wq8
+GHSA-wfhq-q4j2-c37m
+# filelock 4.2.0: fixed in 4.2.1
+GHSA-2g95-wg33-c5x2
+GHSA-567q-5qvw-pf92
+GHSA-6627-m3xw-93mp
+GHSA-69hj-f68j-2879
+GHSA-8mx5-7m5m-r77g
+GHSA-9c4x-gm8v-wgc4
+GHSA-9j6q-wvj5-jgjg
+GHSA-9vhv-jxww-xfm5
+GHSA-crv4-6mhj-j5jh
+GHSA-cwqr-hh33-gh44
+GHSA-fj95-fr6c-h845
+GHSA-fq56-3cx3-fjxp
+GHSA-jqc4-5cvw-7w85
+GHSA-m462-7rxw-wvpg
+GHSA-rfpc-qcw5-3pc4
+GHSA-v4x8-3wr5-3wq8
+GHSA-wfhq-q4j2-c37m
+# pillow 12.3.0: fixed in 13.0.0
+GHSA-22hg-r758-rrw9
+GHSA-24rc-8hj2-v98c
+GHSA-254f-3936-288h
+GHSA-332p-7hrc-92wf
+GHSA-462x-pgg6-55fp
+GHSA-5xm2-6676-qcp9
+GHSA-65qm-jvmh-6pqg
+GHSA-74r2-7ff9-mjj2
+GHSA-78g4-xqwv-q3g8
+GHSA-c6hw-5grf-ff96
+GHSA-f2g6-542v-9j58
+GHSA-fc9g-5qg7-mf45
+GHSA-g7cr-3p24-7wf7
+GHSA-gg2r-wvfm-q9rx
+GHSA-j4m9-6w36-pw47
+GHSA-jg86-v3jv-hrpm
+GHSA-mrfp-p49p-3hf2
+GHSA-p4wg-p73j-c528
+GHSA-q45j-58j2-45rg
+GHSA-vx6w-vv9f-6gvg
+GHSA-w889-685w-c8fh
+GHSA-wqgw-9xfh-qf2g
+GHSA-xcvg-w56q-r89m
+PYSEC-2026-4326
+PYSEC-2026-4327
+PYSEC-2026-4328
+PYSEC-2026-4329
+PYSEC-2026-4330
+PYSEC-2026-4331
+PYSEC-2026-4332
+PYSEC-2026-4333
+PYSEC-2026-4334
+PYSEC-2026-4335
+PYSEC-2026-4336
+PYSEC-2026-4337
+PYSEC-2026-4338
+PYSEC-2026-4339
+PYSEC-2026-4340
+PYSEC-2026-4341
+PYSEC-2026-4342
+PYSEC-2026-4343
+PYSEC-2026-4363
+# transformers 4.57.6: fixed in 5.0.0, 5.10.0, 5.3.0
+PYSEC-2025-217
+PYSEC-2026-2288
+PYSEC-2026-2289
+PYSEC-2026-2290
+PYSEC-2026-3929
+PYSEC-2026-4174
+# urllib3 2.7.0: fixed in 2.8.0
+PYSEC-2026-4175
+PYSEC-2026-4176
+PYSEC-2026-4177

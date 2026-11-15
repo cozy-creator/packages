@@ -27,13 +27,59 @@ cozy run krea-2/generate prompt='a red fox in fresh snow at golden hour' seed=7
 cozy run krea-2/generate_turbo --input request.yaml --lora <org/krea-2-lora>,0.8
 ```
 
-Fields: `prompt`, `aspect_ratio` (any `W:H`, default 1:1), `megapixels` (Raw 1, Turbo 4), `steps` (1–100) and
-`seed` (random when omitted, returned). `generate` also takes `guidance` (0–20; 0 runs no negative branch) and
-`negative_prompt` (default empty, as Krea's): Turbo samples without guidance. Krea 2 makes images from text only, so its `prompt` is words: a mentioned text box goes in as its words, and a mentioned picture as its name, with a warning ([references](../docs/references.md)).
-Unknown fields are dropped with a warning. The result is `image`, `width`, `height`, `seed` and `prompt`.
+Fields: `prompt`, `aspect_ratio` (any `W:H`, default 1:1, or the first picture's), `megapixels` (Raw 1, Turbo 4,
+or the first picture's), `steps` (1–100) and `seed` (random when omitted, returned). `generate` also takes
+`guidance` (0–20; 0 runs no negative branch) and `negative_prompt` (default empty, as Krea's): Turbo samples
+without guidance. Unknown fields are dropped with a warning. The result is `image`, `width`, `height`, `seed`
+and `prompt`.
+
+## Pictures
+
+Krea 2 is text-only upstream; its community adapters make it edit. Each is a LoRA the package arms itself,
+from its author's mirror on the Hub (`--model <slot>=<ref>` swaps one).
+
+- **Edit:** the pictures a prompt mentions (`<amy> on a beach at dusk`; up to 2, the first the scene, the
+  second the person) are edited with Identity Edit V2 (`edit` slot). A mention reads as its name
+  ([references](../docs/references.md)).
+- **Image-to-image:** `image` is a picture to start from, `denoise` how much of it is redrawn (default 0.7).
+- **Control:** `control` is a list of the Runtime's `Control` (`{image, kind, strength}`), `image` the ready map,
+  of the four kinds below; a map of another kind is dropped with a warning. Krea 2 reads the first.
+
+| input | adapter (slot) | how it conditions | Raw | Turbo |
+| --- | --- | --- | --- | --- |
+| mentioned pictures | conradlocke Identity Edit V2 (`edit`) | VAE tokens before the target + Qwen3-VL sees the pictures | yes | yes |
+| `pose` (OpenPose/DWPose skeleton) | thedeoxen pose ControlNet LoRA (`pose`) | ai-toolkit edit: VAE tokens after the target at t=0, attending only to themselves, + `Picture 1:` | untested | yes (trained on Turbo) |
+| `lineart` (white lines on black) | Cierpliwy lineart edit (`lineart`) | ai-toolkit edit, as pose | yes | yes |
+| `inpaint` (the picture with the area to redraw transparent, or black) | Cierpliwy inpaint edit (`inpaint`) | ai-toolkit edit, as pose | yes | yes |
+| `depth` (near is white) | Patil depth ControlNet-LoRA (`depth`) | the map's latents beside each image token (`img_in` 64 → 128) | yes | yes |
+| `sketch`, `canny` | none | dropped with a warning | | |
+
+With pictures, the output is at most 2 MP (the adapters' range). A control with mentioned pictures goes as its
+VAE tokens alone, the person beside the canvas. The pose adapter follows a skeleton loosely, and with a person
+it can repeat them; two pictures (a scene and a person) composite stiffly. General Edit V2 (`--model edit=conradlocke/general-edit@0.1.0`) is the same author's
+instruction editor (remove, recolor, relight); the two are not stacked. Identity Edit V2 and General Edit V2 are
+free for non-commercial use only; commercial use needs the author's licence (their model card).
 
 Guidance is Krea's: `cond + g·(cond − uncond)`, so Krea's 3.5 is ComfyUI's cfg 4.5, and Turbo's 0 is
 ComfyUI's cfg 1.
+
+## Text encoder
+
+`text_encoder` is its own slot: it reads the Qwen3-VL-4B of any Krea 2 checkpoint, the function's own by default
+(Raw's and Turbo's are byte-identical); `model` reads only the DiT, and `vae` the VAE. Each slot builds only what it
+reads, so a model of that part alone serves it: a transformer with its scheduler for `model`, a text encoder with its
+tokenizer for `text_encoder` (`cozy model upload <model>:transformer,scheduler`). Quiho's abliterated encoder
+([Krea2_NSFW_Uncensored_Complete](https://huggingface.co/Quiho/Krea2_NSFW_Uncensored_Complete),
+`quiho/qwen3-vl-4b-abliterated`) is Qwen3-VL-4B with its refusal direction removed:
+
+```sh
+cozy run krea-2/generate_turbo prompt='...' model.text_encoder=quiho/qwen3-vl-4b-abliterated@0.1.0
+```
+
+Quiho publishes it in fp8 only. Its `int8` lane is this package's recipe, written from those fp8 values, and serves
+wherever the card has int8 tensor cores; `fp8` serves the rest.
+On an RTX 4090 it changed details but not what an explicit prompt renders, with or without an NSFW LoRA: what
+Turbo leaves out (a "topless" prompt drawn in a bikini) it leaves out with either encoder.
 
 ## Sizes
 
@@ -53,8 +99,8 @@ Turbo: 1.15), bf16 noise from `seed` drawn on the CPU, and the VAE in bf16. Two 
   tokens keep their positions and values, the DiT reads text at rotary position 0, and the masked keys
   carried nothing. It saves the padding's compute, and with no mask every attention kernel can serve.
   On tiny real modules in f32 the package's latents equal the pipeline's to 1.7e-6 (bf16: its rounding).
-- Only the text encoder's layers 0–34 are built; layer 35, the final norm and the vision tower are never
-  read.
+- Only the text encoder's layers 0–34 are built; layer 35 and the final norm are never read. Its vision
+  tower runs only for a prompt with pictures.
 
 The steps are a plain loop over Diffusers' `FlowMatchEulerDiscreteScheduler`. Each step is `Krea2Transformer2DModel.forward` op for op, with what
 no step changes built once: each prompt's text fusion and projection, and its rotary tables. With CFG the
@@ -80,6 +126,10 @@ cozy model upload hf://krea/Krea-2-Raw@6b0ece7fffb640c5e3bcbe0a7f10f66b8e60a603 
 cozy model upload hf://krea/Krea-2-Turbo@98e0fe118d17c9e3547fbb2e25acdbae2cadf7c7 krea/krea-2-turbo --lane bf16 --on <machine>
 cozy model quantize krea/krea-2@sha256:<bf16 commit> --lane int8 --package krea-2 --on <machine>
 cozy model quantize krea/krea-2-turbo@sha256:<bf16 commit> --lane int8 --package krea-2 --on <machine>
+cozy model upload hf://Quiho/Krea2_NSFW_Uncensored_Complete@4ecd0d82d30daec24691db30495d752f2d7d7f64/qwen3VL4BAbliteratedComfyui_FP8.safetensors \
+  quiho/qwen3-vl-4b-abliterated --lane fp8 --base krea/krea-2-turbo@sha256:<bf16 commit> \
+  --mirror https://huggingface.co/Quiho/Krea2_NSFW_Uncensored_Complete --on <machine>
+cozy model quantize quiho/qwen3-vl-4b-abliterated@sha256:<fp8 commit> --lane int8 --package krea-2 --on <machine>
 ```
 
 The upload reads the Diffusers folders (`raw.safetensors` and `turbo.safetensors`, the reference
@@ -87,6 +137,12 @@ checkpoints, are not taken); the text encoder and VAE are byte-identical in both
 (`int8.convrot`, W8A8 on int8 tensor cores, the default) takes what Comfy-Org's int8 ConvRot files do:
 every linear of the 28 DiT blocks and every projection of Qwen3-VL's language layers. The text fusion,
 embedders, modulation, final layer, token embedding and VAE keep their bytes.
+
+Quiho's encoder is one ComfyUI file (`model.layers.*`, `model.visual.*`), which TensorFS's `qwen3vl.comfy` table reads
+as the `text_encoder`; its linears are plain fp8 with no scales, which TensorFS reads as `fp8.rowwise` with every row's
+scale 1, the values ComfyUI upcasts, so the int8 recipe reads them exactly.
+The upload takes the DiT, VAE and tokenizer from `--base`, so the mirror is a whole Krea 2 Turbo checkpoint, of which
+the slot reads only the encoder.
 
 ## Licence
 
