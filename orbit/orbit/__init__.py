@@ -259,7 +259,7 @@ def silent(frames: Sequence[tuple[VideoFile, int]]) -> Iterator[DecodedMediaEven
                         break
 
 
-@app.tool(label="Orbit", named="video", accelerator=False)
+@app.tool(label="Orbit", named="video")
 async def orbit(ctx: Context, payload: Orbit, out: Outputs, tel: Telemetry) -> OrbitResult:
     """The picture's subject seen from all the way round: one clockwise camera turn around it, frozen in time, that
     loops. H3 renders it under ORB360 from its trained caption, which names the subject and the angle every third of

@@ -1727,7 +1727,7 @@ async def _render(ctx: Context, shot: Shot, out: Outputs, tel: Telemetry, *, pla
                       kept_s=begun if take is not None else None, seams=seams)  # fmt: skip
 
 
-@app.tool(label="Shot", named="shot", accelerator=False, reserved=_RESERVED)
+@app.tool(label="Shot", named="shot", reserved=_RESERVED)
 async def generate(ctx: Context, payload: Shot, out: Outputs, tel: Telemetry) -> ShotResult:
     """One continuous shot of any length, with sound (README.md): a summary, then what happens, beat by beat, each text
     with the references it mentions; an optional first and last frame; and Pick up from here, which goes on from a take
@@ -1753,7 +1753,7 @@ class PackageShotResult(msgspec.Struct):
     warnings: list[str]
 
 
-@app.entrypoint(accelerator=False)
+@app.entrypoint
 async def render_shot(ctx: Context, payload: PackageShot, out: Outputs, tel: Telemetry) -> PackageShotResult:
     """`generate` for another package (`orbit`): its LoRAs on every segment after Turbo's, as `edit` puts its edit LoRA
     on, and only the video back."""
@@ -1806,7 +1806,7 @@ class Edit(msgspec.Struct, kw_only=True):
     seed: Seed | None = None
 
 
-@app.tool(label="Edit", named="edit", accelerator=False, reserved=_RESERVED)
+@app.tool(label="Edit", named="edit", reserved=_RESERVED)
 async def edit(ctx: Context, payload: Edit, out: Outputs, tel: Telemetry) -> ShotResult:
     """A plate edited by its beats, on Ref2VA under the chosen edit LoRA, its trigger opening each beat. With no picture
     in a beat, the plate's own first frame is the picture."""
@@ -1833,7 +1833,7 @@ class UpscaleOutput(msgspec.Struct):
     warnings: list[str] = msgspec.field(default_factory=list)
 
 
-@app.tool(label="Upscale", named="upscale", accelerator=False)
+@app.tool(label="Upscale", named="upscale")
 async def upscale(ctx: Context, payload: Upscale, out: Outputs, tel: Telemetry) -> UpscaleOutput:
     """A take at 1080p, 1440p or 2160p, its sound kept (UPSCALE.md): its 768p latents upscaled and refined by H3 under
     the Regenerate LoRA, from the text they carry, else its frames from its description. A video already that big comes

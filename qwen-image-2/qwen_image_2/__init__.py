@@ -206,8 +206,7 @@ _TURBO = {"expander": "pottokao/qwen-image-2.1-pe-t2i-abliterated@0.1.0", "model
           "rewriter": "darrellbest/qwen-image-2.1-pe-i2i-abliterated@0.1.0",
           "text_encoder": "atomicchat/qwen-image-2.1-text-encoder-abliterated@0.1.0",
           "turbo_lora": "alibaba-pai/qwen-image-2.1-fun-acc@0.1.0"}
-_COMPONENTS = {"expander": ("model",), "model": ("transformer", "vae"), "rewriter": ("model",),
-               "text_encoder": ("text_encoder",)}
+_COMPONENTS = {"model": ("transformer", "vae"), "text_encoder": ("text_encoder",)}
 #: Built and fetched on first use: an edit never pulls the expander, `prompt_upsampling=False` neither enhancer.
 _ON_DEMAND = ("rewriter", "expander")
 

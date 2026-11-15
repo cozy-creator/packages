@@ -157,7 +157,7 @@ async def pruned(ctx: Context, *, source: Weights, tel: Telemetry) -> ModelArtif
     return artifact
 
 
-app.entrypoint(pruned, name="pruned", weights=(WeightsOutput("bf16", max_new_bytes=MAX_PRUNED_BYTES),))
+app.entrypoint(pruned, name="pruned", accelerator=True, weights=(WeightsOutput("bf16", max_new_bytes=MAX_PRUNED_BYTES),))
 
 
 _BLOCKS = "transformer.transformer_blocks.*"
