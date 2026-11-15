@@ -56,3 +56,8 @@ Orbit imports typed call declarations generated from H3's locked interface in
 relocking the H3 dependency. The standard `cozy-calls` optional extra keeps H3 available
 for platform child execution while Orbit's CPU environment installs only its own dependencies.
 The `await call(render_shot, request)` expression remains the managed-call operation.
+
+This RC locks the source-only H3 0.13.0rc7 dependency wheel from the packages GitHub
+prerelease. The existing publisher includes it in dependency order and switches its
+source back to the TensorHub index once that child's intended release exists there.
+Final publication refuses a missing child; RC and dry-run builds may retain the wheel.

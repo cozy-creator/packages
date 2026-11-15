@@ -129,31 +129,31 @@ class vaeRequest(msgspec.Struct, kw_only=True, frozen=True):
 
 apply_adaln: Operation[apply_adalnRequest, ModelArtifact] = Operation(
     distribution='minimax-h3', module='minimax_h3.preparation.adaln_operations', export='apply_adaln',
-    declaration='sha256:55cf33803c21288d5411ac3a4ecef5518d521a27ae6b910056374e664b88db36', request=apply_adalnRequest, result=ModelArtifact,
+    declaration='sha256:39ae12ede57fc5d319647e9eeb9c16af587c7c28f35a0a5637ff60ef3c6e94e3', request=apply_adalnRequest, result=ModelArtifact,
     models=('source', 'fl2va', 'ref2va'),
 )
 
 bf16_full: Operation[bf16_fullRequest, ModelArtifact] = Operation(
     distribution='minimax-h3', module='minimax_h3.preparation.job', export='bf16_full',
-    declaration='sha256:c349dcc7454759b8484512e1148993074563f8100bfb7bf824e818800af0403b', request=bf16_fullRequest, result=ModelArtifact,
+    declaration='sha256:039b3dd296fc05ba5405d05f91521798f5f8605aa5fc67ee1a204bd62b1aefa9', request=bf16_fullRequest, result=ModelArtifact,
     models=('source',),
 )
 
 bf16_pruned: Operation[bf16_prunedRequest, ModelArtifact] = Operation(
     distribution='minimax-h3', module='minimax_h3.preparation.job', export='bf16_pruned',
-    declaration='sha256:709155bf5275dfd30a0a968da3adbf93dc67626c3f1cc57603fd18670155f554', request=bf16_prunedRequest, result=ModelArtifact,
+    declaration='sha256:4d206da87acae75422a860b7e1c28752bf2e7ad6b564187829f94ab182864367', request=bf16_prunedRequest, result=ModelArtifact,
     models=('source',),
 )
 
 compute_adaln_tables: Operation[compute_adaln_tablesRequest, ModelArtifact] = Operation(
     distribution='minimax-h3', module='minimax_h3.preparation.adaln_operations', export='compute_adaln_tables',
-    declaration='sha256:8eef535112004c8ef5c65cd227a2ffbecff12947c6dc038f49294092557806b9', request=compute_adaln_tablesRequest, result=ModelArtifact,
+    declaration='sha256:193760099eea5b40039adbb6648010d980b76434c69cd22ca57527f939f77170', request=compute_adaln_tablesRequest, result=ModelArtifact,
     models=('source',),
 )
 
 curve_pruned: Operation[curve_prunedRequest, ModelArtifact] = Operation(
     distribution='minimax-h3', module='minimax_h3.preparation.job', export='curve_pruned',
-    declaration='sha256:edf0d50902a2d0c6ec9d69bfa647f07c62aecfb8b1710dcf29f2dfc47bfa9bf0', request=curve_prunedRequest, result=ModelArtifact,
+    declaration='sha256:a08354c877b373d98c6879fe78e5d3477717921c82ea3304a70e217da81c98ff', request=curve_prunedRequest, result=ModelArtifact,
     models=('source',),
 )
 
@@ -165,7 +165,7 @@ edit: Operation[Edit, ShotResult] = Operation(
 
 fp8_pruned: Operation[fp8_prunedRequest, ModelArtifact] = Operation(
     distribution='minimax-h3', module='minimax_h3.preparation.job', export='fp8_pruned',
-    declaration='sha256:6415ebcef420ac230cde51e591cf73fdadb513fd594cf54f6a23971ae891029d', request=fp8_prunedRequest, result=ModelArtifact,
+    declaration='sha256:311d62a4e226ddd3af4ff9b37dbf113c140e242a8b9225fde778625e26a47a5b', request=fp8_prunedRequest, result=ModelArtifact,
     models=('source',),
 )
 
@@ -183,7 +183,7 @@ quantize: Operation[quantizeRequest, ModelArtifact] = Operation(
 
 regenerate_lora: Operation[regenerate_loraRequest, ModelArtifact] = Operation(
     distribution='minimax-h3', module='minimax_h3.preparation.regenerate', export='regenerate_lora',
-    declaration='sha256:04cc10e1db478e347b17c1e6dceb333b20c05e41d1fd852a65171a5cce80ee5d', request=regenerate_loraRequest, result=ModelArtifact,
+    declaration='sha256:e89d3e3c1f8bab17dd5864176103deef2e345be26a3e5b73fe30d3294cf67688', request=regenerate_loraRequest, result=ModelArtifact,
     models=('adapters', 'base'),
 )
 
@@ -195,25 +195,25 @@ render_shot: Operation[PackageShot, PackageShotResult] = Operation(
 
 retable: Operation[retableRequest, RetableResult] = Operation(
     distribution='minimax-h3', module='minimax_h3.preparation.job', export='retable',
-    declaration='sha256:c464d549b1bf124d4d965b2ebc03c05a059d3f118e58c575b4a6ca515a94505d', request=retableRequest, result=RetableResult,
+    declaration='sha256:3467730480862f11d828c394c9961dcaa4795e1b85826508aa7d80591e233db8', request=retableRequest, result=RetableResult,
     models=('pruned', 'full'),
 )
 
 retable_adaln: Operation[retable_adalnRequest, ModelArtifact] = Operation(
     distribution='minimax-h3', module='minimax_h3.preparation.adaln_operations', export='retable_adaln',
-    declaration='sha256:5fc7cd9460a41b82446d052522c6d692ddb37fbb8c4e3793dd5d6ba640fc15fd', request=retable_adalnRequest, result=ModelArtifact,
+    declaration='sha256:ba8b1f1d1ddba675bdfc3069df1740222b92d8fc84b8049d6b17ab2c579fd98a', request=retable_adalnRequest, result=ModelArtifact,
     models=('source', 'fl2va', 'ref2va'),
 )
 
 select_adaln_weights: Operation[select_adaln_weightsRequest, Selection] = Operation(
     distribution='minimax-h3', module='minimax_h3.preparation.adaln_operations', export='select_adaln_weights',
-    declaration='sha256:83752543864ecd3359b4ab0f8fa2197434dd5e3c6bae3407cd0879d11764ff66', request=select_adaln_weightsRequest, result=Selection,
+    declaration='sha256:bb3267261c8f839893ad308a14b3ee0452a3b50c309704ecc72c246e0b802b26', request=select_adaln_weightsRequest, result=Selection,
     models=('source',),
 )
 
 turbo_lora: Operation[turbo_loraRequest, ModelArtifact] = Operation(
     distribution='minimax-h3', module='minimax_h3.preparation.turbo', export='turbo_lora',
-    declaration='sha256:9e31e7dc686d62c4cb6a7b76b53c01546018f5a5043c41490a4fb60737d094fc', request=turbo_loraRequest, result=ModelArtifact,
+    declaration='sha256:cb0a09ca5e6d0b665b4c2517c8f06868a6e6fcb2a1407fd4e7b52b24ba5f1ba3', request=turbo_loraRequest, result=ModelArtifact,
     models=('adapters', 'base'),
 )
 
@@ -225,7 +225,7 @@ upscale: Operation[Upscale, UpscaleOutput] = Operation(
 
 vae: Operation[vaeRequest, ModelArtifact] = Operation(
     distribution='minimax-h3', module='minimax_h3.preparation.job', export='vae',
-    declaration='sha256:0dd76e68c4ddbd2762f0932bb9f2c576e6835f7fbfbfafe9142be0f09e2c90cf', request=vaeRequest, result=ModelArtifact,
+    declaration='sha256:be4bbd363573bed147a353991be5380f71601c5bdda26c157469595f7b434cdc', request=vaeRequest, result=ModelArtifact,
     models=('source',),
 )
 

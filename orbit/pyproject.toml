@@ -40,4 +40,4 @@ explicit = true
 [tool.uv.sources]
 torch = { index = "pytorch-cu130", marker = "sys_platform == 'win32'" }
 torchvision = { index = "pytorch-cu130", marker = "sys_platform == 'win32'" }
-minimax-h3 = { index = "tensorhub" }
+minimax-h3 = { url = "https://github.com/cozy-creator/packages/releases/download/xs-198-h3-0.13.0rc7-6136efa9/minimax_h3-0.13.0rc7-py3-none-any.whl" }
