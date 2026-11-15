@@ -10,7 +10,7 @@ for lock in $(git ls-files '*/uv.lock'); do
   (cd "$(dirname "$lock")" && uv export --frozen --format requirements-txt --no-hashes --no-emit-project --all-extras --quiet)
 done | grep -E '^[A-Za-z0-9][A-Za-z0-9._-]*==' | sed 's/ *;.*//' | sort -u \
   | awk -F== -v dir="$work" '{ print > (dir "/" ++seen[tolower($1)] ".txt") }'
-ignore=$(grep -oE '^[A-Z]+-[A-Za-z0-9-]+' pip-audit-known.txt | sed 's/^/--ignore-vuln /' | tr '\n' ' ')
+ignore=$(sed -nE 's/^([A-Z]+-[A-Za-z0-9-]+).*/--ignore-vuln \1/p' pip-audit-known.txt | tr '\n' ' ')
 uvx pip-audit@2.9.0 --version > /dev/null
 for batch in "$work"/*.txt; do
   # shellcheck disable=SC2086
