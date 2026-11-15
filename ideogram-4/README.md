@@ -71,7 +71,8 @@ schedule is shifted by the image size with the preset's (mu, std) nearest the st
 float32 and noise is drawn on the CPU from the seed. The steps are a plain loop over Diffusers'
 `FlowMatchEulerDiscreteScheduler`. The caption's text rows are projected once before it: the image rows never carry Diffusers' zero text features
 (53,248 wide per image token). With tiny random modules on CPU, both DiTs' velocities equal the
-pipeline's forward exactly.
+pipeline's forward exactly. On a GPU each block's norms, modulation, q/k RoPE and SwiGLU run fused on the
+Runtime's kernels, as ComfyUI's comfy-kitchen path does; only their rounding differs.
 
 ## Prepare the models
 
@@ -79,7 +80,7 @@ Ideogram publishes only weight-only fp8 (per-row scales on every linear, its own
 16-bit release exists. TensorFS ingests the fp8 with Diffusers' keys (tfs-134), and the DiTs' `int8` lane is
 written from it (Paul 11-12), as Comfy-Org's `ideogram4_*int8_convrot` files are: every block linear in
 `int8.convrot`, the rest kept fp8. The machine serves `int8` wherever the GPU has int8 tensor cores, fp8 on
-B300; GeForce cards run fp8 at half rate (RTX 4090: 0.80 s a step at int8, 1.01 at fp8). The repository is
+B300; GeForce cards run fp8 at half rate. An RTX 4090 steps the int8 lane in 0.47 s (1024², 48 steps). The repository is
 gated: accept Ideogram's licence on Hugging Face with the account whose token cozy uses.
 
 ```sh
