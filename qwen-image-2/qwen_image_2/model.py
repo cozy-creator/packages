@@ -22,6 +22,8 @@ from PIL import Image
 from torch import nn
 from torch.nn import functional as F
 from diffusers.configuration_utils import ConfigMixin
+from diffusers.pipelines.pipeline_utils import DiffusionPipeline
+from diffusers.image_processor import VaeImageProcessor
 from diffusers.schedulers.scheduling_flow_match_euler_discrete import FlowMatchEulerDiscreteScheduler
 from diffusers.models.autoencoders.autoencoder_kl_qwenimage21 import (
     AutoencoderKLQwenImage21,
@@ -168,9 +170,9 @@ class _RetainedKV(QwenImage21KVCache):
     def __init__(self, num_layers: int, held: Store) -> None:
         self.layer_caches = [_RetainedLayer(held) for _ in range(num_layers)]
 
-    def prefix(self) -> list[KV]:
-        """Each layer's keys and values, as a cached step reads them."""
-        return [layer.get() for layer in self.layer_caches]
+    def prefix(self, layer: int) -> KV:
+        """A layer's keys and values, as a cached step reads them."""
+        return self.layer_caches[layer].get()
 
 
 _DTYPES = {"f32": torch.float32, "bf16": torch.bfloat16, "f16": torch.float16}
@@ -229,53 +231,118 @@ def _stored(config: Config, component: str, module: torch.nn.Module) -> torch.dt
     return dtype
 
 
-class QwenImage21Graph:
-    """One native construction census, with source checkpoint precision preserved."""
+def _section(config: Config, name: str, alone: str) -> Config:
+    """`config`'s section `name`. A checkpoint of one component gives its config unsectioned (Runtime), and none of
+    these is read alone: `alone` says what goes with it."""
+    if name not in config.keys():
+        raise UnsupportedInput(f"this checkpoint holds no {name} section: {alone}", code="artifact_components")
+    return config.section(name)
+
+
+def _transformer(config: Config) -> Transformer:
+    """A checkpoint's `transformer`, hooked for an armed overlay."""
+    # Construction dtype leaves derived buffers F32, as upstream loads them: the DiT's
+    # timestep `freqs` and the text encoder's RoPE. A cast of the built module would round them.
+    section = _section(config, "transformer", "a transformer goes with its scheduler (`<model>:transformer,scheduler`)")
+    with transformer_init.no_init_weights(), local_torch_dtype(torch.bfloat16):
+        built = construct(QwenImage21Transformer2DModel, section.mapping())
+    built.__class__ = Transformer
+    transformer = cast(Transformer, built)  # its class, set above
+    transformer._cozy_overlay = None
+    for path in SITES:
+        transformer.get_submodule(path).register_forward_hook(lora.Hook(partial(_armed, transformer, path)))
+    return transformer
+
+
+def _text_encoder(config: Config) -> Qwen3VLForConditionalGeneration:
+    """A checkpoint's `text_encoder`. The pipeline reads hidden states only, so the 1.24 GB language-model head is not
+    built; Runtime skips its stored weight."""
+    section = _section(config, "text_encoder", "a text encoder goes with its processor (`<model>:text_encoder,processor`)")
+    with transformer_init.no_init_weights():
+        encoder: Qwen3VLForConditionalGeneration = AutoModelForImageTextToText.from_config(  # type: ignore[no-untyped-call]  # Transformers' auto classes are unannotated
+            Qwen3VLConfig(**section.mapping()), dtype=torch.bfloat16
+        )
+    encoder.lm_head = torch.nn.Identity()
+    return encoder
+
+
+class DiTComponents(TypedDict):
+    transformer: Transformer
+
+
+class QwenImage21DiTGraph:
+    """The `transformer` of a checkpoint that holds one, and its scheduler: Qwen-Image-2.1's, Turbo's or a fine-tune's,
+    whole or a model of that part alone (xs-192)."""
 
     def __init__(self, config: Config) -> None:
-        # Construction dtype leaves derived buffers F32, as upstream loads them: the DiT's
-        # timestep `freqs` and the text encoder's RoPE. A cast of the built module would round them.
-        with transformer_init.no_init_weights():
-            with local_torch_dtype(torch.bfloat16):
-                built = construct(QwenImage21Transformer2DModel, config.section("transformer").mapping())
-            built.__class__ = Transformer
-            transformer = cast(Transformer, built)  # its class, set above
-            transformer._cozy_overlay = None
-            for path in SITES:
-                transformer.get_submodule(path).register_forward_hook(lora.Hook(partial(_armed, transformer, path)))
-            self.components: Components = {
-                "transformer": transformer,
-                "text_encoder": AutoModelForImageTextToText.from_config(  # type: ignore[no-untyped-call]  # Transformers' auto classes are unannotated
-                    Qwen3VLConfig(**config.section("text_encoder").mapping()),
-                    dtype=torch.bfloat16,
-                ),
-                "vae": construct(AutoencoderKLQwenImage21, config.section("vae").mapping()),
-            }
-        vae = self.components["vae"]
-        _to(vae, _stored(config, "vae", vae))
-        # Runtime pages a model by its `_no_split_modules`; Diffusers names none for this VAE, so
-        # its 1.35 GB of F32 weights, encoder included, stayed resident through a decode and left
-        # a 3 GB card short for the decode's activations. Each residual, attention and resample
-        # block is one page instead (every one is called as a module, also by `_decoded`).
-        vae._no_split_modules = [  # type: ignore[assignment]  # Diffusers declares None
-            "QwenImage21ResidualBlock",
-            "QwenImage21AttentionBlock",
-            "QwenImage21Resample",
-        ]
-        # The pipeline reads hidden states only, so the 1.24 GB language-model head is not
-        # built; Runtime skips its stored weight.
-        self.components["text_encoder"].lm_head = torch.nn.Identity()
-        self.scheduler_config: dict[str, object] = config.section("scheduler").mapping()
-        # The processor folder's config file, which TensorFS keeps as its component's config.
-        self.processor_config: dict[str, object] = (
-            config.section("processor").mapping() if "processor" in config.keys() else {}
-        )
+        self.components: DiTComponents = {"transformer": _transformer(config)}
+        self.scheduler_config: dict[str, object] = _section(
+            config, "scheduler", "a transformer goes with its scheduler (`<model>:transformer,scheduler`)"
+        ).mapping()
+
+
+class TextEncoderComponents(TypedDict):
+    text_encoder: Qwen3VLForConditionalGeneration
+
+
+def _processor_config(config: Config) -> dict[str, object]:
+    """The processor folder's config file, which TensorFS keeps as its component's config."""
+    return config.section("processor").mapping() if "processor" in config.keys() else {}
+
+
+class QwenImage21TextEncoderGraph:
+    """The `text_encoder` of a checkpoint that holds one, and its processor's config: whole or a model of that part
+    alone (xs-192)."""
+
+    def __init__(self, config: Config) -> None:
+        self.components: TextEncoderComponents = {"text_encoder": _text_encoder(config)}
+        self.processor_config = _processor_config(config)
 
 
 class Components(TypedDict):
     transformer: Transformer
     text_encoder: Qwen3VLForConditionalGeneration
     vae: AutoencoderKLQwenImage21
+
+
+class QwenImage21Graph(QwenImage21DiTGraph):
+    """A whole pipeline's three components in one construction: what the quantize recipes read and calibrate."""
+
+    def __init__(self, config: Config) -> None:
+        super().__init__(config)
+        self.components: Components = {
+            **self.components, "text_encoder": _text_encoder(config), "vae": _vae(config),
+        }
+        self.processor_config = _processor_config(config)
+
+
+def _vae(config: Config) -> AutoencoderKLQwenImage21:
+    """A checkpoint's `vae`, in the dtype it stores: its section of the config, or the whole config of a checkpoint that
+    holds the VAE alone (Runtime gives a lone component's unsectioned). Runtime pages a model by its `_no_split_modules`;
+    Diffusers names none for this VAE, so its 1.35 GB of F32 weights, encoder included, stayed resident through a decode
+    and left a 3 GB card short for the decode's activations. Each residual, attention and resample block is one page
+    instead (every one is called as a module, also by `_decoded`)."""
+    section = config.section("vae") if "vae" in config.keys() else config
+    with transformer_init.no_init_weights():
+        vae: AutoencoderKLQwenImage21 = construct(AutoencoderKLQwenImage21, section.mapping())
+    _to(vae, _stored(config, "vae", vae))
+    vae._no_split_modules = [  # type: ignore[assignment]  # Diffusers declares None
+        "QwenImage21ResidualBlock",
+        "QwenImage21AttentionBlock",
+        "QwenImage21Resample",
+    ]
+    return vae
+
+
+class VAEComponents(TypedDict):
+    vae: AutoencoderKLQwenImage21
+
+
+class QwenImage21VAEGraph:
+    """The `vae` of a checkpoint that holds one: Qwen-Image-2.1's own, or a fine-tune of it."""
+
+    def __init__(self, config: Config) -> None:
+        self.components: VAEComponents = {"vae": _vae(config)}
 
 
 def construct[M: ConfigMixin](cls: type[M], config: dict[str, object]) -> M:
@@ -334,129 +401,91 @@ class _StagedPipeline(QwenImage21Pipeline):
         return self.device_placed
 
 
-class QwenImage21Model(Model[QwenImage21Graph]):
-    #: The 32 DiT blocks attend at 8 bits (comfy-kitchen INT8 on RTX 40-class cards): attention is two thirds
-    #: of a 4 MP step; a 16-bit request attends exactly. Caller LoRAs on the DiT, at any strength: the Runtime
-    #: bakes them into the weights.
-    serving = Serving(attention_bits={"transformer.transformer_blocks.": 8}, loras=("transformer",))
+def _text_pipeline(device: torch.device, encoder: Qwen3VLForConditionalGeneration, processor: Qwen3VLProcessor) -> _StagedPipeline:
+    """Diffusers' pipeline over a text encoder and its processor alone: what encoding a prompt reads (xs-192)."""
+    pipeline = _StagedPipeline(
+        transformer=None,  # type: ignore[arg-type]  # Diffusers takes None for a module it isn't given
+        text_encoder=encoder,
+        vae=None,  # type: ignore[arg-type]
+        processor=processor,
+        scheduler=None,  # type: ignore[arg-type]
+    )
+    pipeline.device_placed = device
+    return pipeline
 
-    graph: QwenImage21Graph
+
+class _Sampling(QwenImage21Pipeline):
+    """What a DiT's denoising reads of Diffusers' pipeline: its scheduler, 16x latent grid and `prepare_latents`. Not
+    upstream's `__init__`, which tokenizes with the processor a DiT's checkpoint doesn't hold (xs-192)."""
+
+    def __init__(self, scheduler: FlowMatchEulerDiscreteScheduler) -> None:
+        DiffusionPipeline.__init__(self)
+        self.register_modules(scheduler=scheduler)  # type: ignore[no-untyped-call]  # Diffusers' register_modules is unannotated
+        self.vae_scale_factor = 16
+
+
+def _encode(
+    pipeline: _StagedPipeline, encoder: Qwen3VLForConditionalGeneration, prompt: str, images: list[Image.Image] | None
+) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
+    """The instruction, with its ordered reference images when given, as one condition."""
+    with torch.inference_mode(), _last_layer_only(encoder):
+        if images is None:
+            embeds, mask, _ = pipeline.encode_prompt(prompt, device=pipeline.device_placed)
+            return embeds, mask, None
+        encoded: tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None] = pipeline.encode_prompt(
+            prompt, image=images, device=pipeline.device_placed  # type: ignore[arg-type]  # pictures, of its input union
+        )
+    return encoded
+
+
+def _fit_prompt(pipeline: _StagedPipeline, processor: Qwen3VLProcessor, prompt: str, grids: Sequence[tuple[int, int]]) -> tuple[str, int, int]:
+    """`prompt` as the DiT's frame rotary table holds it beside references of these latent `grids`: the
+    encoded template's text tokens, the prompt's among them, and each reference's longer side, then the target
+    (`ROPE_POSITIONS`). Upstream encodes any length and fails past the table. With the tokens kept and given."""
+    tokenizer = processor.tokenizer
+    template = pipeline.prompt_template_t2i
+    if grids:  # as `_get_qwen_prompt_embeds` builds it
+        picture = "<image{}><|vision_start|><|image_pad|><|vision_end|>"
+        pictures = " ".join(picture.format(n) for n in range(1, len(grids) + 1))
+        template = pipeline.prompt_template_ti2i.replace(picture.format(1), pictures)
+    room = ROPE_POSITIONS - 1 - sum(max(grid) for grid in grids)
+
+    def length(text: str) -> int:
+        """The text tokens the DiT reads of `text`: the template's after its system prefix, no picture's."""
+        tokens: list[int] = tokenizer(template.format(text or " "))["input_ids"]
+        return sum(token != pipeline._img_token_id for token in tokens[pipeline._drop_idx :])
+
+    ids: list[int] = tokenizer(prompt)["input_ids"]
+    kept, keep = prompt, len(ids)
+    # A cut can tokenize longer at its edge: measured again until it fits.
+    while keep > 0 and (over := length(kept) - room) > 0:
+        keep = max(keep - over, 0)
+        kept = tokenizer.decode(ids[:keep])
+    return kept, keep, len(ids)
+
+
+class QwenImage21TextEncoder(Model[QwenImage21TextEncoderGraph]):
+    """Qwen-Image-2.1's text encoder, its own slot (`text_encoder`): the checkpoint's `text_encoder` and its processor,
+    whichever checkpoint holds them (xs-192)."""
+
+    graph: QwenImage21TextEncoderGraph
     processor: Qwen3VLProcessor
 
     def load(self, loader: Loader) -> None:
-        self.graph = loader.construct(build_qwen_image21)
+        self.graph = loader.construct(QwenImage21TextEncoderGraph)
         self.processor = cast(Qwen3VLProcessor, vlm.processor(loader.assets, "processor/", self.graph.processor_config))  # Qwen3-VL's
 
-    def execution_plan(self, plan: Plan) -> str:
-        vae = self.graph.components["vae"]
-        installed = (
-            fusion.install(plan, BLOCK, self.graph.components["transformer"]),
-            fusion.install_norms(plan, VAE_NORM, self.graph.components["vae"]),
-            fusion.install_lone_frame(plan, VAE_FRAME, vae.decoder, vae.post_quant_conv),
-        )
-        return "+".join(identity for identity in installed if identity)
-
-    def hold_vae(self, tel: Telemetry) -> None:
-        """Run the VAE in bf16 where the GPU computes it natively, as ComfyUI stages it and as Turbo
-        stores it; the base release stores F32, whose decode took 2.0 s on an 8 GB RTX 3070 against
-        ComfyUI's 0.93 s. The Runtime casts the stored bytes when it next fills them; call this
-        before any VAE scope opens."""
-        vae = self.graph.components["vae"]
-        device = torch.device(str(self.device))
-        if device.type != "cuda" or not torch.cuda.is_bf16_supported(including_emulation=False):
-            return
-        if next(vae.parameters()).dtype != VAE_DTYPE:
-            hold_dtype(vae, VAE_DTYPE)
-            tel.log("vae representation", dtype="bfloat16")
-
-    def _pipeline(
-        self, sigmas: Sequence[float] | None = None, scheduler: Mapping[str, object] | None = None
-    ) -> _StagedPipeline:
-        """`scheduler`: fields an overlay's sampling sets over the checkpoint's scheduler."""
-        pipeline = _StagedPipeline(
-            **self.graph.components,
-            processor=self.processor,
-            scheduler=construct(FlowMatchEulerDiscreteScheduler, {**self.graph.scheduler_config, **(scheduler or {})}),
-            sample_sigmas=None if sigmas is None else list(sigmas),
-        )
-        pipeline.device_placed = torch.device(str(self.device))
-        return pipeline
+    def _pipeline(self) -> _StagedPipeline:
+        return _text_pipeline(torch.device(str(self.device)), self.graph.components["text_encoder"], self.processor)
 
     @memoize
     @uses_components("text_encoder")
     def encode(self, prompt: str) -> tuple[torch.Tensor, torch.Tensor | None]:
-        encoder = self.graph.components["text_encoder"]
-        with torch.inference_mode(), _last_layer_only(encoder):
-            embeds, mask, _ = self._pipeline().encode_prompt(
-                prompt, device=torch.device(str(self.device))
-            )
+        embeds, mask, _ = _encode(self._pipeline(), self.graph.components["text_encoder"], prompt, None)
         return embeds, mask
 
     def fit_prompt(self, prompt: str, grids: Sequence[tuple[int, int]]) -> tuple[str, int, int]:
-        """`prompt` as the DiT's frame rotary table holds it beside references of these latent `grids`: the
-        encoded template's text tokens, the prompt's among them, and each reference's longer side, then the target
-        (`ROPE_POSITIONS`). Upstream encodes any length and fails past the table. With the tokens kept and given."""
-        pipeline = self._pipeline()
-        tokenizer = self.processor.tokenizer
-        template = pipeline.prompt_template_t2i
-        if grids:  # as `_get_qwen_prompt_embeds` builds it
-            picture = "<image{}><|vision_start|><|image_pad|><|vision_end|>"
-            pictures = " ".join(picture.format(n) for n in range(1, len(grids) + 1))
-            template = pipeline.prompt_template_ti2i.replace(picture.format(1), pictures)
-        room = ROPE_POSITIONS - 1 - sum(max(grid) for grid in grids)
-
-        def length(text: str) -> int:
-            """The text tokens the DiT reads of `text`: the template's after its system prefix, no picture's."""
-            tokens: list[int] = tokenizer(template.format(text or " "))["input_ids"]
-            return sum(token != pipeline._img_token_id for token in tokens[pipeline._drop_idx :])
-
-        ids: list[int] = tokenizer(prompt)["input_ids"]
-        kept, keep = prompt, len(ids)
-        # A cut can tokenize longer at its edge: measured again until it fits.
-        while keep > 0 and (over := length(kept) - room) > 0:
-            keep = max(keep - over, 0)
-            kept = tokenizer.decode(ids[:keep])
-        return kept, keep, len(ids)
-
-    @memoize
-    @uses_components("vae")
-    def encode_reference_images(self, images: list[Image.Image]) -> tuple[list[Image.Image], torch.Tensor]:
-        """Encode each reference once, using Diffusers' 1 MP conditioning size."""
-        vae = self.graph.components["vae"]
-        device = torch.device(str(self.device))
-        pipeline = self._pipeline()
-        resized, packed = [], []
-        with torch.inference_mode():
-            for image in images:
-                image = image.convert("RGBA")
-                width, height, _ = calculate_dimensions(1024 * 1024, image.width / image.height)  # type: ignore[no-untyped-call]  # Diffusers' own, unannotated
-                resized.append(pipeline.image_processor.resize(image, width=width, height=height))
-                pixels = (
-                    pipeline.image_processor.preprocess(image, width=width, height=height)
-                    .unsqueeze(2)
-                    .to(device=device, dtype=vae.dtype)
-                )
-                encoded = _encoded(vae, pixels)
-                packed.append(
-                    pipeline._pack_latents(  # type: ignore[no-untyped-call]  # Diffusers' own, unannotated
-                        encoded, 1, pipeline.latent_channels, encoded.shape[3], encoded.shape[4]
-                    ).cpu()
-                )
-        return resized, torch.cat(packed, dim=1)
-
-    @uses_components("vae")
-    def encode_canvas(self, image: Image.Image) -> torch.Tensor:
-        """The picture at its own size as the DiT's packed normalized latents (`denoise`'s `start`)."""
-        vae = self.graph.components["vae"]
-        device = torch.device(str(self.device))
-        pipeline = self._pipeline()
-        with torch.inference_mode():
-            pixels = pipeline.image_processor.preprocess(image.convert("RGBA"), width=image.width, height=image.height)
-            encoded = _encoded(vae, pixels.unsqueeze(2).to(device=device, dtype=vae.dtype))
-            packed: torch.Tensor = pipeline._pack_latents(  # type: ignore[no-untyped-call]  # Diffusers' own, unannotated
-                encoded, 1, pipeline.latent_channels, encoded.shape[3], encoded.shape[4]
-            )
-            return packed.cpu()
+        return _fit_prompt(self._pipeline(), self.processor, prompt, grids)
 
     @memoize
     @uses_components("text_encoder")
@@ -464,12 +493,29 @@ class QwenImage21Model(Model[QwenImage21Graph]):
         self, prompt: str, images: list[Image.Image]
     ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
         """Encode the instruction and ordered reference images as one condition."""
-        encoder = self.graph.components["text_encoder"]
-        with torch.inference_mode(), _last_layer_only(encoder):
-            encoded: tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None] = self._pipeline().encode_prompt(
-                prompt, image=images, device=torch.device(str(self.device))  # type: ignore[arg-type]  # pictures, of its input union
-            )
-        return encoded
+        return _encode(self._pipeline(), self.graph.components["text_encoder"], prompt, images)
+
+
+class QwenImage21DiT(Model[QwenImage21DiTGraph]):
+    """Qwen-Image-2.1's DiT, the `model` slot: the checkpoint's `transformer` and its scheduler, whichever checkpoint
+    holds them, whole or a model of that part alone (xs-192)."""
+
+    #: The 32 DiT blocks attend at 8 bits (comfy-kitchen INT8 on RTX 40-class cards): attention is two thirds
+    #: of a 4 MP step; a 16-bit request attends exactly. Caller LoRAs on the DiT, at any strength: the Runtime
+    #: bakes them into the weights.
+    serving = Serving(attention_bits={"transformer.transformer_blocks.": 8}, loras=("transformer",))
+
+    graph: QwenImage21DiTGraph
+
+    def load(self, loader: Loader) -> None:
+        self.graph = loader.construct(QwenImage21DiTGraph)
+
+    def execution_plan(self, plan: Plan) -> str:
+        return fusion.install(plan, BLOCK, self.graph.components["transformer"]) or ""
+
+    def _pipeline(self, scheduler: Mapping[str, object] | None = None) -> _Sampling:
+        """`scheduler`: fields an overlay's sampling sets over the checkpoint's scheduler."""
+        return _Sampling(construct(FlowMatchEulerDiscreteScheduler, {**self.graph.scheduler_config, **(scheduler or {})}))
 
     @uses_components("transformer")
     def denoise(
@@ -508,7 +554,7 @@ class QwenImage21Model(Model[QwenImage21Graph]):
         if not transformer.config["causal_condition"]:
             raise UnsupportedInput("Qwen Image 2.1 denoises with causal conditioning", code="artifact_config")
         device = torch.device(str(self.device))
-        pipeline = self._pipeline(sigmas, scheduler)
+        pipeline = self._pipeline(scheduler)
         euler = pipeline.scheduler
         blocks = transformer.transformer_blocks
         multiple_of = pipeline.vae_scale_factor * 2
@@ -600,12 +646,99 @@ class QwenImage21Model(Model[QwenImage21Graph]):
                 latents = euler.step(noise, timesteps[first], latents, return_dict=False)[0]
                 progress(first, steps)
                 for i in range(first + 1, steps):
-                    cached = (times[i : i + 1], layout.rotary_emb, layout.modulation_mask, kv_cache.prefix())
+                    cached = (times[i : i + 1], layout.rotary_emb, layout.modulation_mask, kv_cache.prefix)
                     noise = transformer(latents, cached=cached, projection=None if heads is None else heads[i])
                     preview(lambda: latents - euler.sigmas[i] * noise, "qwen-image-2", grid=(height // 16, width // 16))
                     latents = euler.step(noise, timesteps[i], latents, return_dict=False)[0]
                     progress(i, steps)
         return latents
+
+
+class QwenImage21Model(QwenImage21DiT):
+    """A whole Qwen-Image-2.1 pipeline in one construction, encoding and denoising on one checkpoint: what the quantize
+    recipes read and calibrate (`quantize.py`). A tool's slots read its parts: `QwenImage21DiT`, `QwenImage21TextEncoder`
+    and `QwenImage21VAE`."""
+
+    graph: QwenImage21Graph
+    processor: Qwen3VLProcessor
+
+    def load(self, loader: Loader) -> None:
+        self.graph = loader.construct(build_qwen_image21)
+        self.processor = cast(Qwen3VLProcessor, vlm.processor(loader.assets, "processor/", self.graph.processor_config))  # Qwen3-VL's
+
+    def _text(self) -> _StagedPipeline:
+        return _text_pipeline(torch.device(str(self.device)), self.graph.components["text_encoder"], self.processor)
+
+    @memoize
+    @uses_components("text_encoder")
+    def encode(self, prompt: str) -> tuple[torch.Tensor, torch.Tensor | None]:
+        embeds, mask, _ = _encode(self._text(), self.graph.components["text_encoder"], prompt, None)
+        return embeds, mask
+
+
+class QwenImage21VAE(Model[QwenImage21VAEGraph]):
+    """Qwen-Image-2.1's VAE, its own slot (`vae`): the checkpoint's `vae`, whichever checkpoint holds one. Its latents
+    are the DiT's, packed and normalized as `QwenImage21Pipeline` packs them."""
+
+    graph: QwenImage21VAEGraph
+    processor: VaeImageProcessor
+
+    def load(self, loader: Loader) -> None:
+        self.graph = loader.construct(QwenImage21VAEGraph)
+        # `QwenImage21Pipeline`'s: 16x, its latent channels the VAE's.
+        channels = self.graph.components["vae"].config["z_dim"]
+        self.processor = VaeImageProcessor(vae_scale_factor=16, vae_latent_channels=channels)
+
+    def execution_plan(self, plan: Plan) -> str:
+        vae = self.graph.components["vae"]
+        installed = (
+            fusion.install_norms(plan, VAE_NORM, vae),
+            fusion.install_lone_frame(plan, VAE_FRAME, vae.decoder, vae.post_quant_conv),
+        )
+        return "+".join(identity for identity in installed if identity)
+
+    def hold(self, tel: Telemetry) -> None:
+        """Run the VAE in bf16 where the GPU computes it natively, as ComfyUI stages it and as Turbo
+        stores it; the base release stores F32, whose decode took 2.0 s on an 8 GB RTX 3070 against
+        ComfyUI's 0.93 s. The Runtime casts the stored bytes when it next fills them; call this
+        before any VAE scope opens."""
+        vae = self.graph.components["vae"]
+        device = torch.device(str(self.device))
+        if device.type != "cuda" or not torch.cuda.is_bf16_supported(including_emulation=False):
+            return
+        if next(vae.parameters()).dtype != VAE_DTYPE:
+            hold_dtype(vae, VAE_DTYPE)
+            tel.log("vae representation", dtype="bfloat16")
+
+    @memoize
+    @uses_components("vae")
+    def encode_reference_images(self, images: list[Image.Image]) -> tuple[list[Image.Image], torch.Tensor]:
+        """Encode each reference once, using Diffusers' 1 MP conditioning size."""
+        vae = self.graph.components["vae"]
+        device = torch.device(str(self.device))
+        resized, packed = [], []
+        with torch.inference_mode():
+            for image in images:
+                image = image.convert("RGBA")
+                width, height, _ = calculate_dimensions(1024 * 1024, image.width / image.height)  # type: ignore[no-untyped-call]  # Diffusers' own, unannotated
+                resized.append(cast(Image.Image, self.processor.resize(image, width=width, height=height)))  # a picture in, a picture out
+                pixels = (
+                    self.processor.preprocess(image, width=width, height=height)
+                    .unsqueeze(2)
+                    .to(device=device, dtype=vae.dtype)
+                )
+                encoded = _encoded(vae, pixels)
+                packed.append(_packed(encoded).cpu())
+        return resized, torch.cat(packed, dim=1)
+
+    @uses_components("vae")
+    def encode_canvas(self, image: Image.Image) -> torch.Tensor:
+        """The picture at its own size as the DiT's packed normalized latents (`denoise`'s `start`)."""
+        vae = self.graph.components["vae"]
+        device = torch.device(str(self.device))
+        with torch.inference_mode():
+            pixels = self.processor.preprocess(image.convert("RGBA"), width=image.width, height=image.height)
+            return _packed(_encoded(vae, pixels.unsqueeze(2).to(device=device, dtype=vae.dtype))).cpu()
 
     @uses_components("vae")
     def decode(self, latents: torch.Tensor, *, width: int, height: int) -> torch.Tensor:
@@ -617,6 +750,14 @@ class QwenImage21Model(Model[QwenImage21Graph]):
             mean = latents.new_tensor(vae.config["latents_mean"]).view(1, vae.config["z_dim"], 1, 1, 1)
             std = latents.new_tensor(vae.config["latents_std"]).view(1, vae.config["z_dim"], 1, 1, 1)
             return _decoded(vae, latents * std + mean).clamp(-1.0, 1.0)[:, :, 0]
+
+
+def _packed(latents: torch.Tensor) -> torch.Tensor:
+    """One frame's normalized latents as the DiT's tokens (`QwenImage21Pipeline._pack_latents`)."""
+    packed: torch.Tensor = QwenImage21Pipeline._pack_latents(  # type: ignore[no-untyped-call]  # Diffusers' own, unannotated
+        latents, 1, latents.shape[1], latents.shape[3], latents.shape[4]
+    )
+    return packed
 
 
 def _encoded(vae: AutoencoderKLQwenImage21, pixels: torch.Tensor) -> torch.Tensor:
