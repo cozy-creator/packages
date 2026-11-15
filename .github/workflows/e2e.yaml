@@ -25,6 +25,6 @@ jobs:
       base: ${{ github.event.merge_group.base_sha || github.event.pull_request.base.sha }}
       select: ${{ inputs.select }}
       creator_ref: f85096b9d6a97a623515526ece6940b6635b3200
-      stack_ref: rc/0.25.0
-      runtime_ref: rc/0.25.0
+      stack_ref: v0.25.0
+      runtime_ref: v0.46.0
       packages_ref: ${{ github.event.merge_group.head_sha || github.event.pull_request.head.sha || github.sha }}
