@@ -48,16 +48,3 @@ the Runtime's output metadata (xs-180).
 | swordswoman | bridged | 1344x768 | yes, on a gold backdrop it made up | 35.2 dB | 25.3 / 29.8 dB | 369 s |
 
 Before, the demo's Ref2VA turns cut at their closest tail frame: 18.8-20.2 dB.
-
-
-Orbit imports typed call declarations generated from H3's locked interface in
-`orbit/_h3.py`. Regenerate them with
-`cozy-runtime --dir orbit calls minimax-h3 orbit/orbit/_h3.py` from the packages root after
-relocking the H3 dependency. The standard `cozy-calls` optional extra keeps H3 available
-for platform child execution while Orbit's CPU environment installs only its own dependencies.
-The `await call(render_shot, request)` expression remains the managed-call operation.
-
-This RC requires the H3 0.13.0rc8 hard-cut SDK source wheel from the packages GitHub
-prerelease. The existing publisher includes it in dependency order and switches its
-source back to the TensorHub index once that child's intended release exists there.
-Final publication refuses a missing child; RC and dry-run builds may retain the wheel.

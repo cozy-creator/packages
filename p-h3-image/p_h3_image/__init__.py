@@ -6,7 +6,7 @@ import dataclasses
 from typing import Annotated
 
 import msgspec
-from cozy_runtime.author import Adjustments, Context, Seed, Telemetry
+from cozy_runtime.author import Adjustments, Context, Outputs, Seed, Telemetry
 from cozy_runtime.fields import Advanced, AspectRatio, FileBound, Image, Prompt, Range, Ratios
 from cozy_runtime.media import ImageFile
 from cozy_runtime.image import MEGAPIXEL, ImageRequest, ImageResult, Sizes
@@ -48,7 +48,7 @@ class _Request(ImageRequest):
     on_demand=("upsampler",),
     memoize=True,
 )
-def generate(ctx: Context, payload: ImageBox, model: PH3Image, upsampler: PH3Upsampler,
+def generate(ctx: Context, payload: ImageBox, model: PH3Image, upsampler: PH3Upsampler, out: Outputs,
              tel: Telemetry, adj: Adjustments) -> ImageResult:  # fmt: skip
     """P-H3-Image, 8 steps without CFG at 8 MP: text to image, or an edit of the pictures the instructions mention."""
     request = _Request(prompt=payload.instructions, aspect_ratio=payload.aspect_ratio,
@@ -94,7 +94,7 @@ def generate(ctx: Context, payload: ImageBox, model: PH3Image, upsampler: PH3Ups
     with tel.stage("decoding image"):
         picture = model.decode(latents)
     with tel.stage("saving image"):
-        asset = ImageFile.from_image(picture, format="png")
+        asset = out.save_image(picture, format="png")
     tel.log("p-h3-image", width=width, height=height, pictures=len(pictures), megapixels=round(width * height / MEGAPIXEL, 2))
     return ImageResult(asset, width, height, seed, prompt)
 
@@ -117,7 +117,7 @@ class UpscaleInput(msgspec.Struct, kw_only=True):
 
 @app.tool(label="Upscale", named="image", defaults={"model": MODEL}, components={"model": IMAGE_COMPONENTS},
           memoize=True)  # fmt: skip
-def upscale(ctx: Context, payload: UpscaleInput, model: PH3Image, tel: Telemetry,
+def upscale(ctx: Context, payload: UpscaleInput, model: PH3Image, out: Outputs, tel: Telemetry,
             adj: Adjustments) -> ImageResult:
     """The picture larger: an edit of it at the size asked, Picture 1 Lanczos-upscaled to the canvas both as the
     condition and, below `denoise`, as the start."""
@@ -138,6 +138,6 @@ def upscale(ctx: Context, payload: UpscaleInput, model: PH3Image, tel: Telemetry
     with tel.stage("decoding image"):
         image = model.decode(latents)
     with tel.stage("saving image"):
-        asset = ImageFile.from_image(image, format="png")
+        asset = out.save_image(image, format="png")
     tel.log("upscale", source=f"{picture.width}x{picture.height}", width=width, height=height, steps=STEPS - first)
     return ImageResult(asset, width, height, seed, UPSCALE_PROMPT)

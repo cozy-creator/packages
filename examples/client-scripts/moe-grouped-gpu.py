@@ -139,7 +139,7 @@ def timed(call: Callable[[], object], repeats: int = 50) -> float:
     return round((time.perf_counter() - started) / repeats * 1e6, 1)
 
 
-@app.entrypoint(accelerator=True)
+@app.entrypoint
 def main(payload: Nothing, tel: Telemetry) -> Passed:
     torch.manual_seed(0)
     results: dict[str, object] = {"gpu": torch.cuda.get_device_name()}

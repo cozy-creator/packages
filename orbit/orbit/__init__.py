@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import math
 import re
-from collections.abc import Iterator, Sequence
+from collections.abc import Awaitable, Callable, Iterator, Sequence
 from dataclasses import replace
 from fractions import Fraction
 from typing import Annotated, NamedTuple
@@ -24,21 +24,12 @@ from cozy_runtime.media import (
     References,
     VideoFile,
 )
-from ._h3 import Beat, PackageShot, Shot, ShotLoRA, render_shot
+from h3 import PackageShot, ShotLoRA, render_shot
+from minimax_h3.official import FPS, frames_for
+from minimax_h3.shot import ANY_SIZE, MAX_DURATION_S, MIN_DURATION_S, Beat, Shot
 from PIL import Image as PILImage
 
 app = App()
-
-# Orbit's trained caption and loop sampling use H3's 24 fps, 17n+5 video grid.
-FPS = 24
-MIN_DURATION_S = 5
-MAX_DURATION_S = 15
-ANY_SIZE = 1 << 40
-
-
-def frames_for(duration_s: int) -> int:
-    return math.ceil((duration_s * FPS - 5) / 17) * 17 + 5
-
 
 #: MATLOWAI's ORB360 step 1500 (hf://MATLOWAI/MiniMax-H3-ORB360-CardSpin), trained on H3's Ref2VA DiT, clockwise only.
 ORB360 = "matlowai/orb360@0.1.1"
@@ -184,10 +175,10 @@ def frames_of(video: VideoFile) -> Iterator[DecodedVideoFrame]:
                 yield event
 
 
-def frame_image(video: VideoFile, index: int) -> ImageFile:
+def frame_image(video: VideoFile, index: int, out: Outputs) -> ImageFile:
     """Frame `index` of `video`, saved as a picture a call can take."""
     decoded = video.read(start=Fraction(index, FPS), end=Fraction(index + 1, FPS), audio=False)
-    return ImageFile.from_image(PILImage.frombytes("RGB", (decoded.width, decoded.height), decoded.frames_rgb[0]), format="png")
+    return out.save_image(PILImage.frombytes("RGB", (decoded.width, decoded.height), decoded.frames_rgb[0]))
 
 
 def orbit_shot(payload: Orbit, subject: str, text: str, *, pinned: bool) -> PackageShot:
@@ -199,10 +190,10 @@ def orbit_shot(payload: Orbit, subject: str, text: str, *, pinned: bool) -> Pack
                        loras=[ShotLoRA(model=ORB360)])  # fmt: skip
 
 
-async def pinned(payload: Orbit, subject: str, text: str, tel: Telemetry) -> Turned:
+async def pinned(payload: Orbit, subject: str, text: str, out: Outputs, tel: Telemetry) -> Turned:
     """Ref2VA under ORB360 with the picture as its first and last frame: its last frame is the turn's end."""
     with tel.scope("Turn"):
-        made = await call(render_shot, orbit_shot(payload, subject, text, pinned=True))
+        made = await call(render_shot, payload=orbit_shot(payload, subject, text, pinned=True))
     thumbs = [grey(frame) for frame in frames_of(made.video)]
     return Turned([(made.video, i) for i in range(len(thumbs) - 1)], psnr(thumbs[-1], thumbs[0]), made.warnings)
 
@@ -211,7 +202,7 @@ async def bridged(payload: Orbit, subject: str, text: str, out: Outputs, tel: Te
     """se-114's B: the Ref2VA turn under ORB360, cut where its tail comes closest to frame 0, its last twelfth redrawn
     by a 5 s FL2VA shot without the LoRA from there to frame 0, fitted into those frames."""
     with tel.scope("Turn"):
-        made = await call(render_shot, orbit_shot(payload, subject, text, pinned=False))
+        made = await call(render_shot, payload=orbit_shot(payload, subject, text, pinned=False))
     out.publish("video", made.video, label="Turn, before its loop is joined")
     thumbs = [grey(frame) for frame in frames_of(made.video)]
     tail = range(max(1, len(thumbs) - 16), len(thumbs))
@@ -225,10 +216,10 @@ async def bridged(payload: Orbit, subject: str, text: str, out: Outputs, tel: Te
              "and perfectly rigid. No zoom, dolly, camera roll, cuts, lighting changes or scene changes.\n\n"
              "overall_soundscape:\nN/A\n\nnon_diegetic_music:\nN/A")  # fmt: skip
     beat = Beat(duration=MIN_DURATION_S, description=Prompt(text=words))
-    shot = Shot(beats=[beat], first_frame=frame_image(made.video, start), last_frame=frame_image(made.video, 0),
+    shot = Shot(beats=[beat], first_frame=frame_image(made.video, start, out), last_frame=frame_image(made.video, 0, out),
                 seed=payload.seed)  # fmt: skip
     with tel.scope("Loop join"):
-        bridge = await call(render_shot, PackageShot(shot=shot))
+        bridge = await call(render_shot, payload=PackageShot(shot=shot))
     joined = [grey(frame) for frame in frames_of(bridge.video)]
     span = turn - start
     picks = [(i * (len(joined) - 1) * 2 + span) // (2 * span) for i in range(span)]
@@ -237,6 +228,8 @@ async def bridged(payload: Orbit, subject: str, text: str, out: Outputs, tel: Te
     return Turned(frames, psnr(joined[-1], thumbs[0]), [*made.warnings, *bridge.warnings])
 
 
+#: How a turn's end meets its start.
+METHODS: dict[str, Callable[[Orbit, str, str, Outputs, Telemetry], Awaitable[Turned]]] = {"pinned": pinned, "bridged": bridged}
 #: se-116's pod runs: `pinned` turned fully and closed at 36-39 dB on the motorcycle and swordswoman, in one call.
 ENDS = "pinned"
 
@@ -266,7 +259,7 @@ def silent(frames: Sequence[tuple[VideoFile, int]]) -> Iterator[DecodedMediaEven
                         break
 
 
-@app.tool(label="Orbit", named="video")
+@app.tool(label="Orbit", named="video", accelerator=False)
 async def orbit(ctx: Context, payload: Orbit, out: Outputs, tel: Telemetry) -> OrbitResult:
     """The picture's subject seen from all the way round: one clockwise camera turn around it, frozen in time, that
     loops. H3 renders it under ORB360 from its trained caption, which names the subject and the angle every third of
@@ -275,11 +268,7 @@ async def orbit(ctx: Context, payload: Orbit, out: Outputs, tel: Telemetry) -> O
     subject = named(payload.subject)
     frames = frames_for(payload.duration)
     plain = backdrop(payload.picture)
-    text = caption(subject, frames, plain)
-    if ENDS == "pinned":
-        turned = await pinned(payload, subject, text, tel)
-    else:
-        turned = await bridged(payload, subject, text, out, tel)
+    turned = await METHODS[ENDS](payload, subject, caption(subject, frames, plain), out, tel)
     with tel.stage("writing the turn"):
         saved = out.save_video_stream(silent(turned.frames))
     tel.log("orbit", method=ENDS, backdrop=plain or "scene", frames=saved.frame_count, seam_db=round(turned.seam_db, 2))

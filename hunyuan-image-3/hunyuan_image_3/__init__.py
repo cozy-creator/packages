@@ -7,10 +7,9 @@ import secrets
 from typing import Annotated
 
 import msgspec
-from cozy_runtime.author import Adjustments, App, Context, Seed, Telemetry
+from cozy_runtime.author import Adjustments, App, Context, Outputs, Seed, Telemetry
 from cozy_runtime.fields import Advanced, AspectRatio, Image, Prompt, Ratios
 from cozy_runtime.image import Guidance, ImageResult, ratio_of, Steps
-from cozy_runtime.media import ImageFile
 
 from .model import GUIDANCE, MAX_NEW_TOKENS, HunyuanImage3, caption
 from . import quantize as quantize  # its recipes
@@ -69,7 +68,7 @@ def requested_size(adj: Adjustments, ratio: str) -> tuple[int, int]:
     return width, height
 
 
-def _generate(ctx: Context, payload: HunyuanRequest, steps: int, model: HunyuanImage3,
+def _generate(ctx: Context, payload: HunyuanRequest, steps: int, model: HunyuanImage3, out: Outputs,
               tel: Telemetry, adj: Adjustments) -> ImageResult:
     prompt, pictures = _said(payload.prompt, adj)
     seed = payload.seed if payload.seed is not None else secrets.randbits(53)
@@ -95,7 +94,7 @@ def _generate(ctx: Context, payload: HunyuanRequest, steps: int, model: HunyuanI
             cancel=ctx.raise_if_cancelled,
             on_step=lambda i: ctx.progress(i, steps))
     with tel.stage("saving image"):
-        asset = ImageFile.from_image(image, format="png")
+        asset = out.save_image(image, format="png")
     return ImageResult(asset, image.width, image.height, seed, caption(cot, prompt))
 
 
@@ -104,21 +103,21 @@ _INSTRUCT = "tencent/hunyuan-image-3-instruct@0.1.1"
 
 
 @app.entrypoint(defaults={"model": _DISTIL}, memoize=True)
-def generate_turbo(ctx: Context, payload: HunyuanRequest, model: HunyuanImage3, tel: Telemetry,
+def generate_turbo(ctx: Context, payload: HunyuanRequest, model: HunyuanImage3, out: Outputs, tel: Telemetry,
                    adj: Adjustments) -> ImageResult:
     """HunyuanImage 3.0 Instruct-Distil, 8 steps at guidance 2.5: text to image, or an edit of up to three pictures.
 
     The model thinks and rewrites the prompt first unless `prompt_upsampling` is false."""
-    return _generate(ctx, payload, payload.steps or DISTIL_STEPS, model, tel, adj)
+    return _generate(ctx, payload, payload.steps or DISTIL_STEPS, model, out, tel, adj)
 
 
 @app.entrypoint(defaults={"model": _INSTRUCT}, memoize=True)
-def generate(ctx: Context, payload: HunyuanRequest, model: HunyuanImage3, tel: Telemetry,
+def generate(ctx: Context, payload: HunyuanRequest, model: HunyuanImage3, out: Outputs, tel: Telemetry,
              adj: Adjustments) -> ImageResult:
     """HunyuanImage 3.0 Instruct, 50 steps with CFG 2.5: text to image, or an edit of up to three pictures.
 
     The model thinks and rewrites the prompt first unless `prompt_upsampling` is false."""
-    return _generate(ctx, payload, payload.steps or INSTRUCT_STEPS, model, tel, adj)
+    return _generate(ctx, payload, payload.steps or INSTRUCT_STEPS, model, out, tel, adj)
 
 
 class ImageBox(msgspec.Struct, kw_only=True):
@@ -138,11 +137,11 @@ class ImageBox(msgspec.Struct, kw_only=True):
 @app.tool(label="Image", named="image", defaults={"model": _DISTIL, "full": _INSTRUCT},
           on_demand=("full", "model"),
           memoize=True)
-def image(ctx: Context, payload: ImageBox, full: HunyuanImage3, model: HunyuanImage3, tel: Telemetry,
+def image(ctx: Context, payload: ImageBox, full: HunyuanImage3, model: HunyuanImage3, out: Outputs, tel: Telemetry,
           adj: Adjustments) -> ImageResult:
     """HunyuanImage 3.0 on a canvas: Instruct-Distil, or Instruct."""
     request = HunyuanRequest(prompt=payload.instructions, aspect_ratio=payload.aspect_ratio, seed=payload.seed,
                              prompt_upsampling=payload.prompt_upsampling)
     if payload.turbo:
-        return _generate(ctx, request, DISTIL_STEPS, model, tel, adj)
-    return _generate(ctx, request, INSTRUCT_STEPS, full, tel, adj)
+        return _generate(ctx, request, DISTIL_STEPS, model, out, tel, adj)
+    return _generate(ctx, request, INSTRUCT_STEPS, full, out, tel, adj)

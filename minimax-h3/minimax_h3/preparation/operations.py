@@ -12,12 +12,9 @@ from cozy_runtime.author import (
     call,
     canonical_json,
 )
-from cozy_runtime.derive.operations import QuantizeRequest, quantize as runtime_quantize
+from cozy_runtime.derive.operations import quantize as runtime_quantize
 
 from .adaln_operations import (
-    AdalnInput,
-    ComputeAdalnInput,
-    SelectAdalnInput,
     apply_adaln,
     compute_adaln_tables,
     retable_adaln,
@@ -66,11 +63,9 @@ async def quantize(
     """
     return await call(
         runtime_quantize,
-        QuantizeRequest(
-            plan=quantization_plan(encoding),
-            max_relative_frobenius=max_relative_frobenius,
-        ),
-        models={"source": ModelChoice(ref=source)},
+        source=ModelChoice(ref=source),
+        plan=quantization_plan(encoding),
+        max_relative_frobenius=max_relative_frobenius,
     )
 
 
@@ -88,8 +83,8 @@ async def precompute_adaln(
     """
     # Each step is a managed call, its models chosen by exact ModelArtifact.
     generator = ModelChoice(ref=generating_model or model)
-    selected_fl = await call(select_adaln_weights, SelectAdalnInput(task="fl2va"), models={"source": generator})
-    selected_ref = await call(select_adaln_weights, SelectAdalnInput(task="ref2va"), models={"source": generator})
+    selected_fl = await call(select_adaln_weights, source=generator, task="fl2va")
+    selected_ref = await call(select_adaln_weights, source=generator, task="ref2va")
     if (
         type(timesteps) is not int
         or timesteps not in selected_fl.steps
@@ -112,21 +107,20 @@ async def precompute_adaln(
         )
     fl = await call(
         compute_adaln_tables,
-        ComputeAdalnInput(task="fl2va", plan_digest=selected_fl.plan_digest),
-        models={"source": ModelChoice(ref=selected_fl.projection)},
+        source=ModelChoice(ref=selected_fl.projection),
+        task="fl2va",
+        plan_digest=selected_fl.plan_digest,
     )
     ref = await call(
         compute_adaln_tables,
-        ComputeAdalnInput(task="ref2va", plan_digest=selected_ref.plan_digest),
-        models={"source": ModelChoice(ref=selected_ref.projection)},
+        source=ModelChoice(ref=selected_ref.projection),
+        task="ref2va",
+        plan_digest=selected_ref.plan_digest,
     )
     attach = retable_adaln if generating_model is not None else apply_adaln
     return await call(
         attach,
-        AdalnInput(),
-        models={
-            "source": ModelChoice(ref=model),
-            "fl2va": ModelChoice(ref=fl),
-            "ref2va": ModelChoice(ref=ref),
-        },
+        source=ModelChoice(ref=model),
+        fl2va=ModelChoice(ref=fl),
+        ref2va=ModelChoice(ref=ref),
     )

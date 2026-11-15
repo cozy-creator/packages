@@ -532,10 +532,10 @@ def fitted(name: str, size: tuple[int, int], shape: tuple[int, int]) -> list[str
     return [f"{name} is {size[0]}x{size[1]}: its middle is used for the shot's {shape[0]}x{shape[1]}"]
 
 
-def frame_at(video: VideoFile, frames: int) -> ImageFile:
+def frame_at(video: VideoFile, frames: int, out: Outputs) -> ImageFile:
     """A video's last frame before `frames`: the one a new part starts from."""
     decoded = video.read(start=Fraction(max(frames - 6, 0), FPS), end=Fraction(frames, FPS), audio=False)
-    return ImageFile.from_image(PILImage.frombytes("RGB", (decoded.width, decoded.height), decoded.frames_rgb[-1]), format="png")
+    return out.save_image(PILImage.frombytes("RGB", (decoded.width, decoded.height), decoded.frames_rgb[-1]))
 
 
 def unusable(take: ShotVideo) -> str:

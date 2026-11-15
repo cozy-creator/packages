@@ -7,7 +7,7 @@ from typing import Annotated
 import msgspec
 from PIL import Image
 
-from cozy_runtime.author import App, Context, Telemetry
+from cozy_runtime.author import App, Context, Outputs, Telemetry
 from cozy_runtime.fields import FileBound
 from cozy_runtime.media import ImageFile
 
@@ -51,6 +51,7 @@ def remove_background(
     ctx: Context,
     payload: RemoveBackgroundInput,
     model: BackgroundRemovalModel,
+    out: Outputs,
     tel: Telemetry,
 ) -> RemoveBackgroundOutput:
     """An image's subject cut out onto a white background, as a WebP."""
@@ -61,5 +62,5 @@ def remove_background(
         mask = model.mask(image)
     ctx.raise_if_cancelled()
     with tel.stage("saving character reference"):
-        result = ImageFile.from_image(white_background(image, mask), format="webp")
+        result = out.save_image(white_background(image, mask), format="webp")
     return RemoveBackgroundOutput(result)
