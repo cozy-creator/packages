@@ -65,6 +65,8 @@ from transformers.models.qwen3_vl.modeling_qwen3_vl import Qwen3VLTextModel, Qwe
 
 if TYPE_CHECKING:
     from diffusers.configuration_utils import ConfigMixin
+
+    from .adapters import AdapterGraph
     from diffusers.models.autoencoders.autoencoder_kl_qwenimage import QwenImageUpBlock
 
 #: Pixels per DiT token: the VAE's 8x, then 2x2 patches.
@@ -317,19 +319,20 @@ class Transformer(Krea2Transformer2DModel):
     """`Krea2Transformer2DModel` whose forward is one sampling step for every prompt of a request."""
 
     #: Each slot's armed adapter, its factors by linear (`adapters.Adapter.applied`), else None.
-    _cozy_overlays: list[Mapping[str, lora.Factors] | None]
-    #: A control adapter's expanded input projection while it is armed (`adapters.Adapter.applied`): its
-    #: weight [6144, 128] over each image token and its control token side by side, and its bias.
-    _cozy_projection: tuple[torch.Tensor, torch.Tensor] | None = None
+    adapter_overlays: list[Mapping[str, lora.Factors] | None]
+    #: The control adapter while it is armed (`adapters.Adapter.applied`): its expanded input projection
+    #: weighs each image token and its control token side by side, [6144, 128], and adds its bias.
+    control_adapter: AdapterGraph | None = None
 
     def embed(self, latents: torch.Tensor, control: torch.Tensor | None) -> torch.Tensor:
         """`img_in`, in its stored dtype, or with `control` tokens the armed control adapter's projection over
         both (Patil's `ControlInputLayer`)."""
         if control is None:
             return cast(torch.Tensor, self.img_in(latents.to(_dtype(self.img_in)))).to(latents.dtype)
-        if self._cozy_projection is None:
+        projection = None if self.control_adapter is None else self.control_adapter.projection
+        if projection is None:
             raise ValueError("a control map reaches Krea 2 only through an armed control adapter")
-        weight, bias = self._cozy_projection
+        weight, bias = projection.weight, projection.bias
         x = torch.cat((latents, control.to(latents.dtype)), dim=-1).to(weight.dtype)
         return F.linear(x, weight, bias.to(weight.dtype)).to(latents.dtype)
 
@@ -364,7 +367,7 @@ class Transformer(Krea2Transformer2DModel):
 
 def _armed(transformer: nn.Module, slot: int, path: str) -> lora.Factors | None:
     """An armed adapter's factors at `path` in `slot` (`Krea2DiT.denoise`'s `overlays`), else None."""
-    armed: list[Mapping[str, lora.Factors] | None] = getattr(transformer, "_cozy_overlays", [None] * SLOTS)
+    armed: list[Mapping[str, lora.Factors] | None] = getattr(transformer, "adapter_overlays", [None] * SLOTS)
     sites = armed[slot]
     return None if sites is None else sites.get(path)
 
@@ -387,7 +390,7 @@ def _transformer(config: Config) -> Transformer:
     for block in transformer.transformer_blocks:
         block.__class__ = Block
     dit = cast(Transformer, transformer)  # its class, set above
-    dit._cozy_overlays = [None] * SLOTS  # a plain attribute: nn.Module keeps a list as such
+    dit.adapter_overlays = [None] * SLOTS  # a plain attribute: nn.Module keeps a list as such
     for path, module in dit.named_modules():
         if isinstance(module, nn.Linear):
             for slot in range(SLOTS):
