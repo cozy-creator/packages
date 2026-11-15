@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Annotated, Literal
 
 import msgspec
 import numpy as np
-from cozy_runtime.author import Adjustments, App, Context, Seed, Telemetry, UnsupportedInput
+from cozy_runtime.author import Adjustments, App, Context, Outputs, Seed, Telemetry, UnsupportedInput
 from cozy_runtime.fields import AspectRatio, Ratios
 from cozy_runtime.image import (
     Guidance,
@@ -20,7 +20,6 @@ from cozy_runtime.image import (
     corners,
     held,
 )
-from cozy_runtime.media import ImageFile
 
 from . import quantize as quantize  # its recipes
 from .model import PATCH, Ideogram4, guidance_schedule
@@ -118,7 +117,7 @@ _COMPONENTS = {"model": ("transformer", "unconditional_transformer", "vae"), "te
 # parameters are in name order: Runtime refuses a binding set whose paths are not sorted.
 @app.entrypoint(defaults=_DEFAULTS, components=_COMPONENTS, on_demand=("upsampler",), memoize=True)
 def generate(ctx: Context, payload: GenerateInput, model: Ideogram4, text_encoder: QwenEncoder,
-             upsampler: QwenUpsampler, tel: Telemetry, adj: Adjustments) -> ImageResult:
+             upsampler: QwenUpsampler, out: Outputs, tel: Telemetry, adj: Adjustments) -> ImageResult:
     """Ideogram 4, 48 steps at guidance 7: a JSON caption or a prompt, with `regions` placed by box.
 
     Guidance is 3 on the last steps; the upsampler expands a prompt into the caption."""
@@ -147,7 +146,7 @@ def generate(ctx: Context, payload: GenerateInput, model: Ideogram4, text_encode
                 "its weights draw it for some captions and seeds, harmless ones included; a more detailed "
                 "prompt or another seed usually renders", level="warning", seed=seed)
     with tel.stage("saving image"):
-        asset = ImageFile.from_image(image, format="png")
+        asset = out.save_image(image, format="png")
     return ImageResult(asset, width, height, seed, written)
 
 
@@ -167,8 +166,8 @@ class ImageBox(msgspec.Struct, kw_only=True):
 @app.tool(label="Image", named="image", defaults=_DEFAULTS, components=_COMPONENTS, on_demand=("upsampler",),
           memoize=True)  # fmt: skip
 def image(ctx: Context, payload: ImageBox, model: Ideogram4, text_encoder: QwenEncoder, upsampler: QwenUpsampler,
-          tel: Telemetry, adj: Adjustments) -> ImageResult:
+          out: Outputs, tel: Telemetry, adj: Adjustments) -> ImageResult:
     """Ideogram 4 on a canvas: Turbo's 12 steps, or 48."""
     request = GenerateInput(prompt=payload.instructions, aspect_ratio=payload.aspect_ratio, megapixels=payload.megapixels,
                             steps=TURBO_STEPS if payload.turbo else STEPS, seed=payload.seed)  # fmt: skip
-    return generate(ctx, request, model, text_encoder, upsampler, tel, adj)
+    return generate(ctx, request, model, text_encoder, upsampler, out, tel, adj)

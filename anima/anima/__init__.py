@@ -16,6 +16,7 @@ from cozy_runtime.author import (
     App,
     Context,
     ImageFrame,
+    Outputs,
     QuantizationPlan,
     Recipe,
     Seed,
@@ -188,6 +189,7 @@ def _generate(
     ip_adapter: IPAdapter,
     pose: PoseControl,
     lllites: dict[str, LLLite],
+    out: Outputs,
     tel: Telemetry,
     adj: Adjustments,
 ) -> ImageResult:
@@ -272,18 +274,18 @@ def _generate(
         pixels = pixels.contiguous()
         rgb = bytes(pixels.numpy().tobytes())
         phases.enter(_SAVE)
-        asset = ImageFile.from_image(ImageFrame(width, height, rgb), format="webp")
+        asset = out.save_image(ImageFrame(width, height, rgb), format="webp")
     return ImageResult(asset, width, height, seed, prompt)
 
 
 @app.entrypoint(defaults=_DEFAULTS, on_demand=_ON_DEMAND, memoize=True)
 def generate(ctx: Context, payload: GenerateInput, model: AnimaModel, image_encoder: ImageEncoder,
              ip_adapter: IPAdapter, depth: LLLite, pose: PoseControl, lineart: LLLite, sketch: LLLite,
-             inpaint: LLLite, tel: Telemetry, adj: Adjustments) -> ImageResult:  # fmt: skip
+             inpaint: LLLite, out: Outputs, tel: Telemetry, adj: Adjustments) -> ImageResult:  # fmt: skip
     """One native-resolution Anima image: from words, steered by the pictures they mention and by control maps,
     or from a start picture."""
     lllites = {"depth": depth, "lineart": lineart, "sketch": sketch, "inpaint": inpaint}
-    return _generate(ctx, payload, model, image_encoder, ip_adapter, pose, lllites, tel, adj)
+    return _generate(ctx, payload, model, image_encoder, ip_adapter, pose, lllites, out, tel, adj)
 
 
 # ------------------------------------------------------------------ quantized lanes
@@ -342,7 +344,7 @@ class ImageBox(msgspec.Struct, kw_only=True):
 
 @app.tool(label="Image", named="image", defaults=_DEFAULTS, on_demand=_ON_DEMAND, memoize=True)
 def image(ctx: Context, payload: ImageBox, model: AnimaModel, image_encoder: ImageEncoder, ip_adapter: IPAdapter,
-          depth: LLLite, pose: PoseControl, lineart: LLLite, sketch: LLLite, inpaint: LLLite,
+          depth: LLLite, pose: PoseControl, lineart: LLLite, sketch: LLLite, inpaint: LLLite, out: Outputs,
           tel: Telemetry, adj: Adjustments) -> ImageResult:  # fmt: skip
     """Anima on a canvas: `generate` from the box. Mentioned pictures steer it, a start picture makes it an edit."""
     request = GenerateInput(prompt=payload.instructions, aspect_ratio=payload.aspect_ratio, megapixels=float(payload.megapixels),
@@ -350,4 +352,4 @@ def image(ctx: Context, payload: ImageBox, model: AnimaModel, image_encoder: Ima
                             strength=payload.strength, control=payload.control,
                             reference_strength=payload.reference_strength)  # fmt: skip
     lllites = {"depth": depth, "lineart": lineart, "sketch": sketch, "inpaint": inpaint}
-    return _generate(ctx, request, model, image_encoder, ip_adapter, pose, lllites, tel, adj)
+    return _generate(ctx, request, model, image_encoder, ip_adapter, pose, lllites, out, tel, adj)

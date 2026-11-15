@@ -7,7 +7,7 @@ from collections.abc import Callable
 from typing import Annotated, Literal
 
 import msgspec
-from cozy_runtime.author import Adjustments, App, Context, Seed, Telemetry
+from cozy_runtime.author import Adjustments, App, Context, Outputs, Seed, Telemetry
 from cozy_runtime.fields import Advanced, AspectRatio, FileBound, Image, Prompt, Ratios, name_key
 from cozy_runtime.media import ImageFile
 from cozy_runtime.image import (
@@ -77,6 +77,7 @@ def _render(
     model: Klein,
     upsampler: Upsampler,
     drafter: Drafter,
+    out: Outputs,
     tel: Telemetry,
     adj: Adjustments,
     *,
@@ -128,7 +129,7 @@ def _render(
         if crop is not None:
             image = image.crop(crop)
     with tel.stage("saving image"):
-        asset = ImageFile.from_image(image, format="png")
+        asset = out.save_image(image, format="png")
     return ImageResult(asset, image.width, image.height, seed, caption)
 
 
@@ -219,7 +220,7 @@ def layout_rows(payload: TurboInput, placed: dict[str, Corners | None]) -> list[
 
 
 def _generate(ctx: Context, function: str, payload: TurboInput, drafter: Drafter, model: Klein,
-              upsampler: Upsampler, tel: Telemetry, adj: Adjustments) -> ImageResult:
+              upsampler: Upsampler, out: Outputs, tel: Telemetry, adj: Adjustments) -> ImageResult:
     default, most = _STEPS[function]
     steps = held(adj, "steps", payload.steps or default, 1, most)
     guidance: float | None = None
@@ -236,7 +237,7 @@ def _generate(ctx: Context, function: str, payload: TurboInput, drafter: Drafter
     # The upsampler is told the references' order in words, or as the layout record's ids; Klein
     # reading the prompt itself was trained on `<ref_image_N>`.
     prompt = worded(payload.prompt, placed, (ref_id if rows else ordinal) if upsample else tagged)
-    return _render(ctx, model, upsampler, drafter, tel, adj, prompt=prompt, upsample=upsample,
+    return _render(ctx, model, upsampler, drafter, out, tel, adj, prompt=prompt, upsample=upsample,
                    draft=payload.prompt_drafting, images=images, prepared=prepared, size=size, crop=crop,
                    canvas=canvas, rows=rows, steps=steps, guidance=guidance, negative=negative,
                    seed=payload.drawn_seed())
@@ -259,17 +260,17 @@ _ON_DEMAND = ("upsampler", "drafter")
 @app.entrypoint(defaults={"model": _BASE, "upsampler": _UPSAMPLER, "drafter": _DRAFTER}, components=_COMPONENTS,
                 on_demand=_ON_DEMAND, memoize=True)
 def generate(ctx: Context, payload: GenerateInput, drafter: Drafter, model: Klein, upsampler: Upsampler,
-             tel: Telemetry, adj: Adjustments) -> ImageResult:
+             out: Outputs, tel: Telemetry, adj: Adjustments) -> ImageResult:
     """Klein Base, 50 steps with CFG 4: text to image, or an edit of up to ten ordered pictures."""
-    return _generate(ctx, "generate", payload, drafter, model, upsampler, tel, adj)
+    return _generate(ctx, "generate", payload, drafter, model, upsampler, out, tel, adj)
 
 
 @app.entrypoint(defaults={"model": _DISTILLED, "upsampler": _UPSAMPLER, "drafter": _DRAFTER}, components=_COMPONENTS,
                 on_demand=_ON_DEMAND, memoize=True)
 def generate_turbo(ctx: Context, payload: TurboInput, drafter: Drafter, model: Klein, upsampler: Upsampler,
-                   tel: Telemetry, adj: Adjustments) -> ImageResult:
+                   out: Outputs, tel: Telemetry, adj: Adjustments) -> ImageResult:
     """The distilled Klein, 16 steps, no guidance: text to image, or an edit of up to ten ordered pictures."""
-    return _generate(ctx, "generate_turbo", payload, drafter, model, upsampler, tel, adj)
+    return _generate(ctx, "generate_turbo", payload, drafter, model, upsampler, out, tel, adj)
 
 
 class ImageBox(msgspec.Struct, kw_only=True):
@@ -293,12 +294,12 @@ class ImageBox(msgspec.Struct, kw_only=True):
           components={"drafter": ("model",), "full": _KLEIN, "model": _KLEIN, "upsampler": ("model",)},
           on_demand=("drafter", "full", "model", "upsampler"), memoize=True)  # fmt: skip
 def image(ctx: Context, payload: ImageBox, drafter: Drafter, full: Klein, model: Klein, upsampler: Upsampler,
-          tel: Telemetry, adj: Adjustments) -> ImageResult:
+          out: Outputs, tel: Telemetry, adj: Adjustments) -> ImageResult:
     """FLUX.3 Klein on a canvas, upsampled: the distilled model, or Base, which loads only when asked for."""
     kind, function, klein = (TurboInput, "generate_turbo", model) if payload.turbo else (GenerateInput, "generate", full)
     request = kind(prompt=payload.instructions, aspect_ratio=payload.aspect_ratio, megapixels=payload.megapixels,
                    seed=payload.seed, prompt_upsampling=payload.prompt_upsampling)  # fmt: skip
-    return _generate(ctx, function, request, drafter, klein, upsampler, tel, adj)
+    return _generate(ctx, function, request, drafter, klein, upsampler, out, tel, adj)
 
 
 #: What Klein is asked of a picture it upscales, read directly (`tagged`).
@@ -318,7 +319,7 @@ class UpscaleInput(msgspec.Struct, kw_only=True):
 
 @app.tool(label="Upscale", named="image", defaults={"model": _DISTILLED}, components={"model": _KLEIN},
           memoize=True)  # fmt: skip
-def upscale(ctx: Context, payload: UpscaleInput, model: Klein, tel: Telemetry,
+def upscale(ctx: Context, payload: UpscaleInput, model: Klein, out: Outputs, tel: Telemetry,
             adj: Adjustments) -> ImageResult:
     """The picture larger: Klein edits it at the size asked, the picture Lanczos-upscaled to the canvas both as the
     reference and, below `denoise`, as the start."""
@@ -342,6 +343,6 @@ def upscale(ctx: Context, payload: UpscaleInput, model: Klein, tel: Telemetry,
     with tel.stage("decoding image"):
         image = model.decode(tokens, width=width, height=height)
     with tel.stage("saving image"):
-        asset = ImageFile.from_image(image, format="png")
+        asset = out.save_image(image, format="png")
     tel.log("upscale", source=f"{picture.width}x{picture.height}", width=width, height=height, denoise=payload.denoise)
     return ImageResult(asset, width, height, seed, UPSCALE_PROMPT)

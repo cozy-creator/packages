@@ -231,10 +231,7 @@ account names that index in its `pyproject.toml` and never spells its URL:
 
 ```toml
 [project]
-dependencies = ["cozy-runtime>=0.47.0.dev0,<0.48"]
-
-[project.optional-dependencies]
-cozy-calls = ["qwen-image-2[cozy-calls]>=0.11.0rc6"]
+dependencies = ["qwen-image-2>=0.1.0"]
 
 [tool.uv.sources]
 qwen-image-2 = { index = "tensorhub" }
@@ -242,23 +239,17 @@ qwen-image-2 = { index = "tensorhub" }
 
 Creator writes the `tensorhub` index (`<hub>/v1/index/<account>/simple/`, explicit)
 for the command's Hub and account, so lock with `task lock -- <package>` (or any `cozy run` of it),
-not raw `uv lock`. uv resolves this distribution only from that index. Generate its typed
-operation references from your caller project's lock:
-
-```sh
-cozy-runtime calls qwen-image-2 qwen_calls.py
-```
-
-Run its functions as managed calls:
+not raw `uv lock`. uv resolves this distribution only from that index. Run its functions as managed
+calls:
 
 ```python
 from cozy_runtime.author import call
 from cozy_runtime.fields import Prompt
-from qwen_calls import GenerateInput, generate
+from qwen_image_2 import GenerateInput, generate
 
 image = await call(
     generate,
-    GenerateInput(prompt=Prompt(text="An explorer in a blue coat"), aspect_ratio="3:4", megapixels=1),
+    payload=GenerateInput(prompt=Prompt(text="An explorer in a blue coat"), aspect_ratio="3:4", megapixels=1),
 )
 ```
 
@@ -268,5 +259,5 @@ for Turbo, `alibaba-pai/qwen-image-2.1-fun-acc@0.1.1`; all read
 `atomicchat/qwen-image-2.1-text-encoder-abliterated@0.1.0` (`text_encoder`; the slot reads only its text encoder),
 `darrellbest/qwen-image-2.1-pe-i2i-abliterated@0.1.0` (`rewriter`) and
 `pottokao/qwen-image-2.1-pe-t2i-abliterated@0.1.0` (`expander`).
-The generated reference runs as a managed child job through `call`. Import implementation
-functions from `qwen_image_2` when you intend ordinary in-process execution.
+A plain `generate(...)` is an ordinary in-process Python call; `call` runs it as its own job on
+the machine.

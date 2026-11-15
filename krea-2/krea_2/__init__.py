@@ -6,7 +6,7 @@ from __future__ import annotations
 from typing import Annotated, Literal
 
 import msgspec
-from cozy_runtime.author import Adjustments, App, Context, Seed, Telemetry
+from cozy_runtime.author import Adjustments, App, Context, Outputs, Seed, Telemetry
 from cozy_runtime.fields import MENTION, AspectRatio, FileBound, Image, Prompt, Ratios
 from cozy_runtime.image import Control, Guidance, ImageRequest, ImageResult, NegativePrompt, Sizes, Steps, held
 from cozy_runtime.media import ImageFile
@@ -87,7 +87,7 @@ def _control(controls: list[Control[Kinds]], adj: Adjustments) -> Control[Kinds]
 
 
 def _generate(ctx: Context, payload: TurboInput, model: Krea2DiT, text_encoder: Krea2TextEncoder, vae: Krea2VAE,
-              adapters: Adapters,
+              adapters: Adapters, out: Outputs,
               tel: Telemetry, adj: Adjustments, *, distilled: bool) -> ImageResult:
     vae.hold_vae()
     prompt, pictures = _said(payload.prompt, adj)
@@ -162,7 +162,7 @@ def _generate(ctx: Context, payload: TurboInput, model: Krea2DiT, text_encoder: 
     with tel.stage("decoding image"):
         image = vae.decode(latents, width=width, height=height)
     with tel.stage("saving image"):
-        asset = ImageFile.from_image(image, format="png")
+        asset = out.save_image(image, format="png")
     return ImageResult(asset, width, height, seed, prompt)
 
 
@@ -191,11 +191,11 @@ _LORA = ("transformer",)
                             "pose": _LORA, "lineart": _LORA, "inpaint": _LORA},
                 on_demand=("edit", "depth", "pose", "lineart", "inpaint"), memoize=True)  # fmt: skip
 def generate(ctx: Context, payload: GenerateInput, model: Krea2DiT, text_encoder: Krea2TextEncoder, vae: Krea2VAE,
-             edit: Adapter, depth: Adapter, pose: Adapter, lineart: Adapter, inpaint: Adapter,
+             edit: Adapter, depth: Adapter, pose: Adapter, lineart: Adapter, inpaint: Adapter, out: Outputs,
              tel: Telemetry, adj: Adjustments) -> ImageResult:
     """The full model, Krea 2 Raw (or a fine-tune of it): 52 steps at guidance 3.5, 1 MP."""
     adapters = {"edit": edit, "depth": depth, "pose": pose, "lineart": lineart, "inpaint": inpaint}
-    return _generate(ctx, payload, model, text_encoder, vae, adapters, tel, adj, distilled=False)
+    return _generate(ctx, payload, model, text_encoder, vae, adapters, out, tel, adj, distilled=False)
 
 
 @app.entrypoint(defaults={"model": _TURBO_MODEL, "text_encoder": _TURBO_MODEL, "vae": _TURBO_MODEL, "edit": _EDIT,
@@ -204,11 +204,11 @@ def generate(ctx: Context, payload: GenerateInput, model: Krea2DiT, text_encoder
                             "pose": _LORA, "lineart": _LORA, "inpaint": _LORA},
                 on_demand=("edit", "depth", "pose", "lineart", "inpaint"), memoize=True)  # fmt: skip
 def generate_turbo(ctx: Context, payload: TurboInput, model: Krea2DiT, text_encoder: Krea2TextEncoder, vae: Krea2VAE,
-                   edit: Adapter, depth: Adapter, pose: Adapter, lineart: Adapter, inpaint: Adapter,
+                   edit: Adapter, depth: Adapter, pose: Adapter, lineart: Adapter, inpaint: Adapter, out: Outputs,
                    tel: Telemetry, adj: Adjustments) -> ImageResult:
     """The fast model, Krea 2 Turbo (or a fine-tune of it): 8 steps without guidance at its fixed shift, 2048²."""
     adapters = {"edit": edit, "depth": depth, "pose": pose, "lineart": lineart, "inpaint": inpaint}
-    return _generate(ctx, payload, model, text_encoder, vae, adapters, tel, adj, distilled=True)
+    return _generate(ctx, payload, model, text_encoder, vae, adapters, out, tel, adj, distilled=True)
 
 
 class ImageBox(msgspec.Struct, kw_only=True):
@@ -235,7 +235,7 @@ class ImageBox(msgspec.Struct, kw_only=True):
           on_demand=("full", "model", "edit", "depth", "pose", "lineart", "inpaint"), memoize=True)  # fmt: skip
 def image(ctx: Context, payload: ImageBox, full: Krea2DiT, model: Krea2DiT, text_encoder: Krea2TextEncoder,
           vae: Krea2VAE, edit: Adapter, depth: Adapter, pose: Adapter, lineart: Adapter, inpaint: Adapter,
-          tel: Telemetry, adj: Adjustments) -> ImageResult:
+          out: Outputs, tel: Telemetry, adj: Adjustments) -> ImageResult:
     """Krea 2 on a canvas: Turbo, or Raw, which loads only when asked for; an edit of the pictures it mentions."""
     kind = TurboInput if payload.turbo else GenerateInput
     megapixels = payload.megapixels
@@ -244,5 +244,5 @@ def image(ctx: Context, payload: ImageBox, full: Krea2DiT, model: Krea2DiT, text
     request = kind(prompt=payload.instructions, aspect_ratio=payload.aspect_ratio, megapixels=megapixels,
                    seed=payload.seed)  # fmt: skip
     adapters = {"edit": edit, "depth": depth, "pose": pose, "lineart": lineart, "inpaint": inpaint}
-    return _generate(ctx, request, model if payload.turbo else full, text_encoder, vae, adapters, tel, adj,
+    return _generate(ctx, request, model if payload.turbo else full, text_encoder, vae, adapters, out, tel, adj,
                      distilled=payload.turbo)

@@ -1117,9 +1117,9 @@ def _references_to_video(
     return H3VideoOutput(result.video, notes + result.warnings)
 
 
-def _keep_frames(last: list[ImageFile], pixels: Tensor) -> None:
+def _keep_frames(out: Outputs, last: list[ImageFile], pixels: Tensor) -> None:
     """A call's delivered `(frames, H, W, 3)` RGB8: its last frame."""
-    last.append(ImageFile.from_image(PILImage.fromarray(pixels[-1].numpy()), format="png"))
+    last.append(out.save_image(PILImage.fromarray(pixels[-1].numpy())))
 
 
 def _anchors(
@@ -1316,7 +1316,7 @@ async def ref2va_segment(
         expected_context_provenance=context_provenance(payload.previous_provenance or observed),
         completed=handed if handed.wanted else None,
         anchors=_anchors(payload.first_frame, payload.last_frame, payload.canvas),
-        ended=partial(_keep_frames, ended),
+        ended=partial(_keep_frames, out, ended),
         earlier=earlier, sound=sound,
     )  # fmt: skip
     return SegmentOutput(segment.video, [*segment.warnings, *handed.warnings], observed, handed.file("context"), ended[0], handed.file("latents"))
@@ -1391,7 +1391,7 @@ async def fl2va_segment(
         first=_frame(payload.first_frame, payload.canvas), last=_frame(payload.last_frame, payload.canvas),
         canvas=payload.canvas, turbo_lora=lora, quality=payload.quality, delivery=plan if plan.successor else None,
         completed=handed if handed.wanted else None,
-        ended=partial(_keep_frames, ended),
+        ended=partial(_keep_frames, out, ended),
     )  # fmt: skip
     return SegmentOutput(shot.video, [*shot.warnings, *handed.warnings], observed, handed.file("context"), ended[0], handed.file("latents"))
 
@@ -1572,7 +1572,7 @@ async def _render(ctx: Context, shot: Shot, out: Outputs, tel: Telemetry, *, pla
         if latents is None:
             warnings.append("this take has no latents here, so the new part is a new video opening on its frame, joined "
                             "after its kept start; the join may show")  # fmt: skip
-            opening = frame_at(take.file, done)
+            opening = frame_at(take.file, done, out)
         beats_from = pickup.beats_from if pickup.beats_from is not None else done / FPS if take.own else 0.0
         offset = beats_from - done / FPS
     script = written(shot, offset=offset, length=None if plate is None else float(plate.probe().duration))
@@ -1633,7 +1633,7 @@ async def _render(ctx: Context, shot: Shot, out: Outputs, tel: Telemetry, *, pla
         # from a seam starts from the kept segment's, named as that segment's successor names it.
         anchor = [_anchor(f"Segment {whole + index} end", script.people)] if index or whole and carried else []
         if anchor and not index:
-            files[anchor[0].name] = frame_at(cast(ShotVideo, take).file, done)
+            files[anchor[0].name] = frame_at(cast(ShotVideo, take).file, done, out)
         refs, added = [*own, *anchor, *([followed] if followed else [])], frozenset(ref.name for ref in anchor)
         forced = added | ({"Plate"} if followed else set())
         # A shot's segment that goes on from frames before it, a take's or its own last segment's, is a continuation (ref
@@ -1648,7 +1648,7 @@ async def _render(ctx: Context, shot: Shot, out: Outputs, tel: Telemetry, *, pla
             begin = _anchor("Plate opening" if plate is not None else "Segment 0 end", script.people)
             if plate is not None:
                 warnings.append("a plate with no picture beside it uses its own first frame as the picture")
-            files[begin.name] = frame_at(plate, 1) if plate is not None else frame_at(cast(ShotVideo, take).file, done)
+            files[begin.name] = frame_at(plate, 1, out) if plate is not None else frame_at(cast(ShotVideo, take).file, done, out)
             segment = segment_call(text, [*refs, begin], soundscape=script.soundscape, music=script.music, index=index,
                                    retained=retained, added=added | {begin.name}, forced=forced | {begin.name}, **role)  # fmt: skip
         files |= {ref.name: file for ref in segment.references if (file := getattr(ref, FILE[ref.kind])) is not None}
@@ -1684,7 +1684,7 @@ async def _render(ctx: Context, shot: Shot, out: Outputs, tel: Telemetry, *, pla
                     pictures = [ref for ref in segment.references if FILE[ref.kind] == "image"]
                     result = await call(
                         ref2va_segment,
-                        Ref2VAInput(
+                        payload=Ref2VAInput(
                             prompt=segment.prompt, seed=seeds[index], duration_s=segments[index], steps=steps,
                             turbo=turbo, quality=shot.quality, frames=held_frames(plan, uses), videos=uses,
                             previous_provenance=expected, context=context if plan.carried else None,
@@ -1697,17 +1697,17 @@ async def _render(ctx: Context, shot: Shot, out: Outputs, tel: Telemetry, *, pla
                             earlier_videos=(*before[1], *(r.video for r in returned)) if end_segment else (),
                             picture_edges=tuple(_LOOSE_EDGE if ref.kind == "world_state" else 0 for ref in pictures),
                             characters=tuple(ref.name if ref.kind == "character" else "" for ref in pictures),
-                        ), assets=_call_assets(files, segment.references), models=models,
+                        ), assets=_call_assets(files, segment.references), **models,
                     )  # fmt: skip
                 else:
                     result = await call(
                         fl2va_segment,
-                        FL2VAInput(
+                        payload=FL2VAInput(
                             prompt=segment.prompt, seed=seeds[index], duration_s=segments[index], steps=steps,
                             turbo=turbo, quality=shot.quality, first_frame=first, last_frame=last, canvas=shape,
                             next_context_frames=cast(ContextFrames, plan.successor.frames),
                             next_context_audio=plan.successor.audio, latents=True,
-                        ), models=models,
+                        ), **models,
                     )  # fmt: skip
         except ChildCallError:
             # Concurrent caller cancellation must not become a successful partial result.
@@ -1737,7 +1737,7 @@ async def _render(ctx: Context, shot: Shot, out: Outputs, tel: Telemetry, *, pla
                       kept_s=begun if take is not None else None, seams=seams)  # fmt: skip
 
 
-@app.tool(label="Shot", named="shot", reserved=_RESERVED)
+@app.tool(label="Shot", named="shot", accelerator=False, reserved=_RESERVED)
 async def generate(ctx: Context, payload: Shot, out: Outputs, tel: Telemetry) -> ShotResult:
     """One continuous shot of any length, with sound (README.md): a summary, then what happens, beat by beat, each text
     with the references it mentions; an optional first and last frame; and Pick up from here, which goes on from a take
@@ -1763,7 +1763,7 @@ class PackageShotResult(msgspec.Struct):
     warnings: list[str]
 
 
-@app.entrypoint
+@app.entrypoint(accelerator=False)
 async def render_shot(ctx: Context, payload: PackageShot, out: Outputs, tel: Telemetry) -> PackageShotResult:
     """`generate` for another package (`orbit`): its LoRAs on every segment after Turbo's, as `edit` puts its edit LoRA
     on, and only the video back."""
@@ -1816,7 +1816,7 @@ class Edit(msgspec.Struct, kw_only=True):
     seed: Seed | None = None
 
 
-@app.tool(label="Edit", named="edit", reserved=_RESERVED)
+@app.tool(label="Edit", named="edit", accelerator=False, reserved=_RESERVED)
 async def edit(ctx: Context, payload: Edit, out: Outputs, tel: Telemetry) -> ShotResult:
     """A plate edited by its beats, on Ref2VA under the chosen edit LoRA, its trigger opening each beat. With no picture
     in a beat, the plate's own first frame is the picture."""
@@ -1843,7 +1843,7 @@ class UpscaleOutput(msgspec.Struct):
     warnings: list[str] = msgspec.field(default_factory=list)
 
 
-@app.tool(label="Upscale", named="upscale")
+@app.tool(label="Upscale", named="upscale", accelerator=False)
 async def upscale(ctx: Context, payload: Upscale, out: Outputs, tel: Telemetry) -> UpscaleOutput:
     """A take at 1080p, 1440p or 2160p, its sound kept (UPSCALE.md): its 768p latents upscaled and refined by H3 under
     the Regenerate LoRA, from the text they carry, else its frames from its description. A video already that big comes
@@ -1867,7 +1867,7 @@ async def upscale(ctx: Context, payload: Upscale, out: Outputs, tel: Telemetry) 
     request = RegenerateInput(video=video.file, latents=video.latents, prompt=prompt, resolution=Resolution(payload.to),
                               strength=strength, seed=seed)  # fmt: skip
     with tel.scope(f"Regenerate at {payload.to}"):
-        result = await call(regenerate_shot, request)
+        result = await call(regenerate_shot, payload=request)
     warnings += result.warnings
     tel.log("h3 upscale", to=payload.to, strength=strength, warnings="; ".join(warnings))
     return UpscaleOutput(result.video, warnings)
