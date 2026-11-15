@@ -28,30 +28,13 @@ from PIL import Image, ImageOps
 from torch import nn
 from transformers.initialization import no_init_weights
 
-from .model import PATCH, SLOTS, Reference, Transformer, as_stored
+from .model import PATCH, SLOTS, Krea2DiTGraph, Reference, Transformer, as_stored
 
 T = TypeVar("T")
 #: An uploaded Krea 2 LoRA's one component (TensorFS's `krea2.lora`), its modules under Diffusers' names.
 COMPONENT = "transformer"
 #: How an adapter takes its pictures (module docstring).
 Protocol = Literal["identity", "ai-toolkit", "concat"]
-
-
-class Factors(nn.Module):
-    """One linear's `lora_A` [r, in] and `lora_B` [out, r], applied as `scale · B·A`."""
-
-    def __init__(self, inputs: int, outputs: int, rank: int, scale: float) -> None:
-        super().__init__()
-        self.lora_A = nn.Linear(inputs, rank, bias=False, dtype=torch.bfloat16)
-        self.lora_B = nn.Linear(rank, outputs, bias=False, dtype=torch.bfloat16)
-        self.unit = scale
-        self.scale = scale
-
-    def forward(self, x: torch.Tensor, out: torch.Tensor) -> None:
-        lora.accumulate(x, out, self.lora_A.weight, self.lora_B.weight, self.scale)
-
-    def factors(self) -> tuple[torch.Tensor, torch.Tensor, float]:
-        return self.lora_A.weight, self.lora_B.weight, self.scale
 
 
 class AdapterGraph:
@@ -63,20 +46,21 @@ class AdapterGraph:
         adapter = config.section(COMPONENT) if COMPONENT in config.keys() else config
         settings = adapter.mapping()
         rank = adapter.as_int("r")
-        scale = adapter.as_float("lora_alpha", float(rank)) / rank
+        #: Its factors' scale at strength 1 (`Adapter.applied`).
+        self.unit = adapter.as_float("lora_alpha", float(rank)) / rank
         with torch.device("meta"):  # the class defaults are Krea 2's geometry
             dit = Krea2Transformer2DModel()
         linears = {name: module for name, module in dit.named_modules() if isinstance(module, nn.Linear)}
         named = [str(target) for target in settings["target_modules"]]
         targets = sorted({name for name in linears for target in named if name == target or name.endswith("." + target)})
         root = nn.Module()
-        self.sites: dict[str, Factors] = {}
+        self.factors: dict[str, lora.Pair] = {}
         with no_init_weights():
             for path in targets:
                 linear = linears[path]
-                factors = Factors(linear.in_features, linear.out_features, rank, scale)
+                factors = lora.Pair(linear.in_features, linear.out_features, rank, self.unit, dtype=torch.bfloat16)
                 _add(root, path, factors)
-                self.sites[path] = factors
+                self.factors[path] = factors
             self.projection: nn.Linear | None = None
             if _stored(config, f"{COMPONENT}.img_in.modules_to_save.weight"):
                 image = linears["img_in"]
@@ -117,32 +101,30 @@ class Adapter(Model[AdapterGraph]):
         self.graph = loader.construct(AdapterGraph)
 
     @uses_components(COMPONENT)
-    def applied(self, transformer: Transformer, slot: int, strength: float, body: Callable[[], T]) -> T:
-        """`body` with this LoRA armed on the DiT in `slot` at `strength`: Runtime bakes it into the resident
-        weights, else its hooks add it. A control LoRA's projection reads the control map at full weight
+    def applied(self, sites: lora.Sites, transformer: Transformer, strength: float, body: Callable[[], T]) -> T:
+        """`body` with this LoRA armed on the DiT's `sites` at `strength`: Runtime bakes it into the resident
+        weights, else its sites add it. A control LoRA's projection reads the control map at full weight
         (Patil's `--lora-scale` scales the LoRA alone)."""
-        for factors in self.graph.sites.values():
-            factors.scale = factors.unit * strength
-        overlays = transformer._cozy_overlays
-        overlays[slot] = self.graph.sites
+        for factors in self.graph.factors.values():
+            factors.scale = self.graph.unit * strength
         projection = self.graph.projection
         if projection is not None:
             transformer._cozy_projection = (projection.weight, projection.bias)
         try:
-            return body()
+            with sites.applied(self.graph.factors):
+                return body()
         finally:
-            overlays[slot] = None
             if projection is not None:
                 transformer._cozy_projection = None
 
 
-def armed(adapters: list[tuple[Adapter, float]], transformer: Transformer, body: Callable[[], T]) -> T:
-    """`body` with each adapter armed in its own slot (at most `SLOTS`)."""
+def armed(adapters: list[tuple[Adapter, float]], dit: Krea2DiTGraph, body: Callable[[], T]) -> T:
+    """`body` with each adapter armed on a `lora.Sites` of its own (at most `SLOTS`)."""
     if not adapters:
         return body()
     (adapter, strength), rest = adapters[0], adapters[1:]
-    slot = SLOTS - len(adapters)
-    return adapter.applied(transformer, slot, strength, lambda: armed(rest, transformer, body))
+    sites = dit.sites[SLOTS - len(adapters)]
+    return adapter.applied(sites, dit.components["transformer"], strength, lambda: armed(rest, dit, body))
 
 
 # Identity Edit (krea2edit) -----------------------------------------------------------------------------

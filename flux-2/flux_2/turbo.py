@@ -1,9 +1,9 @@
 """fal's FLUX.2 [dev] Turbo: a rank-256 LoRA over [dev]'s linears (`fal/FLUX.2-dev-Turbo`), its own model.
 
-The overlay is never merged into a [dev] lane. While `applied` runs, [dev]'s linear hooks
-(`cozy_runtime.lora.Hook`) serve its factors: Runtime bakes them into the resident weights by default, and a
-hook adds the update itself where they are not baked. Its sites are the checkpoint's: each target's stored
-factors give their shapes (`Config.tensor_shape`).
+The overlay is never merged into a [dev] lane. While `applied` runs, it is armed on [dev]'s `lora.Sites`:
+Runtime bakes its factors into the resident weights by default, and a site adds the update itself where they
+are not baked. Its sites are the checkpoint's: each target's stored factors give their shapes
+(`Config.tensor_shape`).
 """
 
 from __future__ import annotations
@@ -23,27 +23,11 @@ COMPONENT = "transformer"
 _DTYPES = {"f32": torch.float32, "bf16": torch.bfloat16, "f16": torch.float16}
 
 
-class Factors(nn.Module):
-    """One site's `lora_A` [r, in] and `lora_B` [out, r], applied as scale · B·A."""
-
-    def __init__(self, inputs: int, outputs: int, rank: int, scale: float) -> None:
-        super().__init__()
-        self.lora_A = nn.Linear(inputs, rank, bias=False)
-        self.lora_B = nn.Linear(rank, outputs, bias=False)
-        self.scale = scale
-
-    def forward(self, x: torch.Tensor, out: torch.Tensor) -> None:
-        lora.accumulate(x, out, self.lora_A.weight, self.lora_B.weight, self.scale)
-
-    def factors(self) -> tuple[torch.Tensor, torch.Tensor, float]:
-        return self.lora_A.weight, self.lora_B.weight, self.scale
-
-
 class TurboGraph:
     def __init__(self, config: Config) -> None:
         adapter = config.mapping()  # the one component's PEFT adapter config
         root = nn.Module()
-        self.sites: dict[str, Factors] = {}
+        self.factors: dict[str, lora.Pair] = {}
         dtype = torch.bfloat16
         for target in adapter["target_modules"]:
             path = target.removeprefix("transformer.")
@@ -54,7 +38,7 @@ class TurboGraph:
                 raise ValueError(f"the Turbo LoRA's {path} has no stored factors to build it from")
             (rank, inputs), (outputs, _) = down, up
             # α: the config's `lora_alpha` (one rank, so no module states its own), else r.
-            factors = Factors(inputs, outputs, rank, float(adapter.get("lora_alpha", rank)) / rank)
+            factors = lora.Pair(inputs, outputs, rank, float(adapter.get("lora_alpha", rank)) / rank)
             dtype = _DTYPES[config.tensor_dtype(f"{key}.lora_A.weight", default="bf16")]
             parent = root
             for name in path.split(".")[:-1]:
@@ -62,7 +46,7 @@ class TurboGraph:
                     parent.add_module(name, nn.Module())
                 parent = getattr(parent, name)
             parent.add_module(path.rsplit(".", 1)[-1], factors)
-            self.sites[path] = factors
+            self.factors[path] = factors
         self.components: dict[str, nn.Module] = {COMPONENT: root.to(dtype)}
 
 
@@ -77,12 +61,9 @@ class Flux2TurboLoRA(Model[TurboGraph]):
         self.graph = loader.construct(TurboGraph)
 
     @uses_components(COMPONENT)
-    def applied(self, transformer: nn.Module, body: Callable[[], T]) -> T:
-        """`body` with this overlay armed on [dev]'s `transformer`."""
-        if not hasattr(transformer, "_cozy_turbo"):
+    def applied(self, sites: lora.Sites | None, body: Callable[[], T]) -> T:
+        """`body` with this overlay armed on [dev]'s transformer (`sites`; [klein] has none)."""
+        if sites is None:
             raise ValueError("the Turbo LoRA adapts FLUX.2 [dev] only")
-        transformer._cozy_turbo = self.graph.sites  # type: ignore[assignment]  # a plain attribute: nn.Module keeps non-tensors as such
-        try:
+        with sites.applied(self.graph.factors):
             return body()
-        finally:
-            transformer._cozy_turbo = None  # type: ignore[assignment]  # a plain attribute
