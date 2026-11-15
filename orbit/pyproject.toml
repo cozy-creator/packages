@@ -4,12 +4,14 @@ version = "0.2.0rc1"
 description = "Orbit: a picture's subject seen from all the way round, one clockwise camera turn by MiniMax H3 and ORB360"
 requires-python = ">=3.12,<3.15"
 dependencies = [
-    "cozy-runtime[media]>=0.46.0,<0.47",
-    "minimax-h3>=0.12.0rc2",
+    "cozy-runtime[media]>=0.47.0.dev0,<0.48",
     "msgspec>=0.19",
     "numpy>=1.26",
     "pillow>=12",
 ]
+
+[project.optional-dependencies]
+cozy-calls = ["minimax-h3[cozy-calls]>=0.13.0rc8"]
 
 [project.entry-points."cozy.application"]
 default = "orbit:app"
@@ -38,4 +40,4 @@ explicit = true
 [tool.uv.sources]
 torch = { index = "pytorch-cu130", marker = "sys_platform == 'win32'" }
 torchvision = { index = "pytorch-cu130", marker = "sys_platform == 'win32'" }
-minimax-h3 = { index = "tensorhub" }
+minimax-h3 = { url = "https://github.com/cozy-creator/packages/releases/download/xs-198-h3-0.13.0rc8-fa7d5146/minimax_h3-0.13.0rc8-py3-none-any.whl" }

@@ -52,7 +52,6 @@ from cozy_runtime.author import (
     Model,
     ModelAssets,
     OutputError,
-    Outputs,
     QuantizationPlan,
     Recipe,
     Seed,
@@ -588,7 +587,6 @@ def generate(
     payload: GenerateInput,
     facts: Preflight[GenerateFacts],
     model: SdxlModel,
-    out: Outputs,
     tel: Telemetry,
     adj: Adjustments,
 ) -> ImageResult:
@@ -625,7 +623,7 @@ def generate(
     decoded_h, decoded_w = int(pixels.shape[0]), int(pixels.shape[1])
     tel.metric("decoded_pixels", float(decoded_w * decoded_h))
     with tel.stage("encode_webp"):
-        asset = out.save_image(ImageFrame(decoded_w, decoded_h, rgb), format="webp")
+        asset = ImageFile.from_image(ImageFrame(decoded_w, decoded_h, rgb), format="webp")
     tel.log("sampled", sampler="ddim eta=1.0" if hidiffusion_applied else "dpmpp_2m_karras", steps=steps,
             guidance=guidance, classifier_free=classifier_free, hidiffusion=hidiffusion_applied)
     return ImageResult(asset, decoded_w, decoded_h, seed, prompt)
@@ -655,10 +653,10 @@ def resolve_image(payload: ImageBox) -> GenerateFacts:
 
 
 @app.tool(label="Image", named="image", defaults=_DEFAULTS, memoize=True, preflight=resolve_image)
-def image(ctx: Context, payload: ImageBox, facts: Preflight[GenerateFacts], model: SdxlModel, out: Outputs,
+def image(ctx: Context, payload: ImageBox, facts: Preflight[GenerateFacts], model: SdxlModel,
           tel: Telemetry, adj: Adjustments) -> ImageResult:
     """SDXL on a canvas: `generate` from the box."""
-    return generate(ctx, _request(payload), facts, model, out, tel, adj)
+    return generate(ctx, _request(payload), facts, model, tel, adj)
 
 
 #: What SDXL is told of a picture it upscales, and kept from.
@@ -677,7 +675,7 @@ class UpscaleInput(msgspec.Struct, kw_only=True):
 
 
 @app.tool(label="Upscale", named="image", defaults=_DEFAULTS, memoize=True)
-def upscale(ctx: Context, payload: UpscaleInput, model: SdxlModel, out: Outputs, tel: Telemetry,
+def upscale(ctx: Context, payload: UpscaleInput, model: SdxlModel, tel: Telemetry,
             adj: Adjustments) -> ImageResult:
     """The picture larger: Lanczos to the size asked, then SDXL img2img over the whole canvas (DPM++ 2M Karras)."""
     hold_decode_dtype(model.pipe.components["vae"], tel)
@@ -698,7 +696,7 @@ def upscale(ctx: Context, payload: UpscaleInput, model: SdxlModel, out: Outputs,
     rgb = ((image[0].float() / 2 + 0.5).clamp(0, 1) * 255).round().to(torch.uint8).permute(1, 2, 0).contiguous()
     _integrity(image, rgb, tel)
     with tel.stage("saving image"):
-        asset = out.save_image(ImageFrame(width, height, bytes(rgb.cpu().numpy().tobytes())), format="png")
+        asset = ImageFile.from_image(ImageFrame(width, height, bytes(rgb.cpu().numpy().tobytes())), format="png")
     tel.log("upscale", source=f"{picture.width}x{picture.height}", width=width, height=height, denoise=payload.denoise)
     return ImageResult(asset, width, height, seed, UPSCALE_PROMPT)
 
