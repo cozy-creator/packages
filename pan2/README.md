@@ -35,3 +35,9 @@ for pinned sources, component/dtype details and remaining execution evidence.
 Real CLI renders cover the native 10-second and maximum 20-second paths on H200. See the
 [execution report](../research/video-models/2026-11-15.md) for exact cohorts, timings, UI checks,
 comparison caveats and the separate publication/installed-package gates.
+
+## Several GPUs
+
+The simulator supports Ulysses sequence parallelism across 2, 4 or 8 GPUs. Use `--gpus=2` with a machine that has two GPUs; the video and text token streams are split inside the transformer. The optional caption reasoner remains an auxiliary model.
+
+A full 20-second, 1248×704, 50-step video completed on two H200s in 1247.600 seconds. One card thermally throttled, and the earlier single-H200 run used a different worker cohort, so this is not a clean scaling ratio. Four/eight-rank transformer parity is checked on CPU; production GPU runs at those degrees remain unmeasured. See the [qualification report](../research/video-models/2026-11-15.md).

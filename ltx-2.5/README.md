@@ -43,3 +43,13 @@ for exact cohorts and the separate publication/installed-package gates.
 The [CPU importer](../examples/client-scripts/ingest-ltx25.py) reproduces the pinned Distilled
 checkpoint with BF16 transformer/video and F32 audio VAE/vocoder. It runs before serving;
 `HF_TOKEN` supplies gated source access, or `--token-stdin` reads it from standard input.
+
+## Several GPUs
+
+A single video can use Ulysses sequence parallelism across 2, 4 or 8 GPUs:
+
+```sh
+cozy run ltx-2.5/generate --on renderbox --gpus=2 prompt="A quiet workshop." duration_s=20 resolution=1080p audio=true
+```
+
+Two H200 GPUs have produced full 20-second text-to-video and first-frame videos with stereo sound. Four/eight-rank transformer parity is checked on CPU; production GPU timing at those degrees remains unmeasured. See the [qualification report](../research/video-models/2026-11-15.md) for actual timings, thermal conditions and ComfyUI comparisons.
