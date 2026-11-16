@@ -10,6 +10,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 # ==============================================================================
+# Modified for Cozy (packages xs-200): Transformers 5's `Siglip2ImageProcessor` (the torchvision one, formerly
+# `Siglip2ImageProcessorFast`), asked for tensors as the Fast one returned them.
 """
 Image Processor Module for HunyuanImage-3.0
 
@@ -26,7 +28,7 @@ from PIL import Image
 from torchvision import transforms
 from transformers.image_processing_utils import BaseImageProcessor
 from transformers.image_utils import load_image
-from transformers.models.siglip2.image_processing_siglip2_fast import Siglip2ImageProcessorFast
+from transformers.models.siglip2.image_processing_siglip2 import Siglip2ImageProcessor
 from transformers.generation.logits_process import LogitsProcessor, LogitsProcessorList
 
 from .tokenization_hunyuan_image_3 import ImageInfo, ImageTensor, CondImage, Resolution, ResolutionGroup
@@ -254,7 +256,7 @@ class HunyuanImage3ImageProcessor(object):
 
         # Initialize ViT processor based on encoder type
         if config.vit_type == "siglip2-so400m-patch16-naflex":
-            self.vit_processor = Siglip2ImageProcessorFast.from_dict(config.vit_processor)
+            self.vit_processor = Siglip2ImageProcessor.from_dict(config.vit_processor)
         else:
             raise ValueError(f"Unsupported vit_type: {config.vit_type}")
         # Initialize ViT information
@@ -427,7 +429,7 @@ class HunyuanImage3ImageProcessor(object):
         """
         origin_size = image.size
         # Process image through ViT processor
-        inputs = self.vit_info.processor(image)
+        inputs = self.vit_info.processor(image, return_tensors="pt")
         image = inputs["pixel_values"].squeeze(0)   # (seq_len, dim)
 
         # Extract additional processor outputs (spatial shapes, attention masks, etc.)

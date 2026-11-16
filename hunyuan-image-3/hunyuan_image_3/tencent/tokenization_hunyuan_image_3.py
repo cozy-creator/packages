@@ -11,6 +11,8 @@
 # limitations under the License.
 # ==============================================================================
 # Modified for Cozy (packages se-079): diffusers' BaseOutput is replaced by an equivalent class.
+# Modified for Cozy (packages xs-200): on Transformers 5, decoding keeps Transformers 4's clean-up of spaces, which
+# Transformers 5 skips for a BPE tokenizer unless asked.
 
 from collections import defaultdict
 from copy import deepcopy
@@ -23,7 +25,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
-from transformers.tokenization_utils_fast import PreTrainedTokenizerFast
+from transformers import PreTrainedTokenizerFast
 
 from collections import OrderedDict
 from dataclasses import fields
@@ -576,6 +578,7 @@ class HunyuanImage3TokenizerFast(PreTrainedTokenizerFast):
     for multimodal tasks.
     """
     def __init__(self, *args, **kwargs):
+        kwargs.setdefault("clean_up_tokenization_spaces_for_bpe_even_though_it_will_corrupt_output", True)
         super().__init__(*args, **kwargs)
         # A convenience mapping for special tokens
         special_tokens = self.special_tokens_map.get('additional_special_tokens', [])
