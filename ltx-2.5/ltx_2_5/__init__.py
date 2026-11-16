@@ -14,17 +14,18 @@ import torch
 from cozy_runtime import rng
 from cozy_runtime.author import Adjustments, App, Context, Outputs, Seed, Telemetry
 from cozy_runtime.fields import (
-    Advanced, AspectRatio, Audio, FileBound, Image, ImagePreparation, Label, Pickup, Prompt, Range, Ratios, Video,
+    Advanced, AspectRatio, Audio, FileBound, Image, ImagePreparation, Label, Pickup, Placeholder, Prompt, Range, Ratios,
+    Video,
 )
-from cozy_runtime.media import ImageFile, VideoFile
+from cozy_runtime.media import AudioFile, ImageFile, VideoFile
 from PIL import Image as PILImage
 
-from . import annotators, controls, sound
+from . import annotators, controls, mel
 from . import quantize as quantize  # its recipe
 from .adapter import ICLora
 from .annotators import PersonDetector, VideoDepth, WholeBody
 from .enhancer import Enhancer
-from .model import COMPONENTS, FPS, REFINE_SIGMAS, SIGMAS, Frame, Ltx25
+from .model import COMPONENTS, FPS, REFINE_SIGMAS, SIGMAS, Frame, Ltx25, Window
 from .prompts import names, rendered, sheet
 
 app = App()
@@ -116,7 +117,7 @@ def waveform(planes: tuple[bytes, ...]) -> torch.Tensor:
 
 
 def at_rate(audio: torch.Tensor, rate: int, target: int, channels: int) -> torch.Tensor:
-    audio = sound.resample(audio, rate, target)
+    audio = mel.resample(audio, rate, target)
     return audio.expand(channels, -1).clone() if audio.shape[0] < channels else audio[:channels]
 
 
@@ -244,9 +245,9 @@ def generate(ctx: Context, payload: Generate, model: Ltx25, ingredients: ICLora,
         adapter = union_control
 
     def stage_one() -> tuple[torch.Tensor, torch.Tensor]:
-        return model.denoise(embeds, pictures, width=width // 2, height=height // 2, frames=frames, reference=reference,
-                             downscale=adapter.graph.downscale if adapter is not None else 1, held=held,
-                             generator=generator, check=ctx.raise_if_cancelled,
+        return model.denoise(embeds, pictures, width=width // 2, height=height // 2, frames=frames, sigmas=SIGMAS,
+                             reference=reference, downscale=adapter.graph.downscale if adapter is not None else 1,
+                             held=held, generator=generator, check=ctx.raise_if_cancelled,
                              progress=lambda step: ctx.progress(step, len(SIGMAS)))
 
     with tel.stage("generating video and audio"):
@@ -255,8 +256,8 @@ def generate(ctx: Context, payload: Generate, model: Ltx25, ingredients: ICLora,
     with tel.stage("upscaling latents"):
         high = model.upscale(latents[0])
     with tel.stage("refining video and audio"):
-        latents = model.denoise(embeds, pictures, width=width, height=height, frames=frames, latents=(high, latents[1]),
-                                held=held, generator=generator, check=ctx.raise_if_cancelled,
+        latents = model.denoise(embeds, pictures, width=width, height=height, frames=frames, sigmas=REFINE_SIGMAS,
+                                latents=(high, latents[1]), held=held, generator=generator, check=ctx.raise_if_cancelled,
                                 progress=lambda step: ctx.progress(step, len(REFINE_SIGMAS)))
     ctx.raise_if_cancelled()
     with tel.stage("decoding video"):
@@ -286,3 +287,164 @@ def generate(ctx: Context, payload: Generate, model: Ltx25, ingredients: ICLora,
     tel.log("ltx-2.5", width=width, height=height, frames=len(pixels), audio=payload.audio,
             sampler="diffusers-euler", stages=2, steps=len(SIGMAS) + len(REFINE_SIGMAS))
     return VideoResult(video, width, height, float(FPS), len(pixels), seed, prompt)
+
+
+class Sound(msgspec.Struct, kw_only=True):
+    #: What is heard, in your words: the voices and what they say (quoted), the music, the place.
+    prompt: Annotated[str, Placeholder('A woman saying: "Oh, what a lovely day we are having!"')] = ""
+    duration_s: Annotated[float, Range(1, 20, unit="s")] = 5.0
+    seed: Seed | None = None
+    #: Lightricks' enhancer (Gemma 4 E2B) first rewrites the prompt; their text-to-audio template leaves it off.
+    prompt_upsampling: Annotated[bool, Advanced()] = False
+
+
+class SoundResult(msgspec.Struct):
+    audio: Annotated[AudioFile, FileBound(max_bytes=1 << 32, media_types=("audio/flac",))]
+    duration_s: float
+    sample_rate: int
+    seed: int
+    #: The text the model read.
+    prompt: str
+
+
+@app.tool(label="LTX-2.5 Sound", named="sound", defaults={"model": MODEL, "enhancer": ENHANCER},
+          components={"model": ("transformer", "text_encoder", "connectors", "audio_vae", "vocoder")},
+          on_demand=("enhancer",), memoize=True)
+def sound(ctx: Context, payload: Sound, model: Ltx25, enhancer: Enhancer, out: Outputs, tel: Telemetry,
+          adj: Adjustments) -> SoundResult:
+    """Sound alone from text: LTX-2.5's audio branch in one distilled stage, its video stream a stub nothing attends to
+    (Lightricks' `LTX-2.5_T2A_Single_Stage_Distilled` template and its `LTXVAudioOnlyModel`)."""
+    text = payload.prompt.strip()
+    if not text:
+        raise ValueError("LTX-2.5 Sound needs a prompt describing the sound")
+    seed = int(payload.seed) if payload.seed is not None else secrets.randbits(32)
+    seconds = min(20.0, max(1.0, payload.duration_s))
+    if seconds != payload.duration_s:
+        adj.warn("duration_s", f"LTX-2.5 makes 1-20 seconds of sound, so this runs {seconds:g} seconds")
+    frames = 8 * math.ceil(seconds * FPS / 8) + 1
+    if payload.prompt_upsampling:
+        with tel.stage("enhancing prompt"):
+            text = enhancer.rewrite(text, None)
+    with tel.stage("encoding prompt"):
+        embeds = model.encode(text)
+    with tel.stage("generating audio"):
+        latents = model.sound(embeds, frames=frames, generator=rng.generator(seed), check=ctx.raise_if_cancelled,
+                              progress=lambda step: ctx.progress(step, len(SIGMAS)))
+    ctx.raise_if_cancelled()
+    with tel.stage("decoding audio"):
+        audio, rate = model.decode_audio(latents)
+    # The model's length is on the video's frame grid; the sound is the length asked for.
+    audio = audio[:, : round(seconds * rate)].contiguous()
+    with tel.stage("saving audio"):
+        saved = out.save_audio(audio, sample_rate=rate)
+    tel.log("ltx-2.5 sound", seconds=seconds, sampler="diffusers-euler", steps=len(SIGMAS))
+    return SoundResult(saved, audio.shape[1] / rate, rate, seed, text)
+
+
+class Retake(msgspec.Struct, kw_only=True):
+    #: The take to redo part of.
+    video: VideoFile
+    #: Where the part redone starts, in seconds from the take's start.
+    start_s: Annotated[float, Range(0, 3600, unit="s")]
+    #: Where it ends.
+    end_s: Annotated[float, Range(0, 3600, unit="s")]
+    #: What happens in that part, with its sound and dialogue.
+    prompt: Annotated[str, Placeholder("What happens instead, and what is heard")] = ""
+    redo: Annotated[Literal["both", "video", "sound"], Label("Redo", {
+        "both": ("Picture and sound", "Both are made again in that part"),
+        "video": ("Picture only", "The take's sound stays as it is"),
+        "sound": ("Sound only", "The take's picture stays as it is")})] = "both"
+    seed: Seed | None = None
+    #: Lightricks' enhancer (Gemma 4 E2B) first rewrites the prompt, as upstream's retake offers (off there by default).
+    prompt_upsampling: Annotated[bool, Advanced()] = False
+
+
+def grid(width: int, height: int) -> tuple[int, int]:
+    """The size a retake renders at: the take's, its sides on the VAE's 32-pixel grid, at most 1080p's area."""
+    scale = min(1.0, math.sqrt(1920 * 1088 / (width * height)))
+    return max(64, round(width * scale / 32) * 32), max(64, round(height * scale / 32) * 32)
+
+
+def fitted(audio: torch.Tensor, samples: int) -> torch.Tensor:
+    return audio[:, :samples] if audio.shape[1] >= samples else torch.nn.functional.pad(audio, (0, samples - audio.shape[1]))
+
+
+@app.tool(label="LTX-2.5 Retake", named="retake", defaults={"model": MODEL, "enhancer": ENHANCER},
+          components={"model": ("transformer", "text_encoder", "connectors", "vae", "audio_vae", "vocoder")},
+          on_demand=("enhancer",), memoize=True)
+def retake(ctx: Context, payload: Retake, model: Ltx25, enhancer: Enhancer, out: Outputs, tel: Telemetry,
+           adj: Adjustments) -> VideoResult:
+    """A part of a take made again from text, the rest kept: upstream's `RetakePipeline`, distilled, in one stage at the
+    take's size. The take's video and sound are encoded, and only the latents in the window are renoised and redone.
+    The model's span is at most 20 seconds (`8k + 1` frames) around the window; frames outside it are the take's own,
+    and so is whatever is not redone."""
+    text = payload.prompt.strip()
+    if not text:
+        raise ValueError("LTX-2.5 Retake needs a prompt describing the part made again")
+    seed = int(payload.seed) if payload.seed is not None else secrets.randbits(32)
+    with tel.stage("reading the take"):
+        read = payload.video.read(fps=FPS)
+        taken = [PILImage.frombytes("RGB", (read.width, read.height), frame) for frame in read.frames_rgb]
+    n = len(taken)
+    if n < 9:
+        raise ValueError(f"the take has {n} frames: a retake needs at least 9 (0.375 s at {FPS} fps)")
+    start, end = max(0.0, payload.start_s), min(payload.end_s, n / FPS)
+    if end <= start:
+        raise ValueError(f"end_s ({payload.end_s:g}) must be after start_s ({payload.start_s:g}), within the take's "
+                         f"{n / FPS:g} s")
+    if end != payload.end_s:
+        adj.warn("end_s", f"the take lasts {n / FPS:g} s, so the retake ends there")
+    span = min(481, 8 * ((n - 1) // 8) + 1)
+    first = min(max(0, round((start + end) / 2 * FPS - span / 2)), n - span)
+    if start < first / FPS or end > (first + span) / FPS:
+        start, end = max(start, first / FPS), min(end, (first + span) / FPS)
+        adj.warn("end_s", f"LTX-2.5 redoes at most 20 s at once, so this retake runs {start:g}-{end:g} s")
+    width, height = grid(read.width, read.height)
+    if (width, height) != (read.width, read.height):
+        adj.warn("video", f"LTX-2.5 retakes at {width}x{height}, on its 32-pixel grid within 1080p's area")
+        taken = [frame.resize((width, height), PILImage.Resampling.LANCZOS) for frame in taken]
+    video, redo_sound = payload.redo != "sound", payload.redo != "video"
+    window = Window(start - first / FPS, end - first / FPS, video=video, sound=redo_sound)
+    soundtrack = read.soundtrack
+    if payload.prompt_upsampling:
+        with tel.stage("enhancing prompt"):
+            text = enhancer.rewrite(text, None)
+    with tel.stage("encoding prompt"):
+        embeds = model.encode(text)
+    with tel.stage("encoding the take"):
+        source = model.encode_video(taken[first:first + span])
+        held = None
+        if soundtrack is not None:
+            rate = soundtrack.sample_rate
+            held = model.encode_audio(waveform(soundtrack.pcm_f32le)[:, round(first / FPS * rate):round((first + span) / FPS * rate)],
+                                      rate)
+    with tel.stage("redoing the part"):
+        latents = model.denoise(embeds, (), width=width, height=height, frames=span, sigmas=SIGMAS,
+                                latents=(source, None), held=held, window=window, generator=rng.generator(seed),
+                                check=ctx.raise_if_cancelled, progress=lambda step: ctx.progress(step, len(SIGMAS)))
+    ctx.raise_if_cancelled()
+    with tel.stage("decoding video"):
+        made = list(model.decode_video(latents[0])) if video else [np.asarray(frame) for frame in taken[first:first + span]]
+    pixels = np.stack([np.asarray(frame) for frame in taken[:first]] + made + [np.asarray(frame) for frame in taken[first + span:]])
+    audio: torch.Tensor | None = None
+    out_rate: int | None = None
+    if not redo_sound:
+        # The take's own sound, untouched; a silent take stays silent.
+        if soundtrack is not None:
+            audio, out_rate = waveform(soundtrack.pcm_f32le), soundtrack.sample_rate
+    else:
+        with tel.stage("decoding audio"):
+            redone, out_rate = model.decode_audio(latents[1])
+        redone = fitted(redone, round(span / FPS * out_rate))
+        if soundtrack is not None:
+            own = at_rate(waveform(soundtrack.pcm_f32le), soundtrack.sample_rate, out_rate, redone.shape[0])
+            before, after = own[:, :round(first / FPS * out_rate)], own[:, round((first + span) / FPS * out_rate):]
+        else:
+            before = torch.zeros(redone.shape[0], round(first / FPS * out_rate))
+            after = torch.zeros(redone.shape[0], round((n - first - span) / FPS * out_rate))
+        audio = torch.cat([fitted(before, round(first / FPS * out_rate)), redone, after], dim=1)
+    with tel.stage("saving video"):
+        saved = out.save_video(pixels, fps=FPS, audio=audio, sample_rate=out_rate)
+    tel.log("ltx-2.5 retake", width=width, height=height, frames=len(pixels), span=span, start=start, end=end,
+            redo=payload.redo, sampler="diffusers-euler", steps=len(SIGMAS))
+    return VideoResult(saved, width, height, float(FPS), len(pixels), seed, text)

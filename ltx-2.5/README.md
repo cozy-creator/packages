@@ -2,7 +2,7 @@
 
 `generate` makes synchronized video and stereo sound from text, and optional first and last frames. A picture the
 prompt mentions is a reference (a character, prop or place the video keeps), a sound it mentions is the soundtrack,
-and Pick up from here continues a take.
+and Pick up from here continues a take. `sound` makes sound alone, and `retake` makes part of a take again.
 It is the **LTX-2.5** video tool in the web UI. This package uses the LTX-2.5 22B Distilled model,
 with its 8-step first stage and 3-step spatial refinement, at 24 fps.
 
@@ -87,6 +87,21 @@ for exact cohorts and the separate publication/installed-package gates.
 The [CPU importer](../examples/client-scripts/ingest-ltx25.py) reproduces the pinned Distilled
 checkpoint with BF16 transformer/video and F32 audio VAE/vocoder. It runs before serving;
 `HF_TOKEN` supplies gated source access, or `--token-stdin` reads it from standard input.
+
+## Sound and Retake
+
+- **`sound`** (LTX-2.5 Sound) makes sound alone from text: speech, music, a soundscape. It runs only the model's
+  audio branch, as Lightricks' text-to-audio template does (`LTXVAudioOnlyModel`), and returns 48 kHz stereo FLAC.
+  Quote what is said: `A woman saying: "Oh, what a lovely day we are having!"`.
+- **`retake`** (LTX-2.5 Retake) makes part of a take again from text and keeps the rest, as upstream's
+  `RetakePipeline` does: `start_s` to `end_s` is redone, its picture and sound, the picture only, or the sound
+  only (`redo`). It runs one distilled stage at the take's size (sides on 32, at most 1080p's area), on at most
+  20 s around the window; the rest of a longer take is kept as it was.
+
+```sh
+cozy run ltx-2.5/sound prompt='Rain on a tin roof, distant thunder.' duration_s=8
+cozy run ltx-2.5/retake --file video=take.mp4 start_s=2 end_s=3.5 prompt='She laughs and claps her hands.'
+```
 
 ## Several GPUs
 
