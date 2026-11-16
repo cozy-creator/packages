@@ -12,6 +12,7 @@ from cozy_runtime.author import Adjustments, App, Context, Outputs, Seed, Teleme
 from cozy_runtime.fields import Advanced, AspectRatio, FileBound, ImagePreparation, Range, Ratios
 from cozy_runtime.media import ImageFile, VideoFile
 
+from . import quantize as quantize  # its recipe
 from .model import COMPONENTS, FPS, REFINE_SIGMAS, SIGMAS, Ltx25
 
 app = App()
