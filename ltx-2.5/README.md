@@ -29,6 +29,14 @@ upsampler, convolutional video VAE, audio VAE and 48 kHz vocoder under Runtime. 
 tokenizer assets travel with the model. The supplied diffusion decoder and DFR workflow are
 separate from this convolutional-decode tool.
 
+`lightricks/ltx-2.5@0.2.0` has two lanes: `bf16` and `int8` (int8 ConvRot on the transformer blocks and Gemma's language
+layers, [`quantize.py`](ltx_2_5/quantize.py)). A GPU with int8 tensor cores runs `int8`; `--lane bf16` pins 16 bits.
+`ENHANCER_INT8` writes the same lane of the Gemma 4 E2B prompt enhancer.
+
+```sh
+cozy model quantize lightricks/ltx-2.5@0.1.0 --lane int8 --package ./ltx-2.5 --on <machine>
+```
+
 Sampling follows the released Diffusers Euler path. The newer native LTX pipeline's Euler
 ancestral path has different intermediate arithmetic; matching its numerical output is a
 separate comparison. See the [source assessment](../research/ltx-2.5/README.md).

@@ -12,10 +12,11 @@ from cozy_runtime.author import Adjustments, App, Context, Outputs, Seed, Teleme
 from cozy_runtime.fields import Advanced, AspectRatio, FileBound, ImagePreparation, Range, Ratios
 from cozy_runtime.media import ImageFile, VideoFile
 
+from . import quantize as quantize  # its recipe
 from .model import COMPONENTS, FPS, REFINE_SIGMAS, SIGMAS, Ltx25
 
 app = App()
-MODEL = "lightricks/ltx-2.5@0.1.0"
+MODEL = "lightricks/ltx-2.5@0.2.0"
 
 
 class Generate(msgspec.Struct, kw_only=True):

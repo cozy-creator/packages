@@ -14,10 +14,11 @@ from cozy_runtime.author import Adjustments, App, Context, Outputs, OutputError,
 from cozy_runtime.fields import Advanced, AspectRatio, FileBound, ImagePreparation, Range, Ratios
 from cozy_runtime.media import ImageFile, VideoFile
 
+from . import quantize as quantize  # its recipe
 from .model import COMPONENTS, DEFAULT_STEPS, FPS, Pan2, Reasoner
 
 app = App()
-MODEL = "ifm/pan2@0.1.0"
+MODEL = "ifm/pan2@0.2.0"
 
 REWRITE = Path(__file__).with_name("prompt-policy.md").read_text()
 

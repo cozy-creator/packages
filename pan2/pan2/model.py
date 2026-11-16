@@ -102,7 +102,7 @@ class Reasoner(VisionLM):
 
 @sequence_parallel(degrees=(2, 4, 8))
 class Pan2(Model[Graph]):
-    serving = Serving(min_bits=16, attention_bits=16)
+    serving = Serving(attention_bits={"transformer.transformer_blocks.": 8})
     graph: Graph
     tokenizer: Qwen2Tokenizer
 
