@@ -7,7 +7,7 @@ av==19.0.2
 certifi==2026.10.23
 charset-normalizer==3.5.2
 click==8.5.1
-cozy-runtime @ git+https://github.com/cozy-creator/cozy-runtime@11a6ec533f8dd1cf9687016f533f9ee6d26b0a73
+cozy-runtime @ git+https://github.com/cozy-creator/cozy-runtime@a68f06a4c4badd1ac3da85cf117dee6e41f78033
 diffusers==0.43.0
 einops==0.8.2
 filelock==4.2.10
