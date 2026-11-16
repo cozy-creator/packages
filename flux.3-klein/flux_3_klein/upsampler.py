@@ -260,7 +260,7 @@ def policy_reference(image: Image.Image, n_refs: int) -> Image.Image:
 class Upsampler(Model[UpsamplerGraph]):
     """Rewrites a short request, and its references when editing, into the caption Klein wants."""
 
-    serving = Serving(min_bits=4, phase="decode")
+    serving = Serving(phase="decode")
 
     graph: UpsamplerGraph
     processor: ProcessorMixin

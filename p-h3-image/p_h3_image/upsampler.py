@@ -66,7 +66,7 @@ class PH3Upsampler(Model[UpsamplerGraph]):
     """Pruna's prompt upsampler (a Qwen3.5-9B fine-tune): a short request to the full prompt P-H3-Image renders
     best, or for an edit a brief of what to keep and what to change. Greedy; it reasons first."""
 
-    serving = Serving(min_bits=4, phase="decode")
+    serving = Serving(phase="decode")
 
     graph: UpsamplerGraph
     processor: ProcessorMixin

@@ -176,7 +176,7 @@ class Schema:
 class QwenUpsampler(Model[UpsamplerGraph]):
     """Qwen3-VL-8B-Instruct writing Ideogram 4's structured caption from a plain prompt."""
 
-    serving = Serving(min_bits=4, phase="decode")
+    serving = Serving(phase="decode")
 
     graph: UpsamplerGraph
     tokenizer: PreTrainedTokenizerFast
