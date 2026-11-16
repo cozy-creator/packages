@@ -1,10 +1,10 @@
 [project]
 name = "ltx-2.5"
 version = "0.2.0rc1"
-description = "LTX-2.5 synchronized video and audio from text and first and last frames"
+description = "LTX-2.5 synchronized video and audio from text, frames, references, a soundtrack and a pickup"
 requires-python = ">=3.12,<3.15"
 dependencies = [
-    "cozy-runtime[media]>=0.46.0",
+    "cozy-runtime[media]>=0.47.0.dev0,<0.48",
     "diffusers>=0.43,<0.44",
     "msgspec>=0.19",
     "numpy>=1.26",

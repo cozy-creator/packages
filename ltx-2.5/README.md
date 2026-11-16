@@ -1,6 +1,8 @@
 # LTX-2.5
 
-`generate` makes synchronized video and stereo sound from text, and optional first and last frames.
+`generate` makes synchronized video and stereo sound from text, and optional first and last frames. A picture the
+prompt mentions is a reference (a character, prop or place the video keeps), a sound it mentions is the soundtrack,
+and Pick up from here continues a take.
 It is the **LTX-2.5** video tool in the web UI. This package uses the LTX-2.5 22B Distilled model,
 with its 8-step first stage and 3-step spatial refinement, at 24 fps.
 
@@ -19,6 +21,28 @@ cozy run ltx-2.5/generate --input request.yaml --file first_frame=opening.webp -
 
 A first frame replaces the video's first latent; a last frame guides its very last frame, as upstream's
 `--image PATH FRAME_IDX 1.0` does (`ImageGuide`). Both are re-encoded at each stage's size, at the model's CRF 18.
+
+## Prompts
+
+Write what happens in your own words, as one flowing paragraph: the shot, the scene, the action, the people, the
+camera and the sound, dialogue in quotes (Lightricks' [prompting guide](https://docs.ltx.io/open-source-model/usage-guides/prompting-guide)).
+`prompt_upsampling` (on by default, as Lightricks' templates have it) first rewrites it with Lightricks' enhancer,
+Gemma 4 E2B (`google/gemma-4-e2b-it`, fetched the first time it is used), and their own text-to-video and
+image-to-video system prompts, into the caption style LTX-2.5 was trained on. The result's `prompt` is the text the
+model read.
+
+## References, soundtrack and pickup
+
+- **Mentioned pictures** (`<amy>`, `<teapot>`) are panels of a reference sheet, in the order first mentioned, on
+  black; Lightricks' Ingredients IC-LoRA (`lightricks/ingredients`) reads it in the first stage, and the prompt takes
+  its two-part form: `Reference sheet: Left: amy. Right: teapot.` then `Generated video: <your text>`. It was
+  trained on 768x448, 5-second clips; other sizes and longer clips work, less faithfully.
+- **A mentioned sound** is the soundtrack: held as it is while the video is made to it (upstream's audio-to-video),
+  and returned unchanged. A clip longer than the sound is shortened to it. LTX-2.5 takes no voice or music style
+  from a sound.
+- **Pick up from here** keeps the take up to its frame and carries its last 25 frames and their sound into the
+  new part, as upstream's long-video windows carry, so the new part continues the take.
+- **LoRAs** (`--lora`, the page's LoRAs) apply to both stages, as upstream's distilled pipeline applies them.
 
 Describe sounds and any spoken dialogue in the prompt. `audio: false` returns a silent MP4.
 The output carries the actual width, height, fps, frame count, seed and prompt.
