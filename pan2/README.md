@@ -28,6 +28,13 @@ The checkpoint includes its Qwen text encoder, Wan2.2 VAE, configs and tokenizer
 loading and residency; inference does not fetch models from Hugging Face. The separate conceptual
 reasoner is an on-demand model slot (`reasoner`), defaulting to `qwen/qwen3.5-9b@0.2.0`.
 
+`ifm/pan2@0.2.0` has two lanes: `bf16` and `int8` (int8 ConvRot on the DiT blocks and the Qwen encoder's language
+layers, [`quantize.py`](pan2/quantize.py)). A GPU with int8 tensor cores runs `int8`; `--lane bf16` pins 16 bits.
+
+```sh
+cozy model quantize ifm/pan2@0.1.0 --lane int8 --package ./pan2 --on <machine>
+```
+
 PAN2 code and weights are Apache-2.0, with upstream notices retained. The optional upstream
 `pan2-guardrail` package is separate from this generator. See the [assessment](../research/pan2/README.md)
 for pinned sources, component/dtype details and remaining execution evidence.
