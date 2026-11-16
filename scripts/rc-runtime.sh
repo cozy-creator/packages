@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # rc-runtime.sh [pure|native]: the URL of the open RC's newest Runtime wheel (cozy-runtime's rolling prerelease rc-<x.y.z>),
 # pure (what a lock takes) or native (Linux x86_64, with kernels: what a machine runs). The open RC is this computer's cozy's:
-# the minor after a release (0.25.0 → 0.26.0) or a dev build's own (0.26.0-dev → 0.26.0). Each Runtime merge into the RC
-# replaces its wheels, so nothing keeps this URL: a package names only its floor (`cozy-runtime>=0.47.0.dev0`, xs-194).
+# the minor after a release (0.25.0 → 0.26.0) or a dev build's own (0.26.0-dev → 0.26.0). The prerelease keeps the RC's
+# newest 20 builds, its SHA256SUMS newest first, so the first match is the newest; a package still names only its floor
+# (`cozy-runtime>=0.47.0.dev0`, xs-194).
 set -euo pipefail
 v=$(cozy --version | awk '{print $2}'); x=${v%%-*}; IFS=. read -r major minor _ <<< "$x"
 [[ $v == *-* ]] || minor=$((minor + 1))
