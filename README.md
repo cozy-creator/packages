@@ -13,6 +13,8 @@ dependencies or qualifying a worker image.
 | path | responsibility |
 |---|---|
 | `minimax-h3/` | MiniMax H3 generation, editing, upscaling and checkpoint preparation |
+| `pan2/` | PAN2 text-to-video and first-frame animation from a structured action timeline |
+| `ltx-2.5/` | LTX-2.5 Distilled text/image-to-video with synchronized stereo audio and spatial refinement |
 | `sdxl/` | SDXL text-to-image package plus the family's `int8`/`fp8`/`w4a8` recipes (se-008, cr-073, se-023) |
 | `anima/` | Anima text-to-image package for local development and benchmarking (se-009; model license is non-commercial) |
 | `qwen-image-2/` | Qwen-Image-2.1 image generation and reference editing with native Runtime execution (research model licence) |

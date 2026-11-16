@@ -53,6 +53,7 @@ concurrency:
 
 permissions:
   contents: read
+  pull-requests: read
   actions: read
 
 jobs:
@@ -77,6 +78,20 @@ jobs:
           fi
       - if: steps.scope.outputs.run == 'true'
         uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      # A queue entry that deletes what a tracker issue or changelog.d entry added names it under `## Removed` (xs-199).
+      - if: steps.scope.outputs.run == 'true' && github.event_name == 'merge_group'
+        name: The PR names the requested features it removes
+        # Report-only until 0.26.0 is promoted (release lead, 11-15); then blocking (tracker xs-199).
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BASE: ${{ github.event.merge_group.base_sha }}
+          HEAD_REF: ${{ github.event.merge_group.head_ref }}
+        run: |
+          gh pr view "$(sed -nE 's|.*/pr-([0-9]+)-[0-9a-f]+$|\1|p' <<< "$HEAD_REF")" -R "$GITHUB_REPOSITORY" --json title,headRefName,body > "$RUNNER_TEMP/pr.json"
+          python3 scripts/removed-features.py "$BASE" "$GITHUB_SHA" --pr "$RUNNER_TEMP/pr.json"
       - if: steps.scope.outputs.run == 'true'
         uses: astral-sh/setup-uv@v7
       - if: steps.scope.outputs.run == 'true'
