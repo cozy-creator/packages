@@ -1812,7 +1812,7 @@ class Edit(msgspec.Struct, kw_only=True):
             "vfx_edit": ("VFX edit", "General prompt-directed VFX editing with an aligned source video"),
             "motion_transfer": ("Motion transfer", "The character in the reference performs the guide video's motion"),
         }),
-    ]  # fmt: skip
+    ] = "vfx_edit"  # fmt: skip
     beats: Annotated[list[Beat], Count(min=1)]
     turbo: bool = True
     quality: Quality = "standard"
