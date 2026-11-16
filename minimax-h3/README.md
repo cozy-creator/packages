@@ -7,7 +7,8 @@ Video with sound from MiniMax H3, as three tools. Each is a box on a canvas and 
   or `steps` (30, 40 or 50, under Advanced) the full model. `quality` (draft, standard, full) trades speed for fidelity.
 - **`edit`** (MiniMax H3 Edit) edits a plate, a video it follows frame by frame, by its beats, under one of Alissonerdx's
   guide-edit LoRAs: character swap, head swap, style transfer, VFX edit or motion transfer.
-- **`upscale`** (MiniMax H3 Upscale) re-renders a take at 1080p, 1440p or 2160p with NVIDIA's Regenerate-2K ([UPSCALE.md](UPSCALE.md)).
+- **`upscale`** (MiniMax H3 Upscale) re-renders a take at 1080p, 1440p or 2160p with NVIDIA's Regenerate-2K, guided by
+  the take's own text or a `prompt` that replaces it ([UPSCALE.md](UPSCALE.md)).
 
 For other packages, **`render_shot`** is `generate` with their LoRAs on every segment (`{shot, loras: [{model,
 strength}]}`), returning only the video, as [orbit](../orbit/README.md) puts ORB360 on its shot.

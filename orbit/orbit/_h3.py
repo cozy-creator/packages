@@ -117,6 +117,7 @@ class turbo_loraRequest(msgspec.Struct, kw_only=True, frozen=True):
 
 class Upscale(msgspec.Struct, kw_only=True, frozen=True):
     video: ShotVideo
+    prompt: Prompt[Image] = Prompt(text='')
     to: Literal['1080p', '1440p', '2160p'] = '1440p'
     strength: Annotated[float, msgspec.Meta(ge=0.7, le=0.909)] = 0.7
 

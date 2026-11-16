@@ -1,0 +1,68 @@
+[
+  {
+    "function": "generate",
+    "gpu": "NVIDIA GeForce RTX 5090",
+    "gpus": 1,
+    "request": {
+      "refs": 0,
+      "seconds": 15.0
+    },
+    "warm_ms": 230000,
+    "note": "pod-session 43455948344 (0.26.0 candidate)"
+  },
+  {
+    "function": "generate",
+    "gpu": "NVIDIA GeForce RTX 4090",
+    "gpus": 1,
+    "request": {
+      "refs": 0,
+      "seconds": 15.0
+    },
+    "warm_ms": 335100,
+    "note": "release-gate 43211705140 (0.25.0, host RAM 30.46 GiB)"
+  },
+  {
+    "function": "generate",
+    "gpu": "NVIDIA GeForce RTX 4070",
+    "gpus": 1,
+    "request": {
+      "refs": 0,
+      "seconds": 15.0
+    },
+    "warm_ms": 872800,
+    "note": "release-gate 43032341163 (0.24.0)"
+  },
+  {
+    "function": "generate",
+    "gpu": "NVIDIA GeForce RTX 3090",
+    "gpus": 1,
+    "request": {
+      "refs": 0,
+      "seconds": 15.0
+    },
+    "warm_ms": 744900,
+    "note": "release-gate 43027199393 (0.24.0)"
+  },
+  {
+    "function": "generate",
+    "gpu": "NVIDIA RTX PRO 6000 Blackwell",
+    "gpus": 1,
+    "request": {
+      "refs": 0,
+      "seconds": 15.0
+    },
+    "warm_ms": 217500,
+    "note": "release-gate 43039533939 (0.24.0)"
+  },
+  {
+    "function": "generate",
+    "gpu": "NVIDIA H100 80GB HBM3",
+    "gpus": 1,
+    "request": {
+      "refs": 0,
+      "seconds": 15.0
+    },
+    "warm_ms": 246900,
+    "note": "BENCHMARKS.md 4x H100 SXM, one GPU (0.24.0 candidate)"
+  }
+]

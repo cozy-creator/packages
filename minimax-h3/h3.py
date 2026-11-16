@@ -50,8 +50,11 @@ from cozy_runtime.fields import (
     Count,
     FileBound,
     FileLimits,
+    Image,
     ImagePreparation,
     Label,
+    Placeholder,
+    Prompt,
     Range,
     Shape,
     Spans,
@@ -1829,13 +1832,23 @@ async def edit(ctx: Context, payload: Edit, out: Outputs, tel: Telemetry) -> Sho
 
 
 class Upscale(msgspec.Struct, kw_only=True):
-    """A take re-rendered larger by NVIDIA's Regenerate-2K: from its latents when H3 made it, else from its frames and
-    description."""
+    """A take re-rendered larger by NVIDIA's Regenerate-2K: from its latents when H3 made it, else from its frames, guided by
+    the text it was made from or by `prompt`."""
 
     video: ShotVideo
+    #: The text the re-render follows, in place of the take's own (its latents' text, else its description); empty keeps
+    #: that. With no text at all it still runs, and warns: text helps it redraw what the take shows. Faces and small text
+    #: are redrawn from the text, more as `strength` rises (at 0.909 a face can become another person). A mention is its
+    #: name.
+    prompt: Annotated[Prompt[Image], Placeholder("Describe the video (empty: an H3 take's own text)")] = Prompt()
     to: Literal["1080p", "1440p", "2160p"] = "1440p"
     #: How much of the take the refine redraws, as its start noise: 0.7, 0.8 or 0.909 (NVIDIA's).
     strength: Annotated[float, Range(0.7, 0.909), Advanced()] = REGENERATE_STRENGTH
+
+
+def _names(text: str) -> str:
+    """`text` with each mention as its name: `<Ada>` is Ada."""
+    return re.sub(r"<([^<>]+)>", r"\1", text).strip()
 
 
 class UpscaleOutput(msgspec.Struct):
@@ -1843,23 +1856,28 @@ class UpscaleOutput(msgspec.Struct):
     warnings: list[str] = msgspec.field(default_factory=list)
 
 
-@app.tool(label="Upscale", named="upscale")
+@app.tool(label="Upscale", named="upscale", reserved=_RESERVED)
 async def upscale(ctx: Context, payload: Upscale, out: Outputs, tel: Telemetry) -> UpscaleOutput:
     """A take at 1080p, 1440p or 2160p, its sound kept (UPSCALE.md): its 768p latents upscaled and refined by H3 under
-    the Regenerate LoRA, from the text they carry, else its frames from its description. A video already that big comes
-    back as it is."""
+    the Regenerate LoRA, else its frames, from `prompt`, else the text the latents carry, else its description. A video
+    already that big comes back as it is."""
     video, warnings = payload.video, []
     probe = video.file.probe()
     if min(probe.width, probe.height) >= int(payload.to[:-1]):
         warnings.append(f"this video is {probe.width}x{probe.height}, already {payload.to}: it comes back as it is")
         with video.file.stream() as events:
             return UpscaleOutput(out.save_video_stream(iter(events)).video, warnings)
-    # The text the video was made from: its latents carry it whole, else its description, names without brackets.
-    carried = shot_latents.text(video.latents.read_bytes()) if video.latents is not None else ""
-    prompt = carried or re.sub(r"<([^<>]+)>", r"\1", video.description).strip()
+    # The text it follows: the prompt given, else the one the video was made from (its latents carry it whole, else its
+    # description); names without brackets, since the re-render attaches no reference. With none it runs on the empty
+    # text: NVIDIA name no neutral prompt (their pairs were captioned), and 0.7, the default, keeps the most of the take.
+    prompt, source = _names(payload.prompt.text), "prompt"
+    if not prompt and video.latents is not None:
+        prompt, source = shot_latents.text(video.latents.read_bytes()), "latents"
     if not prompt:
-        raise InvalidRequest("this video has no latents from H3 and no description, and Regenerate re-renders it from the "
-                             "text it was made from: give it a description", fields=["video"])  # fmt: skip
+        prompt, source = _names(video.description), "description"
+    if not prompt:
+        source = "none"
+        warnings.append("no text to guide this upscale; add a prompt for a closer result")
     strength = min(REGENERATE_STRENGTHS, key=lambda served: abs(served - payload.strength))
     if round(payload.strength, 3) != strength:
         warnings.append(f"strength {payload.strength} runs at {strength}, the nearest served")
@@ -1869,5 +1887,5 @@ async def upscale(ctx: Context, payload: Upscale, out: Outputs, tel: Telemetry) 
     with tel.scope(f"Regenerate at {payload.to}"):
         result = await call(regenerate_shot, request)
     warnings += result.warnings
-    tel.log("h3 upscale", to=payload.to, strength=strength, warnings="; ".join(warnings))
+    tel.log("h3 upscale", to=payload.to, strength=strength, text=source, warnings="; ".join(warnings))
     return UpscaleOutput(result.video, warnings)
