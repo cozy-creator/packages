@@ -62,8 +62,8 @@ block (32 / 4 = 8); its shifts set the collapsed heads. Missing, wrong-task or
 unsupported plans refuse; there is no packaged fallback or plan digest pin. Outputs,
 projections and table banks retain the plan asset, and full-model derivations
 preserve other component assets. The source checkpoint identity binds plan bytes
-to resumable computation. See [client preparation](preparation-client-scripts.md) for the
-migration boundary of older projection/bank bindings.
+to resumable computation. The [memo-bank example](../../examples/client-scripts/h3-memo-bank/README.md) composes
+the AdaLN operations and covers the migration boundary of older projection/bank bindings.
 
 Community DiTs in ComfyUI's curve form (PinkCherry, Eros Max) have no time embedder: each AdaLN
 linear reads `k` coordinates that `adaln_t_table` `[grid, k]` interpolates at `t`, with no SiLU.

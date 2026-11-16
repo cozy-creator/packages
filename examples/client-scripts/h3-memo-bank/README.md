@@ -41,7 +41,7 @@ original approved 30/40/50-plan geometry.
 
 The kernel holds one block projection at a time on one `ctx.device`. It does not
 load the full model into VRAM, and extra GPUs do not automatically accelerate the
-public helper's sequential banks. One GPU is sufficient architecturally; 8 GiB
+caller's sequential banks. One GPU is sufficient architecturally; 8 GiB
 VRAM and 16 GiB host RAM are conservative planning allowances, **not measured peak
 requirements**. The root's already-owned 2/4-H100 worker has ample margin.
 
@@ -68,33 +68,26 @@ cozy run /ABSOLUTE/PATH/adopt_full.py --describe
 cozy run /ABSOLUTE/PATH/adopt_full.py \
   'model.source=minimaxai/minimax-h3@sha256:f1e86cb6b4935fbf9e79d90ee87366b6d13e2280b1846b4e9bfa0a00242793eb' \
   --on ROOT_OWNED_WORKER --json
-# Retain stdout as adoption.json. With the Runtime 0.48 SDK in this Python environment:
-cozy-runtime --dir /ABSOLUTE/PATH/PACKAGES/minimax-h3 --json describe > h3-interface.json
-python3 prepare_callers.py adoption.json \
-  --tools-source /ABSOLUTE/PATH/PACKAGES/minimax-h3 --interface h3-interface.json \
-  --out ~/.cozy/outputs/h3-bank-qualification-027
-cozy run ~/.cozy/outputs/h3-bank-qualification-027/compute --describe
+# Retain stdout as adoption.json, then, with the Runtime SDK in this Python environment:
+python3 prepare_callers.py adoption.json --tools-source /ABSOLUTE/PATH/PACKAGES/minimax-h3 \
+  --out ~/.cozy/outputs/h3-bank-qualification
+cozy run ~/.cozy/outputs/h3-bank-qualification/compute --describe
 ```
 
-The selected H3 0.14 source and supplied interface must match. The generator checks
-that through public `describe`, then uses public `calls` to generate every foreign
-operation reference. It copies `precompute_adaln` verbatim from the selected source,
-with its globals bound to those references. `provenance.json` records the source
-commit and file hashes, helper, interface, SDK and generated-caller digests.
-
-The five generated package directories require Runtime 0.48. H3 is an exact-version
-`cozy-calls` dependency with the selected source override; caller execution imports
-no H3 implementation. Use a frozen tracked checkout, and regenerate after changing
-the selected source or interface. These private callers are never published. The
-generator refuses an existing output directory so earlier evidence remains intact.
+The generator describes the selected H3 checkout and generates its operation references
+(`cozy-runtime calls`) into each caller's `_h3.py`. The caller's own `bank` composes them:
+two selections, two table computations and one attach, each a managed H3 operation.
+`provenance.json` records the source commit and file hashes, interface, references, SDK
+and caller digests. Each caller depends on that exact H3 version from the checkout; use a
+frozen tracked checkout and regenerate after changing it. These private callers are never
+published. The generator refuses an existing output directory so earlier evidence remains intact.
 
 The adoption script refuses pruned inputs and produces a real native receipt with
 zero tensor payload production. A bound Model is an attempt capability; it cannot
 be passed directly to a managed child. `prepare_callers.py` therefore requires an
 actual completed CLI ModelArtifact result and never invents a producer/receipt.
 It emits full compute, single-task FL compute, caller-only edit, schedule40 and
-wrong-plan callers under normal outputs. A private tools checkout supports
-same-version code/plan tests without installing its compute dependencies in callers.
+wrong-plan callers under normal outputs.
 
 Already passed: the actual adoption-script dry-run and the published
 `minimax-h3/select-adaln-weights` dry-run against the exact full source.
@@ -114,7 +107,7 @@ was fabricated merely to make a dry-run appear complete.
    read is 63,340,032 bytes, not another 520,418,304-byte first block. Record
    `h3.adaln.source_bytes`, `h3.adaln.reused_tables`, all native part writes,
    checkpoint identities, attempt causes and complete results.
-2. **Completed caller reuse.** Run `caller_edited`. The public helper composes
+2. **Completed caller reuse.** Run `caller_edited`. Its `bank` composes
    two select, two compute and one attach calls. Require zero new body attempts
    for all five leaves, exact computation/result/receipt identity, and no new
    generator reads or table writes. Confirm the first compute really ran; existing
@@ -163,5 +156,4 @@ CLI `0.0.0-f9654a7190aa`. Geometry is source-derived and the coverage fixture pa
 the structural parser while failing the production launch pin as expected. The
 previous caller generator was syntax-checked using a genuine historical small-fixture
 receipt; those generated test callers were not submitted and are not H3 proof.
-The 0.27 caller composition still needs a new genuine adoption receipt, matching
-Runtime 0.48/TensorFS 0.27 artifacts and ordinary CLI qualification.
+The current callers still need a new genuine adoption receipt and ordinary CLI qualification.

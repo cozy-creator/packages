@@ -49,16 +49,6 @@ the Runtime's output metadata (xs-180).
 
 Before, the demo's Ref2VA turns cut at their closest tail frame: 18.8-20.2 dB.
 
-
-Orbit imports typed call declarations generated from H3's locked interface in
-`orbit/_h3.py`. Regenerate them with
-`cozy-runtime --dir orbit calls minimax-h3 orbit/orbit/_h3.py` from the packages root after
-relocking the H3 dependency. The standard `cozy-calls` optional extra keeps H3 available
-for platform child execution while Orbit's CPU environment installs only its own dependencies.
-The `await call(render_shot, request)` expression remains the managed-call operation.
-
-Cozy 0.27 requires H3 0.14.0rc1 or newer in the `cozy-calls` extra and Runtime 0.48.
-The lock selects the reviewed Runtime 0.48/TensorFS 0.27 artifacts and the immutable
-[H3 prerequisite wheel](https://github.com/cozy-creator/packages/releases/tag/xs-198-h3-0.14.0rc1-6afff07c).
-Generated references follow that exact locked artifact. This GitHub prerequisite is
-separate from TensorHub publication and the coordinated release's model qualification.
+Orbit calls H3's `render_shot` through `orbit/_h3.py`, typed references generated from H3's interface. After
+changing H3's interface, regenerate them from the packages root:
+`cozy-runtime --dir minimax-h3 --json describe > h3.json && cozy-runtime --package-interface h3.json calls minimax-h3 orbit/orbit/_h3.py`.

@@ -49,19 +49,6 @@ class Selection(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
     steps: list[int]
 
 
-class SelectAdalnInput(msgspec.Struct, frozen=True, kw_only=True, forbid_unknown_fields=True):
-    task: Task
-
-
-class ComputeAdalnInput(msgspec.Struct, frozen=True, kw_only=True, forbid_unknown_fields=True):
-    task: Task
-    plan_digest: str
-
-
-class AdalnInput(msgspec.Struct, frozen=True, kw_only=True, forbid_unknown_fields=True):
-    pass
-
-
 def _asset(name: str) -> bytes:
     return files(__package__).joinpath("assets", name).read_bytes()
 
@@ -208,9 +195,8 @@ def _project(ctx: Context, source: Checkpoint, task: Task, output: str) -> Model
         return ctx.adopt_model(out)
 
 
-async def select_adaln_weights(ctx: Context, payload: SelectAdalnInput, *, source: Weights) -> Selection:
+async def select_adaln_weights(ctx: Context, *, source: Weights, task: Task) -> Selection:
     """One DiT's AdaLN generating weights, selected from a full or pruned checkpoint."""
-    task = payload.task
     ctx.raise_if_cancelled()
     opened = open_source(ctx, source)
     present = rows(opened)
@@ -247,16 +233,16 @@ def _bank_config(task: Task, projection: str, plan: TimestepPlan) -> bytes:
 
 async def compute_adaln_tables(
     ctx: Context,
-    payload: ComputeAdalnInput,
     *,
     source: Weights,
+    task: Task,
+    plan_digest: str,
     tel: Telemetry,
 ) -> ModelArtifact:
     """One DiT's AdaLN timestep tables, computed from its generating weights."""
-    task = payload.task
     opened = open_source(ctx, source)
     plan = _plan(opened, task)
-    if payload.plan_digest != plan.digest:
+    if plan_digest != plan.digest:
         raise UnsupportedInput(
             "AdaLN plan differs from the source projection plan", code="adaln_plan"
         )
@@ -387,7 +373,6 @@ def _apply_adaln(
 
 async def apply_adaln(
     ctx: Context,
-    payload: AdalnInput,
     *,
     source: Weights,
     fl2va: Weights,
@@ -399,7 +384,6 @@ async def apply_adaln(
 
 async def retable_adaln(
     ctx: Context,
-    payload: AdalnInput,
     *,
     source: Weights,
     fl2va: Weights,

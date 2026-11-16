@@ -146,7 +146,7 @@ def reference(picture: PILImage.Image) -> PILImage.Image:
     return picture if size == picture.size else picture.resize(size, PILImage.Resampling.LANCZOS)
 
 
-@app.entrypoint(accelerator=False)
+@app.entrypoint
 async def generate(ctx: Context, payload: GenerateInput) -> ImageResult:
     """MOSS-Image from the text (`text_to_image`); with a control map, `control` under its kind's adapter
     (`CONTROL_LORAS`, at its strength); else with pictures mentioned, `edit` under Moss-Image-Edit (`EDIT_LORA`).
@@ -284,7 +284,7 @@ class ImageBox(msgspec.Struct, kw_only=True):
     control: list[Control[Literal["pose", "depth", "canny", "lineart", "sketch"]]] = msgspec.field(default_factory=list)
 
 
-@app.tool(label="Image", named="image", accelerator=False)
+@app.tool(label="Image", named="image")
 async def image(ctx: Context, payload: ImageBox) -> ImageResult:
     """MOSS-Image on a canvas: `generate` from the box, steered by its first control map when it has one, else an
     edit of its pictures when it mentions any."""

@@ -1,7 +1,6 @@
-"""Generate callers from a real adoption receipt and the selected H3 source/interface."""
+"""Generate caller packages from a real adoption receipt and the selected H3 checkout."""
 
 import argparse
-import ast
 import hashlib
 import json
 from pathlib import Path
@@ -21,8 +20,7 @@ def sdk(*arguments: str) -> bytes:
 
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument("adoption", type=Path)
-parser.add_argument("--tools-source", type=Path, required=True, help="exact H3 checkout used by the callers")
-parser.add_argument("--interface", type=Path, required=True, help="canonical cozy-runtime describe --json for that checkout")
+parser.add_argument("--tools-source", type=Path, required=True, help="exact H3 checkout the callers depend on")
 parser.add_argument("--out", type=Path, default=Path.home() / ".cozy/outputs/h3-bank-qualification")
 args = parser.parse_args()
 reply = json.loads(args.adoption.read_text())
@@ -41,80 +39,81 @@ selected = args.tools_source.resolve()
 project = tomllib.loads((selected / "pyproject.toml").read_text())["project"]
 if project["name"] != "minimax-h3":
     raise SystemExit("tools source must be the minimax-h3 package")
-interface = args.interface.read_bytes()
-described = sdk("--dir", str(selected), "--json", "describe")
-if json.loads(interface) != json.loads(described):
-    raise SystemExit("interface does not match the selected H3 source; describe it again")
 
-helper_path = Path("minimax_h3/preparation/operations.py")
-operations = (selected / helper_path).read_text()
-helper = next(
-    node for node in ast.parse(operations).body
-    if isinstance(node, ast.AsyncFunctionDef) and node.name == "precompute_adaln"
-)
-orchestration = ast.get_source_segment(operations, helper)
-assert orchestration is not None
-source_files = subprocess.check_output([
-    "git", "-C", str(selected), "ls-files", "-z", "--cached", "--others", "--exclude-standard", "--", ".",
-]).decode().split("\0")
-source_hashes = {name: digest((selected / name).read_bytes()) for name in sorted(set(source_files)) if name}
-source_identity = digest(json.dumps(source_hashes, sort_keys=True, separators=(",", ":")).encode())
-source_commit = subprocess.check_output(["git", "-C", str(selected), "rev-parse", "HEAD"], text=True).strip()
-
-# Keep the source-derived orchestration intact; only the imported targets change to Operations.
+# The bank: two selections, two table computations and one attach, each a managed H3 operation.
 code = '''import msgspec
 from cozy_runtime.author import App, ModelArtifact, ModelChoice, UnsupportedInput, call
+
 from ._h3 import (
-    AdalnInput, ComputeAdalnInput, SelectAdalnInput,
-    apply_adaln, compute_adaln_tables, retable_adaln, select_adaln_weights,
+    apply_adaln, apply_adalnRequest, compute_adaln_tables, compute_adaln_tablesRequest, select_adaln_weights,
+    select_adaln_weightsRequest,
 )
 
 app = App()
 SOURCE = msgspec.json.decode(BODY, type=ModelArtifact)
 
-HELPER
 
 class Nothing(msgspec.Struct):
     pass
 
-@app.entrypoint(accelerator=False)
+
+async def bank(model: ModelArtifact, timesteps: int) -> ModelArtifact:
+    """`model` with its AdaLN generators replaced by the shared tables of the plan both tasks serve."""
+    source = {"source": ModelChoice(ref=model)}
+    fl = await call(select_adaln_weights, select_adaln_weightsRequest(task="fl2va"), models=source)
+    ref = await call(select_adaln_weights, select_adaln_weightsRequest(task="ref2va"), models=source)
+    if timesteps not in fl.steps or timesteps not in ref.steps:
+        raise UnsupportedInput("H3 timestep count is not supported by both source model plans", code="adaln_plan")
+    if fl.ready and ref.ready:
+        return model
+    if fl.projection is None or ref.projection is None:
+        raise UnsupportedInput("H3 source lacks both tasks' generating weights", code="adaln_generating_weights")
+    tables = {}
+    for task, selection in (("fl2va", fl), ("ref2va", ref)):
+        tables[task] = await call(
+            compute_adaln_tables,
+            compute_adaln_tablesRequest(task=task, plan_digest=selection.plan_digest),
+            models={"source": ModelChoice(ref=selection.projection)},
+        )
+    attached = {"source": ModelChoice(ref=model)} | {task: ModelChoice(ref=table) for task, table in tables.items()}
+    return await call(apply_adaln, apply_adalnRequest(), models=attached)
+
+
+@app.entrypoint
 async def main(payload: Nothing) -> ModelArtifact:
-    return await precompute_adaln(model=SOURCE, timesteps=30)
-'''.replace("BODY", repr(json.dumps(artifact, sort_keys=True, separators=(",", ":")))).replace("HELPER", orchestration)
+    return await bank(SOURCE, 30)
+'''.replace("BODY", repr(json.dumps(artifact, sort_keys=True, separators=(",", ":"))))
 negative = code.replace(
-    "    return await precompute_adaln(model=SOURCE, timesteps=30)",
-    "    selected = await call(select_adaln_weights, SelectAdalnInput(task='fl2va'), models={'source': ModelChoice(ref=SOURCE)})\n"
+    "    return await bank(SOURCE, 30)",
+    "    selected = await call(select_adaln_weights, select_adaln_weightsRequest(task='fl2va'), models={'source': ModelChoice(ref=SOURCE)})\n"
     "    if selected.ready or selected.projection is None:\n"
     "        raise ValueError('positive bank test requires generating weights')\n"
-    "    return await call(compute_adaln_tables, ComputeAdalnInput(task='fl2va', plan_digest='sha256:' + '0' * 64), models={'source': ModelChoice(ref=selected.projection)})",
+    "    return await call(compute_adaln_tables, compute_adaln_tablesRequest(task='fl2va', plan_digest='sha256:' + '0' * 64), "
+    "models={'source': ModelChoice(ref=selected.projection)})",
 )
 callers = {
     "compute": code,
     "caller_edited": code + "\n# Same library operations, new caller.\n",
-    "schedule40": code.replace("model=SOURCE, timesteps=30", "model=SOURCE, timesteps=40"),
+    "schedule40": code.replace("bank(SOURCE, 30)", "bank(SOURCE, 40)"),
     "wrong_plan": negative,
     "compute_fl": negative.replace("plan_digest='sha256:' + '0' * 64", "plan_digest=selected.plan_digest"),
 }
 args.out.mkdir(parents=True, exist_ok=False)
-canonical = args.out / "h3-interface.json"
-canonical.write_bytes(interface)
+interface = sdk("--dir", str(selected), "--json", "describe")
+(args.out / "h3-interface.json").write_bytes(interface)
 generated = args.out / "h3_calls.py"
-sdk("--package-interface", str(canonical), "calls", "minimax-h3", str(generated))
+sdk("--package-interface", str(args.out / "h3-interface.json"), "calls", "minimax-h3", str(generated))
 references = generated.read_bytes()
 for name, caller in callers.items():
-    root = args.out / name
-    module = root / "bank_caller"
+    module = args.out / name / "bank_caller"
     module.mkdir(parents=True)
     (module / "__init__.py").write_text(caller)
     (module / "_h3.py").write_bytes(references)
-    (root / "pyproject.toml").write_text(f'''[project]
+    (args.out / name / "pyproject.toml").write_text(f'''[project]
 name = "h3-bank-{name.replace('_', '-')}"
 version = "0.0.1"
 requires-python = ">=3.12,<3.13"
-dependencies = ["cozy-runtime>=0.48.0.dev0,<0.49", "msgspec>=0.19"]
-
-[project.optional-dependencies]
-cozy-calls = ["minimax-h3[cozy-calls]=={project['version']}"]
+dependencies = ["cozy-runtime>=0.47.0.dev2290,<0.48", "minimax-h3=={project['version']}", "msgspec>=0.19"]
 
 [project.entry-points."cozy.application"]
 default = "bank_caller:app"
@@ -129,14 +128,13 @@ packages = ["bank_caller"]
 [tool.uv.sources]
 minimax-h3 = {{ path = {json.dumps(str(selected))}, editable = true }}
 ''')
+files = subprocess.check_output(["git", "-C", str(selected), "ls-files", "-z", "--cached", "--others", "--exclude-standard", "--", "."])
+hashes = {name: digest((selected / name).read_bytes()) for name in sorted(set(files.decode().split("\0"))) if name}
 provenance = {
     "source": str(selected),
-    "source_commit": source_commit,
-    "source_digest": source_identity,
-    "source_files": source_hashes,
+    "source_commit": subprocess.check_output(["git", "-C", str(selected), "rev-parse", "HEAD"], text=True).strip(),
+    "source_digest": digest(json.dumps(hashes, sort_keys=True, separators=(",", ":")).encode()),
     "version": project["version"],
-    "helper": str(helper_path),
-    "helper_digest": digest(orchestration.encode()),
     "interface_digest": digest(interface),
     "references_digest": digest(references),
     "adoption_digest": digest(args.adoption.read_bytes()),

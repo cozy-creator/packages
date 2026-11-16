@@ -24,21 +24,13 @@ from cozy_runtime.media import (
     References,
     VideoFile,
 )
-from ._h3 import Beat, PackageShot, Shot, ShotLoRA, render_shot
+from minimax_h3.official import FPS, frames_for
+from minimax_h3.shot import ANY_SIZE, MAX_DURATION_S, MIN_DURATION_S
 from PIL import Image as PILImage
 
+from ._h3 import Beat, PackageShot, Shot, ShotLoRA, render_shot
+
 app = App()
-
-# Orbit's trained caption and loop sampling use H3's 24 fps, 17n+5 video grid.
-FPS = 24
-MIN_DURATION_S = 5
-MAX_DURATION_S = 15
-ANY_SIZE = 1 << 40
-
-
-def frames_for(duration_s: int) -> int:
-    return math.ceil((duration_s * FPS - 5) / 17) * 17 + 5
-
 
 #: MATLOWAI's ORB360 step 1500 (hf://MATLOWAI/MiniMax-H3-ORB360-CardSpin), trained on H3's Ref2VA DiT, clockwise only.
 ORB360 = "matlowai/orb360@0.1.1"

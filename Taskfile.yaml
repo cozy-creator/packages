@@ -85,12 +85,7 @@ tasks:
           else echo "published live: $shipped"; fi
         }
         trap finish EXIT
-        # A first-party source can serve an ordinary dependency or the managed `cozy-calls` extra.
-        # RC dependency wheels stay in this repository until the gated child is published to the Hub.
-        rc_deps() { sed -nE 's|^([A-Za-z0-9._-]+) = \{ *url = "https://github[.]com/cozy-creator/packages/releases/download/[^"]+".*|\1|p' "$1/pyproject.toml"; }
-        deps() {
-          { sed -n 's/^\([A-Za-z0-9._-]*\) = { *index = "tensorhub".*/\1/p' "$1/pyproject.toml"; rc_deps "$1"; } | sort -u
-        }
+        deps() { sed -n 's/^\([A-Za-z0-9._-]*\) = { *index = "tensorhub".*/\1/p' "$1/pyproject.toml"; }
         pinned() { for q in $up; do grep -A1 -x "name = \"$q\"" "$1/uv.lock" | grep -qx "version = \"$(out "$q")\"" || return 1; done; }
         locked() { grep -A1 -x "name = \"$2\"" "$1/uv.lock" | sed -n 's/^version = "\(.*\)"$/\1/p'; }
         floor() { grep -oE "\"$2(\[[^]]*\])?>=[0-9][0-9.]*" "$1/pyproject.toml" | head -1 | sed 's/.*>=//'; }
@@ -136,21 +131,8 @@ tasks:
         for r in $roots; do on=$(held "$r")
           [ -z "$on" ] || { echo "$r $(out "$r") already exists on $on: bump its version on master; nothing published" >&2; exit 1; }
         done
-        # A published first-party child replaces its RC wheel source before the ordinary relock.
-        # This also resumes a promotion whose child finished in an earlier invocation.
-        relock() {
-          for q in $(rc_deps "$1"); do
-            pkg "$q" || { echo "$1: the RC dependency $q has no source here to choose its release" >&2; exit 1; }
-            if published "$q"; then
-              escaped=$(printf '%s' "$q" | sed 's/[.]/\\./g')
-              sed -i -E "s|^($escaped) = \{ *url = \"https://github[.]com/cozy-creator/packages/releases/download/[^\"]+\".*|\\1 = { index = \"tensorhub\" }|" "$1/pyproject.toml"
-            elif [ -z "$dry$rc" ]; then
-              echo "$1: publish $q $(out "$q") on $lock first; a final release cannot keep its RC dependency wheel" >&2
-              exit 1
-            fi
-          done
-          LOCK_HUB=$lock scripts/lock.sh "$@"
-        }
+        # The lock `cozy package publish` makes (scripts/lock.sh), against $lock's root index.
+        relock() { LOCK_HUB=$lock scripts/lock.sh "$@"; }
         ups() { for q in "$@"; do printf ' --upgrade-package=%s' "$q"; done; }
         pairs() { awk -F'"' '/^name = /{n=$2} /^version = /{print n, $2}'; }
         # The Triton sets the package's import declares, compiled on this CPU for every card row with the Runtime its lock
