@@ -1822,7 +1822,7 @@ class Edit(msgspec.Struct, kw_only=True):
     seed: Seed | None = None
 
 
-@app.tool(label="Edit", named="edit", reserved=_RESERVED)
+@app.tool(label="MiniMax H3 Edit", named="edit", reserved=_RESERVED)
 async def edit(ctx: Context, payload: Edit, out: Outputs, tel: Telemetry) -> ShotResult:
     """A plate edited by its summary and beats, on Ref2VA under the chosen edit LoRA, its trigger opening each beat. With
     no picture in a beat, the plate's own first frame is the picture."""
