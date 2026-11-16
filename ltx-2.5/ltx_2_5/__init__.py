@@ -26,7 +26,8 @@ from .adapter import ICLora
 from .annotators import PersonDetector, VideoDepth, WholeBody
 from .enhancer import Enhancer
 from .model import COMPONENTS, FPS, REFINE_SIGMAS, SIGMAS, Frame, Ltx25, Window
-from .prompts import names, rendered, sheet
+from .msr import MSR
+from .prompts import cast, labelled, names, rendered, sheet, speakers
 
 app = App()
 MODEL = "lightricks/ltx-2.5@0.2.0"
@@ -34,6 +35,10 @@ MODEL = "lightricks/ltx-2.5@0.2.0"
 INGREDIENTS = "lightricks/ingredients@0.1.0"
 #: Lightricks' Union Control IC-LoRA, the LTX-2.3 adapter their LTX-2.5 workflow runs (`Lightricks/LTX-2.3-22b-IC-LoRA-Union-Control@20a580c8`).
 UNION_CONTROL = "lightricks/union-control@0.1.0"
+#: Licon MSR V2, the community LTX-2.5 LoRA for pictures and their voices (`LiconStudio/LTX-2.5-Multiple-Subject-Reference@aa19b48f`).
+SUBJECTS = "liconstudio/multiple-subject-reference@0.1.0"
+#: MSR's slots: four subjects and a background; two of them speak (its Guide's `pic1`-`pic4`, `background`, `audio_ref1`-`2`).
+MSR_PICTURES, MSR_VOICES = 5, 2
 #: Union Control's annotators, as Lightricks' workflow runs them: Video-Depth-Anything Small for depth, DWPose (Megvii's
 #: YOLOX-L finding people, DWPose-l reading their bodies, hands and faces) for pose.
 DEPTH = "depth-anything/video-depth-anything-small@0.1.0"
@@ -57,8 +62,8 @@ class Keyframe(msgspec.Struct, kw_only=True):
 
 class Generate(msgspec.Struct, kw_only=True):
     #: What happens, in your words, with its sound and dialogue. A picture it mentions is a character, prop or place
-    #: the video keeps (Lightricks' Ingredients reference sheet); a video it mentions sets the structure (Union
-    #: Control); a sound it mentions is the soundtrack it is timed to.
+    #: the video keeps (Lightricks' Ingredients reference sheet); a sound mentioned after a picture is that character's
+    #: voice (Licon MSR), else the soundtrack it is timed to; a video it mentions sets the structure (Union Control).
     prompt: Prompt[Image | Video | Audio] = Prompt()
     #: The picture the video starts from.
     first_frame: Picture | None = None
@@ -122,18 +127,18 @@ def at_rate(audio: torch.Tensor, rate: int, target: int, channels: int) -> torch
 
 
 @app.tool(label="LTX-2.5", named="video",
-          defaults={"model": MODEL, "ingredients": INGREDIENTS, "union_control": UNION_CONTROL, "enhancer": ENHANCER,
-                    "depth": DEPTH, "people": PEOPLE, "pose": POSE},
+          defaults={"model": MODEL, "ingredients": INGREDIENTS, "subjects": SUBJECTS, "union_control": UNION_CONTROL,
+                    "enhancer": ENHANCER, "depth": DEPTH, "people": PEOPLE, "pose": POSE},
           components={"model": COMPONENTS},
-          on_demand=("ingredients", "union_control", "enhancer", "depth", "people", "pose"), memoize=True)
-def generate(ctx: Context, payload: Generate, model: Ltx25, ingredients: ICLora, union_control: ICLora, enhancer: Enhancer,
-             depth: VideoDepth, people: PersonDetector, pose: WholeBody, out: Outputs, tel: Telemetry,
+          on_demand=("ingredients", "subjects", "union_control", "enhancer", "depth", "people", "pose"), memoize=True)
+def generate(ctx: Context, payload: Generate, model: Ltx25, ingredients: ICLora, subjects: MSR, union_control: ICLora,
+             enhancer: Enhancer, depth: VideoDepth, people: PersonDetector, pose: WholeBody, out: Outputs, tel: Telemetry,
              adj: Adjustments) -> VideoResult:
     """LTX-2.5 Distilled, in two stages: a scene and its synchronized sound, then x2 spatial refinement. A first frame
     replaces the first latent and a last frame guides the last frame (upstream's `--image PATH FRAME_IDX 1.0`); mentioned
-    pictures are the Ingredients IC-LoRA's reference sheet in stage 1 (upstream's IC-LoRA stages), a mentioned video the
-    Union Control IC-LoRA's reference there; a mentioned sound is
-    held as the soundtrack through both (`A2VidPipelineTwoStage`); a pickup carries its take's last 25 frames and their
+    pictures are the Ingredients IC-LoRA's reference sheet in stage 1 (upstream's IC-LoRA stages), or with their voices
+    Licon MSR's subjects in both stages; a mentioned video the Union Control IC-LoRA's reference in stage 1; a sound no
+    picture speaks in is held as the soundtrack through both (`A2VidPipelineTwoStage`); a pickup carries its take's last 25 frames and their
     sound as the new part's opening (upstream's long-video carry)."""
     text = names(payload.prompt.text)
     if not text:
@@ -171,6 +176,23 @@ def generate(ctx: Context, payload: Generate, model: Ltx25, ingredients: ICLora,
                 if given is not None:
                     adj.warn(name, f"the take picked up sets the opening and the shape; {name} is ignored")
             first = None
+    # A sound mentioned with pictures is the voice of the picture named before it (Licon MSR); else the soundtrack.
+    owners = speakers(payload.prompt.text, panels, sounds) if panels and sounds and pickup is None else {}
+    cast_order: list[str] = []
+    voices: list[tuple[str, int]] = []
+    if owners:
+        voiced = list(dict.fromkeys(owners.values()))
+        cast_order = voiced + [key for key in panels if key not in voiced]
+        if len(cast_order) > MSR_PICTURES:
+            adj.warn("prompt", f"MSR keeps {MSR_PICTURES} pictures, so it goes without "
+                               f"{', '.join(f'<{key}>' for key in cast_order[MSR_PICTURES:])}")
+            cast_order = cast_order[:MSR_PICTURES]
+        for sound, owner in owners.items():
+            if owner not in cast_order[:MSR_VOICES] or any(slot == cast_order.index(owner) + 1 for _, slot in voices):
+                adj.warn("prompt", f"MSR gives two pictures a voice each, so <{sound}> goes unused")
+                continue
+            voices.append((sound, cast_order.index(owner) + 1))
+        sounds = []
     if len(sounds) > 1:
         adj.warn("prompt", f"LTX-2.5 takes one soundtrack, so it goes without {', '.join(f'<{key}>' for key in sounds[1:])}")
     soundtrack = None
@@ -202,6 +224,10 @@ def generate(ctx: Context, payload: Generate, model: Ltx25, ingredients: ICLora,
         pictures.append((keyframe.picture.read().convert("RGB"), frame))
     if kept is not None:
         pictures.insert(0, (kept[-carry:], 0))
+    if cast_order:
+        # MSR reads its subjects by slot: `<amy>` is Image 1, her voice Audio 1.
+        text = labelled(payload.prompt.text, {key: f"Image {slot}" for slot, key in enumerate(cast_order, start=1)}
+                        | {key: f"Audio {index}" for index, (key, _) in enumerate(voices, start=1)})
     video_text = text
     if payload.prompt_upsampling:
         labels = [key.replace(".", " ") for key in [*panels, *videos]]
@@ -211,7 +237,7 @@ def generate(ctx: Context, payload: Generate, model: Ltx25, ingredients: ICLora,
             adj.warn("prompt_upsampling", f"the enhancer's rewrite lost a reference ({', '.join(labels)}), so the prompt "
                                           "goes as written")
         video_text = rewritten or text
-    prompt = rendered(video_text, panels)
+    prompt = cast(video_text, cast_order, voices) if cast_order else rendered(video_text, panels)
     held = None
     if soundtrack is not None or kept_sound is not None:
         with tel.stage("encoding sound"):
@@ -224,8 +250,18 @@ def generate(ctx: Context, payload: Generate, model: Ltx25, ingredients: ICLora,
     with tel.stage("encoding prompt"):
         embeds = model.encode(prompt)
 
-    adapter, reference = None, None
-    if panels:
+    adapter, reference, group = None, None, None
+    if cast_order:
+        with tel.stage("encoding voices"):
+            spoken = []
+            for key, slot in voices:
+                clip = mentioned[key]
+                assert isinstance(clip, Audio)
+                said = clip.file.read(end=Fraction(30))
+                spoken.append((slot, model.encode_audio(waveform(said.pcm_f32le), said.sample_rate)))
+        group = subjects.subjects([value.file.read() for value in (mentioned[key] for key in cast_order)
+                                   if isinstance(value, Image)], spoken)
+    elif panels:
         with tel.stage("making the reference sheet"):
             board = sheet([value.file.read() for value in (mentioned[key] for key in panels) if isinstance(value, Image)],
                           width // 2, height // 2)
@@ -247,18 +283,24 @@ def generate(ctx: Context, payload: Generate, model: Ltx25, ingredients: ICLora,
     def stage_one() -> tuple[torch.Tensor, torch.Tensor]:
         return model.denoise(embeds, pictures, width=width // 2, height=height // 2, frames=frames, sigmas=SIGMAS,
                              reference=reference, downscale=adapter.graph.downscale if adapter is not None else 1,
-                             held=held, generator=generator, check=ctx.raise_if_cancelled,
+                             held=held, subjects=group, generator=generator, check=ctx.raise_if_cancelled,
                              progress=lambda step: ctx.progress(step, len(SIGMAS)))
 
     with tel.stage("generating video and audio"):
-        latents = adapter.applied(model.graph.sites, stage_one) if adapter is not None else stage_one()
+        latents = (subjects.applied(model.graph.sites, stage_one) if group is not None
+                   else adapter.applied(model.graph.sites, stage_one) if adapter is not None else stage_one())
     ctx.raise_if_cancelled()
     with tel.stage("upscaling latents"):
         high = model.upscale(latents[0])
+
+    def stage_two() -> tuple[torch.Tensor, torch.Tensor]:
+        return model.denoise(embeds, pictures, width=width, height=height, frames=frames, sigmas=REFINE_SIGMAS,
+                             latents=(high, latents[1]), held=held, subjects=group, generator=generator,
+                             check=ctx.raise_if_cancelled, progress=lambda step: ctx.progress(step, len(REFINE_SIGMAS)))
+
     with tel.stage("refining video and audio"):
-        latents = model.denoise(embeds, pictures, width=width, height=height, frames=frames, sigmas=REFINE_SIGMAS,
-                                latents=(high, latents[1]), held=held, generator=generator, check=ctx.raise_if_cancelled,
-                                progress=lambda step: ctx.progress(step, len(REFINE_SIGMAS)))
+        # MSR's LoRA and subjects are on both stages, as its sample workflow runs them.
+        latents = subjects.applied(model.graph.sites, stage_two) if group is not None else stage_two()
     ctx.raise_if_cancelled()
     with tel.stage("decoding video"):
         pixels = model.decode_video(latents[0])

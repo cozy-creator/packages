@@ -130,6 +130,42 @@ class Window:
         return ((coords[0, 0, :, 1] > self.start) & (coords[0, 0, :, 0] < self.end)).float()[None, :, None]
 
 
+@dataclass(frozen=True)
+class Subjects:
+    """Licon MSR's references (msr.py) for one stage: the pictures in slot order, each with its slot's embedding [128], and the voices
+    as (their picture's slot, from 1; the audio VAE's latents [1, C, L, M], not normalized; their slot's embedding)."""
+
+    pictures: Sequence[tuple[Image.Image, torch.Tensor]]
+    voices: Sequence[tuple[int, torch.Tensor, torch.Tensor]] = ()
+    slot_s: float = 5.0
+    margin_s: float = 0.04
+    #: Each picture's still, in frames (the Guide's default `reference_frames`).
+    frames: int = 33
+
+
+def framed(picture: Image.Image, width: int, height: int) -> Image.Image:
+    """`picture` at `width` x `height` as the Guide frames a subject (nodes.py `_resize_reference`): a larger one of the
+    same orientation covers it, centre-cropped; otherwise it is fitted whole on white."""
+
+    def family(w: int, h: int) -> str:
+        return "landscape" if w / h >= 1.25 else "portrait" if w / h <= 0.8 else "square"
+
+    picture = picture.convert("RGB")
+    if picture.size == (width, height):
+        return picture
+    if family(*picture.size) == family(width, height) and not (picture.width <= width and picture.height <= height):
+        scale = max(width / picture.width, height / picture.height)
+        w, h = max(width, round(picture.width * scale)), max(height, round(picture.height * scale))
+        resized = picture.resize((w, h), Image.Resampling.BILINEAR)
+        left, top = (w - width) // 2, (h - height) // 2
+        return resized.crop((left, top, left + width, top + height))
+    scale = min(width / picture.width, height / picture.height)
+    w, h = max(1, min(width, round(picture.width * scale))), max(1, min(height, round(picture.height * scale)))
+    canvas = Image.new("RGB", (width, height), (255, 255, 255))
+    canvas.paste(picture.resize((w, h), Image.Resampling.BILINEAR), ((width - w) // 2, (height - h) // 2))
+    return canvas
+
+
 class Pipeline(LTX2InContextPipeline):
     """Diffusers' LTX-2 in-context pipeline's conditioning, driven by one distilled loop of our own: pictures at frames,
     an IC-LoRA's reference, and sound held as it is, the way upstream's stages take them."""
@@ -168,9 +204,9 @@ class Pipeline(LTX2InContextPipeline):
             progress: Callable[[int], None], width: int = 0, height: int = 0, reference: list[Image.Image] | None = None,
             downscale: int = 1, held: torch.Tensor | None = None,
             latents: tuple[torch.Tensor, torch.Tensor | None] | None = None,
-            window: Window | None = None) -> tuple[torch.Tensor, torch.Tensor]:
+            window: Window | None = None, subjects: Subjects | None = None) -> tuple[torch.Tensor, torch.Tensor]:
         """One distilled stage (no guidance): Diffusers' in-context latents (pictures, then an IC-LoRA's reference
-        video, at 1 / `downscale` of the stage's size),
+        video, at 1 / `downscale` of the stage's size, then MSR's `subjects`),
         upstream's first-frame keyframe marker, and `held` audio latents ([1, C, L, M], not normalized) kept clean
         over the clip's first L audio latents: all of them is a soundtrack (upstream's `freeze_audio`), fewer a carry
         (`AudioConditionByLatentIndex`). `window` redoes only its seconds of `latents` and `held` (a retake). Width 0 is
@@ -197,6 +233,11 @@ class Pipeline(LTX2InContextPipeline):
                 num_channels_latents=self.transformer.config.in_channels, height=height, width=width,
                 num_frames=frames, frame_rate=fps, noise_scale=noise_scale, dtype=torch.float32, device=device,
                 generator=generator, latents=None if latents is None else latents[0])
+            if subjects is not None and subjects.pictures:
+                tokens, coords = self.subject_tokens(subjects, width, height, fps, device)
+                video, clean = torch.cat([video, tokens], dim=1), torch.cat([clean, tokens], dim=1)
+                mask = torch.cat([mask, torch.ones_like(tokens[..., :1])], dim=1)
+                appended = coords if appended is None else torch.cat([appended, coords], dim=2)
         # The causal first latent frame encodes one pixel frame; upstream marks it for LTX-2.5's keyframe embedding
         # whatever conditions it (ltx_core/tools.py `_first_frame_keyframes_mask`); appended tokens are unmarked.
         marker = torch.zeros(video.shape[0], video.shape[1], 1, device=device, dtype=torch.float32)
@@ -235,6 +276,14 @@ class Pipeline(LTX2InContextPipeline):
         if window is not None and window.sound:
             open_ = torch.maximum(open_, window.inside(audio_coords))
         audio = audio * open_ + fixed * (1 - open_)
+        voiced = 0
+        if subjects is not None and subjects.voices:
+            # MSR's voices go before the clip's sound, clean (timestep 0), each in its picture's window.
+            tokens, coords = self.voice_tokens(subjects, device)
+            voiced = tokens.shape[1]
+            audio, fixed = torch.cat([tokens, audio], dim=1), torch.cat([tokens, fixed], dim=1)
+            open_ = torch.cat([torch.zeros_like(tokens[..., :1]), open_], dim=1)
+            audio_coords = torch.cat([coords, audio_coords], dim=2)
         frozen = bool(open_.max() == 0)
         # A video kept whole (sound alone, or a retake of the sound only) is frozen conditioning too.
         still = bool(mask[:, : f * h * w].min() == 1)
@@ -283,8 +332,45 @@ class Pipeline(LTX2InContextPipeline):
                                               self.vae.config.scaling_factor)
         if frozen:
             audio = fixed
-        audio = self._denormalize_audio_latents(audio, self.audio_vae.latents_mean, self.audio_vae.latents_std)
+        audio = self._denormalize_audio_latents(audio[:, voiced:], self.audio_vae.latents_mean, self.audio_vae.latents_std)
         return video, self._unpack_audio_latents(audio, length, num_mel_bins=bins)
+
+    def subject_tokens(self, subjects: Subjects, width: int, height: int, fps: float,
+                       device: torch.device) -> tuple[torch.Tensor, torch.Tensor]:
+        """Each picture as MSR's Guide appends it: a still of 33 frames framed at the stage's size, its normalized
+        latents plus its slot's embedding, at its pic1-based negative frame offset (`-(count - index)`, with the causal
+        first-frame positions). Packed tokens [1, T, C] and their coordinates [1, 3, T, 2], in seconds."""
+        made, places = [], []
+        count = len(subjects.pictures)
+        for index, (picture, embedding) in enumerate(subjects.pictures):
+            pixels = torch.from_numpy(np.asarray(framed(picture, width, height))).to(device=device, dtype=self.vae.dtype)
+            pixels = (pixels.permute(2, 0, 1)[:, None].expand(-1, subjects.frames, -1, -1)[None] / 127.5 - 1).contiguous()
+            latent = self._normalize_latents(self.vae.encode(pixels).latent_dist.mode().float(), self.vae.latents_mean,
+                                             self.vae.latents_std)
+            latent = latent + embedding.to(device=device, dtype=torch.float32).view(1, -1, 1, 1, 1)
+            _, _, f, h, w = latent.shape
+            made.append(self._pack_latents(latent, self.transformer_spatial_patch_size, self.transformer_temporal_patch_size))
+            coords = self.transformer.rope.prepare_video_coords(1, f, h, w, device, fps=fps)
+            coords[:, 0] += -(count - index) / fps
+            places.append(coords)
+        return torch.cat(made, dim=1), torch.cat(places, dim=2)
+
+    def voice_tokens(self, subjects: Subjects, device: torch.device) -> tuple[torch.Tensor, torch.Tensor]:
+        """Each voice as MSR's AVref places it: its normalized latents, at most its slot's length, plus its slot's
+        embedding, right-aligned to end `margin_s` before its picture's window, the windows `slot_s` long and the last
+        picture's ending at 0. Packed tokens [1, T, C] and their coordinates [1, 1, T, 2], in seconds."""
+        ends = self.transformer.audio_rope.prepare_audio_coords(1, round(subjects.slot_s * 50), device)[0, 0, :, 1]
+        most = max(1, int((ends <= subjects.slot_s + 1e-6).sum()))
+        made, places = [], []
+        count = len(subjects.pictures)
+        for slot, latents, embedding in subjects.voices:
+            tokens = self._normalize_audio_latents(self._pack_audio_latents(latents.to(device=device, dtype=torch.float32)),
+                                                   self.audio_vae.latents_mean, self.audio_vae.latents_std)[:, :most]
+            made.append(tokens + embedding.to(device=device, dtype=torch.float32).view(1, 1, -1))
+            coords = self.transformer.audio_rope.prepare_audio_coords(1, tokens.shape[1], device)
+            end = -((count - slot) * subjects.slot_s) - subjects.margin_s
+            places.append(coords + (end - coords[:, :, -1:, 1:]))
+        return torch.cat(made, dim=1), torch.cat(places, dim=2)
 
 
 @sequence_parallel(degrees=(2, 4, 8))
@@ -323,7 +409,7 @@ class Ltx25(Model[Graph]):
                 frames: int, sigmas: Sequence[float], generator: torch.Generator, check: Callable[[], None],
                 progress: Callable[[int], None], reference: list[Image.Image] | None = None, downscale: int = 1,
                 held: torch.Tensor | None = None, latents: tuple[torch.Tensor, torch.Tensor | None] | None = None,
-                window: Window | None = None) -> tuple[torch.Tensor, torch.Tensor]:
+                window: Window | None = None, subjects: Subjects | None = None) -> tuple[torch.Tensor, torch.Tensor]:
         # The VAE roots are also leased: their latent-statistic buffers participate here, and they encode the pictures
         # and the reference at each stage's size, as upstream's stages do (ltx_pipelines/distilled.py `_video_conditionings`).
         pipe = self.pipeline()
@@ -332,7 +418,7 @@ class Ltx25(Model[Graph]):
             with torch.inference_mode():
                 return pipe.run(embeds, pictures, reference=reference, downscale=downscale, held=held, width=width,
                                 height=height, frames=frames, sigmas=sigmas, generator=generator, check=check,
-                                progress=progress, latents=latents, window=window)
+                                progress=progress, latents=latents, window=window, subjects=subjects)
         finally:
             pipe.transformer._reset_stateful_cache()
 

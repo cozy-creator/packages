@@ -6,11 +6,14 @@ mention as its name. With pictures mentioned, the Ingredients IC-LoRA's two-part
 
     Generated video: <the video>
 
-and the sheet itself: one panel per picture, on black, no text, the pictures in the order they are first mentioned."""
+and the sheet itself: one panel per picture, on black, no text, the pictures in the order they are first mentioned.
+With a voice mentioned too, Licon MSR's form (its card and sample workflow): `Image 1: <name>.` per picture, `Audio 1:
+<name>, belongs only to Image 2.` per voice, then the video, each mention as its label."""
 
 from __future__ import annotations
 
 import math
+from collections.abc import Mapping, Sequence
 
 from cozy_runtime.fields import MENTION
 from PIL import Image
@@ -58,3 +61,26 @@ def rendered(video: str, panels: list[str]) -> str:
         return video
     described = " ".join(f"{place}: {name}." for place, name in zip(places(len(panels)), panels, strict=True))
     return f"Reference sheet: {described}\n\nGenerated video: {video}"
+
+
+def labelled(text: str, labels: Mapping[str, str]) -> str:
+    """`text` with each mention as its label (`<amy>` is Image 1), else as its name."""
+    return MENTION.sub(lambda found: labels.get(found[1], found[1].replace(".", " ")), text).strip()
+
+
+def speakers(text: str, pictures: Sequence[str], sounds: Sequence[str]) -> dict[str, str]:
+    """Whose voice each sound is: the picture mentioned nearest before it, else the first picture mentioned."""
+    order = [found[1] for found in MENTION.finditer(text)]
+    owners: dict[str, str] = {}
+    for sound in sounds:
+        before = order[: order.index(sound)] if sound in order else []
+        owners[sound] = next((key for key in reversed(before) if key in pictures), pictures[0])
+    return owners
+
+
+def cast(video: str, pictures: Sequence[str], voices: Sequence[tuple[str, int]]) -> str:
+    """MSR's form: each picture by its slot, each voice with the picture it belongs to, then the video."""
+    lines = [f"Image {slot}: {name.replace('.', ' ')}." for slot, name in enumerate(pictures, start=1)]
+    lines += [f"Audio {index}: {name.replace('.', ' ')}, belongs only to Image {slot}."
+              for index, (name, slot) in enumerate(voices, start=1)]
+    return "\n\n".join([*lines, video])

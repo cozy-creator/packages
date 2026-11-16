@@ -45,9 +45,12 @@ model read.
   the prompt ("<amy> dances the way <clip> does"), with the subject as the first frame or a mention.
   Pictures and a video can't be references together: their adapters take references at different sizes.
 - **Keyframes** (`keyframes`: a picture and a time) each land on their exact frame, as upstream's `ImageGuide` does.
-- **A mentioned sound** is the soundtrack: held as it is while the video is made to it (upstream's audio-to-video),
-  and returned unchanged. A clip longer than the sound is shortened to it. LTX-2.5 takes no voice or music style
-  from a sound.
+- **A sound mentioned after a picture** is that character's voice (`<amy> says, in <amyvoice>: "Hello."`): Licon
+  MSR V2 (`liconstudio/multiple-subject-reference`, Apache-2.0) keeps up to five pictures and two of their voices,
+  on both stages. Its prompt names them by slot: `Image 1: amy.`, `Audio 1: amyvoice, belongs only to Image 1.`,
+  then your text with `<amy>` as Image 1. A voice is at most 5 seconds.
+- **A sound mentioned with no picture** is the soundtrack: held as it is while the video is made to it (upstream's
+  audio-to-video), and returned unchanged. A clip longer than the sound is shortened to it.
 - **Pick up from here** keeps the take up to its frame and carries its last 25 frames and their sound into the
   new part, as upstream's long-video windows carry, so the new part continues the take.
 - **LoRAs** (`--lora`, the page's LoRAs) apply to both stages, as upstream's distilled pipeline applies them.

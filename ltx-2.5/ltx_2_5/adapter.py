@@ -40,6 +40,7 @@ def _add(root: nn.Module, path: str, module: nn.Module) -> None:
 class Graph:
     def __init__(self, config: Config) -> None:
         settings = (config.section(COMPONENT) if COMPONENT in config.keys() else config).mapping()
+        self.settings = settings
         alpha = settings.get("lora_alpha")
         self.downscale = int(str(settings.get("reference_downscale_factor", 1)))
         root = nn.Module()
@@ -55,7 +56,13 @@ class Graph:
                     factors.register_buffer("alpha", torch.ones((), dtype=torch.float32))
                 _add(root, path, factors)
                 self.factors[path] = factors
+            for path, module in self.saved(config).items():
+                _add(root, path, module)
         self.components = {COMPONENT: stored(root, COMPONENT, config)}
+
+    def saved(self, config: Config) -> dict[str, nn.Module]:
+        """The adapter's own modules beside its factors (PEFT's `modules_to_save`), by path: none here."""
+        return {}
 
 
 @sequence_parallel(degrees=(2, 4, 8))
