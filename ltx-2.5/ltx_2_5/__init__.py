@@ -188,8 +188,9 @@ def generate(ctx: Context, payload: Generate, model: Ltx25, ingredients: ICLora,
     cast_order: list[str] = []
     voices: list[tuple[str, int]] = []
     if panels and (owners or payload.references == "subjects"):
-        voiced = list(dict.fromkeys(owners.values()))
-        cast_order = voiced + [key for key in panels if key not in voiced]
+        # Pictures keep the order they are mentioned in; a voiced one past MSR's two voiced slots moves up into them.
+        late = [key for key in dict.fromkeys(owners.values()) if panels.index(key) >= MSR_VOICES]
+        cast_order = late + [key for key in panels if key not in late]
         if len(cast_order) > MSR_PICTURES:
             adj.warn("prompt", f"MSR keeps {MSR_PICTURES} pictures, so it goes without "
                                f"{', '.join(f'<{key}>' for key in cast_order[MSR_PICTURES:])}")
@@ -231,13 +232,14 @@ def generate(ctx: Context, payload: Generate, model: Ltx25, ingredients: ICLora,
         pictures.append((keyframe.picture.read().convert("RGB"), frame))
     if kept is not None:
         pictures.insert(0, (kept[-carry:], 0))
+    labels = [key.replace(".", " ") for key in [*panels, *videos]]
     if cast_order:
         # MSR reads its subjects by slot: `<amy>` is Image 1, her voice Audio 1.
-        text = labelled(payload.prompt.text, {key: f"Image {slot}" for slot, key in enumerate(cast_order, start=1)}
-                        | {key: f"Audio {index}" for index, (key, _) in enumerate(voices, start=1)})
+        slots = ({key: f"Image {slot}" for slot, key in enumerate(cast_order, start=1)}
+                 | {key: f"Audio {index}" for index, (key, _) in enumerate(voices, start=1)})
+        text, labels = labelled(payload.prompt.text, slots), list(slots.values())
     video_text = text
     if payload.prompt_upsampling:
-        labels = [key.replace(".", " ") for key in [*panels, *videos]]
         with tel.stage("enhancing prompt"):
             rewritten = enhancer.rewrite(text, kept[-1] if kept else first, labels)
         if rewritten is None:
