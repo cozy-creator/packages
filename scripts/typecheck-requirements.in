@@ -1,9 +1,9 @@
 # The type check's environment (scripts/typecheck.sh): the Runtime and the libraries the packages import, CPU-only.
 # `scripts/typecheck.sh lock` pins them into typecheck-requirements.txt; re-pin when the Runtime moves:
-# the typed Runtime and TensorFS stubs, selected by verified wheel URLs for a prerelease cohort.
+# the typed Runtime the packages build on and the TensorFS whose typed stubs it reads (git revs until they publish).
 mypy
-cozy-runtime[adapters,media]>=0.48.0.dev0,<0.49
-tensorfs>=0.27.0.dev0,<0.28
+cozy-runtime[adapters,media] @ git+https://github.com/cozy-creator/cozy-runtime@6d33e63c67d4ef21b6f989c38be13412b6f3fb4f
+tensorfs==0.24.2
 torch @ https://download.pytorch.org/whl/cpu/torch-2.15.0%2Bcpu-cp312-cp312-manylinux_2_28_x86_64.whl
 torchvision
 triton
