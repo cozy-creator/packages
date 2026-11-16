@@ -9,7 +9,7 @@ from cozy_runtime.author import ModelArtifact, ModelChoice, Seed
 from cozy_runtime.fields import AspectRatio, Audio, Image, Pickup, Prompt, Video
 from cozy_runtime.author import Operation
 
-class AdalnInput(msgspec.Struct, kw_only=True, frozen=True):
+class apply_adalnRequest(msgspec.Struct, kw_only=True, frozen=True):
     pass
 
 class bf16_fullRequest(msgspec.Struct, kw_only=True, frozen=True):
@@ -18,7 +18,7 @@ class bf16_fullRequest(msgspec.Struct, kw_only=True, frozen=True):
 class bf16_prunedRequest(msgspec.Struct, kw_only=True, frozen=True):
     pass
 
-class ComputeAdalnInput(msgspec.Struct, kw_only=True, frozen=True):
+class compute_adaln_tablesRequest(msgspec.Struct, kw_only=True, frozen=True):
     task: Literal['fl2va', 'ref2va']
     plan_digest: str
 
@@ -100,7 +100,10 @@ class RetableResult(msgspec.Struct, kw_only=True, frozen=True):
     adaln_pruned: ModelArtifact
     tables: ModelArtifact
 
-class SelectAdalnInput(msgspec.Struct, kw_only=True, frozen=True):
+class retable_adalnRequest(msgspec.Struct, kw_only=True, frozen=True):
+    pass
+
+class select_adaln_weightsRequest(msgspec.Struct, kw_only=True, frozen=True):
     task: Literal['fl2va', 'ref2va']
 
 class Selection(msgspec.Struct, kw_only=True, frozen=True):
@@ -124,121 +127,87 @@ class UpscaleOutput(msgspec.Struct, kw_only=True, frozen=True):
 class vaeRequest(msgspec.Struct, kw_only=True, frozen=True):
     pass
 
-apply_adaln: Operation[AdalnInput, ModelArtifact] = Operation(
+apply_adaln: Operation[apply_adalnRequest, ModelArtifact] = Operation(
     distribution='minimax-h3', module='minimax_h3.preparation.adaln_operations', export='apply_adaln',
-    declaration='sha256:4690dda12931893f2447cd0bb2b0ff9f795c6a6321ba1d12bf7eb2e9b88dc6b6', request=AdalnInput, result=ModelArtifact,
-    models=('source', 'fl2va', 'ref2va'), assets_parameter='',
-    wire_request=None,
+    request=apply_adalnRequest, result=ModelArtifact, models=('source', 'fl2va', 'ref2va'),
 )
 
 bf16_full: Operation[bf16_fullRequest, ModelArtifact] = Operation(
     distribution='minimax-h3', module='minimax_h3.preparation.job', export='bf16_full',
-    declaration='sha256:c8a3aeaa4e8c241ca650bff7f54593cf6d15923acba2fca4f3370a598e935f9a', request=bf16_fullRequest, result=ModelArtifact,
-    models=('source',), assets_parameter='',
-    wire_request=None,
+    request=bf16_fullRequest, result=ModelArtifact, models=('source',),
 )
 
 bf16_pruned: Operation[bf16_prunedRequest, ModelArtifact] = Operation(
     distribution='minimax-h3', module='minimax_h3.preparation.job', export='bf16_pruned',
-    declaration='sha256:11e8027eca6d3989957a6d8bb531d604ed4dc127b612b86ef7817a513385939b', request=bf16_prunedRequest, result=ModelArtifact,
-    models=('source',), assets_parameter='',
-    wire_request=None,
+    request=bf16_prunedRequest, result=ModelArtifact, models=('source',),
 )
 
-compute_adaln_tables: Operation[ComputeAdalnInput, ModelArtifact] = Operation(
+compute_adaln_tables: Operation[compute_adaln_tablesRequest, ModelArtifact] = Operation(
     distribution='minimax-h3', module='minimax_h3.preparation.adaln_operations', export='compute_adaln_tables',
-    declaration='sha256:f1146218f91f33d963bac72b235e943920a643091c673bd44c901e4ec998ca03', request=ComputeAdalnInput, result=ModelArtifact,
-    models=('source',), assets_parameter='',
-    wire_request=None,
+    request=compute_adaln_tablesRequest, result=ModelArtifact, models=('source',),
 )
 
 curve_pruned: Operation[curve_prunedRequest, ModelArtifact] = Operation(
     distribution='minimax-h3', module='minimax_h3.preparation.job', export='curve_pruned',
-    declaration='sha256:261ee5d11d7cf08317b29131c7c07350ef77af4b4f7b5365156f81c4794d271e', request=curve_prunedRequest, result=ModelArtifact,
-    models=('source',), assets_parameter='',
-    wire_request=None,
+    request=curve_prunedRequest, result=ModelArtifact, models=('source',),
 )
 
 edit: Operation[Edit, ShotResult] = Operation(
     distribution='minimax-h3', module='h3', export='edit',
-    declaration='sha256:e682c75c384cd7a448e30c957039270513e57e7d1b5c7de385da655a2cc02ebf', request=Edit, result=ShotResult,
-    models=(), assets_parameter='',
-    wire_request=None,
+    request=Edit, result=ShotResult, models=(),
 )
 
 fp8_pruned: Operation[fp8_prunedRequest, ModelArtifact] = Operation(
     distribution='minimax-h3', module='minimax_h3.preparation.job', export='fp8_pruned',
-    declaration='sha256:9d245edd932ad8534499a9663af203f63936267aa1e4c4dfb75e9d3b7d48b74d', request=fp8_prunedRequest, result=ModelArtifact,
-    models=('source',), assets_parameter='',
-    wire_request=None,
+    request=fp8_prunedRequest, result=ModelArtifact, models=('source',),
 )
 
 generate: Operation[Shot, ShotResult] = Operation(
     distribution='minimax-h3', module='h3', export='generate',
-    declaration='sha256:a5d2143d969b24e18ad87551a3a69ef449bdc50795723f83ee89722b58371607', request=Shot, result=ShotResult,
-    models=(), assets_parameter='',
-    wire_request=None,
+    request=Shot, result=ShotResult, models=(),
 )
 
 quantize: Operation[quantizeRequest, ModelArtifact] = Operation(
     distribution='minimax-h3', module='cozy_runtime.derive.recipes', export='quantize',
-    declaration='sha256:4dd6ec2dcaba7cc6bce19fa6b97056c4c30a45e398eba4cb3a104dbf8ab2d6d2', request=quantizeRequest, result=ModelArtifact,
-    models=('source',), assets_parameter='',
-    wire_request=None,
+    request=quantizeRequest, result=ModelArtifact, models=('source',),
 )
 
 regenerate_lora: Operation[regenerate_loraRequest, ModelArtifact] = Operation(
     distribution='minimax-h3', module='minimax_h3.preparation.regenerate', export='regenerate_lora',
-    declaration='sha256:2f6e1852ea5b0b871b2b595b64c139ca946c69ae3b520df2f53ccae35191fc5b', request=regenerate_loraRequest, result=ModelArtifact,
-    models=('adapters', 'base'), assets_parameter='',
-    wire_request=None,
+    request=regenerate_loraRequest, result=ModelArtifact, models=('adapters', 'base'),
 )
 
 render_shot: Operation[PackageShot, PackageShotResult] = Operation(
     distribution='minimax-h3', module='h3', export='render_shot',
-    declaration='sha256:778477d3d07867f8be0876f2efcf0e49e6985448f5b0095370a97e66d3a71aee', request=PackageShot, result=PackageShotResult,
-    models=(), assets_parameter='',
-    wire_request=None,
+    request=PackageShot, result=PackageShotResult, models=(),
 )
 
 retable: Operation[retableRequest, RetableResult] = Operation(
     distribution='minimax-h3', module='minimax_h3.preparation.job', export='retable',
-    declaration='sha256:72c202147908fdace053faefe6eed53159b257cce37620175a1bf2bb8fdce991', request=retableRequest, result=RetableResult,
-    models=('pruned', 'full'), assets_parameter='',
-    wire_request=None,
+    request=retableRequest, result=RetableResult, models=('pruned', 'full'),
 )
 
-retable_adaln: Operation[AdalnInput, ModelArtifact] = Operation(
+retable_adaln: Operation[retable_adalnRequest, ModelArtifact] = Operation(
     distribution='minimax-h3', module='minimax_h3.preparation.adaln_operations', export='retable_adaln',
-    declaration='sha256:d6384be52e5753fad8b01b5145ff17b78bfe05cb6ec96a68479c0138a24af874', request=AdalnInput, result=ModelArtifact,
-    models=('source', 'fl2va', 'ref2va'), assets_parameter='',
-    wire_request=None,
+    request=retable_adalnRequest, result=ModelArtifact, models=('source', 'fl2va', 'ref2va'),
 )
 
-select_adaln_weights: Operation[SelectAdalnInput, Selection] = Operation(
+select_adaln_weights: Operation[select_adaln_weightsRequest, Selection] = Operation(
     distribution='minimax-h3', module='minimax_h3.preparation.adaln_operations', export='select_adaln_weights',
-    declaration='sha256:2a17373c2eec9997b9fa3c8aa085df22704845e59333df83e22bb329d920f83f', request=SelectAdalnInput, result=Selection,
-    models=('source',), assets_parameter='',
-    wire_request=None,
+    request=select_adaln_weightsRequest, result=Selection, models=('source',),
 )
 
 turbo_lora: Operation[turbo_loraRequest, ModelArtifact] = Operation(
     distribution='minimax-h3', module='minimax_h3.preparation.turbo', export='turbo_lora',
-    declaration='sha256:716555434cc001be19ffba9a1ac0d69aab102d181021b89889e9d6d649e1c8cf', request=turbo_loraRequest, result=ModelArtifact,
-    models=('adapters', 'base'), assets_parameter='',
-    wire_request=None,
+    request=turbo_loraRequest, result=ModelArtifact, models=('adapters', 'base'),
 )
 
 upscale: Operation[Upscale, UpscaleOutput] = Operation(
     distribution='minimax-h3', module='h3', export='upscale',
-    declaration='sha256:cbe52caccc45b79144bd33739985169aabf0d91b79970ead101e1ddfebdaba89', request=Upscale, result=UpscaleOutput,
-    models=(), assets_parameter='',
-    wire_request=None,
+    request=Upscale, result=UpscaleOutput, models=(),
 )
 
 vae: Operation[vaeRequest, ModelArtifact] = Operation(
     distribution='minimax-h3', module='minimax_h3.preparation.job', export='vae',
-    declaration='sha256:20aba232430cac1d4ebff0c956dd9d56b8c0ffe8dff6b1848a54994c534a6d78', request=vaeRequest, result=ModelArtifact,
-    models=('source',), assets_parameter='',
-    wire_request=None,
+    request=vaeRequest, result=ModelArtifact, models=('source',),
 )
