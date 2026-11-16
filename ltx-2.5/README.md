@@ -33,10 +33,12 @@ model read.
 
 ## References, soundtrack and pickup
 
-- **Mentioned pictures** (`<amy>`, `<teapot>`) are panels of a reference sheet, in the order first mentioned, on
-  black; Lightricks' Ingredients IC-LoRA (`lightricks/ingredients`) reads it in the first stage, and the prompt takes
-  its two-part form: `Reference sheet: Left: amy. Right: teapot.` then `Generated video: <your text>`. It was
-  trained on 768x448, 5-second clips; other sizes and longer clips work, less faithfully.
+- **Mentioned pictures** (`<amy>`, `<teapot>`) are subjects the video keeps: Licon MSR V2
+  (`liconstudio/multiple-subject-reference`, Apache-2.0) takes up to five, each its own reference on both stages, and
+  its prompt names them by slot: `Image 1: amy.`, then your text with `<amy>` as Image 1. `references: sheet` puts them
+  instead on Lightricks' Ingredients reference sheet (`lightricks/ingredients`), in the order first mentioned, read in
+  the first stage with its two-part prompt: `Reference sheet: Left: amy. Right: teapot.` then `Generated video: <your
+  text>`.
 - **A mentioned video** sets the structure or the motion: Lightricks' Union Control IC-LoRA (`lightricks/union-control`,
   the LTX-2.3 adapter their LTX-2.5 workflow runs) follows its control maps in the first stage, at half the stage's
   size, as the adapter was trained. `control` picks the map, made as Lightricks' workflow makes it: `depth` (default,
@@ -45,10 +47,8 @@ model read.
   the prompt ("<amy> dances the way <clip> does"), with the subject as the first frame or a mention.
   Pictures and a video can't be references together: their adapters take references at different sizes.
 - **Keyframes** (`keyframes`: a picture and a time) each land on their exact frame, as upstream's `ImageGuide` does.
-- **A sound mentioned after a picture** is that character's voice (`<amy> says, in <amyvoice>: "Hello."`): Licon
-  MSR V2 (`liconstudio/multiple-subject-reference`, Apache-2.0) keeps up to five pictures and two of their voices,
-  on both stages. Its prompt names them by slot: `Image 1: amy.`, `Audio 1: amyvoice, belongs only to Image 1.`,
-  then your text with `<amy>` as Image 1. A voice is at most 5 seconds.
+- **A sound mentioned after a picture** is that character's voice (`<amy> says, in <amyvoice>: "Hello."`): MSR gives
+  two pictures a voice each, at most 5 seconds, named `Audio 1: amyvoice, belongs only to Image 1.`
 - **A sound mentioned with no picture** is the soundtrack: held as it is while the video is made to it (upstream's
   audio-to-video), and returned unchanged. A clip longer than the sound is shortened to it.
 - **Pick up from here** keeps the take up to its frame and carries its last 25 frames and their sound into the

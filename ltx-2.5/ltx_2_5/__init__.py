@@ -62,8 +62,8 @@ class Keyframe(msgspec.Struct, kw_only=True):
 
 class Generate(msgspec.Struct, kw_only=True):
     #: What happens, in your words, with its sound and dialogue. A picture it mentions is a character, prop or place
-    #: the video keeps (Lightricks' Ingredients reference sheet); a sound mentioned after a picture is that character's
-    #: voice (Licon MSR), else the soundtrack it is timed to; a video it mentions sets the structure (Union Control).
+    #: the video keeps; a sound mentioned after a picture is that character's voice, else the soundtrack it is timed
+    #: to; a video it mentions sets the structure (Union Control).
     prompt: Prompt[Image | Video | Audio] = Prompt()
     #: The picture the video starts from.
     first_frame: Picture | None = None
@@ -83,6 +83,11 @@ class Generate(msgspec.Struct, kw_only=True):
         "pose": ("Motion transfer", "Moves like the people in the video you mention: body, hands and face"),
         "edges": ("Structure", "Follows the shapes and layout of the video you mention"),
         "map": ("As given", "The video is already a control map: edges, depth or pose")})] = "depth"
+    #: How mentioned pictures are kept: each its own subject (Licon MSR, up to five, two with a voice) or together on
+    #: Lightricks' Ingredients reference sheet. A voice always takes subjects.
+    references: Annotated[Literal["subjects", "sheet"], Advanced(), Label("Pictures", {
+        "subjects": ("Subjects", "Licon MSR: up to five pictures, and a voice for two of them"),
+        "sheet": ("Reference sheet", "Lightricks' Ingredients: every picture on one sheet, no voices")})] = "subjects"
     #: Lightricks' enhancer (Gemma 4 E2B) first rewrites the prompt as LTX-2.5's captions read, as their templates do.
     prompt_upsampling: Annotated[bool, Advanced()] = True
     #: Render the soundtrack with the synchronized audio branch; false returns a silent MP4.
@@ -136,8 +141,8 @@ def generate(ctx: Context, payload: Generate, model: Ltx25, ingredients: ICLora,
              adj: Adjustments) -> VideoResult:
     """LTX-2.5 Distilled, in two stages: a scene and its synchronized sound, then x2 spatial refinement. A first frame
     replaces the first latent and a last frame guides the last frame (upstream's `--image PATH FRAME_IDX 1.0`); mentioned
-    pictures are the Ingredients IC-LoRA's reference sheet in stage 1 (upstream's IC-LoRA stages), or with their voices
-    Licon MSR's subjects in both stages; a mentioned video the Union Control IC-LoRA's reference in stage 1; a sound no
+    pictures are Licon MSR's subjects in both stages, with their voices, or the Ingredients IC-LoRA's reference sheet in
+    stage 1 (upstream's IC-LoRA stages); a mentioned video the Union Control IC-LoRA's reference in stage 1; a sound no
     picture speaks in is held as the soundtrack through both (`A2VidPipelineTwoStage`); a pickup carries its take's
     last 25 frames and their sound as the new part's opening (upstream's long-video carry)."""
     text = names(payload.prompt.text)
@@ -177,10 +182,12 @@ def generate(ctx: Context, payload: Generate, model: Ltx25, ingredients: ICLora,
                     adj.warn(name, f"the take picked up sets the opening and the shape; {name} is ignored")
             first = None
     # A sound mentioned with pictures is the voice of the picture named before it (Licon MSR); else the soundtrack.
-    owners = speakers(payload.prompt.text, panels, sounds) if panels and sounds and pickup is None else {}
+    owners = speakers(payload.prompt.text, panels, sounds) if panels and sounds else {}
+    if owners and payload.references == "sheet":
+        adj.warn("references", "a voice needs Licon MSR's subjects, so the pictures are subjects")
     cast_order: list[str] = []
     voices: list[tuple[str, int]] = []
-    if owners:
+    if panels and (owners or payload.references == "subjects"):
         voiced = list(dict.fromkeys(owners.values()))
         cast_order = voiced + [key for key in panels if key not in voiced]
         if len(cast_order) > MSR_PICTURES:
