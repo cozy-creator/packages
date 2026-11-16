@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import weakref
 from collections.abc import Callable, Mapping
 from typing import TypedDict, cast
 
@@ -74,11 +75,75 @@ class Components(TypedDict):
     vae: AutoencoderKLWan
 
 
+#: The curve form's config (Comfy-Org's names): the time embedding's SiLU, `vec(t)`, as coordinates in a basis of
+#: `adaln_curve_dim` (192) lerped from `adaln_t_table`, one row per `adaln_curve_grid` (4097) points of t in [0, 1]; and
+#: every modulation `linear` over those coordinates. It replaces the time embedder and the 4096-wide modulation weights
+#: (17.7 GB F32) with 0.8 GB (se-140); `lanes.curve` writes it from the full form.
+CURVE = ("adaln_curve_grid", "adaln_curve_dim")
+
+
+class _CurveCoordinates(nn.Module):
+    """`time_proj` of the curve form: each timestep (0-1000) as its lerped row of the transformer's table."""
+
+    def __init__(self, owner: PAN2Transformer3DModel) -> None:
+        super().__init__()
+        self._owner = weakref.ref(owner)  # not a submodule: the table is the transformer's own buffer
+
+    def forward(self, timestep: torch.Tensor) -> torch.Tensor:
+        table = cast(torch.Tensor, cast(PAN2Transformer3DModel, self._owner()).adaln_t_table)
+        position = (timestep.float() / 1000).clamp(0, 1) * (table.shape[0] - 1)
+        low = position.floor().long().clamp(max=table.shape[0] - 2)
+        return torch.lerp(table[low], table[low + 1], (position - low).unsqueeze(1))
+
+
+class _Float32(nn.Module):
+    """Stands where the time embedder's `linear_1` was: Diffusers casts the time projection to its weight's dtype."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.register_buffer("weight", torch.empty(0), persistent=False)
+
+
+class _Coordinates(nn.Module):
+    """`time_embedder` of the curve form: the coordinates are already `vec(t)`."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.linear_1 = _Float32()
+
+    def forward(self, coordinates: torch.Tensor) -> torch.Tensor:
+        return coordinates
+
+
+def curved(model: PAN2Transformer3DModel, grid: int, dim: int) -> PAN2Transformer3DModel:
+    """`model` in the curve form: its table, coordinate time embedding and `dim`-wide modulation linears."""
+    inner = int(model.config["num_attention_heads"]) * int(model.config["attention_head_dim"])
+    model.register_buffer("adaln_t_table", torch.empty(grid, dim, dtype=torch.float32))
+    model.time_proj = _CurveCoordinates(model)
+    model.time_embedder = _Coordinates()
+    for block in model.transformer_blocks:
+        block.norm1.silu = nn.Identity()
+        block.norm1.linear = nn.Linear(dim, 6 * inner)
+    model.norm_out.silu = nn.Identity()
+    model.norm_out.linear = nn.Linear(dim, 2 * inner)
+    return model
+
+
+def transformer(config: Config) -> PAN2Transformer3DModel:
+    """The DiT as the checkpoint stores it: the full form, or the curve form its config names (`CURVE`)."""
+    settings = config.section("transformer").mapping()
+    curve = [settings.pop(key, None) for key in CURVE]
+    model = PAN2Transformer3DModel.from_config(settings)
+    if curve[0] is not None:
+        model = curved(model, int(curve[0]), int(curve[1]))
+    return stored(model, "transformer", config)
+
+
 class Graph:
     components: Components
     def __init__(self, config: Config) -> None:
         self.components = {
-            "transformer": stored(PAN2Transformer3DModel.from_config(config.section("transformer").mapping()), "transformer", config),
+            "transformer": transformer(config),
             "text_encoder": stored(Qwen3_5TextModel(Qwen3_5TextConfig(**config.section("text_encoder").mapping())), "text_encoder", config),
             "vae": stored(AutoencoderKLWan.from_config(config.section("vae").mapping()), "vae", config),
         }

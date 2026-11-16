@@ -20,6 +20,8 @@ from .model import COMPONENTS, DEFAULT_STEPS, FPS, Pan2, Reasoner
 app = App()
 MODEL = "ifm/pan2@0.2.0"
 
+from . import lanes as lanes  # noqa: E402  # the `curve` lane function; it registers on `app`
+
 REWRITE = Path(__file__).with_name("prompt-policy.md").read_text()
 
 
