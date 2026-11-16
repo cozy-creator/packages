@@ -161,12 +161,17 @@ _TURBO_DEFAULTS = {"model": _BASE, "edit_model": _EDIT,
                    "turbo_lora": "lightx2v/qwen-image-2512-lightning-lora@0.1.0",
                    "edit_turbo_lora": "lightx2v/qwen-image-edit-2511-lightning-lora@0.1.0"}
 _COMPONENTS = {"edit_model": ("transformer",)}
+#: Which requests need each DiT and LoRA (cl-1103, `_full`, `_turbo`): a prompt with a picture runs the edit DiT (and
+#: Turbo its LoRA), one without the base DiT (and Turbo its LoRA). `model` is never ruled: its text encoder and VAE
+#: serve every render.
+_EDIT_RULE = '.references.exists(r, r.type == "image")'
+_TEXT_RULE = '.references.all(r, r.type != "image")'
 
 
 # The edit DiT is all `edit_model` binds: the text encoder, VAE and tokenizer are `model`'s. It, and
-# its LoRA, are fetched and built by the first request with references.
-@app.entrypoint(defaults={"model": _BASE, "edit_model": _EDIT}, components=_COMPONENTS, on_demand=("edit_model",),
-                memoize=True)
+# its LoRA, are fetched for a request with references.
+@app.entrypoint(defaults={"model": _BASE, "edit_model": _EDIT}, components=_COMPONENTS,
+                needs={"edit_model": f"request.prompt{_EDIT_RULE}"}, memoize=True)
 def generate(ctx: Context, payload: GenerateInput, edit_model: QwenImageTransformer, model: QwenImage,
              tel: Telemetry, adj: Adjustments) -> ImageResult:
     """Qwen-Image-2512 from text (50 steps), or Qwen-Image-Edit-2511 with pictures (40 steps).
@@ -175,8 +180,9 @@ def generate(ctx: Context, payload: GenerateInput, edit_model: QwenImageTransfor
     return _full(ctx, payload, edit_model, model, tel, adj)
 
 
-@app.entrypoint(defaults=_TURBO_DEFAULTS, components=_COMPONENTS, on_demand=("edit_model", "edit_turbo_lora"),
-                memoize=True)
+@app.entrypoint(defaults=_TURBO_DEFAULTS, components=_COMPONENTS,
+                needs={"edit_model": f"request.prompt{_EDIT_RULE}", "edit_turbo_lora": f"request.prompt{_EDIT_RULE}",
+                       "turbo_lora": f"request.prompt{_TEXT_RULE}"}, memoize=True)  # fmt: skip
 def generate_turbo(ctx: Context, payload: TurboInput, edit_model: QwenImageTransformer, edit_turbo_lora: QwenImageLoRA,
                    model: QwenImage, turbo_lora: QwenImageLoRA, tel: Telemetry,
                    adj: Adjustments) -> ImageResult:
@@ -195,10 +201,12 @@ class ImageBox(msgspec.Struct, kw_only=True):
     seed: Seed | None = None
 
 
-# `model` holds the text encoder and VAE every render reads; each other DiT and LoRA is built, and its
-# weights fetched, only when a render asks for it.
+# `model` holds the text encoder and VAE every render reads; each other DiT and LoRA is fetched only for a render
+# that uses it: a LoRA only with `turbo`.
 @app.tool(label="Image", named="image", defaults=_TURBO_DEFAULTS, components=_COMPONENTS,
-          on_demand=("edit_model", "edit_turbo_lora", "turbo_lora"), memoize=True)  # fmt: skip
+          needs={"edit_model": f"request.instructions{_EDIT_RULE}",
+                 "edit_turbo_lora": f"request.turbo && request.instructions{_EDIT_RULE}",
+                 "turbo_lora": f"request.turbo && request.instructions{_TEXT_RULE}"}, memoize=True)  # fmt: skip
 def image(ctx: Context, payload: ImageBox, edit_model: QwenImageTransformer, edit_turbo_lora: QwenImageLoRA,
           model: QwenImage, turbo_lora: QwenImageLoRA, tel: Telemetry, adj: Adjustments) -> ImageResult:
     """Qwen Image on a canvas: Lightning, or the full models."""
