@@ -3,7 +3,8 @@
 DiT's `lora.Sites` for stage 1 only, the stage that takes its reference (ltx_pipelines/ic_lora.py
 `DEFAULT_IC_LORA_STAGES`), at strength 1: "the weights ship pre-scaled, so full strength is the intended default"
 (its model card). TensorFS stores it as PEFT's form under Diffusers' module names: `<module>.lora_A.weight` [r, in],
-`.lora_B.weight` [out, r], the config's `lora_alpha` (else r) over each module's rank."""
+`.lora_B.weight` [out, r], scaled by α over the module's rank: its own `.alpha` (F32, where ranks differ), else the
+config's `lora_alpha`, else r (TensorFS import/lora.rs)."""
 
 from __future__ import annotations
 
@@ -42,8 +43,10 @@ class Graph:
             for path in (str(target) for target in settings["target_modules"]):
                 rank, fan_in = config.tensor_shape(f"{COMPONENT}.{path}.lora_A.weight", default=(0, 0))
                 fan_out, _ = config.tensor_shape(f"{COMPONENT}.{path}.lora_B.weight", default=(0, 0))
-                scale = float(alpha) / rank if isinstance(alpha, (int, float)) else 1.0
-                factors = lora.Pair(fan_in, fan_out, rank, scale, dtype=torch.bfloat16)
+                factors = lora.Pair(fan_in, fan_out, rank, float(alpha) / rank if isinstance(alpha, (int, float)) else 1.0,
+                                    dtype=torch.bfloat16)
+                if config.tensor_shape(f"{COMPONENT}.{path}.alpha", default=(-1,)) != (-1,):
+                    factors.register_buffer("alpha", torch.ones((), dtype=torch.float32))
                 _add(root, path, factors)
                 self.factors[path] = factors
         self.components = {COMPONENT: stored(root, COMPONENT, config)}
@@ -60,5 +63,8 @@ class Ingredients(Model[Graph]):
     def applied(self, sites: lora.Sites, body: Callable[[], R]) -> R:
         """`body` with this LoRA armed on the DiT's `sites`: the Runtime bakes it into the resident weights, else the
         sites add it per call."""
+        for factors in self.graph.factors.values():
+            if hasattr(factors, "alpha"):
+                factors.scale = float(factors.alpha) / factors.lora_A.weight.shape[0]
         with sites.applied(self.graph.factors):
             return body()
