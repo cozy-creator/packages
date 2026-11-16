@@ -357,6 +357,8 @@ requires-dist = [
     { name = "tensorfs", specifier = ">=0.25.0" },
     { name = "tokenizers", specifier = ">=0.22.0" },
     { name = "torch", specifier = ">=2.14" },
+    { name = "torchaudio", specifier = ">=2.9" },
+    { name = "torchvision", specifier = ">=0.24" },
     { name = "transformers", specifier = ">=5.14.1,<5.15" },
 ]
 

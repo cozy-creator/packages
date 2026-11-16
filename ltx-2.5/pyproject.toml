@@ -15,6 +15,10 @@ dependencies = [
     "tensorfs>=0.25.0",
     "tokenizers>=0.22.0",
     "torch>=2.14",
+    # The machine's PyTorch layer: torchaudio's mel for a soundtrack (as upstream encodes it), torchvision for the
+    # enhancer's image processor (as AutoProcessor builds it).
+    "torchaudio>=2.9",
+    "torchvision>=0.24",
     # The customized Gemma4 encoder's upstream verified minor; keep later minors as a separate qualification.
     "transformers>=5.14.1,<5.15",
 ]

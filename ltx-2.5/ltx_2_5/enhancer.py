@@ -5,8 +5,7 @@ reproduces them, and its copies of the system prompts are byte-identical to upst
 
 from __future__ import annotations
 
-import tempfile
-from pathlib import Path
+import json
 
 import torch
 from cozy_runtime.author import Config, Loader, Model, ModelAssets, Serving, uses_components
@@ -21,20 +20,39 @@ from diffusers.pipelines.ltx2.utils import (
     LTX2_5_T2V_DEFAULT_SYSTEM_PROMPT,
 )
 from PIL import Image
-from transformers import Gemma4Config, Gemma4ForConditionalGeneration, Gemma4Processor
+from tokenizers import Tokenizer
+from transformers import (
+    AddedToken, Gemma4AudioFeatureExtractor, Gemma4Config, Gemma4ForConditionalGeneration, Gemma4ImageProcessor,
+    Gemma4Processor, Gemma4VideoProcessor, GemmaTokenizer,
+)
 
 from .model import stored
 
 COMPONENT = "model"
-#: The upstream checkpoint's processor, tokenizer and chat template, as its mirror keeps them beside the weights.
-PROCESSOR = ("processor_config.json", "tokenizer.json", "tokenizer_config.json", "chat_template.jinja")
+#: Tokenizer settings that name files or classes, not the tokenizer's own behaviour.
+METADATA = ("tokenizer_class", "auto_map", "name_or_path", "tokenizer_file", "vocab_file", "processor_class", "backend")
 
 
 def processor(assets: ModelAssets) -> Gemma4Processor:
-    with tempfile.TemporaryDirectory() as folder:
-        for name in PROCESSOR:
-            Path(folder, name).write_bytes(assets.read(f"{COMPONENT}/{name}"))
-        return Gemma4Processor.from_pretrained(folder)
+    """The upstream processor from the checkpoint's files as its mirror keeps them (`processor_config.json`,
+    `tokenizer.json`, `tokenizer_config.json`, `chat_template.jinja`), built in memory as AutoProcessor builds it."""
+    def read(name: str) -> bytes:
+        return assets.read(f"{COMPONENT}/{name}")
+    settings = json.loads(read("processor_config.json"))
+    images, video, audio = settings.pop("image_processor"), settings.pop("video_processor"), settings.pop("feature_extractor")
+    for part, key in ((images, "image_processor_type"), (video, "video_processor_type"), (audio, "feature_extractor_type")):
+        part.pop(key, None)
+    settings.pop("processor_class", None)
+    words = json.loads(read("tokenizer_config.json"))
+    added = words.pop("added_tokens_decoder", {})
+    for key in METADATA:
+        words.pop(key, None)
+    chat = read("chat_template.jinja").decode()
+    tokenizer = GemmaTokenizer(tokenizer_object=Tokenizer.from_str(read("tokenizer.json").decode()),
+                               added_tokens_decoder={int(i): AddedToken(**token) for i, token in added.items()}, **words)
+    tokenizer.chat_template = chat
+    return Gemma4Processor(feature_extractor=Gemma4AudioFeatureExtractor(**audio), image_processor=Gemma4ImageProcessor(**images),
+                           tokenizer=tokenizer, video_processor=Gemma4VideoProcessor(**video), chat_template=chat, **settings)
 
 
 class Graph:
