@@ -324,7 +324,7 @@ def sound(ctx: Context, payload: Sound, model: Ltx25, enhancer: Enhancer, out: O
     frames = 8 * math.ceil(seconds * FPS / 8) + 1
     if payload.prompt_upsampling:
         with tel.stage("enhancing prompt"):
-            text = enhancer.rewrite(text, None)
+            text = enhancer.rewrite(text, None) or text
     with tel.stage("encoding prompt"):
         embeds = model.encode(text)
     with tel.stage("generating audio"):
@@ -408,7 +408,7 @@ def retake(ctx: Context, payload: Retake, model: Ltx25, enhancer: Enhancer, out:
     soundtrack = read.soundtrack
     if payload.prompt_upsampling:
         with tel.stage("enhancing prompt"):
-            text = enhancer.rewrite(text, None)
+            text = enhancer.rewrite(text, None) or text
     with tel.stage("encoding prompt"):
         embeds = model.encode(text)
     with tel.stage("encoding the take"):
