@@ -301,7 +301,7 @@ class Ltx25(Model[Graph]):
         vae = self.graph.components["audio_vae"]
         config = vae.config
         with torch.inference_mode():
-            mel = sound.log_mel(waveform.to(self.device), rate, int(config["sample_rate"]), int(config["mel_bins"]),
+            mel = sound.log_mel(waveform.to(torch.device(str(self.device))), rate, int(config["sample_rate"]), int(config["mel_bins"]),
                                 int(config["mel_hop_length"]), channels=int(config["in_channels"]))
             return cast(torch.Tensor, vae.encode(mel.to(vae.dtype)).latent_dist.mode()).float()
 
