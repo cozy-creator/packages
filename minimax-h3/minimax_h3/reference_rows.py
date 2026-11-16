@@ -52,6 +52,8 @@ class LoopState(Protocol):
     num_condition_audio_rows: int
     #: the carried picture rows that left the protected prefix (`continuation.unprotect_carried`)
     carried_video_rows: int
+    #: the guide's rows that left it (`unprotect_guide`)
+    guide_video_rows: int
     video_indices: torch.Tensor
     token_tags: torch.Tensor
     prompt_embeds: torch.Tensor
@@ -196,15 +198,32 @@ def unprotect_carried(state: LoopState, context: AVContext, patch_size: Sequence
         return 0
     _, patch_h, patch_w = patch_size
     _, _, frames, height, width = (int(n) for n in context.video.shape)
-    count, conditions = frames * (height // patch_h) * (width // patch_w), state.num_condition_video_rows
+    count = frames * (height // patch_h) * (width // patch_w)
+    return _unprotect(state, state.num_condition_video_rows - count, count)
+
+
+def unprotect_guide(state: LoopState, first: int, count: int) -> int:
+    """A guide's rows (`guide_rows`) out of the protected prefix, as `unprotect_carried` moves
+    carried ones: the plate is video the render follows frame by frame, not a reference, so it
+    takes the video's sparsity (cl-1081). Protected, a 15 s edit's plate is half its rows, and
+    every step ran dense (`AttentionLayout.sparse`). `first` is its first condition row (the
+    anchors pack in front of it), `count` its video rows. Returns how many moved."""
+    return _unprotect(state, first, count)
+
+
+def _unprotect(state: LoopState, first: int, count: int) -> int:
+    """Condition video rows `first..first + count` (one run of packed rows) to just before the
+    first target row, so what stays protected is still one prefix. None move when the layout
+    isn't the one this reads."""
+    conditions = state.num_condition_video_rows
     fields = state.denoiser_input_fields
     video, rows = fields["video_indices"], fields["token_tags"].numel()
-    if not 0 < count <= conditions < video.numel():
+    if not (count > 0 and first >= 0 and first + count <= conditions < video.numel()):
         return 0
-    # One read before the loop: where the carried block and the first target row sit.
-    carried = video[conditions - count : conditions + 1].tolist()
-    start, target = carried[0], carried[-1]
-    if carried[:-1] != list(range(start, start + count)) or target < start + count:
+    # One read before the loop: where the block and the first target row sit.
+    block, target = video[first : first + count].tolist(), int(video[conditions])
+    start = block[0]
+    if block != list(range(start, start + count)) or target < start + count:
         return 0
     order = torch.cat([
         torch.arange(start), torch.arange(start + count, target),

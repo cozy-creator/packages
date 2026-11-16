@@ -82,7 +82,7 @@ from .continuation import (
     export_context,
 )
 from .guide_rows import ANCHOR_LATENTS, ANCHORS, GUIDE, GUIDE_LATENTS, GuideClip, anchor_rows, guide_rows
-from .reference_rows import ClipRows, LoopState, motion_size, public_video, unprotect_carried
+from .reference_rows import ClipRows, LoopState, motion_size, public_video, unprotect_carried, unprotect_guide
 from .steps import denoise_official
 from .overlay import ATTENTION_KWARG, OVERLAY_KWARG, REGENERATE_BANK, TURBO_BANK, Overlay, TurboSchedule
 from .vae_tiles import TileBatchedVideoVAE, encode_condition
@@ -183,8 +183,9 @@ def _attention_layout(
     fields = state.denoiser_input_fields
     # NVIDIA's H3 policy protects every row before target video, including target
     # audio. Diffusers packs text, reference media, target audio, then target video.
-    # A continuation's carried frames are video, not references: they sit after the
-    # prefix and take the video's own sparsity (Paul 11-12; `unprotect_carried`).
+    # A continuation's carried frames and an edit's guide are video, not references: they
+    # sit after the prefix and take the video's own sparsity (Paul 11-12; `unprotect_carried`,
+    # `unprotect_guide`).
     # Shape/count metadata is host-resident; do not read GPU values.
     return AttentionLayout(
         live_tokens=fields["token_tags"].numel(),
@@ -192,6 +193,7 @@ def _attention_layout(
             fields["text_indices"].numel()
             + state.num_condition_video_rows
             - state.carried_video_rows
+            - state.guide_video_rows
             + fields["audio_indices"].numel()
         ),
         step=step,
@@ -1608,16 +1610,16 @@ class OfficialH3Pipeline:
         )
         # The selected upstream workflow owns the ordered preparation steps.
         # Text-only requests have no keyframe tensors to encode or concatenate.
-        guided = 0
+        guide = anchors = 0
         for name in blocks:
             if name == "denoise.denoise":
                 break
             if not name.startswith("denoise."):
                 continue
             if name == "denoise.set_timesteps" and state.get(GUIDE_LATENTS) is not None:
-                guided = self._pack_guide(scoped, state)
+                guide = self._pack_guide(scoped, state)
             if name == "denoise.set_timesteps" and state.get(ANCHOR_LATENTS):
-                guided += self._pack_anchors(scoped, state)
+                anchors = self._pack_anchors(scoped, state)
             self._run_with(task, scoped, name, state)
 
         context: AVContext | None = state.values.get("continuation_context")
@@ -1638,11 +1640,13 @@ class OfficialH3Pipeline:
         clips = None
         if _TRUNK[task] == "ref2va":
             references, latents = state.normalized_references, state.condition_latents
-            clips = ClipRows(block_state, references, latents, scoped.patch_size, start=guided)
+            clips = ClipRows(block_state, references, latents, scoped.patch_size, start=guide + anchors)
             clips.thin(block_state)
         block_state.carried_video_rows = (
             0 if context is None else unprotect_carried(block_state, context, tuple(scoped.patch_size))
         )
+        # The anchors pack in front of the guide; its rows follow them.
+        block_state.guide_video_rows = unprotect_guide(block_state, anchors, guide) if guide else 0
         # Every path runs `denoise_official`; on several ranks each rank runs the loop.
         cancel()
         loop_over = partial(
