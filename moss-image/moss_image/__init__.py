@@ -9,7 +9,7 @@ import math
 from typing import Annotated, Literal
 
 import msgspec
-from cozy_runtime.author import Adjustments, App, Context, Lora, ModelChoice, Outputs, Seed, Telemetry, call
+from cozy_runtime.author import Adjustments, App, Context, Lora, ModelChoice, Seed, Telemetry, call
 from cozy_runtime.fields import Advanced, AspectRatio, FileBound, Image, Prompt, Ratios
 from cozy_runtime.media import ImageFile
 from PIL import Image as PILImage
@@ -146,7 +146,7 @@ def reference(picture: PILImage.Image) -> PILImage.Image:
     return picture if size == picture.size else picture.resize(size, PILImage.Resampling.LANCZOS)
 
 
-@app.entrypoint(accelerator=False)
+@app.entrypoint
 async def generate(ctx: Context, payload: GenerateInput) -> ImageResult:
     """MOSS-Image from the text (`text_to_image`); with a control map, `control` under its kind's adapter
     (`CONTROL_LORAS`, at its strength); else with pictures mentioned, `edit` under Moss-Image-Edit (`EDIT_LORA`).
@@ -154,14 +154,14 @@ async def generate(ctx: Context, payload: GenerateInput) -> ImageResult:
     model and LoRAs reach it."""
     if maps := steering(payload):
         lora = Lora(CONTROL_LORAS[maps[0].kind], maps[0].strength)
-        return await call(control, payload=payload, model=ModelChoice(lora=(lora,)))
+        return await call(control, payload, models={"model": ModelChoice(lora=(lora,))})
     if payload.prompt.references:
-        return await call(edit, payload=payload, model=ModelChoice(lora=(Lora(EDIT_LORA),)))
-    return await call(text_to_image, payload=payload)
+        return await call(edit, payload, models={"model": ModelChoice(lora=(Lora(EDIT_LORA),))})
+    return await call(text_to_image, payload)
 
 
 @app.entrypoint(defaults=_DEFAULTS, components=_COMPONENTS, memoize=True, private=True)
-def text_to_image(ctx: Context, payload: GenerateInput, model: MossImage, out: Outputs, tel: Telemetry,
+def text_to_image(ctx: Context, payload: GenerateInput, model: MossImage, tel: Telemetry,
                   adj: Adjustments) -> ImageResult:
     """MOSS-Image SFT, 50 Euler steps at CFG 3, with `regions` laid out as upstream's layout JSON.
 
@@ -186,12 +186,12 @@ def text_to_image(ctx: Context, payload: GenerateInput, model: MossImage, out: O
     with tel.stage("decoding image"):
         image = model.decode(latents)
     with tel.stage("saving image"):
-        asset = out.save_image(image, format="png")
+        asset = ImageFile.from_image(image, format="png")
     return ImageResult(asset, width, height, seed, prompt)
 
 
 @app.entrypoint(defaults=_DEFAULTS, components=_COMPONENTS, memoize=True, private=True)
-def control(ctx: Context, payload: GenerateInput, model: MossImage, out: Outputs, tel: Telemetry,
+def control(ctx: Context, payload: GenerateInput, model: MossImage, tel: Telemetry,
             adj: Adjustments) -> ImageResult:
     """`generate` under its first control map, the kind's adapter stacked on `model` by its caller (thedeoxen's
     workflows, ComfyUI's `ai-toolkit` edit format): the map at the picture's size is the one noise-free reference at
@@ -230,13 +230,13 @@ def control(ctx: Context, payload: GenerateInput, model: MossImage, out: Outputs
     with tel.stage("decoding image"):
         image = model.decode(latents)
     with tel.stage("saving image"):
-        asset = out.save_image(image, format="png")
+        asset = ImageFile.from_image(image, format="png")
     tel.log("moss control", kind=steer.kind, strength=steer.strength, map=f"{picture.width}x{picture.height}")
     return ImageResult(asset, width, height, seed, text)
 
 
 @app.entrypoint(defaults=_DEFAULTS, components=_COMPONENTS, memoize=True, private=True)
-def edit(ctx: Context, payload: GenerateInput, model: MossImage, out: Outputs, tel: Telemetry,
+def edit(ctx: Context, payload: GenerateInput, model: MossImage, tel: Telemetry,
          adj: Adjustments) -> ImageResult:
     """`generate` with pictures, Moss-Image-Edit stacked on `model` by its caller: each picture a noise-free
     reference at t = 0 (`MossImage.denoise`'s `references`), 30 Euler steps at CFG 4 against an empty negative that
@@ -265,7 +265,7 @@ def edit(ctx: Context, payload: GenerateInput, model: MossImage, out: Outputs, t
     with tel.stage("decoding image"):
         image = model.decode(latents)
     with tel.stage("saving image"):
-        asset = out.save_image(image, format="png")
+        asset = ImageFile.from_image(image, format="png")
     tel.log("moss edit", pictures=len(images), references=" ".join(f"{r.shape[3] * 16}x{r.shape[2] * 16}" for r in references))
     return ImageResult(asset, width, height, seed, text)
 
@@ -284,7 +284,7 @@ class ImageBox(msgspec.Struct, kw_only=True):
     control: list[Control[Literal["pose", "depth", "canny", "lineart", "sketch"]]] = msgspec.field(default_factory=list)
 
 
-@app.tool(label="Image", named="image", accelerator=False)
+@app.tool(label="Image", named="image")
 async def image(ctx: Context, payload: ImageBox) -> ImageResult:
     """MOSS-Image on a canvas: `generate` from the box, steered by its first control map when it has one, else an
     edit of its pictures when it mentions any."""
@@ -308,14 +308,14 @@ class UpscaleInput(msgspec.Struct, kw_only=True):
 
 
 @app.tool(label="Upscale", named="image", defaults=_DEFAULTS, components=_COMPONENTS, memoize=True)
-def upscale(ctx: Context, payload: UpscaleInput, model: MossImage, out: Outputs, tel: Telemetry,
+def upscale(ctx: Context, payload: UpscaleInput, model: MossImage, tel: Telemetry,
             adj: Adjustments) -> ImageResult:
     """The picture larger: `remake` at the size asked, from `UPSCALE_PROMPT` (50-step schedule, CFG 3)."""
     with tel.stage("reading picture"):
         picture = payload.image.read()
     width, height = SIZES.fit(adj, picture.size, payload.megapixels * MEGAPIXEL)
     seed = payload.seed if payload.seed is not None else ImageRequest(prompt="").drawn_seed()
-    result = remake(ctx, model, out, tel, picture, UPSCALE_PROMPT, "", width=width, height=height, steps=STEPS,
+    result = remake(ctx, model, tel, picture, UPSCALE_PROMPT, "", width=width, height=height, steps=STEPS,
                     guidance=GUIDANCE, seed=seed, strength=payload.denoise)  # fmt: skip
     tel.log("upscale", source=f"{picture.width}x{picture.height}", width=width, height=height, denoise=payload.denoise)
     return result
@@ -338,7 +338,7 @@ class ImageToImageInput(msgspec.Struct, kw_only=True):
 
 
 @app.entrypoint(defaults=_DEFAULTS, components=_COMPONENTS, memoize=True)
-def image_to_image(ctx: Context, payload: ImageToImageInput, model: MossImage, out: Outputs, tel: Telemetry,
+def image_to_image(ctx: Context, payload: ImageToImageInput, model: MossImage, tel: Telemetry,
                    adj: Adjustments) -> ImageResult:
     """The picture remade from the prompt (`remake`): 50 Euler steps at CFG 3, those above `strength` skipped."""
     with tel.stage("reading picture"):
@@ -348,11 +348,11 @@ def image_to_image(ctx: Context, payload: ImageToImageInput, model: MossImage, o
     guidance = held(adj, "guidance", GUIDANCE if payload.guidance is None else payload.guidance, 1.0, 20.0,
                     "MOSS-Image's CFG 1-20")
     seed = payload.seed if payload.seed is not None else ImageRequest(prompt="").drawn_seed()
-    return remake(ctx, model, out, tel, picture, payload.prompt, payload.negative_prompt or "", width=width,
+    return remake(ctx, model, tel, picture, payload.prompt, payload.negative_prompt or "", width=width,
                   height=height, steps=steps, guidance=guidance, seed=seed, denoise=payload.strength)  # fmt: skip
 
 
-def remake(ctx: Context, model: MossImage, out: Outputs, tel: Telemetry, picture: PILImage.Image, prompt: str,
+def remake(ctx: Context, model: MossImage, tel: Telemetry, picture: PILImage.Image, prompt: str,
            negative_prompt: str, *, width: int, height: int, steps: int, guidance: float, seed: int,
            strength: float = 1.0, denoise: float | None = None) -> ImageResult:
     """Image-to-image: the picture Lanczos to `width` x `height`, encoded, noised to the sigma `strength` (or the
@@ -371,5 +371,5 @@ def remake(ctx: Context, model: MossImage, out: Outputs, tel: Telemetry, picture
     with tel.stage("decoding image"):
         image = model.decode(latents)
     with tel.stage("saving image"):
-        asset = out.save_image(image, format="png")
+        asset = ImageFile.from_image(image, format="png")
     return ImageResult(asset, width, height, seed, prompt)

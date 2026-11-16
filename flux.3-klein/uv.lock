@@ -167,8 +167,8 @@ wheels = [
 
 [[package]]
 name = "cozy-runtime"
-version = "0.47.0.dev2287+g1a53ab3c"
-source = { url = "https://github.com/cozy-creator/cozy-runtime/releases/download/rc-0.26.0/cozy_runtime-0.47.0.dev2287+g1a53ab3c-py3-none-any.whl" }
+version = "0.47.0.dev2292+g95f20fb1"
+source = { url = "https://github.com/cozy-creator/cozy-runtime/releases/download/rc-0.26.0/cozy_runtime-0.47.0.dev2292+g95f20fb1-py3-none-any.whl" }
 dependencies = [
     { name = "msgspec" },
     { name = "numpy" },
@@ -177,7 +177,7 @@ dependencies = [
     { name = "tensorfs" },
 ]
 wheels = [
-    { url = "https://github.com/cozy-creator/cozy-runtime/releases/download/rc-0.26.0/cozy_runtime-0.47.0.dev2287+g1a53ab3c-py3-none-any.whl", hash = "sha256:0a8738d1c9e970e58c6828467a423591265a992384ecdae27c216ffe54145eed" },
+    { url = "https://github.com/cozy-creator/cozy-runtime/releases/download/rc-0.26.0/cozy_runtime-0.47.0.dev2292+g95f20fb1-py3-none-any.whl", hash = "sha256:10f607d27465812fc71c0e7392bc1b6dd83f5366bab1d662124073c5fa055485" },
 ]
 
 [package.optional-dependencies]
@@ -238,7 +238,7 @@ wheels = [
 
 [[package]]
 name = "flux-3-klein"
-version = "0.11.0rc2"
+version = "0.11.0rc3"
 source = { editable = "." }
 dependencies = [
     { name = "cozy-runtime", extra = ["adapters", "media"] },
@@ -253,7 +253,7 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
-    { name = "cozy-runtime", extras = ["adapters", "media"], url = "https://github.com/cozy-creator/cozy-runtime/releases/download/rc-0.26.0/cozy_runtime-0.47.0.dev2287+g1a53ab3c-py3-none-any.whl" },
+    { name = "cozy-runtime", extras = ["adapters", "media"], url = "https://github.com/cozy-creator/cozy-runtime/releases/download/rc-0.26.0/cozy_runtime-0.47.0.dev2292+g95f20fb1-py3-none-any.whl" },
     { name = "diffusers", specifier = ">=0.42.1,<0.43" },
     { name = "msgspec", specifier = ">=0.19" },
     { name = "numpy", specifier = ">=1.26" },

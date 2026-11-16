@@ -48,3 +48,7 @@ the Runtime's output metadata (xs-180).
 | swordswoman | bridged | 1344x768 | yes, on a gold backdrop it made up | 35.2 dB | 25.3 / 29.8 dB | 369 s |
 
 Before, the demo's Ref2VA turns cut at their closest tail frame: 18.8-20.2 dB.
+
+Orbit calls H3's `render_shot` through `orbit/_h3.py`, typed references generated from H3's interface. After
+changing H3's interface, regenerate them from the packages root:
+`cozy-runtime --dir minimax-h3 --json describe > h3.json && cozy-runtime --package-interface h3.json calls minimax-h3 orbit/orbit/_h3.py`.
