@@ -107,8 +107,6 @@ def letterbox(picture: PILImage.Image, size: int = SIGLIP_SIZE) -> torch.Tensor:
 class ImageEncoder(Model[EncoderGraph]):
     """google/siglip2-base-patch16-512's vision tower: 1024 tokens of 768 per picture."""
 
-    serving = Serving(encoded_leaves=False, min_bits=16)
-
     graph: EncoderGraph
 
     def load(self, loader: Loader) -> None:

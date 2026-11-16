@@ -184,3 +184,18 @@ UPSAMPLER_NVFP4 = Recipe(
 #: The drafter's lane from any Qwen3.5-9B lane: its multi-token-prediction head alone (`mtp.*`,
 #: bf16 in each), 0.5 GB of the 18 GB model, the source's own objects, with the model's config.
 DRAFTER_HEAD = Recipe(lane="bf16", model=Drafter, plan=SelectionPlan(include=("model.mtp.*",)))
+
+#: The drafter's int8 lane (`int8.convrot`), from its bf16 head (Paul 11-16: every model int8 ConvRot by
+#: default): the MTP layer's q/k/v/o and MLP projections, as qwen3.6's int8 lane takes its own. `fc`, the norms
+#: and the shared embedding keep their bytes. A draft is kept only where the upsampler's decode agrees, so the
+#: encoding can move acceptance, never the caption.
+DRAFTER_INT8 = Recipe(
+    lane="int8",
+    model=Drafter,
+    plan=QuantizationPlan(
+        encoding="int8.convrot",
+        components=("model",),
+        include=("model.mtp.layers.*_proj.weight",),
+        output_precision="preserve",
+    ),
+)

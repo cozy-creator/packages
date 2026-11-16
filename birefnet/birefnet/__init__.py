@@ -11,6 +11,7 @@ from cozy_runtime.author import App, Context, Telemetry
 from cozy_runtime.fields import FileBound
 from cozy_runtime.media import ImageFile
 
+from . import quantize as quantize  # its recipes
 from .model import BackgroundRemovalModel
 
 app = App()

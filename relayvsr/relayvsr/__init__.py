@@ -16,6 +16,7 @@ from cozy_runtime.author import App, Context, Outputs, Seed, Telemetry
 from cozy_runtime.fields import Advanced, AspectRatio, FileBound, Ratios, Shape
 from cozy_runtime.media import DecodedAudioChunk, DecodedMediaHeader, DecodedVideoFrame, VideoFile
 
+from . import quantize as quantize  # its recipes
 from .flash import Condition, History
 from .model import RelayModel, frame_tensor
 

@@ -319,6 +319,23 @@ INT8 = Recipe(
     ),
 )
 
+#: The image encoder's int8 lane (SigLIP2's own release, read by `image_encoder`; Paul 11-16: every model int8
+#: ConvRot by default): the vision tower's 12 layers' q/k/v/out and MLP linears. The rest is rounded from the
+#: source's F32 to bf16, which the encoder then serves in; the unused text tower shrinks with it.
+IMAGE_ENCODER_INT8 = Recipe(
+    lane="int8",
+    model=ImageEncoder,
+    plan=QuantizationPlan(
+        encoding="int8.convrot",
+        components=("model",),
+        include=(
+            "model.vision_model.encoder.layers.*.self_attn.[qkv]_proj.weight",
+            "model.vision_model.encoder.layers.*.self_attn.out_proj.weight",
+            "model.vision_model.encoder.layers.*.mlp.fc[12].weight",
+        ),
+    ),
+)
+
 
 class ImageBox(msgspec.Struct, kw_only=True):
     #: `generate`'s prompt, and the pictures it mentions for the IP-Adapter (`_said`).
