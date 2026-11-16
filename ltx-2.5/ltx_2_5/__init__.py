@@ -138,8 +138,8 @@ def generate(ctx: Context, payload: Generate, model: Ltx25, ingredients: ICLora,
     replaces the first latent and a last frame guides the last frame (upstream's `--image PATH FRAME_IDX 1.0`); mentioned
     pictures are the Ingredients IC-LoRA's reference sheet in stage 1 (upstream's IC-LoRA stages), or with their voices
     Licon MSR's subjects in both stages; a mentioned video the Union Control IC-LoRA's reference in stage 1; a sound no
-    picture speaks in is held as the soundtrack through both (`A2VidPipelineTwoStage`); a pickup carries its take's last 25 frames and their
-    sound as the new part's opening (upstream's long-video carry)."""
+    picture speaks in is held as the soundtrack through both (`A2VidPipelineTwoStage`); a pickup carries its take's
+    last 25 frames and their sound as the new part's opening (upstream's long-video carry)."""
     text = names(payload.prompt.text)
     if not text:
         raise ValueError("LTX-2.5 needs a prompt describing the video and its sound")
@@ -189,7 +189,7 @@ def generate(ctx: Context, payload: Generate, model: Ltx25, ingredients: ICLora,
             cast_order = cast_order[:MSR_PICTURES]
         for sound, owner in owners.items():
             if owner not in cast_order[:MSR_VOICES] or any(slot == cast_order.index(owner) + 1 for _, slot in voices):
-                adj.warn("prompt", f"MSR gives two pictures a voice each, so <{sound}> goes unused")
+                adj.warn("prompt", f"MSR gives two pictures one voice each, so <{sound}> goes unused")
                 continue
             voices.append((sound, cast_order.index(owner) + 1))
         sounds = []
