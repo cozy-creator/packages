@@ -5,7 +5,7 @@ from __future__ import annotations
 import msgspec
 from cozy_runtime import vlm
 from cozy_runtime.author import App, Context, EncodingRule, QuantizationPlan, Recipe, Telemetry
-from cozy_runtime.vlm import AskRequest, AskResult, VisionLM
+from cozy_runtime.vlm import AskRequest, AskResult, TextBox, TextResult, VisionLM
 
 app = App()
 
@@ -77,3 +77,9 @@ _CAPTION = "Say what this shows, in one or two plain sentences, for someone who 
 def caption(ctx: Context, payload: AskRequest, model: VisionLM, tel: Telemetry) -> AskResult:
     """What a picture or a video shows, in this package's own question: `images` or `videos`, and nothing to ask."""
     return vlm.ask(ctx, msgspec.structs.replace(payload, prompt=_CAPTION), model, tel)
+
+
+@app.tool(label="Write", named="text", defaults={"model": "qwen/qwen3.6-35b-a3b@0.1.0"}, memoize=True)
+def write(ctx: Context, payload: TextBox, model: VisionLM, tel: Telemetry) -> TextResult:
+    """Words on a canvas: what the instructions ask, about the pictures and videos they mention."""
+    return vlm.write(ctx, payload, model, tel)
