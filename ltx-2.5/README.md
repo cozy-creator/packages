@@ -37,9 +37,12 @@ model read.
   black; Lightricks' Ingredients IC-LoRA (`lightricks/ingredients`) reads it in the first stage, and the prompt takes
   its two-part form: `Reference sheet: Left: amy. Right: teapot.` then `Generated video: <your text>`. It was
   trained on 768x448, 5-second clips; other sizes and longer clips work, less faithfully.
-- **A mentioned video** sets the structure: Lightricks' Union Control IC-LoRA (`lightricks/union-control`, the
-  LTX-2.3 adapter their LTX-2.5 workflow runs) follows its edges in the first stage, at half the stage's size, as the
-  adapter was trained. `control: map` takes a clip that is already a control map (edges, depth or pose) as it is.
+- **A mentioned video** sets the structure or the motion: Lightricks' Union Control IC-LoRA (`lightricks/union-control`,
+  the LTX-2.3 adapter their LTX-2.5 workflow runs) follows its control maps in the first stage, at half the stage's
+  size, as the adapter was trained. `control` picks the map, made as Lightricks' workflow makes it: `depth` (default,
+  Video-Depth-Anything Small), `pose` ("Motion transfer": DWPose's body, hands and face, so the subject moves like the
+  people in the clip), `edges` (Canny), or `map` (the clip is already a control map). Say what to do with the clip in
+  the prompt ("<amy> dances the way <clip> does"), with the subject as the first frame or a mention.
   Pictures and a video can't be references together: their adapters take references at different sizes.
 - **Keyframes** (`keyframes`: a picture and a time) each land on their exact frame, as upstream's `ImageGuide` does.
 - **A mentioned sound** is the soundtrack: held as it is while the video is made to it (upstream's audio-to-video),

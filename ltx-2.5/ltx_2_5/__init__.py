@@ -19,8 +19,9 @@ from cozy_runtime.fields import (
 from cozy_runtime.media import ImageFile, VideoFile
 from PIL import Image as PILImage
 
-from . import controls, sound
+from . import annotators, controls, sound
 from .adapter import ICLora
+from .annotators import PersonDetector, VideoDepth, WholeBody
 from .enhancer import Enhancer
 from .model import COMPONENTS, FPS, REFINE_SIGMAS, SIGMAS, Frame, Ltx25
 from .prompts import names, rendered, sheet
@@ -31,6 +32,11 @@ MODEL = "lightricks/ltx-2.5@0.1.0"
 INGREDIENTS = "lightricks/ingredients@0.1.0"
 #: Lightricks' Union Control IC-LoRA, the LTX-2.3 adapter their LTX-2.5 workflow runs (`Lightricks/LTX-2.3-22b-IC-LoRA-Union-Control@20a580c8`).
 UNION_CONTROL = "lightricks/union-control@0.1.0"
+#: Union Control's annotators, as Lightricks' workflow runs them: Video-Depth-Anything Small for depth, DWPose (Megvii's
+#: YOLOX-L finding people, DWPose-l reading their bodies, hands and faces) for pose.
+DEPTH = "depth-anything/video-depth-anything-small@0.1.0"
+PEOPLE = "megvii-basedetection/yolox-l@0.1.0"
+POSE = "yzd-v/dw-ll-ucoco-384@0.1.0"
 #: Upstream's prompt enhancer for LTX-2.5 (`google/gemma-4-E2B-it@4adf1574`, ltx-pipelines `--prompt-enhancer-gemma-root`).
 ENHANCER = "google/gemma-4-e2b-it@0.1.0"
 #: Frames a pickup carries from its take into the new part: upstream's long-video carry
@@ -63,11 +69,13 @@ class Generate(msgspec.Struct, kw_only=True):
     #: Unset: the first frame's shape, else the last's, else 16:9. Output sides are on LTX's 64-pixel two-stage grid.
     aspect_ratio: Annotated[AspectRatio, Ratios(min=0.5, max=2)] | None = None
     seed: Seed | None = None
-    #: What a mentioned video gives Union Control: its edges (Lightricks' Canny annotator), or the clip as it is, already a
-    #: control map. Motion transfer (its people's pose) and depth come with their annotators.
-    control: Annotated[Literal["edges", "map"], Advanced(), Label("Reference video", {
+    #: What a mentioned video gives Union Control, by Lightricks' annotators: its depth (their default), its people's
+    #: pose (motion transfer), its edges, or the clip as it is, already a control map.
+    control: Annotated[Literal["depth", "pose", "edges", "map"], Advanced(), Label("Reference video", {
+        "depth": ("Depth", "Follows the depth and layout of the video you mention"),
+        "pose": ("Motion transfer", "Moves like the people in the video you mention: body, hands and face"),
         "edges": ("Structure", "Follows the shapes and layout of the video you mention"),
-        "map": ("As given", "The video is already a control map: edges, depth or pose")})] = "edges"
+        "map": ("As given", "The video is already a control map: edges, depth or pose")})] = "depth"
     #: Lightricks' enhancer (Gemma 4 E2B) first rewrites the prompt as LTX-2.5's captions read, as their templates do.
     prompt_upsampling: Annotated[bool, Advanced()] = True
     #: Render the soundtrack with the synchronized audio branch; false returns a silent MP4.
@@ -112,10 +120,13 @@ def at_rate(audio: torch.Tensor, rate: int, target: int, channels: int) -> torch
 
 
 @app.tool(label="LTX-2.5", named="video",
-          defaults={"model": MODEL, "ingredients": INGREDIENTS, "union_control": UNION_CONTROL, "enhancer": ENHANCER},
-          components={"model": COMPONENTS}, on_demand=("ingredients", "union_control", "enhancer"), memoize=True)
+          defaults={"model": MODEL, "ingredients": INGREDIENTS, "union_control": UNION_CONTROL, "enhancer": ENHANCER,
+                    "depth": DEPTH, "people": PEOPLE, "pose": POSE},
+          components={"model": COMPONENTS},
+          on_demand=("ingredients", "union_control", "enhancer", "depth", "people", "pose"), memoize=True)
 def generate(ctx: Context, payload: Generate, model: Ltx25, ingredients: ICLora, union_control: ICLora, enhancer: Enhancer,
-             out: Outputs, tel: Telemetry, adj: Adjustments) -> VideoResult:
+             depth: VideoDepth, people: PersonDetector, pose: WholeBody, out: Outputs, tel: Telemetry,
+             adj: Adjustments) -> VideoResult:
     """LTX-2.5 Distilled, in two stages: a scene and its synchronized sound, then x2 spatial refinement. A first frame
     replaces the first latent and a last frame guides the last frame (upstream's `--image PATH FRAME_IDX 1.0`); mentioned
     pictures are the Ingredients IC-LoRA's reference sheet in stage 1 (upstream's IC-LoRA stages), a mentioned video the
@@ -218,9 +229,12 @@ def generate(ctx: Context, payload: Generate, model: Ltx25, ingredients: ICLora,
         with tel.stage("reading the reference video"):
             read = clip.file.read(end=Fraction(frames, FPS), fps=FPS, audio=False)
             shown = [PILImage.frombytes("RGB", (read.width, read.height), frame) for frame in read.frames_rgb[:frames]]
+        with tel.stage("annotating the reference video"):
+            reference = (depth.gray(shown) if payload.control == "depth"
+                         else annotators.drawn(shown, people, pose) if payload.control == "pose"
+                         else controls.edges(annotators.scaled(shown)) if payload.control == "edges" else shown)
             # A clip shorter than the video holds its last frame, so every frame has its reference.
-            shown += shown[-1:] * (frames - len(shown))
-            reference = controls.edges(shown) if payload.control == "edges" else shown
+            reference += reference[-1:] * (frames - len(reference))
         adapter = union_control
 
     def stage_one() -> tuple[torch.Tensor, torch.Tensor]:
