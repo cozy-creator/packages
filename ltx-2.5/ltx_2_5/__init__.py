@@ -36,6 +36,13 @@ CARRY = 25
 Picture = Annotated[ImageFile, ImagePreparation(max_pixels=16 << 20)]
 
 
+class Keyframe(msgspec.Struct, kw_only=True):
+    #: A picture the video passes through.
+    picture: Picture
+    #: When, in seconds from the start; it lands on that exact frame.
+    at_s: Annotated[float, Range(0, 20, unit="s")]
+
+
 class Generate(msgspec.Struct, kw_only=True):
     #: What happens, in your words, with its sound and dialogue. A picture it mentions is a character, prop or place
     #: the video keeps (Lightricks' Ingredients reference sheet); a sound it mentions is the soundtrack it is timed to.
@@ -44,6 +51,8 @@ class Generate(msgspec.Struct, kw_only=True):
     first_frame: Picture | None = None
     #: The picture the video ends on.
     last_frame: Picture | None = None
+    #: Pictures the video passes through at given times (upstream's `--image PATH FRAME_IDX 1.0 guide`).
+    keyframes: list[Keyframe] = msgspec.field(default_factory=list)
     duration_s: Annotated[float, Range(1, 20, unit="s")] = 5.0
     resolution: Literal["720p", "1080p"] = "1080p"
     #: Unset: the first frame's shape, else the last's, else 16:9. Output sides are on LTX's 64-pixel two-stage grid.
@@ -150,6 +159,15 @@ def generate(ctx: Context, payload: Generate, model: Ltx25, ingredients: Ingredi
     shape = kept[-1].size if kept else first.size if first is not None else last.size if last is not None else None
     width, height = canvas(payload.resolution, None if kept else payload.aspect_ratio, shape)
     pictures: list[Frame] = [(picture, frame) for picture, frame in ((first, 0), (last, frames - 1)) if picture is not None]
+    for index, keyframe in enumerate(payload.keyframes):
+        frame = round(keyframe.at_s * FPS)
+        if frame > frames - 1:
+            adj.warn(f"keyframes.{index}.at_s", f"{keyframe.at_s:g} s is past the clip's end, so it lands on its last frame")
+        frame = min(frame, frames - 1)
+        if frame == 0 and any(at == 0 for _, at in pictures):
+            adj.warn(f"keyframes.{index}", "the video already opens on a picture, so this keyframe moves to frame 1")
+            frame = 1
+        pictures.append((keyframe.picture.read().convert("RGB"), frame))
     if kept is not None:
         pictures.insert(0, (kept[-carry:], 0))
     video_text = text

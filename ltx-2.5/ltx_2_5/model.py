@@ -126,9 +126,9 @@ class Pipeline(LTX2InContextPipeline):
     """Diffusers' LTX-2 in-context pipeline's conditioning, driven by one distilled loop of our own: pictures at frames,
     an IC-LoRA's reference, and sound held as it is, the way upstream's stages take them."""
 
-    #: A guide's own frame, by the one Diffusers puts it on: its `index` is a latent's, whose first frame is
+    #: Each guide's own frame, in the order Diffusers places them: its `index` is a latent's, whose first frame is
     #: `8k+1`, while upstream's `ImageGuide` takes any frame (ltx_pipelines/utils/types.py `ImageGuide`).
-    guides: dict[int, int]
+    guides: list[int]
 
     @property
     def _execution_device(self) -> torch.device:
@@ -139,12 +139,12 @@ class Pipeline(LTX2InContextPipeline):
     def conditions(self, frames: Sequence[Frame]) -> list[LTX2VideoCondition]:
         """Each picture at its frame, at full strength (the model card's `--image PATH FRAME_IDX 1.0`)."""
         scale = self.vae_temporal_compression_ratio
-        self.guides = {}
+        self.guides = []
         made: list[LTX2VideoCondition] = []
         for picture, frame in frames:
             index = 0 if frame == 0 else (frame - 1) // scale + 1
             if index:
-                self.guides[(index - 1) * scale + 1] = frame
+                self.guides.append(frame)
             made.append(LTX2VideoCondition(frames=picture, index=index, strength=1.0))
         return made
 
@@ -153,7 +153,7 @@ class Pipeline(LTX2InContextPipeline):
                                  device: torch.device) -> torch.Tensor:
         return cast(torch.Tensor, super()._prepare_keyframe_coords(
             keyframe_latent_num_frames, keyframe_latent_height, keyframe_latent_width,
-            self.guides.get(pixel_frame_idx, pixel_frame_idx), num_pixel_frames, fps, device))
+            self.guides.pop(0) if self.guides else pixel_frame_idx, num_pixel_frames, fps, device))
 
     def run(self, embeds: tuple[torch.Tensor, torch.Tensor], pictures: Sequence[Frame], *, sheet: Image.Image | None,
             held: torch.Tensor | None, width: int, height: int, frames: int, sigmas: Sequence[float],
