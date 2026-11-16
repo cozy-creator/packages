@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from typing import TypedDict, cast
 
 import numpy as np
@@ -15,8 +15,7 @@ from diffusers.models.autoencoders.autoencoder_kl_ltx2 import AutoencoderKLLTX2V
 from diffusers.models.transformers.transformer_ltx2 import LTX2VideoTransformer3DModel
 from diffusers.models.condition_embedders.condition_embedder_ltx2 import LTX2TextConnectors
 from diffusers.schedulers.scheduling_flow_match_euler_discrete import FlowMatchEulerDiscreteScheduler
-from diffusers.pipelines.ltx2.pipeline_ltx2 import LTX2Pipeline
-from diffusers.pipelines.ltx2.pipeline_ltx2_image2video import LTX2ImageToVideoPipeline
+from diffusers.pipelines.ltx2.pipeline_ltx2_condition import LTX2ConditionPipeline, LTX2VideoCondition
 from diffusers.pipelines.ltx2.pipeline_ltx2_latent_upsample import LTX2LatentUpsamplePipeline
 from diffusers.models.latent_upscaler.latent_upscaler_ltx2 import LTX2LatentUpsamplerModel
 from diffusers.pipelines.ltx2.vocoder import LTX2VocoderWithBWE
@@ -110,18 +109,39 @@ class Graph:
         self.scheduler_config = config.section("scheduler").mapping()
 
 
-class TextPipeline(LTX2Pipeline):
+#: A picture and the frame of the video it is: 0 starts the video from it; a later one is a guide there.
+Frame = tuple[Image.Image, int]
+
+
+class Pipeline(LTX2ConditionPipeline):
+    #: A guide's own frame, by the one Diffusers puts it on: its `index` is a latent's, whose first frame is
+    #: `8k+1`, while upstream's `ImageGuide` takes any frame (ltx_pipelines/utils/types.py `ImageGuide`).
+    guides: dict[int, int]
+
     @property
     def _execution_device(self) -> torch.device:
         # The earlier stage's text root may be parked while the DiT is active. The first
         # component in Diffusers' registry is not the placement authority.
         return torch.device(str(device()))
 
+    def conditions(self, frames: Sequence[Frame]) -> list[LTX2VideoCondition]:
+        """Each picture at its frame, at full strength (the model card's `--image PATH FRAME_IDX 1.0`)."""
+        scale = self.vae_temporal_compression_ratio
+        self.guides = {}
+        made: list[LTX2VideoCondition] = []
+        for picture, frame in frames:
+            index = 0 if frame == 0 else (frame - 1) // scale + 1
+            if index:
+                self.guides[(index - 1) * scale + 1] = frame
+            made.append(LTX2VideoCondition(frames=picture, index=index, strength=1.0))
+        return made
 
-class ImagePipeline(LTX2ImageToVideoPipeline):
-    @property
-    def _execution_device(self) -> torch.device:
-        return torch.device(str(device()))
+    def _prepare_keyframe_coords(self, keyframe_latent_num_frames: int, keyframe_latent_height: int,
+                                 keyframe_latent_width: int, pixel_frame_idx: int, num_pixel_frames: int, fps: float,
+                                 device: torch.device) -> torch.Tensor:
+        return cast(torch.Tensor, super()._prepare_keyframe_coords(
+            keyframe_latent_num_frames, keyframe_latent_height, keyframe_latent_width,
+            self.guides.get(pixel_frame_idx, pixel_frame_idx), num_pixel_frames, fps, device))
 
 
 @sequence_parallel(degrees=(2, 4, 8))
@@ -134,10 +154,9 @@ class Ltx25(Model[Graph]):
         self.graph = loader.construct(Graph)
         self.tokenizer = tokenizer(loader.assets)
 
-    def _pipeline(self, image: bool = False) -> LTX2Pipeline | LTX2ImageToVideoPipeline:
+    def _pipeline(self) -> Pipeline:
         c = self.graph.components
-        cls = ImagePipeline if image else TextPipeline
-        pipe = cls(
+        pipe = Pipeline(
             scheduler=FlowMatchEulerDiscreteScheduler.from_config(self.graph.scheduler_config),
             vae=c["vae"], audio_vae=c["audio_vae"], text_encoder=c["text_encoder"],
             tokenizer=self.tokenizer, connectors=c["connectors"], transformer=c["transformer"], vocoder=c["vocoder"],
@@ -155,12 +174,13 @@ class Ltx25(Model[Graph]):
         return embeds, mask
 
     @uses_components("transformer", "connectors", "vae", "audio_vae")
-    def denoise(self, embeds: tuple[torch.Tensor, torch.Tensor], image: Image.Image | None, *, width: int, height: int,
+    def denoise(self, embeds: tuple[torch.Tensor, torch.Tensor], pictures: Sequence[Frame], *, width: int, height: int,
                 frames: int, generator: torch.Generator, check: Callable[[], None], progress: Callable[[int], None],
                 latents: tuple[torch.Tensor, torch.Tensor] | None = None) -> tuple[torch.Tensor, torch.Tensor]:
         # Both returns are already denormalized by Diffusers' output_type='latent'.
-        # The VAE roots are also leased: their latent-statistic buffers participate here.
-        pipe = self._pipeline(image=image is not None)
+        # The VAE roots are also leased: their latent-statistic buffers participate here, and they encode the pictures,
+        # at each stage's size, as upstream's stages do (ltx_pipelines/distilled.py `_video_conditionings`).
+        pipe = self._pipeline()
         sigmas = list(SIGMAS if latents is None else REFINE_SIGMAS)
 
         def callback(_pipe: object, index: int, _t: torch.Tensor, values: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
@@ -176,10 +196,8 @@ class Ltx25(Model[Graph]):
             "stg_scale": 0.0, "audio_stg_scale": 0.0,
             "modality_scale": 1.0, "audio_modality_scale": 1.0,
             "output_type": "latent", "return_dict": False, "callback_on_step_end": callback,
-            "callback_on_step_end_tensor_inputs": [],
+            "callback_on_step_end_tensor_inputs": [], "conditions": pipe.conditions(pictures),
         }
-        if image is not None:
-            kwargs["image"] = image
         if latents is not None:
             kwargs.update(latents=latents[0], audio_latents=latents[1], noise_scale=REFINE_SIGMAS[0])
         check()

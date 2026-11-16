@@ -1,6 +1,6 @@
 # LTX-2.5
 
-`generate` makes synchronized video and stereo sound from text and an optional first frame.
+`generate` makes synchronized video and stereo sound from text, and optional first and last frames.
 It is the **LTX-2.5** video tool in the web UI. This package uses the LTX-2.5 22B Distilled model,
 with its 8-step first stage and 3-step spatial refinement, at 24 fps.
 
@@ -14,13 +14,17 @@ seed: 20261115
 ```sh
 cozy run ltx-2.5/generate --input request.yaml
 cozy run ltx-2.5/generate --input request.yaml --file first_frame=opening.webp
+cozy run ltx-2.5/generate --input request.yaml --file first_frame=opening.webp --file last_frame=closing.webp
 ```
+
+A first frame replaces the video's first latent; a last frame guides its very last frame, as upstream's
+`--image PATH FRAME_IDX 1.0` does (`ImageGuide`). Both are re-encoded at each stage's size, at the model's CRF 18.
 
 Describe sounds and any spoken dialogue in the prompt. `audio: false` returns a silent MP4.
 The output carries the actual width, height, fps, frame count, seed and prompt.
 
 `resolution` is `1080p` (1920x1088) or `720p` (1280x704), on the model's native two-stage grid.
-An explicit `aspect_ratio` overrides the first frame's ratio; without a frame it defaults to
+An explicit `aspect_ratio` overrides the first (else last) frame's ratio; without a frame it defaults to
 the listed landscape size. Other ratios keep approximately the same pixel count. `duration_s`
 accepts 1-20 seconds, snapped up to the causal `8k+1` frame grid.
 
