@@ -5,8 +5,9 @@ Video with sound from MiniMax H3, as three tools. Each is a box on a canvas and 
 - **`generate`** (MiniMax H3) renders one continuous shot of any length from an optional `summary` and at least one
   beat, with an optional first and last frame. `turbo: true` (the default) runs the turbo LoRA's 8 steps; `turbo: false`
   or `steps` (30, 40 or 50, under Advanced) the full model. `quality` (draft, standard, full) trades speed for fidelity.
-- **`edit`** (MiniMax H3 Edit) edits a plate, a video it follows frame by frame, by its beats, under one of Alissonerdx's
-  guide-edit LoRAs: character swap, head swap, style transfer, VFX edit or motion transfer.
+- **`edit`** (MiniMax H3 Edit) edits a plate, a video it follows frame by frame, by an optional `summary` and its beats,
+  as `generate` renders a shot, under one of Alissonerdx's guide-edit LoRAs: character swap, head swap, style transfer,
+  VFX edit or motion transfer.
 - **`upscale`** (MiniMax H3 Upscale) re-renders a take at 1080p, 1440p or 2160p with NVIDIA's Regenerate-2K, guided by
   the take's own text or a `prompt` that replaces it ([UPSCALE.md](UPSCALE.md)).
 
@@ -35,7 +36,8 @@ turbo: true
 # edit.yaml — cozy run minimax-h3/edit --input edit.yaml
 plate: <take3@48-336>                         # frames 48 to 336 of take3: the edit's timeline
 edit: character_swap                          # its trigger (`body_swap:`) opens each beat, at the LoRA's strength
-beats: [{duration: 12, description: <kyogre> in place of the man.}]
+summary: <kyogre> walks the man's route through the market at dusk.
+beats: [{duration: 5, description: <kyogre> in place of the man.}, {duration: 7, description: <kyogre> stops at the stall.}]
 ```
 
 **References.** Each text mentions what it uses, and a segment gets only what its own beats, the summary, the soundscape
@@ -56,8 +58,8 @@ decodes as one; without them a new video opens on the cut frame and is joined af
 ends the final segment; a `first_frame` is ignored. `kept_s` in the result says where the new part starts.
 
 **Edit.** The plate's length is the edit's: the last beat is cut at its end or runs on to it. With no picture in the
-first segment, the plate's own first frame is the picture. The plate sets the shape; there is no summary, soundscape
-or music, and joins carry 22 frames.
+first segment, the plate's own first frame is the picture. The summary and beats are a shot's (**Beats**, **Segments**).
+The plate sets the shape; there is no soundscape or music, and joins carry 22 frames.
 
 The result is `video` (768p mp4), `latents` (its own, which a pickup resumes and `upscale` starts from), `seams` (the
 frames where each segment after the first starts, a pickup's kept ones included, also kept in the latents) and `warnings`.

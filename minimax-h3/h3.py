@@ -47,6 +47,7 @@ from cozy_runtime.author import (
 )
 from cozy_runtime.fields import (
     Advanced,
+    Audio,
     Count,
     FileBound,
     FileLimits,
@@ -58,6 +59,7 @@ from cozy_runtime.fields import (
     Range,
     Shape,
     Spans,
+    Video,
 )
 from cozy_runtime.media import (
     AudioFile,
@@ -1797,8 +1799,8 @@ ShotFootage = Annotated[VideoFile, FileBound(max_decoded_bytes=VIDEO_READ_BYTES)
 
 
 class Edit(msgspec.Struct, kw_only=True):
-    """A plate edited by its beats under one of Alissonerdx's edit LoRAs: the plate is followed frame by frame, and its
-    length is the edit's."""
+    """A plate edited under one of Alissonerdx's edit LoRAs, by a summary and its beats as a shot is (`Shot`): the plate is
+    followed frame by frame, and its length is the edit's."""
 
     plate: Annotated[ShotFootage, Spans("beats")]
     # Each LoRA's words and what it does, from its row of the README's LoRA table (lines 28-34).
@@ -1813,20 +1815,21 @@ class Edit(msgspec.Struct, kw_only=True):
             "motion_transfer": ("Motion transfer", "The character in the reference performs the guide video's motion"),
         }),
     ] = "vfx_edit"  # fmt: skip
+    summary: Prompt[Image | Video | Audio] = Prompt()
     beats: Annotated[list[Beat], Count(min=1)]
     turbo: bool = True
     quality: Quality = "standard"
     seed: Seed | None = None
 
 
-@app.tool(label="Edit", named="edit", reserved=_RESERVED)
+@app.tool(label="MiniMax H3 Edit", named="edit", reserved=_RESERVED)
 async def edit(ctx: Context, payload: Edit, out: Outputs, tel: Telemetry) -> ShotResult:
-    """A plate edited by its beats, on Ref2VA under the chosen edit LoRA, its trigger opening each beat. With no picture
-    in a beat, the plate's own first frame is the picture."""
+    """A plate edited by its summary and beats, on Ref2VA under the chosen edit LoRA, its trigger opening each beat. With
+    no picture in a beat, the plate's own first frame is the picture."""
     lora = EDITS[payload.edit]
     beats = [replace(beat, description=replace(beat.description, text=f"{lora.trigger} {beat.description.text}".rstrip()))
              for beat in payload.beats]  # fmt: skip
-    shot = Shot(beats=beats, turbo=payload.turbo, quality=payload.quality, seed=payload.seed)
+    shot = Shot(summary=payload.summary, beats=beats, turbo=payload.turbo, quality=payload.quality, seed=payload.seed)
     choice = ModelChoice(lora=(Lora(lora.model, lora.strength),))
     return await _render(ctx, shot, out, tel, plate=payload.plate, lora=choice)
 
