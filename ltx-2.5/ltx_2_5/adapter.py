@@ -42,7 +42,7 @@ class Graph:
         settings = (config.section(COMPONENT) if COMPONENT in config.keys() else config).mapping()
         self.settings = settings
         alpha = settings.get("lora_alpha")
-        self.downscale = int(str(settings.get("reference_downscale_factor", 1)))
+        self.downscale = int(float(str(settings.get("reference_downscale_factor", 1))))
         root = nn.Module()
         self.factors: dict[str, lora.Pair] = {}
         with no_init_weights():
