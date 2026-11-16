@@ -1,8 +1,12 @@
-"""Lightricks' Ingredients IC-LoRA for LTX-2.5 (`Lightricks/LTX-2.5-22b-IC-LoRA-Ingredients`, mirrored as
-`lightricks/ingredients`): characters, props and places from a reference sheet carried into the video. It arms on the
-DiT's `lora.Sites` for stage 1 only, the stage that takes its reference (ltx_pipelines/ic_lora.py
-`DEFAULT_IC_LORA_STAGES`), at strength 1: "the weights ship pre-scaled, so full strength is the intended default"
-(its model card). TensorFS stores it as PEFT's form under Diffusers' module names: `<module>.lora_A.weight` [r, in],
+"""An IC-LoRA for LTX-2.5: Lightricks' Ingredients (`Lightricks/LTX-2.5-22b-IC-LoRA-Ingredients`, mirrored as
+`lightricks/ingredients`: characters, props and places from a reference sheet) and Union Control
+(`Lightricks/LTX-2.3-22b-IC-LoRA-Union-Control`, `lightricks/union-control`: structure from a reference video's control
+maps, the 2.3 adapter Lightricks' 2.5 workflow runs). It arms on the DiT's `lora.Sites` for stage 1 only, the stage that
+takes its reference (ltx_pipelines/ic_lora.py `DEFAULT_IC_LORA_STAGES`), at strength 1 (Ingredients' card: "the weights
+ship pre-scaled, so full strength is the intended default"; Lightricks' Union Control workflow loads it at 1). Its
+reference is at 1 / `downscale` of the stage's size: the factor the adapter's file names (`reference_downscale_factor`,
+upstream iclora_utils.py), which TensorFS keeps in its adapter config. TensorFS stores it as PEFT's form under
+Diffusers' module names: `<module>.lora_A.weight` [r, in],
 `.lora_B.weight` [out, r], scaled by α over the module's rank: its own `.alpha` (F32, where ranks differ), else the
 config's `lora_alpha`, else r (TensorFS import/lora.rs)."""
 
@@ -37,6 +41,7 @@ class Graph:
     def __init__(self, config: Config) -> None:
         settings = (config.section(COMPONENT) if COMPONENT in config.keys() else config).mapping()
         alpha = settings.get("lora_alpha")
+        self.downscale = int(str(settings.get("reference_downscale_factor", 1)))
         root = nn.Module()
         self.factors: dict[str, lora.Pair] = {}
         with no_init_weights():
@@ -52,7 +57,7 @@ class Graph:
         self.components = {COMPONENT: stored(root, COMPONENT, config)}
 
 
-class Ingredients(Model[Graph]):
+class ICLora(Model[Graph]):
     serving = Serving(encoded_leaves=False, min_bits=16)
     graph: Graph
 

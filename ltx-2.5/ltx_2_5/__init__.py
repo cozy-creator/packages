@@ -13,12 +13,14 @@ import numpy as np
 import torch
 from cozy_runtime import rng
 from cozy_runtime.author import Adjustments, App, Context, Outputs, Seed, Telemetry
-from cozy_runtime.fields import Advanced, AspectRatio, Audio, FileBound, Image, ImagePreparation, Pickup, Prompt, Range, Ratios
+from cozy_runtime.fields import (
+    Advanced, AspectRatio, Audio, FileBound, Image, ImagePreparation, Label, Pickup, Prompt, Range, Ratios, Video,
+)
 from cozy_runtime.media import ImageFile, VideoFile
 from PIL import Image as PILImage
 
-from . import sound
-from .adapter import Ingredients
+from . import controls, sound
+from .adapter import ICLora
 from .enhancer import Enhancer
 from .model import COMPONENTS, FPS, REFINE_SIGMAS, SIGMAS, Frame, Ltx25
 from .prompts import names, rendered, sheet
@@ -27,6 +29,8 @@ app = App()
 MODEL = "lightricks/ltx-2.5@0.1.0"
 #: Lightricks' Ingredients IC-LoRA for LTX-2.5, mirrored (`Lightricks/LTX-2.5-22b-IC-LoRA-Ingredients@5f83f6f7`).
 INGREDIENTS = "lightricks/ingredients@0.1.0"
+#: Lightricks' Union Control IC-LoRA, the LTX-2.3 adapter their LTX-2.5 workflow runs (`Lightricks/LTX-2.3-22b-IC-LoRA-Union-Control@20a580c8`).
+UNION_CONTROL = "lightricks/union-control@0.1.0"
 #: Upstream's prompt enhancer for LTX-2.5 (`google/gemma-4-E2B-it@4adf1574`, ltx-pipelines `--prompt-enhancer-gemma-root`).
 ENHANCER = "google/gemma-4-e2b-it@0.1.0"
 #: Frames a pickup carries from its take into the new part: upstream's long-video carry
@@ -45,8 +49,9 @@ class Keyframe(msgspec.Struct, kw_only=True):
 
 class Generate(msgspec.Struct, kw_only=True):
     #: What happens, in your words, with its sound and dialogue. A picture it mentions is a character, prop or place
-    #: the video keeps (Lightricks' Ingredients reference sheet); a sound it mentions is the soundtrack it is timed to.
-    prompt: Prompt[Image | Audio] = Prompt()
+    #: the video keeps (Lightricks' Ingredients reference sheet); a video it mentions sets the structure (Union
+    #: Control); a sound it mentions is the soundtrack it is timed to.
+    prompt: Prompt[Image | Video | Audio] = Prompt()
     #: The picture the video starts from.
     first_frame: Picture | None = None
     #: The picture the video ends on.
@@ -58,6 +63,11 @@ class Generate(msgspec.Struct, kw_only=True):
     #: Unset: the first frame's shape, else the last's, else 16:9. Output sides are on LTX's 64-pixel two-stage grid.
     aspect_ratio: Annotated[AspectRatio, Ratios(min=0.5, max=2)] | None = None
     seed: Seed | None = None
+    #: What a mentioned video gives Union Control: its edges (Lightricks' Canny annotator), or the clip as it is, already a
+    #: control map. Motion transfer (its people's pose) and depth come with their annotators.
+    control: Annotated[Literal["edges", "map"], Advanced(), Label("Reference video", {
+        "edges": ("Structure", "Follows the shapes and layout of the video you mention"),
+        "map": ("As given", "The video is already a control map: edges, depth or pose")})] = "edges"
     #: Lightricks' enhancer (Gemma 4 E2B) first rewrites the prompt as LTX-2.5's captions read, as their templates do.
     prompt_upsampling: Annotated[bool, Advanced()] = True
     #: Render the soundtrack with the synchronized audio branch; false returns a silent MP4.
@@ -101,13 +111,15 @@ def at_rate(audio: torch.Tensor, rate: int, target: int, channels: int) -> torch
     return audio.expand(channels, -1).clone() if audio.shape[0] < channels else audio[:channels]
 
 
-@app.tool(label="LTX-2.5", named="video", defaults={"model": MODEL, "ingredients": INGREDIENTS, "enhancer": ENHANCER},
-          components={"model": COMPONENTS}, on_demand=("ingredients", "enhancer"), memoize=True)
-def generate(ctx: Context, payload: Generate, model: Ltx25, ingredients: Ingredients, enhancer: Enhancer, out: Outputs,
-             tel: Telemetry, adj: Adjustments) -> VideoResult:
+@app.tool(label="LTX-2.5", named="video",
+          defaults={"model": MODEL, "ingredients": INGREDIENTS, "union_control": UNION_CONTROL, "enhancer": ENHANCER},
+          components={"model": COMPONENTS}, on_demand=("ingredients", "union_control", "enhancer"), memoize=True)
+def generate(ctx: Context, payload: Generate, model: Ltx25, ingredients: ICLora, union_control: ICLora, enhancer: Enhancer,
+             out: Outputs, tel: Telemetry, adj: Adjustments) -> VideoResult:
     """LTX-2.5 Distilled, in two stages: a scene and its synchronized sound, then x2 spatial refinement. A first frame
     replaces the first latent and a last frame guides the last frame (upstream's `--image PATH FRAME_IDX 1.0`); mentioned
-    pictures are the Ingredients IC-LoRA's reference sheet in stage 1 (upstream's IC-LoRA stages); a mentioned sound is
+    pictures are the Ingredients IC-LoRA's reference sheet in stage 1 (upstream's IC-LoRA stages), a mentioned video the
+    Union Control IC-LoRA's reference there; a mentioned sound is
     held as the soundtrack through both (`A2VidPipelineTwoStage`); a pickup carries its take's last 25 frames and their
     sound as the new part's opening (upstream's long-video carry)."""
     text = names(payload.prompt.text)
@@ -121,6 +133,13 @@ def generate(ctx: Context, payload: Generate, model: Ltx25, ingredients: Ingredi
     mentioned = payload.prompt.references
     panels = [key for key, value in mentioned.items() if isinstance(value, Image)]
     sounds = [key for key, value in mentioned.items() if isinstance(value, Audio)]
+    videos = [key for key, value in mentioned.items() if isinstance(value, Video)]
+    if videos and panels:
+        adj.warn("prompt", f"Ingredients and Union Control take references at different sizes, so LTX-2.5 runs one: the "
+                           f"pictures; {', '.join(f'<{key}>' for key in videos)} goes unused")
+        videos = []
+    if len(videos) > 1:
+        adj.warn("prompt", f"Union Control takes one reference video, so it goes without {', '.join(f'<{key}>' for key in videos[1:])}")
     first = payload.first_frame.read().convert("RGB") if payload.first_frame else None
     last = payload.last_frame.read().convert("RGB") if payload.last_frame else None
     pickup, kept, kept_sound, carry = payload.pickup, None, None, 0
@@ -187,17 +206,31 @@ def generate(ctx: Context, payload: Generate, model: Ltx25, ingredients: Ingredi
     with tel.stage("encoding prompt"):
         embeds = model.encode(prompt)
 
-    def stage_one() -> tuple[torch.Tensor, torch.Tensor]:
-        board = None
-        if panels:
+    adapter, reference = None, None
+    if panels:
+        with tel.stage("making the reference sheet"):
             board = sheet([value.file.read() for value in (mentioned[key] for key in panels) if isinstance(value, Image)],
                           width // 2, height // 2)
-        return model.denoise(embeds, pictures, width=width // 2, height=height // 2, frames=frames, sheet=board, held=held,
+        adapter, reference = ingredients, [board] * frames
+    elif videos:
+        clip = mentioned[videos[0]]
+        assert isinstance(clip, Video)
+        with tel.stage("reading the reference video"):
+            read = clip.file.read(end=Fraction(frames, FPS), fps=FPS, audio=False)
+            shown = [PILImage.frombytes("RGB", (read.width, read.height), frame) for frame in read.frames_rgb[:frames]]
+            # A clip shorter than the video holds its last frame, so every frame has its reference.
+            shown += shown[-1:] * (frames - len(shown))
+            reference = controls.edges(shown) if payload.control == "edges" else shown
+        adapter = union_control
+
+    def stage_one() -> tuple[torch.Tensor, torch.Tensor]:
+        return model.denoise(embeds, pictures, width=width // 2, height=height // 2, frames=frames, reference=reference,
+                             downscale=adapter.graph.downscale if adapter is not None else 1, held=held,
                              generator=generator, check=ctx.raise_if_cancelled,
                              progress=lambda step: ctx.progress(step, len(SIGMAS)))
 
     with tel.stage("generating video and audio"):
-        latents = ingredients.applied(model.graph.sites, stage_one) if panels else stage_one()
+        latents = adapter.applied(model.graph.sites, stage_one) if adapter is not None else stage_one()
     ctx.raise_if_cancelled()
     with tel.stage("upscaling latents"):
         high = model.upscale(latents[0])

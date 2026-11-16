@@ -155,11 +155,13 @@ class Pipeline(LTX2InContextPipeline):
             keyframe_latent_num_frames, keyframe_latent_height, keyframe_latent_width,
             self.guides.pop(0) if self.guides else pixel_frame_idx, num_pixel_frames, fps, device))
 
-    def run(self, embeds: tuple[torch.Tensor, torch.Tensor], pictures: Sequence[Frame], *, sheet: Image.Image | None,
-            held: torch.Tensor | None, width: int, height: int, frames: int, sigmas: Sequence[float],
+    def run(self, embeds: tuple[torch.Tensor, torch.Tensor], pictures: Sequence[Frame], *,
+            reference: list[Image.Image] | None, downscale: int, held: torch.Tensor | None, width: int, height: int,
+            frames: int, sigmas: Sequence[float],
             generator: torch.Generator, check: Callable[[], None], progress: Callable[[int], None],
             latents: tuple[torch.Tensor, torch.Tensor] | None = None) -> tuple[torch.Tensor, torch.Tensor]:
-        """One distilled stage (no guidance): Diffusers' in-context latents (pictures, then the reference's tokens),
+        """One distilled stage (no guidance): Diffusers' in-context latents (pictures, then an IC-LoRA's reference
+        video, at 1 / `downscale` of the stage's size),
         upstream's first-frame keyframe marker, and `held` audio latents ([1, C, L, M], not normalized) kept clean
         over the clip's first L audio latents: all of them is a soundtrack (upstream's `freeze_audio`), fewer a carry
         (`AudioConditionByLatentIndex`). Returns the video's and the audio's latents, denormalized."""
@@ -169,9 +171,10 @@ class Pipeline(LTX2InContextPipeline):
         texts, audio_texts, text_mask = self.connectors(embeds[0], embeds[1], padding_side=self.tokenizer_padding_side)
         f = (frames - 1) // self.vae_temporal_compression_ratio + 1
         h, w = height // self.vae_spatial_compression_ratio, width // self.vae_spatial_compression_ratio
-        references = [LTX2ReferenceCondition(frames=[sheet] * frames, strength=1.0)] if sheet is not None else None
+        references = [LTX2ReferenceCondition(frames=reference, strength=1.0)] if reference else None
         video, mask, clean, appended, _, _, _ = self.prepare_latents(
-            conditions=self.conditions(pictures) or None, reference_conditions=references, batch_size=1,
+            conditions=self.conditions(pictures) or None, reference_conditions=references,
+            reference_downscale_factor=downscale, batch_size=1,
             num_channels_latents=self.transformer.config.in_channels, height=height, width=width, num_frames=frames,
             frame_rate=fps, noise_scale=noise_scale, dtype=torch.float32, device=device, generator=generator,
             latents=None if latents is None else latents[0])
@@ -280,7 +283,7 @@ class Ltx25(Model[Graph]):
     @uses_components("transformer", "connectors", "vae", "audio_vae")
     def denoise(self, embeds: tuple[torch.Tensor, torch.Tensor], pictures: Sequence[Frame], *, width: int, height: int,
                 frames: int, generator: torch.Generator, check: Callable[[], None], progress: Callable[[int], None],
-                sheet: Image.Image | None = None, held: torch.Tensor | None = None,
+                reference: list[Image.Image] | None = None, downscale: int = 1, held: torch.Tensor | None = None,
                 latents: tuple[torch.Tensor, torch.Tensor] | None = None) -> tuple[torch.Tensor, torch.Tensor]:
         # The VAE roots are also leased: their latent-statistic buffers participate here, and they encode the pictures
         # and the reference at each stage's size, as upstream's stages do (ltx_pipelines/distilled.py `_video_conditionings`).
@@ -288,7 +291,8 @@ class Ltx25(Model[Graph]):
         check()
         try:
             with torch.inference_mode():
-                return pipe.run(embeds, pictures, sheet=sheet, held=held, width=width, height=height, frames=frames,
+                return pipe.run(embeds, pictures, reference=reference, downscale=downscale, held=held, width=width,
+                                height=height, frames=frames,
                                 sigmas=SIGMAS if latents is None else REFINE_SIGMAS, generator=generator, check=check,
                                 progress=progress, latents=latents)
         finally:

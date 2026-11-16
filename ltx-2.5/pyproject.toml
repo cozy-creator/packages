@@ -8,6 +8,8 @@ dependencies = [
     "diffusers>=0.43,<0.44",
     "msgspec>=0.19",
     "numpy>=1.26",
+    # Lightricks' Union Control annotator: comfyui_controlnet_aux's Canny is OpenCV's.
+    "opencv-python-headless>=4.10",
     "pillow>=12",
     "sentencepiece>=0.2",
     "tensorfs>=0.25.0",
