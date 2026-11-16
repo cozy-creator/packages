@@ -84,8 +84,8 @@ wheels = [
 
 [[package]]
 name = "cozy-runtime"
-version = "0.47.0.dev2287+g1a53ab3c"
-source = { url = "https://github.com/cozy-creator/cozy-runtime/releases/download/rc-0.26.0/cozy_runtime-0.47.0.dev2287+g1a53ab3c-py3-none-any.whl" }
+version = "0.47.0.dev2297+g43eab79f"
+source = { url = "https://github.com/cozy-creator/cozy-runtime/releases/download/rc-0.26.0/cozy_runtime-0.47.0.dev2297+g43eab79f-py3-none-any.whl" }
 dependencies = [
     { name = "msgspec" },
     { name = "numpy" },
@@ -94,7 +94,7 @@ dependencies = [
     { name = "tensorfs" },
 ]
 wheels = [
-    { url = "https://github.com/cozy-creator/cozy-runtime/releases/download/rc-0.26.0/cozy_runtime-0.47.0.dev2287+g1a53ab3c-py3-none-any.whl", hash = "sha256:0a8738d1c9e970e58c6828467a423591265a992384ecdae27c216ffe54145eed" },
+    { url = "https://github.com/cozy-creator/cozy-runtime/releases/download/rc-0.26.0/cozy_runtime-0.47.0.dev2297+g43eab79f-py3-none-any.whl", hash = "sha256:0bee753d050f5aa9b80b5240b957ab8ef54b3a68389236c587805c7229212503" },
 ]
 
 [package.optional-dependencies]
@@ -450,7 +450,7 @@ wheels = [
 
 [[package]]
 name = "qwen3-6"
-version = "0.8.0rc1"
+version = "0.8.0rc2"
 source = { editable = "." }
 dependencies = [
     { name = "cozy-runtime", extra = ["media"] },
@@ -464,7 +464,7 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
-    { name = "cozy-runtime", extras = ["media"], url = "https://github.com/cozy-creator/cozy-runtime/releases/download/rc-0.26.0/cozy_runtime-0.47.0.dev2287+g1a53ab3c-py3-none-any.whl" },
+    { name = "cozy-runtime", extras = ["media"], url = "https://github.com/cozy-creator/cozy-runtime/releases/download/rc-0.26.0/cozy_runtime-0.47.0.dev2297+g43eab79f-py3-none-any.whl" },
     { name = "msgspec", specifier = ">=0.19" },
     { name = "numpy", specifier = ">=1.26" },
     { name = "pillow", specifier = ">=12" },

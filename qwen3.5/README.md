@@ -7,6 +7,11 @@ request and the model code are Runtime's shared Qwen-VL ones (`cozy_runtime.vlm`
 
 `caption` says what a picture or a video shows, in its own question, for a project's Caption: `cozy run qwen3.5/caption --file images=./character.png`.
 
+`write` is its canvas tool (Write, boxes named `text_1`, …): one answer to a box's `instructions`, which may mention
+pictures and videos (`<dog>`), each shown to the model right after its first mention. It samples at Qwen's instruct
+settings (temperature 0.7, top_p 0.8, presence_penalty 1.5), from a new seed each render unless `seed` is set:
+`cozy run qwen3.5/write "instructions=Continue: The sea at night"`.
+
 Write the request in a file, `request.yaml`:
 
 ```yaml
