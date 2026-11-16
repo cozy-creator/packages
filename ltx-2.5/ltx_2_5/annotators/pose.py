@@ -15,6 +15,7 @@ import math
 
 import cv2
 import numpy as np
+import numpy.typing as npt
 import torch
 from cozy_runtime.accel import sequence_parallel
 from cozy_runtime.author import Config, Loader, Model, Serving, uses_components
@@ -42,22 +43,20 @@ EPS = 0.01
 #: COCO-WholeBody's body order to OpenPose's, a neck inserted at 17 (wholebody.py:120-138).
 MMPOSE, OPENPOSE = [17, 6, 8, 10, 7, 9, 12, 14, 16, 13, 15, 2, 1, 4, 3], [1, 2, 3, 4, 6, 7, 8, 9, 10, 12, 13, 14, 15, 16, 17]
 MEAN, STD = np.array([123.675, 116.28, 103.53]), np.array([58.395, 57.12, 57.375])
+#: Each anchor's grid cell (x, y) and stride, level by level, row-major (cv_ox_det.py:56-76 `demo_postprocess`).
+GRIDS = np.concatenate([np.stack(np.meshgrid(np.arange(DETECT_SIZE // stride), np.arange(DETECT_SIZE // stride)), 2)
+                        .reshape(-1, 2) for stride in (8, 16, 32)])
+STRIDES = np.concatenate([np.full(((DETECT_SIZE // stride) ** 2, 1), stride) for stride in (8, 16, 32)])
+#: A frame, its people's boxes and their keypoints, as the models take and give them.
+Frame = np.ndarray[tuple[int, int, int], np.dtype[np.uint8]]
+Boxes = np.ndarray[tuple[int, int], np.dtype[np.float64]]
+People = np.ndarray[tuple[int, int, int], np.dtype[np.float64]]
+Pixels = npt.NDArray[np.uint8]
+Floats = npt.NDArray[np.float32]
+Doubles = npt.NDArray[np.float64]
 
 
-def _anchors() -> tuple[np.ndarray, np.ndarray]:
-    grids, strides = [], []
-    for stride in (8, 16, 32):
-        side = DETECT_SIZE // stride
-        xv, yv = np.meshgrid(np.arange(side), np.arange(side))
-        grids.append(np.stack((xv, yv), 2).reshape(-1, 2))
-        strides.append(np.full((side * side, 1), stride))
-    return np.concatenate(grids), np.concatenate(strides)
-
-
-GRIDS, STRIDES = _anchors()
-
-
-def _letterboxed(bgr: np.ndarray) -> tuple[np.ndarray, float]:
+def _letterboxed(bgr: Pixels) -> tuple[Floats, float]:
     """cv_ox_det.py:78-94 `preprocess`: scaled to fit 640x640 (bilinear), top-left on gray 114, CHW."""
     padded = np.ones((DETECT_SIZE, DETECT_SIZE, 3), dtype=np.uint8) * 114
     r = min(DETECT_SIZE / bgr.shape[0], DETECT_SIZE / bgr.shape[1])
@@ -66,12 +65,12 @@ def _letterboxed(bgr: np.ndarray) -> tuple[np.ndarray, float]:
     return np.ascontiguousarray(padded.transpose(2, 0, 1), dtype=np.float32), r
 
 
-def _nms(boxes: np.ndarray, scores: np.ndarray, threshold: float) -> list[int]:
+def _nms(boxes: Floats, scores: Floats, threshold: float) -> list[int]:
     """cv_ox_det.py:4-31."""
     x1, y1, x2, y2 = boxes[:, 0], boxes[:, 1], boxes[:, 2], boxes[:, 3]
     areas = (x2 - x1 + 1) * (y2 - y1 + 1)
     order = scores.argsort()[::-1]
-    keep = []
+    keep: list[int] = []
     while order.size > 0:
         i = order[0]
         keep.append(i)
@@ -82,7 +81,7 @@ def _nms(boxes: np.ndarray, scores: np.ndarray, threshold: float) -> list[int]:
     return keep
 
 
-def _people(prediction: np.ndarray, ratio: float) -> np.ndarray:
+def _people(prediction: Floats, ratio: float) -> Doubles:
     """cv_ox_det.py:56-76, 96-129 for the person class, the only one the annotator keeps: anchors decoded, boxes at
     objectness times class score over 0.1 suppressed at IoU 0.45, those over 0.3 kept. [n, 4] x0 y0 x1 y1, in pixels."""
     prediction = prediction.copy()
@@ -101,12 +100,13 @@ def _people(prediction: np.ndarray, ratio: float) -> np.ndarray:
     return found[confidence > 0.3]
 
 
-def _third(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+def _third(a: Floats, b: Floats) -> Floats:
     direction = a - b
-    return b + np.r_[-direction[1], direction[0]]
+    third: Floats = b + np.r_[-direction[1], direction[0]]
+    return third
 
 
-def _crop(rgb: np.ndarray, box: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+def _crop(rgb: Pixels, box: Doubles) -> tuple[Floats, Doubles, Doubles]:
     """jit_pose.py:7-49, 119-289 (`bbox_xyxy2cs`, `_fix_aspect_ratio`, `get_warp_matrix`, `top_down_affine`): the box
     grown 1.25x about its center and widened to 3:4, warped to 288x384 (bilinear), normalized. Returns the crop and
     the box's center and scale."""
@@ -124,12 +124,11 @@ def _crop(rgb: np.ndarray, box: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.
     dst[0] = [width * 0.5, height * 0.5]
     dst[1] = np.array([width * 0.5, height * 0.5]) + np.array([0.0, width * -0.5])
     dst[2] = _third(dst[0], dst[1])
-    crop = cv2.warpAffine(rgb, cv2.getAffineTransform(src, dst), (width, height), flags=cv2.INTER_LINEAR)
+    crop: Pixels = cv2.warpAffine(rgb, cv2.getAffineTransform(src, dst), (width, height), flags=cv2.INTER_LINEAR)
     return ((crop - MEAN) / STD).astype(np.float32), center, scale
 
 
-def _decoded(simcc_x: np.ndarray, simcc_y: np.ndarray, center: np.ndarray,
-             scale: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+def _decoded(simcc_x: Floats, simcc_y: Floats, center: Doubles, scale: Doubles) -> tuple[Doubles, Floats]:
     """jit_pose.py:84-116, 292-354: each keypoint at its x and y SimCC maxima, scored by the lower; back in pixels."""
     locs = np.stack((np.argmax(simcc_x, axis=1), np.argmax(simcc_y, axis=1)), axis=-1).astype(np.float32)
     best_x, best_y = np.amax(simcc_x, axis=1), np.amax(simcc_y, axis=1)
@@ -139,10 +138,10 @@ def _decoded(simcc_x: np.ndarray, simcc_y: np.ndarray, center: np.ndarray,
     return locs / INPUT_SIZE * scale + center - scale / 2, scores
 
 
-def _openpose(keypoints: np.ndarray, scores: np.ndarray) -> np.ndarray:
+def _openpose(keypoints: Doubles, scores: Floats) -> Doubles:
     """wholebody.py:120-140: [n, 133, 3] COCO-WholeBody to [n, 134, 3] OpenPose order, the neck the shoulders' mean,
     scored 1 where both shoulders score over 0.3."""
-    info = np.concatenate((keypoints, scores[..., None]), axis=-1)
+    info = np.concatenate((keypoints, scores[..., None].astype(np.float64)), axis=-1)
     neck = np.mean(info[:, [5, 6]], axis=1)
     neck[:, 2:4] = np.logical_and(info[:, 5, 2:4] > 0.3, info[:, 6, 2:4] > 0.3).astype(int)
     info = np.insert(info, 17, neck, axis=1)
@@ -150,13 +149,13 @@ def _openpose(keypoints: np.ndarray, scores: np.ndarray) -> np.ndarray:
     return info
 
 
-def _part(points: np.ndarray) -> list[np.ndarray | None] | None:
+def _part(points: Doubles) -> list[Doubles | None] | None:
     """wholebody.py `format_keypoint_part`: points scoring under 0.3 dropped; a part with none is absent."""
     kept = [point if point[2] >= SCORE else None for point in points]
     return None if all(point is None for point in kept) else kept
 
 
-def _body(canvas: np.ndarray, points: list[np.ndarray | None]) -> None:
+def _body(canvas: Pixels, points: list[Doubles | None]) -> None:
     for (a, b), color in zip(LIMBS, COLORS, strict=False):
         p, q = points[a - 1], points[b - 1]
         if p is None or q is None:
@@ -171,7 +170,7 @@ def _body(canvas: np.ndarray, points: list[np.ndarray | None]) -> None:
             cv2.circle(canvas, (int(point[0]), int(point[1])), 4, color, thickness=-1)
 
 
-def _hand(canvas: np.ndarray, points: list[np.ndarray | None] | None) -> None:
+def _hand(canvas: Pixels, points: list[Doubles | None] | None) -> None:
     if not points:
         return
     for index, (a, b) in enumerate(HAND_EDGES):
@@ -187,13 +186,13 @@ def _hand(canvas: np.ndarray, points: list[np.ndarray | None] | None) -> None:
             cv2.circle(canvas, (int(point[0]), int(point[1])), 4, (0, 0, 255), thickness=-1)
 
 
-def _face(canvas: np.ndarray, points: list[np.ndarray | None] | None) -> None:
+def _face(canvas: Pixels, points: list[Doubles | None] | None) -> None:
     for point in points or ():
         if point is not None and int(point[0]) > EPS and int(point[1]) > EPS:
             cv2.circle(canvas, (int(point[0]), int(point[1])), 3, (255, 255, 255), thickness=-1)
 
 
-def _drawn(people: np.ndarray, height: int, width: int) -> Image.Image:
+def _drawn(people: Doubles, height: int, width: int) -> Image.Image:
     """`DwposeDetector.__call__` from its poses: each person's body, hands and face (wholebody.py `format_result`;
     the face's last two points are the body's eyes) on black at the frame's size, then scaled so the short side is
     512 (`resize_image_with_pad`: area down, cubic up)."""
@@ -228,11 +227,11 @@ class PersonDetector(Model[DetectorGraph]):
         self.graph = loader.construct(DetectorGraph)
 
     @uses_components(COMPONENT)
-    def people(self, frames: list[np.ndarray]) -> list[np.ndarray]:
+    def people(self, frames: list[Frame]) -> list[Boxes]:
         """Each RGB frame's people, [n, 4] boxes in its pixels (`_people`), read as BGR as YOLOX was trained."""
         model = self.graph.components[COMPONENT]
         device = torch.device(str(self.device))
-        found: list[np.ndarray] = []
+        found: list[Boxes] = []
         for start in range(0, len(frames), DETECT_BATCH):
             chunk = [_letterboxed(np.ascontiguousarray(frame[:, :, ::-1])) for frame in frames[start:start + DETECT_BATCH]]
             batch = np.stack([image for image, _ in chunk] + [chunk[-1][0]] * (DETECT_BATCH - len(chunk)))
@@ -258,12 +257,12 @@ class WholeBody(Model[EstimatorGraph]):
         self.graph = loader.construct(EstimatorGraph)
 
     @uses_components(COMPONENT)
-    def keypoints(self, frames: list[np.ndarray], boxes: list[np.ndarray]) -> list[np.ndarray]:
+    def keypoints(self, frames: list[Frame], boxes: list[Boxes]) -> list[People]:
         """Each RGB frame's people in its boxes, [n, 134, 3] x, y, score in OpenPose's order (`_openpose`)."""
         model = self.graph.components[COMPONENT]
         device = torch.device(str(self.device))
         wanted = [(index, box) for index, found in enumerate(boxes) for box in found]
-        people: list[list[tuple[np.ndarray, np.ndarray]]] = [[] for _ in frames]
+        people: list[list[tuple[Doubles, Floats]]] = [[] for _ in frames]
         for start in range(0, len(wanted), POSE_BATCH):
             part = wanted[start:start + POSE_BATCH]
             crops = [_crop(frames[index], box) for index, box in part]
@@ -280,6 +279,6 @@ class WholeBody(Model[EstimatorGraph]):
 def drawn(frames: list[Image.Image], detector: PersonDetector, estimator: WholeBody) -> list[Image.Image]:
     """`frames` as the workflow's pose maps: each at 544 on its short side (`reference.scaled`), its people found and
     read, drawn at that size and scaled to 512. A frame with no one is black."""
-    rgb = [np.asarray(frame) for frame in scaled(frames)]
+    rgb: list[Frame] = [np.asarray(frame, dtype=np.uint8) for frame in scaled(frames)]
     people = estimator.keypoints(rgb, detector.people(rgb))
     return [_drawn(found, *frame.shape[:2]) for frame, found in zip(rgb, people, strict=True)]

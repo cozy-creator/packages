@@ -6,6 +6,8 @@ upstream's xFormers and plain paths."""
 
 from __future__ import annotations
 
+from typing import cast
+
 import torch
 import torch.nn.functional as F
 from torch import nn
@@ -29,7 +31,7 @@ class PatchEmbed(nn.Module):
         self.proj = nn.Conv2d(3, DIM, kernel_size=PATCH, stride=PATCH)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.proj(x).flatten(2).transpose(1, 2)
+        return cast(torch.Tensor, self.proj(x).flatten(2).transpose(1, 2))
 
 
 class Attention(nn.Module):
@@ -43,7 +45,7 @@ class Attention(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         batch, tokens, _ = x.shape
         q, k, v = self.qkv(x).reshape(batch, tokens, 3, HEADS, DIM // HEADS).permute(2, 0, 3, 1, 4)
-        return self.proj(F.scaled_dot_product_attention(q, k, v).transpose(1, 2).reshape(batch, tokens, DIM))
+        return cast(torch.Tensor, self.proj(F.scaled_dot_product_attention(q, k, v).transpose(1, 2).reshape(batch, tokens, DIM)))
 
 
 class LayerScale(nn.Module):
@@ -67,7 +69,7 @@ class Mlp(nn.Module):
         self.fc2 = nn.Linear(DIM * 4, DIM)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.fc2(self.act(self.fc1(x)))
+        return cast(torch.Tensor, self.fc2(self.act(self.fc1(x))))
 
 
 class Block(nn.Module):
@@ -84,7 +86,7 @@ class Block(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = x + self.ls1(self.attn(self.norm1(x)))
-        return x + self.ls2(self.mlp(self.norm2(x)))
+        return cast(torch.Tensor, x + self.ls2(self.mlp(self.norm2(x))))
 
 
 class DinoVisionTransformer(nn.Module):
@@ -127,6 +129,8 @@ class DinoVisionTransformer(nn.Module):
 class PositionalEncoding(nn.Module):
     """motion_module.py:192-210: a stored sinusoidal table over the window's frames."""
 
+    pe: torch.Tensor
+
     def __init__(self, dim: int) -> None:
         super().__init__()
         self.register_buffer("pe", torch.zeros(1, FRAMES, dim))
@@ -153,7 +157,7 @@ class TemporalAttention(nn.Module):
         q, k, v = (project(x).unflatten(-1, (TEMPORAL_HEADS, -1)).transpose(1, 2)
                    for project in (self.to_q, self.to_k, self.to_v))
         x = self.to_out[0](F.scaled_dot_product_attention(q, k, v).transpose(1, 2).flatten(2))
-        return x.unflatten(0, (-1, tokens)).transpose(1, 2).flatten(0, 1)  # (b d) f c -> (b f) d c
+        return cast(torch.Tensor, x.unflatten(0, (-1, tokens)).transpose(1, 2).flatten(0, 1))  # (b d) f c -> (b f) d c
 
 
 class GEGLU(nn.Module):
@@ -194,7 +198,7 @@ class TemporalTransformerBlock(nn.Module):
     def forward(self, x: torch.Tensor, frames: int) -> torch.Tensor:
         for attention, norm in zip(self.attention_blocks, self.norms, strict=True):
             x = attention(norm(x), frames) + x
-        return self.ff(self.ff_norm(x)) + x
+        return cast(torch.Tensor, self.ff(self.ff_norm(x)) + x)
 
 
 class TemporalTransformer3DModel(nn.Module):
@@ -212,7 +216,7 @@ class TemporalTransformer3DModel(nn.Module):
         h = self.proj_in(self.norm(x).permute(0, 2, 3, 1).reshape(batch, height * width, channels))
         for block in self.transformer_blocks:
             h = block(h, frames)
-        return self.proj_out(h).reshape(batch, height, width, channels).permute(0, 3, 1, 2) + x
+        return cast(torch.Tensor, self.proj_out(h).reshape(batch, height, width, channels).permute(0, 3, 1, 2) + x)
 
 
 class TemporalModule(nn.Module):
@@ -223,7 +227,7 @@ class TemporalModule(nn.Module):
         self.temporal_transformer = TemporalTransformer3DModel(channels)
 
     def forward(self, x: torch.Tensor, frames: int) -> torch.Tensor:
-        return self.temporal_transformer(x, frames)
+        return cast(torch.Tensor, self.temporal_transformer(x, frames))
 
 
 class ResidualConvUnit(nn.Module):
@@ -235,7 +239,7 @@ class ResidualConvUnit(nn.Module):
         self.conv2 = nn.Conv2d(FEATURES, FEATURES, 3, padding=1)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.conv2(F.relu(self.conv1(F.relu(x)))) + x
+        return cast(torch.Tensor, self.conv2(F.relu(self.conv1(F.relu(x)))) + x)
 
 
 class FeatureFusionBlock(nn.Module):
@@ -253,7 +257,7 @@ class FeatureFusionBlock(nn.Module):
             x = x + self.resConfUnit1(skip)
         x = self.resConfUnit2(x)
         x = F.interpolate(x, size=size, scale_factor=None if size else 2, mode="bilinear", align_corners=True)
-        return self.out_conv(x)
+        return cast(torch.Tensor, self.out_conv(x))
 
 
 class Scratch(nn.Module):
@@ -326,4 +330,4 @@ class VideoDepthAnything(nn.Module):
         features = self.pretrained.intermediate(x.flatten(0, 1))
         depth = self.head(features, height // PATCH, width // PATCH, frames)
         depth = F.relu(F.interpolate(depth, size=(height, width), mode="bilinear", align_corners=True))
-        return depth.squeeze(1).unflatten(0, (batch, frames))
+        return cast(torch.Tensor, depth.squeeze(1).unflatten(0, (batch, frames)))

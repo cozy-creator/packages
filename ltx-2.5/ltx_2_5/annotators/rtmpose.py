@@ -9,6 +9,8 @@ OpenMMLab; Apache-2.0, see NOTICE. Inference only."""
 
 from __future__ import annotations
 
+from typing import cast
+
 import math
 
 import torch
@@ -30,7 +32,7 @@ class ConvModule(nn.Module):
         self.activate = nn.SiLU()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.activate(self.bn(self.conv(x)))
+        return cast(torch.Tensor, self.activate(self.bn(self.conv(x))))
 
 
 class DepthwiseSeparableConvModule(nn.Module):
@@ -42,7 +44,7 @@ class DepthwiseSeparableConvModule(nn.Module):
         self.pointwise_conv = ConvModule(cin, cout, 1)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.pointwise_conv(self.depthwise_conv(x))
+        return cast(torch.Tensor, self.pointwise_conv(self.depthwise_conv(x)))
 
 
 class CSPNeXtBlock(nn.Module):
@@ -56,7 +58,7 @@ class CSPNeXtBlock(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         out = self.conv2(self.conv1(x))
-        return out + x if self.add_identity else out
+        return cast(torch.Tensor, out + x if self.add_identity else out)
 
 
 class ChannelAttention(nn.Module):
@@ -69,7 +71,7 @@ class ChannelAttention(nn.Module):
         self.act = nn.Hardsigmoid()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return x * self.act(self.fc(self.global_avgpool(x)))
+        return cast(torch.Tensor, x * self.act(self.fc(self.global_avgpool(x))))
 
 
 class CSPLayer(nn.Module):
@@ -86,7 +88,7 @@ class CSPLayer(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = torch.cat((self.blocks(self.main_conv(x)), self.short_conv(x)), dim=1)
-        return self.final_conv(self.attention(x))
+        return cast(torch.Tensor, self.final_conv(self.attention(x)))
 
 
 class SPPBottleneck(nn.Module):
@@ -101,7 +103,7 @@ class SPPBottleneck(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self.conv1(x)
-        return self.conv2(torch.cat([x, *(pool(x) for pool in self.poolings)], dim=1))
+        return cast(torch.Tensor, self.conv2(torch.cat([x, *(pool(x) for pool in self.poolings)], dim=1)))
 
 
 class CSPNeXt(nn.Module):
@@ -116,7 +118,7 @@ class CSPNeXt(nn.Module):
         self.stage4 = nn.Sequential(ConvModule(512, 1024, 3, stride=2), SPPBottleneck(1024), CSPLayer(1024, 3, False))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.stage4(self.stage3(self.stage2(self.stage1(self.stem(x)))))
+        return cast(torch.Tensor, self.stage4(self.stage3(self.stage2(self.stage1(self.stem(x))))))
 
 
 class ScaleNorm(nn.Module):
@@ -129,7 +131,7 @@ class ScaleNorm(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         norm = torch.norm(x, dim=-1, keepdim=True) * self.scale
-        return x / norm.clamp(min=1e-5) * self.g
+        return cast(torch.Tensor, x / norm.clamp(min=1e-5) * self.g)
 
 
 class Scale(nn.Module):
@@ -163,7 +165,7 @@ class RTMCCBlock(nn.Module):
         u, v, base = torch.split(self.act_fn(self.uv(self.ln(x))), [self.e, self.e, self.s], dim=2)
         q, k = torch.unbind(base.unsqueeze(2) * self.gamma[None, None, :] + self.beta, dim=2)
         kernel = torch.square(F.relu(torch.bmm(q, k.permute(0, 2, 1)) / self.sqrt_s))
-        return self.res_scale(x) + self.o(u * torch.bmm(kernel, v))
+        return cast(torch.Tensor, self.res_scale(x) + self.o(u * torch.bmm(kernel, v)))
 
 
 class RTMCCHead(nn.Module):
@@ -194,4 +196,4 @@ class RTMPose(nn.Module):
         self.head = RTMCCHead()
 
     def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        return self.head(self.backbone(x))
+        return cast(tuple[torch.Tensor, torch.Tensor], self.head(self.backbone(x)))

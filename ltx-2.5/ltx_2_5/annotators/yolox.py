@@ -6,6 +6,8 @@ the head returns what the ONNX export does (`decode_in_inference=False`, tools/e
 
 from __future__ import annotations
 
+from typing import cast
+
 import torch
 from torch import nn
 
@@ -24,7 +26,7 @@ class BaseConv(nn.Module):
         self.act = nn.SiLU()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.act(self.bn(self.conv(x)))
+        return cast(torch.Tensor, self.act(self.bn(self.conv(x))))
 
 
 class Bottleneck(nn.Module):
@@ -38,7 +40,7 @@ class Bottleneck(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         y = self.conv2(self.conv1(x))
-        return y + x if self.use_add else y
+        return cast(torch.Tensor, y + x if self.use_add else y)
 
 
 class CSPLayer(nn.Module):
@@ -53,7 +55,7 @@ class CSPLayer(nn.Module):
         self.m = nn.Sequential(*(Bottleneck(hidden, shortcut) for _ in range(n)))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.conv3(torch.cat((self.m(self.conv1(x)), self.conv2(x)), dim=1))
+        return cast(torch.Tensor, self.conv3(torch.cat((self.m(self.conv1(x)), self.conv2(x)), dim=1)))
 
 
 class Focus(nn.Module):
@@ -64,7 +66,7 @@ class Focus(nn.Module):
         self.conv = BaseConv(cin * 4, cout, 3)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.conv(torch.cat((x[..., ::2, ::2], x[..., 1::2, ::2], x[..., ::2, 1::2], x[..., 1::2, 1::2]), dim=1))
+        return cast(torch.Tensor, self.conv(torch.cat((x[..., ::2, ::2], x[..., 1::2, ::2], x[..., ::2, 1::2], x[..., 1::2, 1::2]), dim=1)))
 
 
 class SPPBottleneck(nn.Module):
@@ -79,7 +81,7 @@ class SPPBottleneck(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self.conv1(x)
-        return self.conv2(torch.cat([x, *(pool(x) for pool in self.m)], dim=1))
+        return cast(torch.Tensor, self.conv2(torch.cat([x, *(pool(x) for pool in self.m)], dim=1)))
 
 
 class CSPDarknet(nn.Module):
@@ -159,4 +161,4 @@ class YOLOX(nn.Module):
         self.head = YOLOXHead()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.head(self.backbone(x))
+        return cast(torch.Tensor, self.head(self.backbone(x)))

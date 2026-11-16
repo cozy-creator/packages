@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import cv2
 import numpy as np
+import numpy.typing as npt
 import torch
 import torch.nn.functional as F
 from cozy_runtime.accel import sequence_parallel
@@ -26,6 +27,9 @@ INPUT_SIZE, MAX_RES = 518, 960
 INFER_LEN, OVERLAP, KEYFRAMES, INTERP_LEN = 32, 10, [0, 12, 24, 25, 26, 27, 28, 29, 30, 31], 8
 ALIGN = OVERLAP - INTERP_LEN
 MEAN, STD = np.array([0.485, 0.456, 0.406]), np.array([0.229, 0.224, 0.225])
+#: An RGB frame, and one frame's relative depth.
+Pixels = npt.NDArray[np.uint8]
+Depth = npt.NDArray[np.float32]
 
 
 class Graph:
@@ -33,14 +37,15 @@ class Graph:
         self.components = {COMPONENT: stored(VideoDepthAnything(), COMPONENT, config)}
 
 
-def _fitted(rgb: np.ndarray) -> np.ndarray:
+def _fitted(rgb: Pixels) -> Pixels:
     """node.py:13-34 `preprocess`: a frame longer than 960 shrinks to fit, on even sides, by area."""
     height, width = rgb.shape[:2]
     if max(height, width) <= MAX_RES:
         return rgb
     scale = MAX_RES / max(height, width)
     even = [side + side % 2 for side in (round(width * scale), round(height * scale))]
-    return cv2.resize(rgb, (even[0], even[1]), interpolation=cv2.INTER_AREA)
+    fitted: Pixels = cv2.resize(rgb, (even[0], even[1]), interpolation=cv2.INTER_AREA)
+    return fitted
 
 
 def _network_size(height: int, width: int) -> tuple[int, int]:
@@ -59,13 +64,13 @@ def _network_size(height: int, width: int) -> tuple[int, int]:
     return multiple(scale * width), multiple(scale * height)
 
 
-def _normalized(rgb: np.ndarray, size: tuple[int, int]) -> torch.Tensor:
+def _normalized(rgb: Pixels, size: tuple[int, int]) -> torch.Tensor:
     """video_depth.py:77-89, 102: [0, 1] RGB, bicubic to `size`, ImageNet-normalized, CHW."""
     image = cv2.resize(rgb.astype(np.float32) / 255.0, size, interpolation=cv2.INTER_CUBIC)
     return torch.from_numpy(np.ascontiguousarray(((image - MEAN) / STD).transpose(2, 0, 1)).astype(np.float32))
 
 
-def _scale_and_shift(prediction: np.ndarray, target: np.ndarray) -> tuple[float, float]:
+def _scale_and_shift(prediction: Depth, target: Depth) -> tuple[float, float]:
     """Video-Depth-Anything utils/util.py:40-62 `compute_scale_and_shift_full`, its mask all ones: the least-squares
     `scale * prediction + shift` onto `target`, in F32."""
     prediction, target = prediction.astype(np.float32), target.astype(np.float32)
@@ -78,7 +83,7 @@ def _scale_and_shift(prediction: np.ndarray, target: np.ndarray) -> tuple[float,
     return float((a_11 * b_0 - a_01 * b_1) / det), float((-a_01 * b_0 + a_00 * b_1) / det)
 
 
-def _align(aligned: list[np.ndarray], keys: list[np.ndarray], window: list[np.ndarray]) -> None:
+def _align(aligned: list[Depth], keys: list[Depth], window: list[Depth]) -> None:
     """video_depth.py:121-159, one window at a time: the first window as it is; each later one scaled and shifted
     onto the aligned keyframes it opens with, its first 8 frames cross-faded into the 8 they repeat
     (utils/util.py:65-74 `get_interpolate_frames`)."""
@@ -88,7 +93,7 @@ def _align(aligned: list[np.ndarray], keys: list[np.ndarray], window: list[np.nd
         return
     scale, shift = _scale_and_shift(np.concatenate(window[:ALIGN]), np.concatenate(keys))
 
-    def fit(depth: np.ndarray) -> np.ndarray:
+    def fit(depth: Depth) -> Depth:
         depth = depth * scale + shift
         depth[depth < 0] = 0
         return depth
@@ -116,13 +121,13 @@ class VideoDepth(Model[Graph]):
         to [0, 1] (node.py:47-56 `postprocess_gray`) and written as 8-bit gray RGB at the fitted size."""
         model = self.graph.components[COMPONENT]
         device = torch.device(str(self.device))
-        rgb = [_fitted(np.asarray(frame)) for frame in scaled(frames)]
+        rgb = [_fitted(np.asarray(frame, dtype=np.uint8)) for frame in scaled(frames)]
         height, width = rgb[0].shape[:2]
         size = _network_size(height, width)
         count, step = len(rgb), INFER_LEN - OVERLAP
         rgb += [rgb[-1]] * ((step - count % step) % step + OVERLAP)
-        aligned: list[np.ndarray] = []
-        keys: list[np.ndarray] = []
+        aligned: list[Depth] = []
+        keys: list[Depth] = []
         previous: torch.Tensor | None = None
         for start in range(0, count, step):
             # A later window's first 10 frames are the last window's keyframes, so only its new frames are read.
