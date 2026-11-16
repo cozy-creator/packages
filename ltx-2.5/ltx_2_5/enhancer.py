@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 
 import torch
+from cozy_runtime.accel import sequence_parallel
 from cozy_runtime.author import Config, Loader, Model, ModelAssets, Serving, uses_components
 from diffusers.pipelines.ltx2.prompt_enhancement import (
     _pad_inputs_for_attention_alignment,
@@ -66,7 +67,10 @@ class Graph:
         self.components = {COMPONENT: stored(Gemma4ForConditionalGeneration(Gemma4Config(**settings)), COMPONENT, config)}
 
 
+@sequence_parallel(degrees=(2, 4, 8))
 class Enhancer(Model[Graph]):
+    """Replicated beside the sequence-sharded DiT."""
+
     serving = Serving(min_bits=16, phase="decode")
     graph: Graph
     processor: Gemma4Processor

@@ -16,7 +16,7 @@ from collections.abc import Callable
 from typing import TypeVar
 
 import torch
-from cozy_runtime.accel import lora
+from cozy_runtime.accel import lora, sequence_parallel
 from cozy_runtime.author import Config, Loader, Model, Serving, uses_components
 from torch import nn
 from transformers.initialization import no_init_weights
@@ -57,7 +57,10 @@ class Graph:
         self.components = {COMPONENT: stored(root, COMPONENT, config)}
 
 
+@sequence_parallel(degrees=(2, 4, 8))
 class ICLora(Model[Graph]):
+    """Replicated beside the sequence-sharded DiT, on whose sites it arms."""
+
     serving = Serving(encoded_leaves=False, min_bits=16)
     graph: Graph
 

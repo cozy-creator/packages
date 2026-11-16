@@ -16,6 +16,7 @@ import math
 import cv2
 import numpy as np
 import torch
+from cozy_runtime.accel import sequence_parallel
 from cozy_runtime.author import Config, Loader, Model, Serving, uses_components
 from PIL import Image
 
@@ -216,6 +217,7 @@ class DetectorGraph:
         self.components = {COMPONENT: stored(YOLOX(), COMPONENT, config)}
 
 
+@sequence_parallel(degrees=(2, 4, 8))
 class PersonDetector(Model[DetectorGraph]):
     """YOLOX-L (Megvii's `yolox_l.pth`), for the people DWPose reads."""
 
@@ -245,6 +247,7 @@ class EstimatorGraph:
         self.components = {COMPONENT: stored(RTMPose(), COMPONENT, config)}
 
 
+@sequence_parallel(degrees=(2, 4, 8))
 class WholeBody(Model[EstimatorGraph]):
     """DWPose-l (`dw-ll_ucoco_384`): 133 whole-body keypoints per person."""
 

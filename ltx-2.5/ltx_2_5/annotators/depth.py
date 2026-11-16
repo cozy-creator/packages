@@ -10,6 +10,7 @@ import cv2
 import numpy as np
 import torch
 import torch.nn.functional as F
+from cozy_runtime.accel import sequence_parallel
 from cozy_runtime.author import Config, Loader, Model, Serving, uses_components
 from PIL import Image
 
@@ -100,6 +101,7 @@ def _align(aligned: list[np.ndarray], keys: list[np.ndarray], window: list[np.nd
     keys[1:] = [fit(window[k]) for k in KEYFRAMES[1:ALIGN]]
 
 
+@sequence_parallel(degrees=(2, 4, 8))
 class VideoDepth(Model[Graph]):
     serving = Serving(encoded_leaves=False, min_bits=16)
     graph: Graph
