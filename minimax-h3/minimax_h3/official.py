@@ -1750,8 +1750,9 @@ class OfficialH3Pipeline:
         workflow = self._workflow(task, state)
         components = _ScopedPipeline(self._pipes[workflow], self.components["vae"])
         delivery: ContinuationPlan | None = state.values.get("continuation_delivery")
+        vae = cast(TileBatchedVideoVAE, components.vae)  # `_apply_video_vae_dtype` built it
         return decode_chunks(
-            components.vae, components._execution_device, state.latents,
+            vae, components._execution_device, state.latents,
             (tuple(components.pixel_mean), tuple(components.pixel_std)), on_chunk, delivery,
         )  # fmt: skip
 
