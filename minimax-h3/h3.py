@@ -105,6 +105,7 @@ from minimax_h3.model import (
     H3RegenerateLoRA as H3RegenerateLoRA,
     H3TurboBase as H3TurboBase,
     H3TurboLoRA as H3TurboLoRA,
+    H3VideoVAE as H3VideoVAE,
     condition_references,
 )
 from minimax_h3.official import (
@@ -114,6 +115,8 @@ from minimax_h3.official import (
     MAX_IMAGE_REFERENCES,
     MAX_REFERENCES,
     MAX_VIDEO_REFERENCES,
+    FRAMES_PER_CHUNK,
+    LATENTS_PER_CHUNK,
     MIN_FRAMES,
     REFERENCE_IMAGE_SHORT_EDGE,
     VAE_SPATIAL_RATIO,
@@ -1495,6 +1498,76 @@ async def regenerate_shot(
             frame_rate=str(saved.frame_rate), video_bytes=saved.video.size_bytes)  # fmt: skip
     ctx.release_gpus()
     return RegenerateOutput(saved.video, warnings)
+
+
+class VaeRoundTrip(msgspec.Struct, kw_only=True):
+    """`vae_round_trip`: `video`'s frames, as many as it has, at its H3 canvas."""
+
+    video: Annotated[VideoFile, FileBound(max_decoded_bytes=2 << 30)]
+    #: A `vae_round_trip`'s `latents`, decoded in place of this call's own: two builds' decodes of the same latents.
+    latents: LatentFile | None = None
+
+
+class VaeRoundTripOutput(msgspec.Struct):
+    video: Annotated[VideoFile, FileBound(max_bytes=ANY_SIZE, media_types=("video/mp4",))]
+    #: The encode's normalized `(1, 24, T, h, w)` latents, float32 safetensors (`latents`).
+    latents: LatentFile
+    #: Every 32nd decoded frame, `(t, 3, H, W)` float32 before clipping (`frames`), and their indices (`index`).
+    frames: LatentFile
+
+
+#: The decoded frames `vae_round_trip` keeps: one in this many.
+_KEPT_EVERY = 32
+
+
+@app.entrypoint(defaults={"base_model": _MODEL}, components={"base_model": ("vae",)})
+async def vae_round_trip(
+    ctx: Context, *, payload: VaeRoundTrip, base_model: H3VideoVAE, out: Outputs, tel: Telemetry
+) -> VaeRoundTripOutput:
+    """The video VAE alone: `video` encoded as `upscale` encodes a video (`vae_encode`), then decoded as `generate` decodes
+    a shot, streamed to its MP4 (`vae_decode`). Its benchmark and release-gate cell (cr-306)."""
+    with tel.stage("read_video"):
+        pixels, _, _, count, warnings = _read_draft(payload.video, _draft_size(payload.video))
+        pixels = pixels[:count]
+    with tel.stage("vae_encode"):
+        own = base_model.encode_clip(pixels).cpu()
+    del pixels
+    latents = own if payload.latents is None else load_tensors(payload.latents.read_bytes())["latents"]
+    steps = int(latents.shape[2]) - 2
+    if steps < 0 or steps % LATENTS_PER_CHUNK:
+        raise InvalidRequest(f"{int(latents.shape[2])} latent frames are not on the VAE's 5n + 2 grid", fields=["latents"])
+    frames = steps // LATENTS_PER_CHUNK * FRAMES_PER_CHUNK + 5
+    kept: list[Tensor] = []
+    index: list[int] = []
+    with tel.stage("vae_decode"):
+        stream = _VideoStream(torch, out, frames=frames, waveform=None, sample_rate=0, cancel=ctx.raise_if_cancelled,
+                              progress=ctx.progress)  # fmt: skip
+
+        def push(chunk: Tensor) -> None:
+            first = stream.landed
+            for at in range(-first % _KEPT_EVERY, int(chunk.shape[0]), _KEPT_EVERY):
+                kept.append(chunk[at].float().cpu())
+                index.append(first + at)
+            stream.push(chunk)
+
+        try:
+            base_model.decode_latents(latents.to(str(base_model.device), torch.float32), on_chunk=push)
+        except BaseException:
+            stream.abandon()
+            raise
+    try:
+        with tel.stage("save_video"):
+            saved = stream.finish(ctx.progress)
+    except BaseException:
+        stream.abandon()
+        raise
+    ctx.release_gpus()
+    blob = save_tensors({"frames": torch.stack(kept), "index": torch.tensor(index)})
+    return VaeRoundTripOutput(
+        saved.video,
+        out.save_bytes(save_tensors({"latents": own.float().contiguous()}), media_type="application/octet-stream"),
+        out.save_bytes(blob, media_type="application/octet-stream"),
+    )
 
 
 # --- the three tools ---------------------------------------------------------------------

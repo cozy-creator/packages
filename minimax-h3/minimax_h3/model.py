@@ -10,7 +10,13 @@ from typing import TYPE_CHECKING, Literal, TypedDict, cast
 
 import torch
 from torch import nn
-from diffusers.models.autoencoders.autoencoder_kl_minimax_h3 import MiniMaxH3VideoTransformerBlock
+from diffusers.models.autoencoders.autoencoder_kl_minimax_h3 import (
+    MiniMaxH3VideoCausalConv3d,
+    MiniMaxH3VideoDownsample3d,
+    MiniMaxH3VideoGroupNorm,
+    MiniMaxH3VideoResnetBlock3d,
+    MiniMaxH3VideoTransformerBlock,
+)
 
 from cozy_runtime import rng
 from cozy_runtime.accel import fusion, stepcache
@@ -33,6 +39,7 @@ from .official import (
     REGENERATE_COMPONENT,
     OfficialH3Pipeline,
     OfficialH3RegenerateLoRA,
+    OfficialH3VideoVAE,
     OfficialH3TurboLoRA,
     ReferenceMemo,
     Schedule,
@@ -43,6 +50,7 @@ from .official import (
     build_h3_regenerate_lora,
     build_h3_turbo_base,
     build_h3_turbo_lora,
+    build_h3_video_vae,
     model_plans,
     regenerate_plan,
 )
@@ -83,6 +91,42 @@ VAE_BLOCK = fusion.DiTBlock(
     rms_rounding="once",
     qk_affine=False,
     compose=True,
+)
+
+
+def _causal_padding(conv: nn.Module) -> fusion.Padding:
+    """A causal conv's padding: `spatial_padding` pixels each side, reflected as the release's
+    `spatial_padding_mode` says, and `temporal_padding` zero frames before."""
+    layer = cast(MiniMaxH3VideoCausalConv3d, conv)  # `VAE_ENCODER` declares this class alone
+    side = int(layer.spatial_padding)
+    fills: dict[str, Literal["reflect", "zeros"]] = {"reflect": "reflect", "constant": "zeros", "zeros": "zeros"}
+    fill = fills.get(layer.spatial_padding_mode)
+    if fill is None:
+        raise ValueError(f"no fused {layer.spatial_padding_mode!r} padding")
+    return (side, side, side, side), int(layer.temporal_padding), fill
+
+
+def _downsample_pad(block: nn.Module) -> tuple[int, int, int, int]:
+    """A downsampler's reflected right column and bottom row before its 2x spatial stride."""
+    stride = cast(MiniMaxH3VideoDownsample3d, block).spatial_stride  # `VAE_ENCODER` declares it
+    return (0, 1, 0, 1) if stride == 2 else (0, 0, 0, 0)
+
+
+#: The video VAE's causal-conv encoder as Runtime runs it (cr-306): NDHWC in fp16, each per-frame
+#: GroupNorm, SiLU and pad one pass, each conv accumulating in fp16 with its resnet block's residual
+#: in its epilogue, as ComfyUI's runs under `--fast fp16_accumulation` (Paul, 11-16: "we should be
+#: using the --fast fp16_accumulation"). The encoder's rows are f16 in every lane (`lanes.vae_operand`).
+VAE_ENCODER = fusion.CausalConvEncoder(
+    fusion.CausalConv(MiniMaxH3VideoCausalConv3d, padding=_causal_padding),
+    norm=MiniMaxH3VideoGroupNorm,
+    blocks=(
+        fusion.ConvResidual(
+            MiniMaxH3VideoResnetBlock3d,
+            steps=(("norm1", "conv1"), ("norm2", "conv2")),
+            shortcut="conv_shortcut",
+        ),
+        fusion.PaddedConv(MiniMaxH3VideoDownsample3d, conv="conv", pad=_downsample_pad),
+    ),
 )
 
 
@@ -175,8 +219,8 @@ class H3Model(Model[OfficialH3Pipeline]):
         return None
 
     def execution_plan(self, plan: Plan) -> str:
-        """The fused glue on every filled H3 DiT, the fused video VAE decoder blocks, the CP
-        producer's rotary hook, and each DiT's cacheable block stack (`STACK`)."""
+        """The fused glue on every filled H3 DiT, the fused video VAE encoder and decoder blocks,
+        the CP producer's rotary hook, and each DiT's cacheable block stack (`STACK`)."""
         for component in self.pipe.components.values():
             producer.retain_rotary(component)
         components = self.pipe.components
@@ -184,6 +228,7 @@ class H3Model(Model[OfficialH3Pipeline]):
         plans = (
             glue.install(self, self.pipe, plan),
             fusion.install(plan, VAE_BLOCK, self.pipe.components["vae"]),
+            fusion.install_encoder(plan, VAE_ENCODER, self.pipe.components["vae"]),
             *(stepcache.install(plan, STACK, dit) for dit in dits),
         )
         return "+".join(identity for identity in plans if identity)
@@ -264,6 +309,35 @@ class H3Model(Model[OfficialH3Pipeline]):
         self, state: PipelineState, *, on_step: Callable[[int], None], cancel: Callable[[], None], recipe: FullRecipe = FULL_BALANCED
     ) -> ScheduleFacts:
         return self.pipe.denoise("ref2va", state, on_step=on_step, cancel=cancel, **recipe.denoise())
+
+
+class H3VideoVAE(Model[OfficialH3VideoVAE]):
+    """H3's video VAE alone, its release's `vae` and nothing else loaded (`vae_round_trip`): the encode and decode
+    `H3Model` runs, with the same fused encoder and decoder blocks and 8-bit decoder attention."""
+
+    serving = Serving(attention_bits={"vae": 8})
+
+    pipe: OfficialH3VideoVAE
+
+    def load(self, loader: Loader) -> None:
+        self.pipe = loader.construct(build_h3_video_vae)
+
+    def unload(self, loader: Loader) -> None:
+        return None
+
+    def execution_plan(self, plan: Plan) -> str:
+        """The fused video VAE encoder and decoder blocks."""
+        vae = self.pipe.components["vae"]
+        plans = (fusion.install(plan, VAE_BLOCK, vae), fusion.install_encoder(plan, VAE_ENCODER, vae))
+        return "+".join(identity for identity in plans if identity)
+
+    @uses_components("vae")
+    def encode_clip(self, pixels: torch.Tensor) -> torch.Tensor:
+        return self.pipe.encode_clip(pixels, regenerate.POSTERIOR_SEED)
+
+    @uses_components("vae")
+    def decode_latents(self, latents: torch.Tensor, *, on_chunk: Callable[[torch.Tensor], None]) -> int:
+        return self.pipe.decode_latents(latents, on_chunk)
 
 
 class H3TurboBase(H3Model):
