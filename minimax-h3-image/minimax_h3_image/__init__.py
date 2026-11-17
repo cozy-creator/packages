@@ -13,6 +13,7 @@ from cozy_runtime.image import MEGAPIXEL, ImageRequest, ImageResult, Sizes, rati
 from cozy_runtime.media import ImageFile
 
 from . import lanes as lanes  # the lane functions and the quantized lanes' recipes
+from . import probe as probe  # se-150's measurement, not merged
 from .application import app as app
 from .expander import H3ImagePE
 from .model import GRID, LATENT_CHANNELS, MAX_PICTURES, STEPS, H3Image, H3ImageEncoder, H3TextEncoder, latent_grid, upright

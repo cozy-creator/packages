@@ -13,6 +13,7 @@ from cozy_runtime.image import MEGAPIXEL, ImageRequest, ImageResult, Sizes
 from PIL import Image as PILImage
 
 from . import lanes as lanes  # the `pruned` lane function and the quantized lanes' recipes
+from . import probe as probe  # se-150's measurement, not merged
 from .application import app as app
 from .model import CANVAS_MIN_PIXELS, GRID, IMAGE_COMPONENTS, MAX_PICTURES, PICTURE_PIXELS, SIGMAS, STEPS, PH3Image, resized, size_in_range
 from .upsampler import UPSAMPLER_COMPONENTS, PH3Upsampler, aspect_label
