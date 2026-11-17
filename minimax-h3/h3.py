@@ -1511,6 +1511,8 @@ class VaeRoundTrip(msgspec.Struct, kw_only=True):
     latents: LatentFile | None = None
     #: Evidence only: decode once more under torch.profiler and print its kernel and sync totals.
     profile: bool = True
+    #: Evidence only: read, encode and decode once more beside threads that keep every core and the memory bus busy.
+    contend: bool = True
 
 
 class VaeRoundTripOutput(msgspec.Struct):
@@ -1562,18 +1564,20 @@ async def vae_round_trip(
                 index.append(at)
             landed.append(rgb.cpu())
 
-    _phases.ON[0] = True
+    evidence: dict[str, object] = {"cpu": _cpu_model()}
+    _phases.TEL[0], _phases.PREFIX[0], _phases.ON[0] = tel, "", True
     _phases.TOTALS.clear()
     host_before = _host_cpu()
     started = time.perf_counter()
     with tel.stage("vae_decode"):
         base_model.decode_latents(latents.to(str(base_model.device), torch.float32), on_chunk=push)
-    host_after = _host_cpu()
-    tel.log(_phases.dump("timed", decode_ms=round((time.perf_counter() - started) * 1000, 1), read_ms=read_ms, cpu=_cpu_model(),
-                         host=_host_delta(host_before, host_after)))
+    evidence["timed"] = {"decode_ms": round((time.perf_counter() - started) * 1000, 1), "read_ms": read_ms,
+                         "host": _host_delta(host_before, _host_cpu()), "phases": _phases.dump()}
     _phases.ON[0] = False
+    if payload.contend:
+        evidence["contended"] = _contended(payload, base_model, tel)
     if payload.profile:
-        tel.log(_profile_decode(base_model, latents))
+        evidence["profile"] = _profile_decode(base_model, latents)
     stream = _VideoStream(torch, out, frames=frames, waveform=None, sample_rate=0, cancel=ctx.raise_if_cancelled,
                           progress=ctx.progress)  # fmt: skip
     try:
@@ -1585,7 +1589,7 @@ async def vae_round_trip(
         stream.abandon()
         raise
     ctx.release_gpus()
-    blob = save_tensors({"frames": torch.stack(kept), "index": torch.tensor(index)})
+    blob = save_tensors({"frames": torch.stack(kept), "index": torch.tensor(index)}, metadata={"cr306": _phases.line(**evidence)})
     return VaeRoundTripOutput(
         saved.video,
         out.save_bytes(save_tensors({"latents": own.float().contiguous()}), media_type="application/octet-stream"),
@@ -1625,7 +1629,59 @@ def _cpu_model() -> str:
     return "?"
 
 
-def _profile_decode(base_model: H3VideoVAE, latents: Tensor) -> str:
+def _contended(payload: VaeRoundTrip, base_model: H3VideoVAE, tel: Telemetry) -> dict[str, object]:
+    """Evidence only: a noisy neighbour, emulated. Twice as many threads as this process may run on, each copying and
+    transforming 16 MiB arrays in numpy (no GIL held, no device work), while the clip is read, encoded and decoded again."""
+    import threading
+
+    stop = threading.Event()
+
+    def burn() -> None:
+        a = np.ones(4 << 20, dtype=np.float32)
+        b = np.empty_like(a)
+        while not stop.is_set():
+            np.copyto(b, a)
+            np.sin(a, out=b)
+
+    count = min(2 * len(os.sched_getaffinity(0)), 96)
+    threads = [threading.Thread(target=burn, daemon=True) for _ in range(count)]
+    for thread in threads:
+        thread.start()
+    result: dict[str, object] = {"threads": count}
+    try:
+        host_before = _host_cpu()
+        t0 = time.perf_counter()
+        with tel.stage("c.read_video"):
+            pixels, _, _, count_frames, _ = _read_draft(payload.video, _draft_size(payload.video))
+            pixels = pixels[:count_frames]
+        t1 = time.perf_counter()
+        with tel.stage("c.vae_encode"):
+            latents = base_model.encode_clip(pixels).cpu()
+        t2 = time.perf_counter()
+        del pixels
+        landed: list[Tensor] = []
+
+        def push(chunk: Tensor) -> None:
+            with _phases.phase("land.quantize"):
+                rgb = chunk.clamp(0, 1).mul(255).round().to(torch.uint8)
+            with _phases.phase("land.copy"):
+                landed.append(rgb.cpu())
+
+        _phases.PREFIX[0], _phases.ON[0] = "c.", True
+        with tel.stage("c.vae_decode"):
+            base_model.decode_latents(latents.to(str(base_model.device), torch.float32), on_chunk=push)
+        t3 = time.perf_counter()
+        result.update(read_ms=round((t1 - t0) * 1000, 1), encode_ms=round((t2 - t1) * 1000, 1), decode_ms=round((t3 - t2) * 1000, 1),
+                      host=_host_delta(host_before, _host_cpu()), phases=_phases.dump())
+    finally:
+        _phases.ON[0], _phases.PREFIX[0] = False, ""
+        stop.set()
+        for thread in threads:
+            thread.join()
+    return result
+
+
+def _profile_decode(base_model: H3VideoVAE, latents: Tensor) -> object:
     """Evidence only: one more decode under torch.profiler; GPU busy (kernel union) against wall, and the host's
     synchronizing calls."""
     import json as _json
@@ -1673,13 +1729,13 @@ def _profile_decode(base_model: H3VideoVAE, latents: Tensor) -> str:
                 row[0] += 1
                 row[1] += ev.time_range.elapsed_us() / 1000
         heavy = sorted(names.items(), key=lambda kv: -kv[1][1])[:20]
-        line = "CR306PROFILE " + _json.dumps({"wall_ms": round(wall, 1), "gpu_busy_ms": round(busy / 1000, 1),
+        found: object = {"wall_ms": round(wall, 1), "gpu_busy_ms": round(busy / 1000, 1),
             "device_ops": kernels, "host_calls": {k: [v[0], round(v[1], 1)] for k, v in top},
-            "kernels": {k: [v[0], round(v[1], 1)] for k, v in heavy}})
+            "kernels": {k: [v[0], round(v[1], 1)] for k, v in heavy}}
     except Exception as exc:  # evidence only: a profiler that cannot run says so
-        line = f"CR306PROFILE failed: {exc!r}"
-    print(line, file=_sys.stderr, flush=True)
-    return line
+        found = f"failed: {exc!r}"
+    print(f"CR306PROFILE {_json.dumps(found)}", file=_sys.stderr, flush=True)
+    return found
 
 
 class VaeEncodePicture(msgspec.Struct, kw_only=True):
