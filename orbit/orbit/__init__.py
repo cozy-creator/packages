@@ -277,3 +277,46 @@ async def orbit(ctx: Context, payload: Orbit, out: Outputs, tel: Telemetry) -> O
         saved = out.save_video_stream(silent(turned.frames), keyframe_interval=1)
     tel.log("orbit", method=ENDS, backdrop=plain or "scene", frames=saved.frame_count, seam_db=round(turned.seam_db, 2))
     return OrbitResult(saved.video.with_metadata({"orbit": TURN}), list(dict.fromkeys(turned.warnings)))
+
+
+# se-152's measurement harness (proof/se-152-orbit-arcs only, never merged): one H3 shot from a caption written out in
+# full, with up to four pictures, each a named reference, a keyframe, or both, and an optional LoRA.
+Picture = Annotated[ImageFile, ImagePreparation(max_pixels=16 << 20)]
+
+
+class Probe(msgspec.Struct, kw_only=True):
+    #: The whole caption; it mentions each picture `refs` names as `<name>`.
+    text: str
+    picture: Picture
+    picture2: Picture | None = None
+    picture3: Picture | None = None
+    picture4: Picture | None = None
+    #: The mention names of picture, picture2, ... in order; "" leaves that picture out of the references.
+    refs: list[str] = msgspec.field(default_factory=list)
+    #: The picture (1-4) the shot opens on and the one it ends on; 0 for none.
+    first: int = 0
+    last: int = 0
+    lora: str = ""
+    duration: Annotated[int, Range(MIN_DURATION_S, MAX_DURATION_S, unit="s")] = MIN_DURATION_S
+    aspect_ratio: str | None = None
+    seed: Seed | None = None
+
+
+@app.entrypoint
+async def probe(ctx: Context, payload: Probe, tel: Telemetry) -> OrbitResult:
+    """One shot exactly as asked: Ref2VA when `refs` names a picture, else FL2VA."""
+    ctx.raise_if_cancelled()
+    pictures = [payload.picture, payload.picture2, payload.picture3, payload.picture4]
+    named = {name: Image(file=picture) for name, picture in zip(payload.refs, pictures) if name and picture is not None}
+
+    def frame(index: int) -> ImageFile | None:
+        return pictures[index - 1] if index else None
+
+    beat = Beat(duration=payload.duration, description=Prompt(text=payload.text, references=References(named)))
+    shot = Shot(beats=[beat], first_frame=frame(payload.first), last_frame=frame(payload.last),
+                aspect_ratio=payload.aspect_ratio, seed=payload.seed)  # fmt: skip
+    loras = [ShotLoRA(model=payload.lora)] if payload.lora else []
+    with tel.scope("Probe"):
+        made = await call(render_shot, PackageShot(shot=shot, loras=loras))
+    tel.log("orbit probe", refs=",".join(named), first=payload.first, last=payload.last, lora=payload.lora or "none")
+    return OrbitResult(made.video, made.warnings)

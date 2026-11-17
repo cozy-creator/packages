@@ -107,3 +107,28 @@ def generate(ctx: Context, payload: ImageBox, model: H3Image, vae_encoder: H3Ima
         asset = ImageFile.from_image(picture, format="png")
     tel.log("minimax-h3-image", width=width, height=height, pictures=len(pictures), megapixels=round(width * height / MEGAPIXEL, 2))
     return ImageResult(asset, width, height, seed, prompt)
+
+
+class Probe(msgspec.Struct, kw_only=True):
+    """se-152's test pictures (proof/se-152-orbit-arcs only, never merged): `text`, and for an edit the one picture it
+    mentions as `<panel>`, rendered as written (no prompt expander)."""
+
+    text: str
+    picture: ImageFile | None = None
+    aspect_ratio: str | None = None
+    megapixels: float | None = None
+    seed: Seed | None = None
+
+
+@app.entrypoint(
+    defaults={"model": MODEL, "vae_encoder": MODEL, "text_encoder": TEXT_ENCODER, "expander": EXPANDER},
+    components={"model": ("transformer", "vae_decoder"), "vae_encoder": ("vae_encoder",),
+                "text_encoder": ("text_encoder",), "expander": ("model",)},
+    needs={"vae_encoder": "request.picture != null", "expander": "false"},
+)  # fmt: skip
+def probe(ctx: Context, payload: Probe, model: H3Image, vae_encoder: H3ImageEncoder, text_encoder: H3TextEncoder,
+          expander: H3ImagePE, tel: Telemetry, adj: Adjustments) -> ImageResult:  # fmt: skip
+    references = {"panel": Image(file=payload.picture)} if payload.picture is not None else {}
+    box = ImageBox(instructions=Prompt(text=payload.text, references=references), aspect_ratio=payload.aspect_ratio,
+                   megapixels=payload.megapixels, seed=payload.seed, prompt_upsampling=False)  # fmt: skip
+    return generate(ctx, box, model, vae_encoder, text_encoder, expander, tel, adj)
