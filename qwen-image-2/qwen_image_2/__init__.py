@@ -147,11 +147,14 @@ def _generate(
     tel: Telemetry,
     adj: Adjustments,
     turbo: FunAccLoRA | None,
+    sigmas: tuple[float, ...] | None = None,
+    own: bool = False,
 ) -> ImageResult:
     """Every function's body: with `turbo`, its overlay on the base model and its 4-step grid, else the
-    base model's 40 steps of uniform spacing."""
+    base model's 40 steps of uniform spacing. Proof only (se-153): `sigmas` a distilled schedule; `own` the
+    picture conditioned at its own size, at most the canvas's."""
     prompt, pictures = _said(payload.prompt, adj)
-    steps = turbo.steps if turbo else _STEPS
+    steps = len(sigmas) if sigmas else turbo.steps if turbo else _STEPS
     tel.log("sampling", regime="turbo (Fun Acc)" if turbo else "base", steps=steps,
             schedule="PDD grid, a head per step" if turbo else "uniform, dynamic shift")
     seed = payload.drawn_seed()
@@ -172,6 +175,8 @@ def _generate(
         # The picture being edited at the canvas's area, so the model reads it at the detail it draws (se-153; upstream
         # conditions every picture at 1 MP, `output_resolution`); the others at upstream's 1 MP.
         areas = (width * height, *(REFERENCE_AREA,) * (len(reference_images) - 1))
+        if own:
+            areas = (min(width * height, reference_images[0].width * reference_images[0].height), *areas[1:])
         with tel.stage("encoding reference images"):
             conditioning_images, reference_latents = vae.encode_reference_images(reference_images, areas=areas)
         ctx.raise_if_cancelled()
@@ -186,6 +191,8 @@ def _generate(
             embeds, mask, image_pad_mask = text_encoder.encode_image_prompt(prompt, conditioning_images)
     with tel.stage("generating image"):
         denoise = model.denoise if turbo is None else partial(turbo.denoise, model)
+        if sigmas:
+            denoise = partial(model.denoise, sigmas=sigmas)
         latents = denoise(
             embeds,
             mask,
@@ -266,6 +273,45 @@ def generate_turbo(
 ) -> ImageResult:
     """Qwen-Image-2.1 with Alibaba PAI's Fun Acc: the same inputs, in 4 steps."""
     return _generate(ctx, payload, expander_i2i, expander_t2i, model, text_encoder, vae, tel, adj, turbo_lora)
+
+
+#: Proof only (se-153): Qwen-Image-2.1-Turbo's own 8-step schedule, its `model_index.json` `sample_sigmas`
+#: (hf://Qwen/Qwen-Image-2.1-Turbo@fc13ba19).
+QWEN_TURBO_SIGMAS = (1.0, 0.978453, 0.95418, 0.926626, 0.89508, 0.845148, 0.704534, 0.414568)
+_QWEN_TURBO = {**_FULL, "model": "qwen/qwen-image-2.1-turbo@0.1.1"}
+
+
+@app.entrypoint(defaults=_QWEN_TURBO, components=_COMPONENTS, needs=_NEEDS, memoize=True)  # fmt: skip
+def generate_qwen_turbo(
+    ctx: Context,
+    payload: GenerateInput,
+    expander_i2i: Enhancer,
+    expander_t2i: Enhancer,
+    model: QwenImage21DiT,
+    text_encoder: QwenImage21TextEncoder,
+    vae: QwenImage21VAE,
+    tel: Telemetry,
+    adj: Adjustments,
+) -> ImageResult:
+    """Proof only (se-153): Qwen's own Qwen-Image-2.1-Turbo checkpoint on its 8 sigmas."""
+    return _generate(ctx, payload, expander_i2i, expander_t2i, model, text_encoder, vae, tel, adj, None, QWEN_TURBO_SIGMAS)
+
+
+@app.entrypoint(defaults=_TURBO, components=_COMPONENTS, needs=_NEEDS, memoize=True)  # fmt: skip
+def generate_turbo_own(
+    ctx: Context,
+    payload: GenerateInput,
+    expander_i2i: Enhancer,
+    expander_t2i: Enhancer,
+    model: QwenImage21DiT,
+    text_encoder: QwenImage21TextEncoder,
+    turbo_lora: FunAccLoRA,
+    vae: QwenImage21VAE,
+    tel: Telemetry,
+    adj: Adjustments,
+) -> ImageResult:
+    """Proof only (se-153): Turbo with the picture conditioned at its own size, at most the canvas's."""
+    return _generate(ctx, payload, expander_i2i, expander_t2i, model, text_encoder, vae, tel, adj, turbo_lora, own=True)
 
 
 class ImageBox(msgspec.Struct, kw_only=True):
