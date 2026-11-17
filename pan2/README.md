@@ -15,9 +15,10 @@ cozy run pan2/generate --input request.yaml
 cozy run pan2/generate --input request.yaml --file first_frame=opening.webp
 ```
 
-The prompt rewriter uses Qwen3.5-9B to write PAN2's structured, timed caption. It sees the first
-frame when one is supplied. `prompt_upsampling: false` takes an already structured caption JSON
-in `prompt`; it must fit 1480 PAN2-encoder tokens. The returned `prompt` is the actual caption used.
+The prompt rewriter uses Qwen3.5-9B to write PAN2's structured, timed caption: huihui-ai's abliterated one
+(`huihui-ai/huihui-qwen3.5-9b-abliterated`, refusals removed) by default, or Qwen's own with
+`--model reasoner=qwen/qwen3.5-9b@0.2.0`. It sees the first frame when one is supplied. `prompt_upsampling: false`
+takes an already structured caption JSON in `prompt`; it must fit 1480 PAN2-encoder tokens. The returned `prompt` is the actual caption used.
 
 Advanced controls are `steps` (50 by default), `guidance` (2.5), `negative_prompt`, and the seed.
 The model's own negative caption is used by default. Output sides snap to 32 pixels at approximately
@@ -26,7 +27,7 @@ The result reports actual width, height, frame count, fps and seed with its MP4.
 
 The checkpoint includes its Qwen text encoder, Wan2.2 VAE, configs and tokenizer. Runtime owns
 loading and residency; inference does not fetch models from Hugging Face. The separate conceptual
-reasoner is an on-demand model slot (`reasoner`), defaulting to `qwen/qwen3.5-9b@0.2.0`.
+reasoner is an on-demand model slot (`reasoner`), defaulting to `huihui-ai/huihui-qwen3.5-9b-abliterated@0.1.0`.
 
 `ifm/pan2@0.3.0` has two lanes: `bf16` and `int8` (int8 ConvRot on the DiT blocks and the Qwen encoder's language
 layers, [`quantize.py`](pan2/quantize.py)). A GPU with int8 tensor cores runs `int8`; `--lane bf16` pins 16 bits.
