@@ -1817,7 +1817,33 @@ async def _render(ctx: Context, shot: Shot, out: Outputs, tel: Telemetry, *, pla
                       kept_s=begun if take is not None else None, seams=seams)  # fmt: skip
 
 
-@app.tool(label="Shot", named="shot", reserved=_RESERVED)
+#: Which segment function a shot calls, from its request alone (cl-1103; Paul, 11-16), so a machine fetches that one's DiT before
+#: the shot starts and never the other's. A segment with references runs Ref2VA: one whose text mentions any, a pickup that goes on
+#: from its take's latents (its first frame is a reference), and every segment after the first, which starts from the last one's
+#: frame (more than one beat stands for more than one segment: a rule can't add the beats' seconds). A first segment of text and
+#: keyframes alone runs FL2VA, a pickup's too when its take has no latents (its new part opens on the take's frame). Over-fetched:
+#: Ref2VA for several beats that fit one segment, FL2VA where a beat with references shares the first segment. Still missed, and
+#: fetched when called: FL2VA for a take whose latents are there but can't be used (`unusable`), or where the only references are
+#: clips under `MIN_CLIP_SECONDS`. `_PACKAGE_NEEDS` is the same of a `PackageShot`'s shot.
+_SHOT_WIDE = "size(request.summary.references) > 0 || size(request.soundscape.references) > 0 || size(request.music.references) > 0"
+_SHOT_RESUMED = "request.pickup != null && request.pickup.take.latents != null"
+_SHOT_NEEDS = {
+    "ref2va_segment": f"{_SHOT_WIDE} || ({_SHOT_RESUMED}) || size(request.beats) > 1"
+                      " || request.beats.exists(b, size(b.description.references) > 0)",
+    "fl2va_segment": f"!({_SHOT_WIDE}) && !({_SHOT_RESUMED}) && request.beats.exists(b, size(b.description.references) == 0)",
+}  # fmt: skip
+_PACKAGE_WIDE = ("size(request.shot.summary.references) > 0 || size(request.shot.soundscape.references) > 0"
+                 " || size(request.shot.music.references) > 0")  # fmt: skip
+_PACKAGE_RESUMED = "request.shot.pickup != null && request.shot.pickup.take.latents != null"
+_PACKAGE_NEEDS = {
+    "ref2va_segment": f"{_PACKAGE_WIDE} || ({_PACKAGE_RESUMED}) || size(request.shot.beats) > 1"
+                      " || request.shot.beats.exists(b, size(b.description.references) > 0)",
+    "fl2va_segment": f"!({_PACKAGE_WIDE}) && !({_PACKAGE_RESUMED})"
+                     " && request.shot.beats.exists(b, size(b.description.references) == 0)",
+}  # fmt: skip
+
+
+@app.tool(label="Shot", named="shot", reserved=_RESERVED, needs=_SHOT_NEEDS)
 async def generate(ctx: Context, payload: Shot, out: Outputs, tel: Telemetry) -> ShotResult:
     """One continuous shot of any length, with sound (README.md): a summary, then what happens, beat by beat, each text
     with the references it mentions; an optional first and last frame; and Pick up from here, which goes on from a take
@@ -1843,7 +1869,7 @@ class PackageShotResult(msgspec.Struct):
     warnings: list[str]
 
 
-@app.entrypoint
+@app.entrypoint(needs=_PACKAGE_NEEDS)
 async def render_shot(ctx: Context, payload: PackageShot, out: Outputs, tel: Telemetry) -> PackageShotResult:
     """`generate` for another package (`orbit`): its LoRAs on every segment after Turbo's, as `edit` puts its edit LoRA
     on, and only the video back."""
@@ -1897,7 +1923,8 @@ class Edit(msgspec.Struct, kw_only=True):
     seed: Seed | None = None
 
 
-@app.tool(label="MiniMax H3 Edit", named="edit", reserved=_RESERVED)
+# A plate is a reference of every segment: an edit runs Ref2VA alone.
+@app.tool(label="MiniMax H3 Edit", named="edit", reserved=_RESERVED, needs={"ref2va_segment": "true", "fl2va_segment": "false"})
 async def edit(ctx: Context, payload: Edit, out: Outputs, tel: Telemetry) -> ShotResult:
     """A plate edited by its summary and beats, on Ref2VA under the chosen edit LoRA, its trigger opening each beat. With
     no picture in a beat, the plate's own first frame is the picture."""
