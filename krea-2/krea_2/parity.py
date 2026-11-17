@@ -2,16 +2,12 @@
 builds it, on the same weights, beside the package.
 
 Unmodified modules: `Krea2Transformer2DModel` in bf16 but its `_keep_in_fp32_modules` in F32, the whole
-`Qwen3VLModel` (every layer, its final norm), the Qwen-Image VAE in bf16; the tokenizer `AutoTokenizer` loads
-from the checkpoint's files; the pipeline's own `__call__` encodes (padded to 512 and masked), samples and
+`Qwen3VLModel` (every layer, its final norm), the Qwen-Image VAE in bf16; the checkpoint's tokenizer; the pipeline's own `__call__` encodes (padded to 512 and masked), samples and
 decodes. The noise is the package's (`rng.noise`, bf16 on the CPU), passed as `latents`.
 """
 
 from __future__ import annotations
 
-import json
-import os
-import tempfile
 from typing import cast
 
 import msgspec
@@ -24,10 +20,10 @@ from diffusers.models.autoencoders.autoencoder_kl_qwenimage import AutoencoderKL
 from diffusers.models.transformers.transformer_krea2 import Krea2Transformer2DModel
 from diffusers.pipelines.krea2.pipeline_krea2 import Krea2Pipeline
 from diffusers.schedulers.scheduling_flow_match_euler_discrete import FlowMatchEulerDiscreteScheduler
-from transformers import AutoTokenizer, Qwen3VLConfig, Qwen3VLModel
+from transformers import Qwen3VLConfig, Qwen3VLModel
 from transformers import initialization as transformer_init
 
-from .model import PATCH, construct
+from .model import PATCH, build_tokenizer, construct
 
 
 class RefGraph:
@@ -45,7 +41,6 @@ class RefGraph:
             "transformer": transformer.eval(), "text_encoder": encoder.eval(), "vae": vae.to(dtype=torch.bfloat16).eval(),
         }
         self.scheduler_config = dict(config.section("scheduler").mapping())
-        self.tokenizer_config = dict(config.section("tokenizer").mapping())
 
 
 class RefKrea2(Model[RefGraph]):
@@ -53,15 +48,7 @@ class RefKrea2(Model[RefGraph]):
 
     def load(self, loader: Loader) -> None:
         self.graph = loader.construct(RefGraph)
-        folder = tempfile.mkdtemp(prefix="krea2-tokenizer-")
-        for name in loader.assets.names():
-            if name.startswith("tokenizer/"):
-                with open(os.path.join(folder, name.removeprefix("tokenizer/")), "wb") as file:
-                    file.write(loader.assets.read(name))
-        if not os.path.exists(os.path.join(folder, "tokenizer_config.json")):
-            with open(os.path.join(folder, "tokenizer_config.json"), "w") as file:
-                json.dump(self.graph.tokenizer_config, file)
-        self.tokenizer = AutoTokenizer.from_pretrained(folder)
+        self.tokenizer = build_tokenizer(loader.assets)  # the checkpoint's tokenizer (no from_pretrained in a package)
 
     @uses_components("transformer", "text_encoder", "vae")
     def sample(self, prompt: str, negative: str, width: int, height: int, steps: int, guidance: float, seed: int,

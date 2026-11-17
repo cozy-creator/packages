@@ -220,10 +220,11 @@ def upscale(ctx: Context, payload: UpscaleInput, model: Flux2, turbo_lora: Flux2
 
 
 # se-157 proof only, never merged: the upstream reference on the same weights (`parity.py`).
-from .parity import RefFlux2 as _RefFlux2, RefInput as _RefInput, reference as _reference  # noqa: E402
+from .parity import RefFlux2 as _RefFlux2, RefInput as _RefInput, RefTurbo as _RefTurbo, reference as _reference  # noqa: E402
 
 
-@app.entrypoint(defaults={"model": _DEV}, components={"model": ("transformer", "text_encoder", "vae")})
-def reference(ctx: Context, payload: _RefInput, model: _RefFlux2, tel: Telemetry) -> ImageResult:
+@app.entrypoint(defaults={"model": _DEV, "turbo_lora": _TURBO},
+                components={"model": ("transformer", "text_encoder", "vae"), "turbo_lora": ("transformer",)})
+def reference(ctx: Context, payload: _RefInput, model: _RefFlux2, turbo_lora: _RefTurbo, tel: Telemetry) -> ImageResult:
     """se-157: Diffusers' Flux2Pipeline as fal's Turbo card runs it, beside the package."""
-    return _reference(ctx, payload, model, tel)
+    return _reference(ctx, payload, model, turbo_lora, tel)

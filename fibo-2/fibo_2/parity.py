@@ -1,22 +1,20 @@
 """se-157 proof only, never merged: Diffusers' `BriaFibo2Pipeline` (0.42.1) whole, as its docstring runs it
 (`from_pretrained(dtype=torch.bfloat16)`), on the same weights, beside the package.
 
-Unmodified modules (the whole Qwen3-VL with its head, the DiT, the FLUX.2 VAE in bf16), the processor
-`AutoProcessor` loads from the checkpoint's files, the checkpoint's fonts as files, and one `__call__`.
+Unmodified modules (the whole Qwen3-VL with its head, the DiT, the FLUX.2 VAE in bf16), the checkpoint's
+processor and fonts, and one `__call__`.
 The noise is the package's (`rng.noise`, f32 on the CPU), passed as `latents`.
 """
 
 from __future__ import annotations
 
 import hashlib
-import json
-import os
-import tempfile
+import io
 from typing import Annotated, cast
 
 import msgspec
 import torch
-from cozy_runtime import rng
+from cozy_runtime import rng, vlm
 from cozy_runtime.author import Config, Context, Loader, Model, Telemetry, uses_components
 from cozy_runtime.fields import FileBound
 from cozy_runtime.image import ImageResult
@@ -25,10 +23,10 @@ from diffusers.models.autoencoders.autoencoder_kl_flux2 import AutoencoderKLFlux
 from diffusers.models.transformers.transformer_bria_fibo2 import BriaFibo2Transformer2DModel
 from diffusers.pipelines.bria_fibo2.pipeline_bria_fibo2 import BriaFibo2Pipeline
 from diffusers.schedulers.scheduling_flow_match_euler_discrete import FlowMatchEulerDiscreteScheduler
-from transformers import AutoModelForImageTextToText, AutoProcessor, Qwen3VLConfig
+from transformers import AutoModelForImageTextToText, Qwen3VLConfig
 from transformers import initialization as transformer_init
 
-from .model import construct
+from .model import FONTS, construct
 
 
 class RefGraph:
@@ -52,23 +50,10 @@ class RefFibo2(Model[RefGraph]):
 
     def load(self, loader: Loader) -> None:
         self.graph = loader.construct(RefGraph)
-        root = tempfile.mkdtemp(prefix="fibo2-")
-        self.styles: dict[str, str] = {}
-        for name in loader.assets.names():
-            if name.startswith(("processor/", "model/fonts/", "model/styles/")):
-                path = os.path.join(root, name)
-                os.makedirs(os.path.dirname(path), exist_ok=True)
-                data = loader.assets.read(name)
-                with open(path, "wb") as file:
-                    file.write(data)
-                if name.endswith("negative_prompt.json"):
-                    self.styles[name] = data.decode()
-        processor = os.path.join(root, "processor")
-        if not os.path.exists(os.path.join(processor, "processor_config.json")):
-            with open(os.path.join(processor, "processor_config.json"), "w") as file:
-                json.dump(self.graph.processor_config, file)
-        self.processor = AutoProcessor.from_pretrained(processor)
-        self.fonts = [os.path.join(root, "model/fonts", f) for f in ("Aileron-Regular.otf", "DejaVuSans.ttf")]
+        self.processor = vlm.processor(loader.assets, "processor/", self.graph.processor_config)
+        self.fonts = tuple(loader.assets.read(name) for name in FONTS)
+        self.styles = {name: loader.assets.read(name).decode() for name in loader.assets.names()
+                       if name.endswith("negative_prompt.json")}
 
     @uses_components("transformer", "text_encoder", "vae")
     def sample(self, prompt: str, images: list, width: int, height: int, steps: int, guidance: float,
@@ -83,7 +68,7 @@ class RefFibo2(Model[RefGraph]):
         latents = rng.noise((1, int(tf.config["in_channels"]), height // pipe.vae_scale_factor, width // pipe.vae_scale_factor), seed)
         with torch.inference_mode():
             out = pipe(prompt=prompt, image=images or None, height=height, width=width, num_inference_steps=steps,
-                       guidance_scale=guidance, negative_prompt=negative, fonts=self.fonts, latents=latents.to(device),
+                       guidance_scale=guidance, negative_prompt=negative, fonts=[io.BytesIO(font) for font in self.fonts], latents=latents.to(device),
                        output_type="pil")
         return out.images[0]
 

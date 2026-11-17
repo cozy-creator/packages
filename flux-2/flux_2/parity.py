@@ -1,18 +1,18 @@
-"""se-157 proof only, never merged: Diffusers' `Flux2Pipeline` (0.42.1) as fal's Turbo card and BFL run it, on
-the same [dev] weights, beside the package.
+"""se-157 proof only, never merged: Diffusers' `Flux2Pipeline` (0.42.1) as fal's Turbo card runs it, on the same
+[dev] weights, beside the package.
 
 The full Mistral-Small-3.2 (every layer, its final norm, its vision tower) encodes through the pipeline's own
-`_get_mistral_3_small_prompt_embeds` with the processor `AutoProcessor` loads from the checkpoint's files; the
-pipeline's `__call__` samples (its scheduler, its 1 MP reference cap, its guidance embedding) and decodes with
-the VAE in bf16, the card's `torch_dtype` (BFL runs it in float32). fal's Turbo LoRA comes from its Hugging Face file and is added unfused, as
-PEFT does after `load_lora_weights` (scale alpha/r = 1), by forward hooks, so the shared weights are untouched.
+`_get_mistral_3_small_prompt_embeds` (the processor parsed from the checkpoint's files, as the package does: a
+package may not call `from_pretrained`); the pipeline's `__call__` samples (its scheduler, its 1 MP reference cap,
+its guidance embedding) and decodes with the VAE in bf16, the card's `torch_dtype` (BFL runs it in float32). fal's
+Turbo LoRA is added unfused, as PEFT does after `load_lora_weights` (scale alpha/r = 1), by forward hooks over
+fal's stored factors, so the weights stay untouched.
 """
 
 from __future__ import annotations
 
-import os
-import tempfile
-from typing import Annotated, cast
+from collections.abc import Callable
+from typing import Annotated, TypeVar, cast
 
 import msgspec
 import torch
@@ -26,12 +26,13 @@ from diffusers.models.transformers.transformer_flux2 import Flux2Transformer2DMo
 from diffusers.pipelines.flux2.pipeline_flux2 import Flux2Pipeline
 from diffusers.pipelines.flux2.system_messages import SYSTEM_MESSAGE
 from diffusers.schedulers.scheduling_flow_match_euler_discrete import FlowMatchEulerDiscreteScheduler
-from transformers import AutoProcessor
+from PIL import Image
 from transformers import initialization as transformer_init
 
-from .model import MAX_TOKENS, PATCH, TEXT_LAYERS, TURBO_SIGMAS, construct, text_encoder
+from .model import MAX_TOKENS, PATCH, TEXT_LAYERS, TURBO_SIGMAS, construct, processor, text_encoder
+from .turbo import COMPONENT, Flux2TurboLoRA
 
-TURBO_REPO, TURBO_REV, TURBO_FILE = "fal/FLUX.2-dev-Turbo", "9ee51cd87578162cf8d02355a870bc5f4570045c", "flux.2-turbo-lora.safetensors"
+T = TypeVar("T")
 
 
 class RefGraph:
@@ -42,7 +43,7 @@ class RefGraph:
             vae = construct(AutoencoderKLFlux2, config.section("vae").mapping())
         self.components: dict[str, torch.nn.Module] = {
             "transformer": transformer.to(dtype=torch.bfloat16), "text_encoder": encoder.eval(),
-            "vae": vae.to(dtype=torch.bfloat16),  # the card's torch_dtype; the pipeline decodes in the VAE's dtype
+            "vae": vae.to(dtype=torch.bfloat16),
         }
         self.scheduler_config = dict(config.section("scheduler").mapping())
 
@@ -52,14 +53,7 @@ class RefFlux2(Model[RefGraph]):
 
     def load(self, loader: Loader) -> None:
         self.graph = loader.construct(RefGraph)
-        folder = tempfile.mkdtemp(prefix="flux2-tokenizer-")
-        for name in loader.assets.names():
-            if name.startswith("tokenizer/"):
-                path = os.path.join(folder, name.removeprefix("tokenizer/"))
-                os.makedirs(os.path.dirname(path), exist_ok=True)
-                with open(path, "wb") as file:
-                    file.write(loader.assets.read(name))
-        self.processor = AutoProcessor.from_pretrained(folder)
+        self.processor = processor(loader.assets)
 
     @uses_components("text_encoder")
     def encode(self, prompt: str) -> torch.Tensor:
@@ -72,8 +66,8 @@ class RefFlux2(Model[RefGraph]):
         return embeds.cpu()
 
     @uses_components("transformer", "vae")
-    def sample(self, embeds: torch.Tensor, images: list, width: int, height: int, steps: int, guidance: float,
-               seed: int, turbo: bool) -> object:
+    def sample(self, embeds: torch.Tensor, images: list[Image.Image], width: int, height: int, steps: int,
+               guidance: float, seed: int, turbo: bool) -> Image.Image:
         tf = cast(Flux2Transformer2DModel, self.graph.components["transformer"])
         device = torch.device(str(self.device))
         pipe = Flux2Pipeline(
@@ -81,38 +75,36 @@ class RefFlux2(Model[RefGraph]):
             vae=self.graph.components["vae"], text_encoder=None, tokenizer=None, transformer=tf,  # type: ignore[arg-type]
         )
         noise = rng.noise((1, int(tf.config["in_channels"]), height // PATCH, width // PATCH), seed).to(torch.bfloat16)
-        handles = _turbo_hooks(tf, device) if turbo else []
-        try:
+        with torch.inference_mode():
             out = pipe(
                 image=images or None, prompt_embeds=embeds.to(device), height=height, width=width,
                 num_inference_steps=steps, sigmas=list(TURBO_SIGMAS) if turbo else None, guidance_scale=guidance,
                 latents=noise.to(device), output_type="pil",
             )
+        return cast(Image.Image, out.images[0])
+
+
+class RefTurbo(Flux2TurboLoRA):
+    """fal's factors, added to each target linear's output by a forward hook: PEFT's unfused LoRA."""
+
+    @uses_components(COMPONENT)
+    def hooked(self, model: RefFlux2, body: Callable[[], T]) -> T:
+        tf = model.graph.components["transformer"]
+        handles = []
+        for path, pair in self.graph.factors.items():
+            down, up, scale = pair.factors()
+
+            def hook(_m: torch.nn.Module, inputs: tuple[torch.Tensor, ...], output: torch.Tensor,
+                     down: torch.Tensor = down, up: torch.Tensor = up, scale: float = scale) -> torch.Tensor:
+                x = inputs[0].to(device=down.device, dtype=down.dtype)
+                return output + scale * ((x @ down.T) @ up.T).to(output.device, output.dtype)
+
+            handles.append(tf.get_submodule(path).register_forward_hook(hook))
+        try:
+            return body()
         finally:
             for handle in handles:
                 handle.remove()
-        return out.images[0]
-
-
-def _turbo_hooks(tf: torch.nn.Module, device: torch.device) -> list:
-    from huggingface_hub import hf_hub_download
-    from safetensors.torch import load_file
-
-    weights = load_file(hf_hub_download(TURBO_REPO, TURBO_FILE, revision=TURBO_REV))
-    handles = []
-    for key in weights:
-        if not key.endswith(".lora_A.weight"):
-            continue
-        path = key.removeprefix("transformer.").removesuffix(".lora_A.weight")
-        down = weights[key].to(device=device, dtype=torch.bfloat16)
-        up = weights[key.replace("lora_A", "lora_B")].to(device=device, dtype=torch.bfloat16)
-        module = tf.get_submodule(path)
-
-        def hook(_module, inputs, output, down=down, up=up):
-            return output + (inputs[0].to(down.dtype) @ down.T) @ up.T
-
-        handles.append(module.register_forward_hook(hook))
-    return handles
 
 
 class RefInput(msgspec.Struct, kw_only=True):
@@ -126,8 +118,8 @@ class RefInput(msgspec.Struct, kw_only=True):
     seed: int = 7
 
 
-def reference(ctx: Context, payload: RefInput, model: RefFlux2, tel: Telemetry) -> ImageResult:
-    """The card's call: [dev] Turbo 8 sigmas at guidance 2.5, or [dev] 50 steps at 4."""
+def reference(ctx: Context, payload: RefInput, model: RefFlux2, turbo_lora: RefTurbo, tel: Telemetry) -> ImageResult:
+    """The card's call: [dev] Turbo, 8 sigmas at guidance 2.5, or [dev] 50 steps at 4."""
     images = [payload.image.read().convert("RGB")] if payload.image is not None else []
     width = payload.width or (images[0].width if images else 1024)
     height = payload.height or (images[0].height if images else 1024)
@@ -135,7 +127,12 @@ def reference(ctx: Context, payload: RefInput, model: RefFlux2, tel: Telemetry) 
     guidance = payload.guidance or (2.5 if payload.turbo else 4.0)
     with tel.stage("encoding prompt"):
         embeds = model.encode(payload.prompt)
+
+    def run() -> Image.Image:
+        return model.sample(embeds, images, width, height, steps, guidance, payload.seed, payload.turbo)
+
     with tel.stage("generating image"):
-        image = model.sample(embeds, images, width, height, steps, guidance, payload.seed, payload.turbo)
-    tel.log("reference", steps=steps, guidance=guidance, width=width, height=height, turbo=payload.turbo)
-    return ImageResult(ImageFile.from_image(image, format="png"), image.width, image.height, payload.seed, payload.prompt)  # type: ignore[attr-defined]
+        image = turbo_lora.hooked(model, run) if payload.turbo else run()
+    tel.log("reference", steps=steps, guidance=guidance, width=width, height=height, turbo=payload.turbo,
+            text_tokens=int(embeds.shape[1]))
+    return ImageResult(ImageFile.from_image(image, format="png"), image.width, image.height, payload.seed, payload.prompt)

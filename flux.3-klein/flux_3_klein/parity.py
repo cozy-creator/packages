@@ -8,13 +8,12 @@ loads it. Pixels are rounded (BFL truncates), so the comparison sees the pipelin
 
 from __future__ import annotations
 
-import os
-import tempfile
 from typing import Annotated, cast
 
 import msgspec
 import numpy as np
 import torch
+from cozy_runtime import vlm
 from cozy_runtime.author import Config, Context, Loader, Model, Telemetry, uses_components
 from cozy_runtime.fields import FileBound
 from cozy_runtime.image import ImageResult
@@ -23,7 +22,7 @@ from diffusers.models.autoencoders.autoencoder_kl_flux2 import AutoencoderKLFlux
 from diffusers.models.transformers.transformer_flux3 import Flux3Transformer2DModel
 from diffusers.modular_pipelines.flux3.encoders import Flux3TextEncoderStep
 from PIL import Image
-from transformers import AutoModelForImageTextToText, AutoProcessor, Qwen3VLConfig
+from transformers import AutoModelForImageTextToText, Qwen3VLConfig
 from transformers import initialization as transformer_init
 
 from .klein import MAX_TOKENS, PAD_MULTIPLE, TEXT_LAYERS, construct, prepare_reference
@@ -52,12 +51,8 @@ class RefKlein(Model[RefGraph]):
 
     def load(self, loader: Loader) -> None:
         self.graph = loader.construct(RefGraph)
-        folder = tempfile.mkdtemp(prefix="klein-text-encoder-")
-        for name in loader.assets.names():
-            if name.startswith("text_encoder/"):
-                with open(os.path.join(folder, name.removeprefix("text_encoder/")), "wb") as file:
-                    file.write(loader.assets.read(name))
-        self.processor = AutoProcessor.from_pretrained(folder)  # BFL `TextEncoder`: AutoProcessor of the folder
+        # BFL `TextEncoder`: the folder's processor, right-padded (the Runtime parses it: no from_pretrained here).
+        self.processor = vlm.processor(loader.assets, "text_encoder/")
         self.processor.tokenizer.padding_side = "right"
 
     @uses_components("text_encoder")
