@@ -1,6 +1,6 @@
 [project]
 name = "birefnet"
-version = "0.9.0rc2"
+version = "0.9.0"
 description = "BiRefNet background removal for supplied character references"
 requires-python = ">=3.12"
 dependencies = [
