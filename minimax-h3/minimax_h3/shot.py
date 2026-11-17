@@ -690,16 +690,15 @@ class SoFar:
 
 def join_kept(out: Outputs, take: VideoFile, frames: int, new: VideoFile) -> tuple[VideoFile, list[str]]:
     """A take's first `frames`, then `new`, as one video, when no latents carry the take into it: the kept start is
-    encoded at the new part's size and joined by packet copy (`save_video_concat`), under one soundtrack, the take's to
-    the cut, then the new part's."""
+    encoded at the new part's size and joined by packet copy (`Outputs.join_video`, which takes the saved start in, so it
+    isn't an output left unreturned), under one soundtrack, the take's to the cut, then the new part's."""
     probe = new.probe()
     sound = probe.soundtrack
+    if sound is None:
+        raise OutputError("the new part has no soundtrack to join under", code="output_integrity")
     warnings = [] if (take.probe().width, take.probe().height) == (probe.width, probe.height) else [
         f"the kept start is {take.probe().width}x{take.probe().height}, so it's scaled to the new part's {probe.width}x{probe.height}"
     ]  # fmt: skip
-    start = out.save_video_stream(_kept_frames(take, frames, (probe.width, probe.height))).video
-    if sound is None:
-        raise OutputError("the new part has no soundtrack to join under", code="output_integrity")
     kept_format = take.probe().soundtrack
     samples = frames * sound.sample_rate // FPS
     if kept_format is not None and (kept_format.channels, kept_format.sample_rate) == (sound.channels, sound.sample_rate):
@@ -709,18 +708,22 @@ def join_kept(out: Outputs, take: VideoFile, frames: int, new: VideoFile) -> tup
         before = np.zeros((sound.channels, 0), dtype=np.float32)
         if kept_format is not None:
             warnings.append("the kept start's sound isn't the new part's format, so it's silent")
-    before = np.pad(before, ((0, 0), (0, samples - before.shape[1])))
-    after = sound_chunks(new.stream(pictures=False))
-    waveform = np.concatenate([before, *after], axis=1).astype(np.float32)
+    before = np.pad(before, ((0, 0), (0, samples - before.shape[1]))).astype(np.float32)
+    parts = sound_chunks(new.stream(pictures=False))
+    after = np.concatenate(parts, axis=1).astype(np.float32) if parts else np.zeros((sound.channels, 0), dtype=np.float32)
+    layout, names = AUDIO_LAYOUTS[sound.channels]
+    track = DecodedAudioFormat(channels=sound.channels, sample_rate=sound.sample_rate, channel_layout=layout,
+                               channel_names=names, time_base=Fraction(1, sound.sample_rate))  # fmt: skip
 
-    def soundtrack(counts: Sequence[int]) -> Iterator[DecodedMediaEvent]:
-        layout, names = AUDIO_LAYOUTS[sound.channels]
-        yield DecodedMediaHeader(video=None, audio=DecodedAudioFormat(
-            channels=sound.channels, sample_rate=sound.sample_rate, channel_layout=layout, channel_names=names,
-            time_base=Fraction(1, sound.sample_rate)))  # fmt: skip
-        yield DecodedAudioChunk(channels=sound.channels, sample_count=int(waveform.shape[1]), sample_rate=sound.sample_rate,
-                                channel_layout=layout, channel_names=names,
-                                pcm_f32le=tuple(np.ascontiguousarray(channel).tobytes() for channel in waveform),
-                                pts=0, time_base=Fraction(1, sound.sample_rate))  # fmt: skip
+    def chunk(wave: npt.NDArray[np.float32], pts: int) -> Iterator[DecodedAudioChunk]:
+        if wave.shape[1]:
+            yield DecodedAudioChunk(channels=sound.channels, sample_count=int(wave.shape[1]), sample_rate=sound.sample_rate,
+                                    channel_layout=layout, channel_names=names,
+                                    pcm_f32le=tuple(np.ascontiguousarray(channel).tobytes() for channel in wave),
+                                    pts=pts, time_base=track.time_base)  # fmt: skip
 
-    return out.save_video_concat([start, new], soundtrack).video, warnings
+    join = out.join_video(track)
+    start = out.save_video_stream(_kept_frames(take, frames, (probe.width, probe.height))).video
+    join.append(start, lambda _: chunk(before, 0))
+    join.append(new, lambda _: chunk(after, samples), last=True)
+    return join.finish().video, warnings
