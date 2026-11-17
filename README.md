@@ -26,7 +26,7 @@ dependencies or qualifying a worker image.
 | `p-h3-image/` | P-H3-Image, Pruna AI's image model: text to image and edits of up to 8 pictures at 8 MP in 8 steps (MiniMax H3 Community License) |
 | `relayvsr/` | RelayVSR streaming 4x video upscaling, a fast alternative to SeedVR2 (Apache-2.0) |
 | `orbit/` | Orbit: a picture's subject seen from all the way round, one clockwise turn by `minimax-h3` under ORB360 |
-| `qwen3.6/` | Qwen3.6-35B-A3B and 27B: questions about text, images and videos, on Runtime's shared Qwen-VL code (Apache-2.0) |
+| `qwen3/` | Qwen3.5, 3.6 and 3.8 (abliterated checkpoints): questions about text, images and videos, on Runtime's shared Qwen-VL code (Apache-2.0) |
 | `examples/` | private `main()` scripts for conversions, uploads and diagnostics; run directly with `cozy run` |
 | `*/pyproject.toml` | release metadata; its one `cozy.application` entry point names the package's App |
 | `Taskfile.yaml` | `task publish -- [--dry-run] <package>` (release with its dependents), `task lock -- <package>` |
@@ -67,7 +67,7 @@ only its tolerances, as `Model` class keywords:
 
 - `min_bits=` (16, 8 or 4; default 8): the fewest bits the machine may pick by itself. A slot at
   4 takes `nvfp4` when it decodes; memory never lowers a lane.
-- `phase="decode"` for an LM's token loop (qwen3.5's and Klein's upsampler's).
+- `phase="decode"` for an LM's token loop (qwen3's and Klein's upsampler's).
 - `attention_bits=` (16, 8 or 4, or a mapping from a component-qualified module prefix to one;
   default 16): the fewest bits attention may run at. H3 declares 4 on its DiTs, Klein 8 on its
   image and joint blocks. `AttentionLayout.exact_paths` holds sites at 16.
