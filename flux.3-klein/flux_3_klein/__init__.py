@@ -251,13 +251,14 @@ _DISTILLED = "black-forest-labs/flux-3-klein@0.1.0"
 _BASE = "black-forest-labs/flux-3-klein-base@0.1.0"
 _KLEIN = ("transformer", "text_encoder", "vae")
 _COMPONENTS = {"model": _KLEIN, "upsampler": ("model",), "drafter": ("model",)}
-#: Built and fetched on first use: `prompt_upsampling=False` never pulls the upsampler, and
-#: `prompt_drafting=False` never pulls the drafter.
-_ON_DEMAND = ("upsampler", "drafter")
+#: Which requests need each (cl-1103, `_render`): the upsampler with upsampling on (unset is on), the drafter with
+#: drafting on too. Over-fetched: a finished layout caption (`is_finished`), which goes as written, but only its text says so.
+_NEEDS = {"upsampler": "request.prompt_upsampling != false",
+          "drafter": "request.prompt_upsampling != false && request.prompt_drafting"}
 
 
 @app.entrypoint(defaults={"model": _BASE, "upsampler": _UPSAMPLER, "drafter": _DRAFTER}, components=_COMPONENTS,
-                on_demand=_ON_DEMAND, memoize=True)
+                needs=_NEEDS, memoize=True)
 def generate(ctx: Context, payload: GenerateInput, drafter: Drafter, model: Klein, upsampler: Upsampler,
              tel: Telemetry, adj: Adjustments) -> ImageResult:
     """Klein Base, 50 steps with CFG 4: text to image, or an edit of up to ten ordered pictures."""
@@ -265,7 +266,7 @@ def generate(ctx: Context, payload: GenerateInput, drafter: Drafter, model: Klei
 
 
 @app.entrypoint(defaults={"model": _DISTILLED, "upsampler": _UPSAMPLER, "drafter": _DRAFTER}, components=_COMPONENTS,
-                on_demand=_ON_DEMAND, memoize=True)
+                needs=_NEEDS, memoize=True)
 def generate_turbo(ctx: Context, payload: TurboInput, drafter: Drafter, model: Klein, upsampler: Upsampler,
                    tel: Telemetry, adj: Adjustments) -> ImageResult:
     """The distilled Klein, 16 steps, no guidance: text to image, or an edit of up to ten ordered pictures."""
@@ -287,11 +288,16 @@ class ImageBox(msgspec.Struct, kw_only=True):
     prompt_upsampling: Annotated[bool, Advanced()] = True
 
 
-# Each checkpoint is built, and its weights fetched, only when a box asks for it.
+# Each checkpoint is fetched only for a box that uses it: the distilled Klein (`model`) with `turbo`, else Base
+# (`full`); the upsampler and drafter as `_NEEDS` says, a box always drafting.
+_BOX_NEEDS = {"drafter": "request.prompt_upsampling", "full": "!request.turbo", "model": "request.turbo",
+              "upsampler": "request.prompt_upsampling"}
+
+
 @app.tool(label="FLUX.3 Klein", named="image",
           defaults={"drafter": _DRAFTER, "full": _BASE, "model": _DISTILLED, "upsampler": _UPSAMPLER},
           components={"drafter": ("model",), "full": _KLEIN, "model": _KLEIN, "upsampler": ("model",)},
-          on_demand=("drafter", "full", "model", "upsampler"), memoize=True)  # fmt: skip
+          needs=_BOX_NEEDS, memoize=True)  # fmt: skip
 def image(ctx: Context, payload: ImageBox, drafter: Drafter, full: Klein, model: Klein, upsampler: Upsampler,
           tel: Telemetry, adj: Adjustments) -> ImageResult:
     """FLUX.3 Klein on a canvas, upsampled: the distilled model, or Base, which loads only when asked for."""
