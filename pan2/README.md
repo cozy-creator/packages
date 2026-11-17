@@ -28,11 +28,15 @@ The checkpoint includes its Qwen text encoder, Wan2.2 VAE, configs and tokenizer
 loading and residency; inference does not fetch models from Hugging Face. The separate conceptual
 reasoner is an on-demand model slot (`reasoner`), defaulting to `qwen/qwen3.5-9b@0.2.0`.
 
-`ifm/pan2@0.2.0` has two lanes: `bf16` and `int8` (int8 ConvRot on the DiT blocks and the Qwen encoder's language
+`ifm/pan2@0.3.0` has two lanes: `bf16` and `int8` (int8 ConvRot on the DiT blocks and the Qwen encoder's language
 layers, [`quantize.py`](pan2/quantize.py)). A GPU with int8 tensor cores runs `int8`; `--lane bf16` pins 16 bits.
+The `int8` DiT is in the curve form (ComfyUI's, se-140): its modulation input is a table of 192 coordinates at 4097
+points of t, and each AdaLN linear takes those coordinates, 0.8 GB in place of 17.7 GB of F32 (a 24 GiB DiT, not 41).
+[`lanes.py`](pan2/lanes.py) `curve` writes it from the full form; the recipe then quantizes it:
 
 ```sh
-cozy model quantize ifm/pan2@0.1.0 --lane int8 --package ./pan2 --on <machine>
+cozy run ./pan2/curve ifm/pan2@0.2.0 ifm/pan2 --on <machine>
+cozy model quantize ifm/pan2@<the curve commit> --lane int8 --package ./pan2 --on <machine>
 ```
 
 PAN2 code and weights are Apache-2.0, with upstream notices retained. The optional upstream
