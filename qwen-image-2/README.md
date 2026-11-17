@@ -1,8 +1,8 @@
-# Qwen Image 2
+# Qwen Image 2.1
 
 `generate` creates or edits one lossless image using Qwen-Image-2.1, and `generate_turbo` does
 the same with Alibaba PAI's Fun Acc overlay on it (`alibaba-pai/qwen-image-2.1-fun-acc`, a 330 MiB
-4-step distillation). Both take the same inputs. On a canvas they're one tool, `image` (Qwen Image 2):
+4-step distillation). Both take the same inputs. On a canvas they're one tool, `image` (Qwen Image 2.1; Qwen Image 1 is `qwen-image`):
 its `instructions`, a Turbo toggle (the overlay loads only when asked for), `aspect_ratio`, `megapixels`, `seed` and,
 under Advanced, `prompt_upsampling` and `creativity`. The model checkpoint is selected
 independently from the package. TensorFS owns model downloads and bytes;

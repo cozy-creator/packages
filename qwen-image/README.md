@@ -1,4 +1,4 @@
-# Qwen Image
+# Qwen Image 1
 
 Qwen's 20B dual-stream DiT with a Qwen2.5-VL-7B text encoder. One function generates from text with
 Qwen-Image-2512, or edits and composes the pictures its prompt mentions with Qwen-Image-Edit-2511. The two
@@ -10,8 +10,8 @@ DiT changes between requests.
 | `generate` | `qwen/qwen-image-2512@0.1.1` | `qwen/qwen-image-edit-2511@0.1.0` | 50 / 40 | true CFG 4.0 |
 | `generate_turbo` | the same, with `lightx2v/qwen-image-2512-lightning-lora@0.1.0` | the same, with `lightx2v/qwen-image-edit-2511-lightning-lora@0.1.0` | 8 | none |
 
-`image` is the canvas tool, its prompt `instructions`, one box for both: `turbo` (on by default), `aspect_ratio` and `seed`, at
-the card's 1328² class. Each DiT and LoRA loads only when a render asks for it.
+On a canvas it's one tool, `image` (Qwen Image 1; Qwen Image 2.1 is `qwen-image-2`), its prompt `instructions`, one box for
+both: `turbo` (on by default), `aspect_ratio`, `megapixels` and `seed`. Each DiT and LoRA loads only when a render asks for it.
 
 Write the request in a file, `request.yaml`:
 
@@ -53,7 +53,8 @@ machine's default lane.
 
 Text to image defaults to Qwen-Image-2512's 1328×1328 (1.68 MiP); an explicit `aspect_ratio` keeps that
 area. With references and neither size input, the output takes the first reference's aspect ratio and
-pixel count (upstream takes the last reference's ratio at 1 MiP). Sides are rounded to the 16 px grid.
+pixel count (upstream takes the last reference's ratio at 1 MiP). The `image` box always names a size, made or
+edited: `megapixels` 1 (Qwen-Image-Edit-2511's 1024²), 1.7 (Qwen-Image-2512's 1328², the default) or 2. Sides are rounded to the 16 px grid.
 The model serves 256² to 2 MiP with sides from 128 to 4096 px; anything outside is clamped and
 reported as a `clamp` adjustment.
 

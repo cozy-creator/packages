@@ -67,7 +67,7 @@ def decoded_image(decoded: torch.Tensor) -> PILImage.Image:
     pixels = decoded[0].detach().float()
     if not bool(torch.isfinite(pixels).all()):
         raise OutputError(
-            "Qwen Image decoder produced non-finite pixels, so there is no picture: try another seed, "
+            "Qwen Image 2.1's decoder produced non-finite pixels, so there is no picture: try another seed, "
             "and if it repeats another lane with `--lane bf16`",
             code="output_integrity",
         )
@@ -87,7 +87,7 @@ def _said(prompt: Prompt[Image], adj: Adjustments) -> tuple[str, list[Image]]:
     27130, 27161, 27174), kept with them (27190, 27200)."""
     keys = list(prompt.references)
     if len(keys) > MAX_PICTURES:
-        adj.warn("prompt", f"Qwen Image 2 takes {MAX_PICTURES} pictures, so it goes without {', '.join(f'<{key}>' for key in keys[MAX_PICTURES:])}")
+        adj.warn("prompt", f"Qwen Image 2.1 takes {MAX_PICTURES} pictures, so it goes without {', '.join(f'<{key}>' for key in keys[MAX_PICTURES:])}")
         keys = keys[:MAX_PICTURES]
     words = "\n".join(f"<{key}>: {prompt.references[key].description.strip()}" for key in keys if prompt.references[key].description.strip())
     said = "\n\n".join(filter(None, (prompt.text.strip(), words)))
@@ -290,7 +290,7 @@ def image(
     tel: Telemetry,
     adj: Adjustments,
 ) -> ImageResult:
-    """Qwen Image 2 on a canvas: Turbo (the base model and its Fun Acc overlay), or the full 40 steps."""
+    """Qwen Image 2.1 on a canvas: Turbo (the base model and its Fun Acc overlay), or the full 40 steps."""
     request = GenerateInput(prompt=payload.instructions, aspect_ratio=payload.aspect_ratio,
                             megapixels=payload.megapixels, seed=payload.seed,
                             prompt_upsampling=payload.prompt_upsampling, creativity=payload.creativity)  # fmt: skip
@@ -298,7 +298,7 @@ def image(
                      turbo_lora if payload.turbo else None)  # fmt: skip
 
 
-#: What Qwen Image 2 is asked of a picture it upscales: a restoration, after ausboss's Qwen-Image-2.1 Restore LoRA card (se-147).
+#: What Qwen Image 2.1 is asked of a picture it upscales: a restoration, after ausboss's Qwen-Image-2.1 Restore LoRA card (se-147).
 UPSCALE_PROMPT = ("Restore the picture at a higher resolution: remove the blur, noise and JPEG compression artifacts and "
                   "recover sharp, clean detail and edges, keeping the same composition, subject, line work and colours.")
 #: The base model's steps for an upscale: 20, 28 and 40 score alike against the clean pictures (se-147 round 2).
@@ -321,8 +321,8 @@ _UPSCALE = {"model": "qwen/qwen-image-2.1@0.1.0", "text_encoder": "atomicchat/qw
           components={"model": ("transformer",), "text_encoder": ("text_encoder",), "vae": ("vae",)}, memoize=True)  # fmt: skip
 def upscale(ctx: Context, payload: UpscaleInput, model: QwenImage21DiT, text_encoder: QwenImage21TextEncoder,
             vae: QwenImage21VAE, tel: Telemetry, adj: Adjustments) -> ImageResult:
-    """The picture restored at the size asked: the base model edits it from noise, the picture its reference at the
-    canvas's size, as Diffusers sizes a reference to its output, so the edit keeps to it pixel for pixel. A start from
+    """Qwen Image 2.1 restores the picture at the size asked: the base model edits it from noise, the picture its reference
+    at the canvas's size, as Diffusers sizes a reference to its output, so the edit keeps to it pixel for pixel. A start from
     the picture blown up keeps its blur and blocks at any strength (se-147)."""
     with tel.stage("reading picture"):
         picture = payload.image.read(mode="RGBA")

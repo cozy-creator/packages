@@ -1,14 +1,14 @@
-"""Qwen-Image: Qwen-Image-2512 text-to-image and Qwen-Image-Edit-2511 editing, full and Lightning,
+"""Qwen Image 1: Qwen-Image-2512 text-to-image and Qwen-Image-Edit-2511 editing, full and Lightning,
 Runtime-executed."""
 
 from __future__ import annotations
 
 from functools import partial
-from typing import TYPE_CHECKING, Annotated
+from typing import TYPE_CHECKING, Annotated, Literal
 
 import msgspec
 from cozy_runtime.author import Adjustments, App, Context, Seed, Telemetry
-from cozy_runtime.fields import AspectRatio, Image, Prompt, Ratios
+from cozy_runtime.fields import AspectRatio, Image, Label, Prompt, Ratios
 from cozy_runtime.image import (
     Guidance,
     ImageRequest,
@@ -36,6 +36,9 @@ MAX_MEGAPIXELS = 2.0
 SIZES = Sizes((MIN_MEGAPIXELS, MAX_MEGAPIXELS), (128, 4096), PATCH, "the model serves 0.06-2 MiP")
 #: Text to image defaults to Qwen-Image-2512's 1328² at 1:1.
 TEXT_MEGAPIXELS = 1328 * 1328 / MEGAPIXEL
+#: The box's sizes: Qwen-Image-Edit-2511's 1024² (Diffusers sizes an edit's output there), Qwen-Image-2512's 1328² (its
+#: last training stage and its card's 1:1), and the 2 MiP top of `SIZES`.
+MEGAPIXELS = {"1": 1.0, "1.7": TEXT_MEGAPIXELS, "2": MAX_MEGAPIXELS}
 #: `generate`'s recommended steps and negative prompt per DiT (each model card's), at true CFG 4.0.
 TEXT_STEPS, EDIT_STEPS, TURBO_STEPS = 50, 40, 8
 TEXT_NEGATIVE = (
@@ -197,6 +200,8 @@ class ImageBox(msgspec.Struct, kw_only=True):
     turbo: bool = True
     #: `ImageRequest.target`, held to the model's sizes (`SIZES.fit`).
     aspect_ratio: Annotated[AspectRatio, Ratios(min=1 / 16, max=16)] | None = None
+    #: `SIZES.pixels` of a picture made or edited (`MEGAPIXELS`): 1.7 is the native 1328², the default.
+    megapixels: Annotated[Literal["1", "1.7", "2"], Label("", options={"1": "1 MP", "1.7": "1.7 MP", "2": "2 MP"})] = "1.7"
     #: `ImageRequest.drawn_seed`.
     seed: Seed | None = None
 
@@ -209,9 +214,9 @@ class ImageBox(msgspec.Struct, kw_only=True):
                  "turbo_lora": f"request.turbo && request.instructions{_TEXT_RULE}"}, memoize=True)  # fmt: skip
 def image(ctx: Context, payload: ImageBox, edit_model: QwenImageTransformer, edit_turbo_lora: QwenImageLoRA,
           model: QwenImage, turbo_lora: QwenImageLoRA, tel: Telemetry, adj: Adjustments) -> ImageResult:
-    """Qwen Image on a canvas: Lightning, or the full models."""
+    """Qwen Image 1 on a canvas: Lightning, or the full models."""
     request = GenerateInput(prompt=payload.instructions, aspect_ratio=payload.aspect_ratio,
-                            seed=payload.seed)  # fmt: skip
+                            megapixels=MEGAPIXELS[payload.megapixels], seed=payload.seed)  # fmt: skip
     if payload.turbo:
         return _turbo(ctx, request, edit_model, edit_turbo_lora, model, turbo_lora, tel, adj)
     return _full(ctx, request, edit_model, model, tel, adj)
