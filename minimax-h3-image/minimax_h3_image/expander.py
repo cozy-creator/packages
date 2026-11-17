@@ -72,8 +72,22 @@ def _spans(answer: str) -> list[str]:
     return spans
 
 
+def _ratio(value: object) -> str | None:
+    ratio = _RATIO.fullmatch(str(value or ""))
+    if ratio is None or int(ratio[1]) <= 0 or int(ratio[2]) <= 0:
+        return None
+    return f"{ratio[1]}:{ratio[2]}"
+
+
+#: The two fields as the PE writes them, for an object JSON refuses: a quote left unescaped in the caption, or no
+#: comma between the fields. The caption runs to the last `"` before the ratio's key.
+_FIELDS = re.compile(r'"expanded_caption"\s*:\s*"(.*)"\s*,?\s*"(?:target_)?aspect_ratio"\s*:\s*"([^"]*)"', re.S)
+
+
 def parse(answer: str, ratio_key: str) -> Expansion | None:
-    """The answer's last JSON object with an `expanded_caption`, and its ratio when it is a positive `W:H`."""
+    """The answer's caption and its ratio (when a positive `W:H`): its last JSON object with an `expanded_caption`;
+    else its two fields read loosely; else, when it holds no object at all, the answer as written (sampled without
+    MiniMax's JSON-schema decoding, the PE writes about one answer in seven as the bare caption)."""
     for span in reversed(_spans(answer)):
         try:
             found = json.loads(span)
@@ -84,9 +98,13 @@ def parse(answer: str, ratio_key: str) -> Expansion | None:
         caption = found.get("expanded_caption")
         if not isinstance(caption, str) or not caption.strip():
             continue
-        ratio = _RATIO.fullmatch(str(found.get(ratio_key) or ""))
-        valid = ratio is not None and int(ratio[1]) > 0 and int(ratio[2]) > 0
-        return Expansion(caption.strip(), f"{ratio[1]}:{ratio[2]}" if valid else None)  # type: ignore[index]  # `valid`: matched
+        return Expansion(caption.strip(), _ratio(found.get(ratio_key)))
+    if loose := _FIELDS.search(answer):
+        caption = loose[1].replace('\\"', '"').replace("\\n", "\n").strip()
+        return Expansion(caption, _ratio(loose[2])) if caption else None
+    text = answer.strip()
+    if text and "{" not in text and "expanded_caption" not in text:
+        return Expansion(text, None)
     return None
 
 
