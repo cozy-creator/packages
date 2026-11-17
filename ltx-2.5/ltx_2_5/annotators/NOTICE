@@ -1,0 +1,18 @@
+The networks in this folder are adapted from Apache License 2.0 sources (see LICENSE), trimmed to inference with
+their module names kept so the authors' checkpoints load as they are.
+
+vda.py: Video Depth Anything, https://github.com/DepthAnything/Video-Depth-Anything at 4f5ae23172ba60fd7bc11ef671cca678842c7072
+  Copyright (2025) Bytedance Ltd. and/or its affiliates. Its DINOv2 is Copyright (c) Meta Platforms, Inc. and
+  affiliates; its motion module is from AnimateDiff (guoyww/AnimateDiff) and Copyright 2022 The HuggingFace Team.
+
+yolox.py: YOLOX, https://github.com/Megvii-BaseDetection/YOLOX at 0.1.1rc0
+  Copyright (c) 2014-2021 Megvii Inc.
+
+rtmpose.py: RTMPose and CSPNeXt, Copyright (c) OpenMMLab: https://github.com/open-mmlab/mmpose v1.3.2,
+  https://github.com/open-mmlab/mmdetection v3.3.0, https://github.com/open-mmlab/mmcv v2.1.0, configured as
+  DWPose (https://github.com/IDEA-Research/DWPose, Apache License 2.0).
+
+depth.py and pose.py follow the pre- and post-processing of the same sources and of the ComfyUI nodes Lightricks'
+Union Control workflow runs (yuvraj108c/ComfyUI-Video-Depth-Anything, Apache License 2.0;
+Fannovel16/comfyui_controlnet_aux). The OpenPose-style drawing in pose.py is written here to reproduce that
+annotator's output.
