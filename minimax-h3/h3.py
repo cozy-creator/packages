@@ -105,6 +105,7 @@ from minimax_h3.model import (
     H3RegenerateLoRA as H3RegenerateLoRA,
     H3TurboBase as H3TurboBase,
     H3TurboLoRA as H3TurboLoRA,
+    H3VideoVAE as H3VideoVAE,
     condition_references,
 )
 from minimax_h3.official import (
@@ -1521,7 +1522,7 @@ _KEPT_EVERY = 32
 
 @app.entrypoint(defaults={"base_model": _MODEL}, components={"base_model": ("vae",)})
 async def vae_round_trip(
-    ctx: Context, *, payload: VaeRoundTrip, base_model: H3TurboBase, out: Outputs, tel: Telemetry
+    ctx: Context, *, payload: VaeRoundTrip, base_model: H3VideoVAE, out: Outputs, tel: Telemetry
 ) -> VaeRoundTripOutput:
     """The video VAE alone: `video` encoded as `upscale` encodes a video (`vae_encode`), then decoded as `generate` decodes
     a shot, streamed to its MP4 (`vae_decode`). Its benchmark and release-gate cell (cr-306)."""

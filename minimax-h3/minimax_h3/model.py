@@ -266,6 +266,34 @@ class H3Model(Model[OfficialH3Pipeline]):
         return self.pipe.denoise("ref2va", state, on_step=on_step, cancel=cancel, **recipe.denoise())
 
 
+class H3VideoVAE(Model[OfficialH3Pipeline]):
+    """H3's video VAE alone, its release's `vae` and nothing else loaded (`vae_round_trip`): the encode and decode
+    `H3Model` runs, with the same fused encoder and decoder blocks and 8-bit decoder attention."""
+
+    serving = Serving(attention_bits={"vae": 8})
+
+    pipe: OfficialH3Pipeline
+
+    def load(self, loader: Loader) -> None:
+        plans = model_plans(loader.assets)
+        self.pipe = loader.construct(partial(build_h3_pipeline, plans=plans, assets=loader.assets))
+
+    def unload(self, loader: Loader) -> None:
+        return None
+
+    def execution_plan(self, plan: Plan) -> str:
+        """The fused video VAE decoder blocks."""
+        return fusion.install(plan, VAE_BLOCK, self.pipe.components["vae"])
+
+    @uses_components("vae")
+    def encode_clip(self, pixels: torch.Tensor) -> torch.Tensor:
+        return self.pipe.encode_clip(pixels, regenerate.POSTERIOR_SEED)
+
+    @uses_components("vae")
+    def decode_latents(self, latents: torch.Tensor, *, on_chunk: Callable[[torch.Tensor], None]) -> int:
+        return self.pipe.decode_latents(latents, on_chunk)
+
+
 class H3TurboBase(H3Model):
     """The five-root base checkpoint with construction-time turbo consumers.
 
