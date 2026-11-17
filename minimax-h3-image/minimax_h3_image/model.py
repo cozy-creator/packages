@@ -18,6 +18,7 @@ from typing import Literal, cast
 import numpy as np
 import torch
 from cozy_runtime import vlm
+from cozy_runtime.accel import fusion
 from cozy_runtime.accel.attention import AttentionLayout, attention_scope
 from cozy_runtime.accel.kernels import Plan
 from cozy_runtime.author import Config, Loader, Model, Serving, memoize, preview, uses_components
@@ -28,7 +29,7 @@ from transformers import ProcessorMixin, Qwen3VLConfig, Qwen3VLForConditionalGen
 
 from . import fused
 from .transformer import ImageTransformer, TabledTransformer, build_transformer, compute_dtypes, parse_tables
-from .vae import PIXEL_MEAN, PIXEL_STD, ImageDecoder, ImageEncoder
+from .vae import PIXEL_MEAN, PIXEL_STD, VAE_ENCODER, ImageDecoder, ImageEncoder
 
 #: The checkpoint's sampling grid (`pdd_config.json`), one output head per step.
 SIGMAS = (1.0, 0.9675236940383911, 0.8875485062599182, 0.75, 0.5327739119529724, 0.23200887441635132, 0.0)
@@ -273,11 +274,15 @@ class H3ImageEncoder(Model[EncoderGraph]):
     def unload(self, loader: Loader) -> None:
         return None
 
+    def execution_plan(self, plan: Plan) -> str:
+        """The fused encoder (`VAE_ENCODER`), MiniMax-H3's."""
+        return fusion.install_encoder(plan, VAE_ENCODER, self.graph.components["vae_encoder"])
+
     @uses_components("vae_encoder")
     def encode(self, pictures: list[Image.Image], noise: list[torch.Tensor]) -> list[torch.Tensor]:
         """Each picture's normalized latents `(1, 24, h, w)` on the CPU (Diffusers' `MiniMaxH3ImageEditVaeEncoderStep`):
         at its `VAE_EDGES` size, cropped to whole cells, ImageNet-normalized, a posterior sample with its `noise`
-        rounded to float16, cropped to whole patches."""
+        rounded to float16, cropped to whole patches. The encoder computes in its rows' dtype, the sample in float32."""
         encoder = cast(ImageEncoder, self.graph.components["vae_encoder"])
         device = torch.device(str(self.device))
         pixel_mean = torch.tensor(PIXEL_MEAN, device=device).view(1, -1, 1, 1)
@@ -290,9 +295,9 @@ class H3ImageEncoder(Model[EncoderGraph]):
                 pixels = torch.from_numpy(np.array(resized(picture, VAE_EDGES))).to(device).permute(2, 0, 1)[None]
                 pixels = pixels[..., : pixels.shape[-2] // 16 * 16, : pixels.shape[-1] // 16 * 16]
                 pixels = (pixels.to(torch.float32).div(255.0) - pixel_mean) / pixel_std
-                moments = encoder(pixels)
+                moments = encoder(pixels).float()
                 mu, logvar = torch.chunk(moments, 2, dim=1)
-                sample = mu + torch.exp(0.5 * torch.clamp(logvar, -30.0, 20.0)) * drawn.to(device, moments.dtype)
+                sample = mu + torch.exp(0.5 * torch.clamp(logvar, -30.0, 20.0)) * drawn.to(device, torch.float32)
                 latents = sample.to(torch.float16).float()
                 latents = latents[..., : latents.shape[-2] // 2 * 2, : latents.shape[-1] // 2 * 2]
                 out.append(((latents - mean) / std).cpu())
