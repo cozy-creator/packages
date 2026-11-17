@@ -233,8 +233,9 @@ def upscale(
 class UpscaleImageInput(Restoration, kw_only=True):
     #: `upscale_image`: the picture restored, the box's own version.
     image: Annotated[ImageFile, FileBound(max_decoded_bytes=256 << 20)]
-    #: `output_sizes`: the picture's shape fitted in this 16:9 canvas, as the video tool's.
-    resolution: Annotated[Resolution, Shape(pixels=_RESOLUTIONS)] = Resolution.HD
+    #: `output_sizes`: the picture's shape fitted in this 16:9 canvas, as the video tool's. 2160p: a small picture comes
+    #: out closest to its clean original there (se-149: DISTS 0.155 against 1080p's 0.178 on 225 px JPEGs).
+    resolution: Annotated[Resolution, Shape(pixels=_RESOLUTIONS)] = Resolution.UHD
     #: `restore_window`.
     seed: Seed = 42  # type: ignore[assignment]  # a literal: the interface is read from source (Seed is an int NewType)
 

@@ -11,7 +11,7 @@ Runtime's streaming media API.
 `upscale_image` (the Upscale tool on a picture box) restores one picture the same way, as a PNG: one frame
 through the same encode, denoise and decode. On a box its `image` is the box's own version (`<self.N>`), and the
 result is the box's next version. It takes `resolution` (the picture's shape fitted in that 16:9 canvas, as the video
-tool's), `seed`, `color_correction`, `input_noise_scale` and `latent_noise_scale`.
+tool's; 2160p by default, where a small JPEG comes out closest to its clean original, se-149), `seed`, `color_correction`, `input_noise_scale` and `latent_noise_scale`.
 
 Resolution defines the maximum 16:9 canvas; source-aspect output fits inside it. Internally,
 padding meets the model's 16-pixel grid and is cropped from the result. Audio is decoded and
