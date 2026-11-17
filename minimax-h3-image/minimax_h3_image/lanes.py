@@ -331,7 +331,7 @@ async def abliterate(ctx: Context, payload: Abliteration, expander: H3ImagePE, *
     r = difference[layer].float()
     r = r / r.norm()
     tel.log("refusal direction", layer=layer, separation=[round(s, 4) for s in separation])
-    writers = [k for k in tensors if k.endswith(_WRITERS) or k == _EMBED]
+    writers = [k for k in tensors if (k.startswith("model.language_model.layers.") and k.endswith(_WRITERS)) or k == _EMBED]
     with ctx.output("bf16", Derivation(base=src, order=[(COMPONENT, k) for k in tensors])) as out:
         with tel.stage("orthogonalizing"):
             for done, key in enumerate(writers, 1):

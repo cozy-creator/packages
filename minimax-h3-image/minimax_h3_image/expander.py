@@ -147,12 +147,12 @@ class H3ImagePE(VisionLM):
     def residuals(self, requests: list[str]) -> torch.Tensor:
         """Each request's residual stream at its last prompt token under the T2I PE's prompts, the thought opened, at
         every hidden state: `(layers + 1, requests, hidden)` float32 on the CPU (`lanes.abliterate`)."""
-        language = self.pipe.components[COMPONENT].model.language_model
+        model = self.pipe.components[COMPONENT].model
         rows = []
         for request in requests:
             inputs = self._inputs(text=[self._chat(Question(self.t2i_task.format(request)), self.t2i_system, True)])
             with torch.no_grad():
-                out = language(input_ids=inputs["input_ids"], attention_mask=inputs["attention_mask"], use_cache=False,
-                               output_hidden_states=True)  # fmt: skip
+                out = model(input_ids=inputs["input_ids"], attention_mask=inputs["attention_mask"], use_cache=False,
+                            output_hidden_states=True)  # fmt: skip
             rows.append(torch.stack([state[0, -1].float().cpu() for state in out.hidden_states]))
         return torch.stack(rows, dim=1)
