@@ -15,6 +15,8 @@ over a `bf16`. Its int8 can be no better than the NVFP4 it decodes: the FP4 grid
 from __future__ import annotations
 
 import math
+from typing import Literal
+
 import msgspec
 import torch
 from cozy_runtime.author import (
@@ -277,6 +279,13 @@ _WRITERS = ("linear_attn.out_proj.weight", "self_attn.o_proj.weight", "mlp.down_
 _EMBED = "model.language_model.embed_tokens.weight"
 
 
+def _plain_config(source: Checkpoint) -> dict[str, object]:
+    """The expander's construction config without ModelOpt's `quantization_config`: the upload keeps it, and the
+    Runtime refuses its `weights` carrier; the lanes' encodings are their tensors' own."""
+    config = {k: v for k, v in dict(source.components[COMPONENT].config).items() if k != "quantization_config"}
+    return dict(canonical_json.decode(canonical_json.encode(config)))
+
+
 async def expander_bf16(ctx: Context, *, source: Weights, tel: Telemetry) -> ModelArtifact:
     """The expander's `bf16` lane from its NVFP4 upload: each NVFP4 weight decoded and rounded once to bf16; every
     other tensor is the upload's."""
@@ -285,6 +294,7 @@ async def expander_bf16(ctx: Context, *, source: Weights, tel: Telemetry) -> Mod
     order = list(tensors)
     decoded = 0
     with ctx.output("bf16", Derivation(base=src, order=[(COMPONENT, k) for k in order])) as out:
+        out.config(COMPONENT, _plain_config(src))
         with tel.stage("decoding"):
             for done, key in enumerate(order, 1):
                 ctx.raise_if_cancelled()
@@ -299,6 +309,27 @@ async def expander_bf16(ctx: Context, *, source: Weights, tel: Telemetry) -> Mod
 
 app.entrypoint(expander_bf16, name="expander_bf16", accelerator=False,
                weights=(WeightsOutput("bf16", max_new_bytes=64 << 30),))  # fmt: skip
+
+
+class Relane(msgspec.Struct, kw_only=True):
+    #: The lane `source` is, which the output keeps.
+    lane: Literal["nvfp4", "bf16", "int8", "w4a8"]
+
+
+async def expander_config(ctx: Context, payload: Relane, *, source: Weights, tel: Telemetry) -> ModelArtifact:
+    """An expander checkpoint as it is, its config without ModelOpt's `quantization_config` (`_plain_config`): the
+    NVFP4 upload, and lanes derived before the config was cleaned. No tensor is written again."""
+    src = ctx.tensorfs_source(source)
+    order = [(COMPONENT, k) for k in src.components[COMPONENT].tensors]
+    with ctx.output(payload.lane, Derivation(base=src, order=order)) as out:
+        out.config(COMPONENT, _plain_config(src))
+        artifact = ctx.adopt_model(out)
+    tel.log("expander config", lane=payload.lane)
+    return artifact
+
+
+app.entrypoint(expander_config, name="expander_config", accelerator=False,
+               weights=tuple(WeightsOutput(lane, max_new_bytes=64 << 20) for lane in ("nvfp4", "bf16", "int8", "w4a8")))  # fmt: skip
 
 
 class Abliteration(msgspec.Struct, kw_only=True):
