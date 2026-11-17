@@ -1,7 +1,7 @@
 [project]
 name = "qwen-image-2"
-version = "0.14.0rc1"
-description = "Cozy image generation and reference editing using Qwen-Image-2.1"
+version = "0.14.0rc2"
+description = "Cozy image generation and reference editing with Qwen Image 2.1"
 requires-python = ">=3.12"
 dependencies = [
     "cozy-runtime[adapters,media]>=0.48.0.dev0,<0.49",
