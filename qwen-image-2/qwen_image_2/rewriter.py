@@ -72,6 +72,45 @@ _RATIO = re.compile(r"\s*(\d+(?:\.\d+)?)\s*:\s*(\d+(?:\.\d+)?)\s*")
 _FOLLOW = re.compile(r"\s*<image(\d+)>\s*")
 
 
+#: A request for a transparent picture, in the model card's words or a person's: an alpha channel, RGBA, or a
+#: transparent background (not an object that is itself transparent, as glass is).
+_TRANSPARENT = re.compile(
+    r"\b(?:rgba|alpha[\s-]*channel|transparent[\s-]+(?:back|bg\b)|background\s+(?:is\s+|that\s+is\s+)?transparent)",
+    re.IGNORECASE,
+)
+#: What a rewrite has lost a transparency request by: a background painted as transparency's stand-in.
+_PAINTED = re.compile(r"\bchecker|\bgrid\s+of\s+(?:gr[ae]y|white)|\btransparency[\s-]*(?:style|pattern|grid)", re.IGNORECASE)
+#: Appended to each enhancer's system prompt: Qwen's PE rewrites "transparent background" into a backdrop (a
+#: gray-and-white checkerboard), and Qwen-Image-2.1 draws RGBA only for the model card's wording.
+KEEP_TRANSPARENCY = (
+    "If the request asks for a transparent background, an alpha channel or an RGBA image, the picture must stay "
+    "transparent: begin rewritten_prompt with \"This is an RGBA image with transparency.\" and end it with \"The image "
+    "has alpha channel and the background is transparent.\", keep the request's own words about transparency, and "
+    "describe no background, backdrop, surface, scenery or checkerboard behind the subject."
+)
+
+
+#: The model card's own wording, which Qwen-Image-2.1 draws RGBA for (README "Transparent images").
+CARD = ("rgba image with transparency", "alpha channel and the background is transparent")
+
+
+def _phrases(text: str) -> set[str]:
+    return {" ".join(found[0].lower().split()) for found in _TRANSPARENT.finditer(text)}
+
+
+def transparent(request: str) -> bool:
+    """Whether `request` asks for a transparent picture."""
+    return bool(_phrases(request))
+
+
+def keeps_transparency(request: str, rewritten: str) -> bool:
+    """Whether a rewrite of `request` still asks for its transparency, in the request's own words or the model card's,
+    and paints no stand-in for it."""
+    flat = " ".join(rewritten.lower().split())
+    words = _phrases(request) <= _phrases(rewritten) or all(phrase in flat for phrase in CARD)
+    return words and _PAINTED.search(rewritten) is None
+
+
 @dataclass(frozen=True)
 class Rewrite:
     prompt: str
@@ -146,7 +185,7 @@ class Enhancer(VisionLM):
 
     def load(self, loader: Loader) -> None:
         super().load(loader)
-        self.system = loader.assets.read(SYSTEM_PROMPT).decode("utf-8").strip()
+        self.system = loader.assets.read(SYSTEM_PROMPT).decode("utf-8").strip() + "\n\n" + KEEP_TRANSPARENCY
 
     @uses_components(COMPONENT)
     def answer(

@@ -16,7 +16,7 @@ from PIL import Image as PILImage
 
 from . import quantize as quantize  # its recipes
 from .model import QwenImage21DiT, QwenImage21TextEncoder, QwenImage21VAE, reference_grids
-from .rewriter import Creativity, Enhancer, rewrite
+from .rewriter import Creativity, Enhancer, keeps_transparency, rewrite, transparent
 from .turbo import FunAccLoRA
 
 app = App()
@@ -113,6 +113,11 @@ def _upsampled(
     if found is None:
         adj.warn("prompt_upsampling", "Qwen's prompt enhancer gave no rewrite, so the prompt goes as written")
         tel.log("upsampled prompt", parsed=False, answer=answer[:2000], thought_tokens=thought, answer_tokens=said)
+        return payload, prompt
+    if transparent(prompt) and not keeps_transparency(prompt, found.prompt):
+        adj.warn("prompt_upsampling", "Qwen's prompt enhancer dropped the transparent background, so the prompt goes as written")
+        tel.log("upsampled prompt", kept=False, lost="transparency", rewrite=found.prompt[:2000], seed=seed,
+                thought_tokens=thought, answer_tokens=said)
         return payload, prompt
     ratio = found.ratio
     if found.follow is not None:

@@ -44,6 +44,12 @@ where upstream's full thought held them 6 of 6. With no thought at all, the enha
 gives one. With no `aspect_ratio`, the enhancer's canvas is used, as upstream passes it to the renderer: its
 `wh_ratio`, or the shape of the picture its `ratio_follow` names.
 
+A request for transparency (an RGBA image, an alpha channel, a transparent background) stays one. Qwen's enhancer
+rewrites "transparent background" into a backdrop, a gray-and-white checkerboard, so each enhancer's system prompt
+gains a rule: keep the request's transparency words, frame the rewrite in the model card's wording below, and describe
+no background. A rewrite that still loses them (or paints a checkerboard) is not used: the prompt goes as written,
+with a warning.
+
 `creativity` steers how far the rewrite goes beyond the words: `balanced` (the default) is Qwen's own rewrite;
 `faithful` and `creative` add one sentence after the request, where the enhancer reads intent: change only what was
 asked, or make a striking new picture, bold with expression, pose, styling, setting, light and camera.
