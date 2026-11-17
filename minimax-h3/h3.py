@@ -1609,7 +1609,7 @@ async def vae_encode_picture(
     with tel.stage("vae_encode"):
         latents = base_model.encode_clip(pixels).cpu()
     ctx.release_gpus()
-    tel.log("h3 picture encode", size=list(size), latents=list(latents.shape))
+    tel.log("h3 picture encode", size=f"{size[0]}x{size[1]}")
     return VaeEncodePictureOutput(
         out.save_bytes(save_tensors({"latents": latents.float().contiguous()}), media_type="application/octet-stream")
     )

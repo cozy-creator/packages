@@ -187,7 +187,7 @@ class TileBatchedVideoVAE(AutoencoderKLMiniMaxH3):
         columns = len(xs)
         rows = [moments[row * columns : (row + 1) * columns] for row in range(len(ys))]
         ratio = self.spatial_compression_ratio
-        return self._stitch_tiles(rows, [o // ratio for o in y_overlaps], [o // ratio for o in x_overlaps])  # type: ignore[arg-type]  # rows of tile tuples: it indexes them
+        return self._stitch_tiles(rows, [o // ratio for o in y_overlaps], [o // ratio for o in x_overlaps])
 
     def _encode_tiles(self, batch: torch.Tensor) -> torch.Tensor:
         moments: torch.Tensor = self.quant_conv(self.encoder(batch))
