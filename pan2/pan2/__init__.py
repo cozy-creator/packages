@@ -75,8 +75,9 @@ def caption(text: str) -> str:
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
 
 
+# The reasoner only for a request that upsamples, which it rewrites into the event timeline (cl-1103).
 @app.tool(label="PAN2", named="video", defaults={"model": MODEL, "reasoner": "qwen/qwen3.5-9b@0.2.0"},
-          components={"model": COMPONENTS}, on_demand=("reasoner",), memoize=True)
+          components={"model": COMPONENTS}, needs={"reasoner": "request.prompt_upsampling"}, memoize=True)
 def generate(ctx: Context, payload: Generate, model: Pan2, reasoner: Reasoner, out: Outputs,
              tel: Telemetry, adj: Adjustments) -> VideoResult:
     """PAN2's silent video, at 24 fps for up to 20 seconds. A first frame animates that scene."""

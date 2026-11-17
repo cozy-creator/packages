@@ -134,9 +134,10 @@ class ImageBox(msgspec.Struct, kw_only=True):
     prompt_upsampling: Annotated[bool, Advanced()] = True
 
 
-# Each checkpoint is built, and its weights fetched, only when a render asks for it.
+# Each checkpoint is fetched only for a render that uses it (cl-1103): Instruct-Distil (`model`) with `turbo`, else
+# Instruct (`full`).
 @app.tool(label="Image", named="image", defaults={"model": _DISTIL, "full": _INSTRUCT},
-          on_demand=("full", "model"),
+          needs={"full": "!request.turbo", "model": "request.turbo"},
           memoize=True)
 def image(ctx: Context, payload: ImageBox, full: HunyuanImage3, model: HunyuanImage3, tel: Telemetry,
           adj: Adjustments) -> ImageResult:
