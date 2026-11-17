@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import sys
 from collections import deque
 from collections.abc import Iterator
@@ -233,8 +234,9 @@ def upscale(
 class UpscaleImageInput(Restoration, kw_only=True):
     #: `upscale_image`: the picture restored, the box's own version.
     image: Annotated[ImageFile, FileBound(max_decoded_bytes=256 << 20)]
-    #: `output_sizes`: the picture's shape fitted in this 16:9 canvas, as the video tool's.
-    resolution: Annotated[Resolution, Shape(pixels=_RESOLUTIONS)] = Resolution.HD
+    #: `picture_size`: the picture's short side, as the ComfyUI node's `resolution`. 2160p: a small picture comes out
+    #: closest to its clean original there (se-149: DISTS 0.155 against 1080p's 0.178 on 225 px JPEGs).
+    resolution: Annotated[Resolution, Shape(pixels=_RESOLUTIONS)] = Resolution.UHD
     #: `restore_window`.
     seed: Seed = 42  # type: ignore[assignment]  # a literal: the interface is read from source (Seed is an int NewType)
 
@@ -246,6 +248,15 @@ class UpscaleImageOutput(msgspec.Struct):
     ]
     width: int
     height: int
+
+
+def picture_size(width: int, height: int, resolution: Resolution) -> tuple[int, int]:
+    """The picture at its own ratio, its short side at `resolution`'s edge (a 9:16 picture at 2160p is 2160x3840), held
+    to the pixels of that resolution's 16:9 canvas, which the field declares: only a picture longer than 16:9 one way or
+    the other is held smaller (21:9 at 2160p is 4399x1885)."""
+    canvas = _RESOLUTIONS[resolution]
+    scale = min(canvas[1] / min(width, height), math.sqrt(canvas[0] * canvas[1] / (width * height)))
+    return max(2, round(width * scale)), max(2, round(height * scale))
 
 
 @app.tool(
@@ -264,8 +275,7 @@ def upscale_image(
     ctx.raise_if_cancelled()
     with tel.stage("reading picture"):
         picture = payload.image.read()
-    edge = int(payload.resolution.value[:-1])
-    (width, height), _ = output_sizes(picture.width, picture.height, edge, None)
+    width, height = picture_size(picture.width, picture.height, payload.resolution)
     with tel.stage("restoring picture"):
         [restored] = restore_window(
             model,
