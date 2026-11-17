@@ -157,6 +157,7 @@ def _generate(
     vae.hold(tel)
     ctx.raise_if_cancelled()
     reference_latents, image_pad_mask = None, None
+    conditioning_images: list[PILImage.Image] = []  # the references as encoded, at their 1 MP
     if reference_images:
         with tel.stage("encoding reference images"):
             conditioning_images, reference_latents = vae.encode_reference_images(reference_images)
@@ -166,14 +167,14 @@ def _generate(
     first = reference_images[0].size if reference_images else None
     width, height = payload.size(adj, first, SIZES, megapixels=DEFAULT_MEGAPIXELS)
     with tel.stage("encoding prompt"):
-        prompt, keep, given = text_encoder.fit_prompt(prompt, reference_grids(reference_images or []))
+        prompt, keep, given = text_encoder.fit_prompt(prompt, reference_grids(conditioning_images))
         if keep < given:
             beside = f" beside {len(pictures)} pictures" if reference_images else ""
             adj.warn("prompt", f"Qwen-Image 2.1 reads {keep} of its {given} tokens{beside}, so it goes without the rest")
         if reference_images is None:
             embeds, mask = text_encoder.encode(prompt)
         else:
-            embeds, mask, image_pad_mask = text_encoder.encode_image_prompt(prompt, conditioning_images)  # type: ignore[possibly-undefined]  # read with the pictures
+            embeds, mask, image_pad_mask = text_encoder.encode_image_prompt(prompt, conditioning_images)
     with tel.stage("generating image"):
         denoise = model.denoise if turbo is None else partial(turbo.denoise, model)
         latents = denoise(
@@ -184,7 +185,7 @@ def _generate(
             steps=steps,
             seed=seed,
             progress=ctx.progress,
-            reference_images=reference_images,
+            reference_images=conditioning_images or None,
             reference_latents=reference_latents,
             image_pad_mask=image_pad_mask,
         )
@@ -328,7 +329,7 @@ def upscale(ctx: Context, payload: UpscaleInput, model: QwenImage21DiT, text_enc
     ctx.raise_if_cancelled()
     with tel.stage("generating image"):
         latents = turbo_lora.denoise(model, embeds, mask, width=width, height=height, steps=turbo_lora.steps, seed=seed,
-                                     progress=ctx.progress, reference_images=[picture], reference_latents=latents,
+                                     progress=ctx.progress, reference_images=conditioning, reference_latents=latents,
                                      image_pad_mask=image_pad_mask, start=start, strength=payload.denoise)  # fmt: skip
     with tel.stage("decoding image"):
         image = decoded_image(vae.decode(latents, width=width, height=height))
