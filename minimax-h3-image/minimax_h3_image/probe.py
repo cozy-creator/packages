@@ -6,10 +6,13 @@ from __future__ import annotations
 
 import math
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from typing import Annotated, cast
 
 import msgspec
 import torch
+from cozy_runtime.accel import fusion
 from cozy_runtime.author import Context, Outputs, Telemetry
 from cozy_runtime.fields import FileBound
 from cozy_runtime.media import File, ImageFile
@@ -118,3 +121,83 @@ async def encode_probe(
                 model_s=times["model"], reference_peak=ref_peaks[top], at=top)  # fmt: skip
     blob = out.save_bytes(save_tensors(saved), media_type="application/octet-stream")
     return EncodeProbeOutput(blob, dtypes, measured, all_peaks)
+
+
+# --- cr-323's measurement, not merged ------------------------------------------------------------------------------
+
+
+@contextmanager
+def three_taps(active: bool) -> Iterator[None]:
+    """While `active`, the fused encoder as before cr-323: a lone frame through all three temporal taps (the Runtime's
+    `fusion._lone_frame` answers no). A Runtime before cr-323 runs three taps either way."""
+    lone = getattr(fusion, "_lone_frame", None)
+    if not active or lone is None:
+        yield
+        return
+    setattr(fusion, "_lone_frame", lambda *_: False)
+    try:
+        yield
+    finally:
+        setattr(fusion, "_lone_frame", lone)
+
+
+class LoneProbe(msgspec.Struct, kw_only=True):
+    images: list[Picture]
+    #: timed passes per arm, alternating, after one untimed pass each
+    passes: int = 3
+
+
+class LoneMeasured(msgspec.Struct):
+    grid: list[int]
+    three_taps_s: list[float]
+    last_tap_s: list[float]
+    psnr_db: float
+    max_abs: float
+
+
+class LoneProbeOutput(msgspec.Struct):
+    runtime: str
+    lone_path: bool
+    fused: int
+    measured: dict[str, LoneMeasured]
+    latents: LatentFile
+
+
+@app.entrypoint(defaults={"vae_encoder": MODEL}, components={"vae_encoder": ("vae_encoder",)})
+async def lone_probe(
+    ctx: Context, *, payload: LoneProbe, vae_encoder: ProbeEncoder, out: Outputs, tel: Telemetry
+) -> LoneProbeOutput:
+    """cr-323: each reference as `generate` encodes it (noise from seed 0) through the fused encoder with all three
+    temporal taps and with the last tap alone, `passes` timed passes each, alternating, and the two latents' PSNR."""
+    from importlib.metadata import version
+
+    lone_path = hasattr(fusion, "_lone_frame")
+    saved: dict[str, torch.Tensor] = {}
+    measured: dict[str, LoneMeasured] = {}
+    for index, image in enumerate(payload.images):
+        picture = upright(image.read())
+        h, w = latent_grid(picture)
+        noise = torch.randn((1, LATENT_CHANNELS, h, w), generator=torch.Generator().manual_seed(0))
+        key = str(index)
+        with three_taps(True):
+            before, _ = vae_encoder.latents(picture, noise)
+        after, _ = vae_encoder.latents(picture, noise)
+        times: dict[str, list[float]] = {"three_taps": [], "last_tap": []}
+        for _ in range(payload.passes):
+            for arm in times:
+                ctx.raise_if_cancelled()
+                with three_taps(arm == "three_taps"):
+                    started = time.perf_counter()
+                    with tel.stage(f"vae_encode_{arm}"):
+                        vae_encoder.latents(picture, noise)
+                    times[arm].append(round(time.perf_counter() - started, 4))
+        saved[f"{key}/three_taps"], saved[f"{key}/last_tap"] = before.float().contiguous(), after.float().contiguous()
+        a, b = before.double(), after.double()
+        mse = float((a - b).square().mean())
+        value = round(10 * math.log10(float(a.max() - a.min()) ** 2 / mse), 2) if mse > 0 else SAME
+        measured[key] = LoneMeasured([h, w], times["three_taps"], times["last_tap"], value, float((a - b).abs().max()))
+        tel.log("lone probe", key=key, grid=[h, w], psnr_db=value, three_taps_s=times["three_taps"], last_tap_s=times["last_tap"])
+    encoder = cast(ImageEncoder, vae_encoder.graph.components["vae_encoder"])
+    fused = sum(1 for m in encoder.modules() if getattr(type(m), "_cozy_fused", "") in ("causal-conv", "conv-residual", "padded-conv"))
+    blob = out.save_bytes(save_tensors(saved), media_type="application/octet-stream")
+    return LoneProbeOutput(version("cozy-runtime"), lone_path, fused, measured, blob)

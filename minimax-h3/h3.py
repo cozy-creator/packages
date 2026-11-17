@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import hashlib
 import math
+import time
 import queue
 import re
 from collections.abc import Callable, Iterator, Sequence
@@ -2010,3 +2011,90 @@ async def upscale(ctx: Context, payload: Upscale, out: Outputs, tel: Telemetry) 
     warnings += result.warnings
     tel.log("h3 upscale", to=payload.to, strength=strength, text=source, warnings="; ".join(warnings))
     return UpscaleOutput(result.video, warnings)
+
+
+# --- cr-323's measurement, not merged ------------------------------------------------------------------------------
+
+
+def _three_taps_off(active: bool) -> Callable[[], None]:
+    """While `active`, the fused encoder as before cr-323 (a lone frame through all three temporal taps): undone by the
+    returned call. A Runtime before cr-323 runs three taps either way."""
+    from cozy_runtime.accel import fusion
+
+    lone = getattr(fusion, "_lone_frame", None)
+    if not active or lone is None:
+        return lambda: None
+    setattr(fusion, "_lone_frame", lambda *_: False)
+    return lambda: setattr(fusion, "_lone_frame", lone)
+
+
+class LoneProbe(msgspec.Struct, kw_only=True):
+    images: list[Annotated[ImageFile, FileBound(max_decoded_bytes=1 << 30)]]
+    #: reference short edges: 1024 is ref2va's default fidelity, 2048 its `high`
+    short_edges: list[int]
+    passes: int = 3
+
+
+class LoneMeasured(msgspec.Struct):
+    size: list[int]
+    three_taps_s: list[float]
+    last_tap_s: list[float]
+    psnr_db: float
+    max_abs: float
+
+
+class LoneProbeOutput(msgspec.Struct):
+    runtime: str
+    lone_path: bool
+    measured: dict[str, LoneMeasured]
+    latents: LatentFile
+
+
+@app.entrypoint(defaults={"base_model": _MODEL}, components={"base_model": ("vae",)})
+async def lone_probe(
+    ctx: Context, *, payload: LoneProbe, base_model: H3VideoVAE, out: Outputs, tel: Telemetry
+) -> LoneProbeOutput:
+    """cr-323: each picture resized as ref2va resizes a picture reference to each short edge, encoded as one frame
+    (`encode_clip`, ref2va's `encode_condition`) with all three temporal taps and with the last tap alone, `passes` timed
+    passes each, alternating, and the two latents' PSNR."""
+    from importlib.metadata import version
+
+    from cozy_runtime.accel import fusion
+
+    lone_path = hasattr(fusion, "_lone_frame")
+    saved: dict[str, Tensor] = {}
+    measured: dict[str, LoneMeasured] = {}
+    for index, image in enumerate(payload.images):
+        picture = image.read().convert("RGB")
+        width, height = picture.size
+        for edge in payload.short_edges:
+            scale = edge / min(width, height)
+            size = (_on_multiple(width * scale), _on_multiple(height * scale))
+            pixels = torch.from_numpy(np.asarray(picture.resize(size, resample=PILImage.Resampling.LANCZOS)).copy())
+            key = f"{index}@{edge}"
+            undo = _three_taps_off(True)
+            try:
+                before = base_model.encode_clip(pixels).cpu()
+            finally:
+                undo()
+            after = base_model.encode_clip(pixels).cpu()
+            times: dict[str, list[float]] = {"three_taps": [], "last_tap": []}
+            for _ in range(payload.passes):
+                for arm in times:
+                    ctx.raise_if_cancelled()
+                    undo = _three_taps_off(arm == "three_taps")
+                    try:
+                        started = time.perf_counter()
+                        with tel.stage(f"vae_encode_{arm}"):
+                            base_model.encode_clip(pixels).cpu()
+                        times[arm].append(round(time.perf_counter() - started, 4))
+                    finally:
+                        undo()
+            saved[f"{key}/three_taps"], saved[f"{key}/last_tap"] = before.float().contiguous(), after.float().contiguous()
+            a, b = before.double(), after.double()
+            mse = float((a - b).square().mean())
+            value = round(10 * math.log10(float(a.max() - a.min()) ** 2 / mse), 2) if mse > 0 else 999.0
+            measured[key] = LoneMeasured(list(size), times["three_taps"], times["last_tap"], value, float((a - b).abs().max()))
+            tel.log("lone probe", key=key, size=list(size), psnr_db=value, three_taps_s=times["three_taps"], last_tap_s=times["last_tap"])
+    blob = out.save_bytes(save_tensors(saved), media_type="application/octet-stream")
+    return LoneProbeOutput(version("cozy-runtime"), lone_path, measured, blob)

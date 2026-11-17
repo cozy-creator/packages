@@ -7,6 +7,8 @@ from __future__ import annotations
 import io
 import math
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 import urllib.request
 from typing import Annotated, cast
 
@@ -198,3 +200,88 @@ async def compare_images(ctx: Context, *, payload: Pair) -> Compared:
     mse = float(np.mean((a - b) ** 2))
     value = 10 * math.log10(255.0**2 / mse) if mse > 0 else SAME
     return Compared(round(value, 2), float(np.abs(a - b).max()), round(float(np.abs(a - b).mean()), 4), list(a.shape[:2]))
+
+
+# --- cr-323's measurement, not merged ------------------------------------------------------------------------------
+
+
+@contextmanager
+def three_taps(active: bool) -> Iterator[None]:
+    """While `active`, the fused encoder as before cr-323: a lone frame through all three temporal taps (the Runtime's
+    `fusion._lone_frame` answers no). A Runtime before cr-323 runs three taps either way."""
+    lone = getattr(fusion, "_lone_frame", None)
+    if not active or lone is None:
+        yield
+        return
+    setattr(fusion, "_lone_frame", lambda *_: False)
+    try:
+        yield
+    finally:
+        setattr(fusion, "_lone_frame", lone)
+
+
+def fused_convs(root: nn.Module) -> int:
+    """The convs and blocks under `root` the fused encoder took over."""
+    return sum(1 for m in root.modules() if getattr(type(m), "_cozy_fused", "") in ("causal-conv", "conv-residual", "padded-conv"))
+
+
+class LoneProbe(msgspec.Struct, kw_only=True):
+    images: list[Picture]
+    megapixels: list[float]
+    #: timed passes per arm, alternating, after one untimed pass each
+    passes: int = 3
+
+
+class LoneMeasured(msgspec.Struct):
+    size: list[int]
+    #: the fused encoder as before cr-323 (all three taps) and as after it (the last tap), seconds per pass
+    three_taps_s: list[float]
+    last_tap_s: list[float]
+    #: the last tap's latents against the three taps'
+    psnr_db: float
+    max_abs: float
+
+
+class LoneProbeOutput(msgspec.Struct):
+    runtime: str
+    #: whether this Runtime has cr-323's lone-frame path (else both arms ran three taps)
+    lone_path: bool
+    fused: int
+    measured: dict[str, LoneMeasured]
+    latents: LatentFile
+
+
+@app.entrypoint(defaults={"model": MODEL}, components={"model": ("vae",)})
+async def lone_probe(ctx: Context, *, payload: LoneProbe, model: PH3ImageVAE, out: Outputs, tel: Telemetry) -> LoneProbeOutput:
+    """cr-323: each picture at each size through the fused encoder with all three temporal taps and with the last tap
+    alone, `passes` timed passes each, alternating, and the two latents' PSNR."""
+    from importlib.metadata import version
+
+    lone_path = hasattr(fusion, "_lone_frame")
+    saved: dict[str, torch.Tensor] = {}
+    measured: dict[str, LoneMeasured] = {}
+    for index, image in enumerate(payload.images):
+        picture = image.read().convert("RGB")
+        for mp in payload.megapixels:
+            size = size_at_area(*picture.size, round(mp * MEGAPIXEL))
+            pixels = torch.from_numpy(np.array(resized(picture, size)))
+            key = f"{index}@{mp:g}"
+            with three_taps(True):
+                before, _ = model.encode(pixels)
+            after, _ = model.encode(pixels)
+            times: dict[str, list[float]] = {"three_taps": [], "last_tap": []}
+            for _ in range(payload.passes):
+                for arm in times:
+                    ctx.raise_if_cancelled()
+                    with three_taps(arm == "three_taps"):
+                        started = time.perf_counter()
+                        with tel.stage(f"vae_encode_{arm}"):
+                            model.encode(pixels)
+                        times[arm].append(round(time.perf_counter() - started, 4))
+            saved[f"{key}/three_taps"], saved[f"{key}/last_tap"] = before.float().contiguous(), after.float().contiguous()
+            compared = psnr(before, after)
+            measured[key] = LoneMeasured(list(size), times["three_taps"], times["last_tap"], compared["psnr_db"], compared["max_abs"])
+            tel.log("lone probe", key=key, size=list(size), **compared, three_taps_s=times["three_taps"], last_tap_s=times["last_tap"])
+    fused = fused_convs(model.graph.components["vae"])
+    blob = out.save_bytes(save_tensors(saved), media_type="application/octet-stream")
+    return LoneProbeOutput(version("cozy-runtime"), lone_path, fused, measured, blob)
