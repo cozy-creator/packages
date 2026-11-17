@@ -2,9 +2,9 @@
 # requires-python = ">=3.12"
 # dependencies = ["cozy-runtime>=0.32", "msgspec>=0.19", "torch==2.14.0", "pillow>=12"]
 # ///
-"""Qwen3.6's expert routing and decode speed on this machine's GPU (se-085).
+"""A Qwen3.x MoE's expert routing and decode speed on this machine's GPU (se-085).
 
-    cozy run ./examples/client-scripts/qwen3.6-routing.py model.model=<qwen3.6-35b-a3b or 27b release> \
+    cozy run ./examples/client-scripts/qwen3-routing.py model.model=<a Qwen3.6-35B-A3B or 27B checkpoint> \
         picture=./picture.png prompt="..." [thinking:=true] [max_tokens:=1024] --on <machine>
 
 One question about `picture`,

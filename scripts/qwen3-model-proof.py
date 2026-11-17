@@ -1,7 +1,7 @@
-"""Qwen3.6: the package's model code (`cozy_runtime.vlm`, `cozy_runtime.moe`) against Transformers', on
+"""Qwen3: the package's model code (`cozy_runtime.vlm`, `cozy_runtime.moe`) against Transformers', on
 CPU, with small random-weight models.
 
-    python scripts/qwen3.6-model-proof.py <checkpoint files dir>
+    python scripts/qwen3-model-proof.py <checkpoint files dir>
 
 The files dir holds a Qwen3.6 checkpoint's `config.json`, `generation_config.json`, tokenizer, processor
 configs and chat template (`Qwen/Qwen3.6-35B-A3B@995ad96e`). For the dense and the MoE layout, one

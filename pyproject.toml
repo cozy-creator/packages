@@ -20,8 +20,7 @@ include = [
     "p-h3-image",
     "pan2",
     "ltx-2.5",
-    "qwen3.5",
-    "qwen3.6",
+    "qwen3",
     "qwen-image",
     "qwen-image-2",
     "sdxl",
@@ -45,8 +44,7 @@ extraPaths = [
     "p-h3-image",
     "pan2",
     "ltx-2.5",
-    "qwen3.5",
-    "qwen3.6",
+    "qwen3",
     "qwen-image",
     "qwen-image-2",
     "sdxl",
@@ -65,13 +63,13 @@ reportPrivateImportUsage = false
 [tool.mypy]
 python_version = "3.12"
 files = [
-    "anima", "birefnet", "qwen3.5", "seedvr2", "minimax-h3", "sdxl", "qwen-image-2", "qwen-image", "flux-2",
-    "flux.3-klein", "fibo-2", "hidream-o1", "hunyuan-image-3", "ideogram-4", "moss-image", "qwen3.6", "krea-2",
+    "anima", "birefnet", "qwen3", "seedvr2", "minimax-h3", "sdxl", "qwen-image-2", "qwen-image", "flux-2",
+    "flux.3-klein", "fibo-2", "hidream-o1", "hunyuan-image-3", "ideogram-4", "moss-image", "krea-2",
     "relayvsr", "orbit", "p-h3-image", "pan2", "ltx-2.5", "scripts", "examples",
 ]
 mypy_path = [
     "typings", "anima", "birefnet", "fibo-2", "flux-2", "flux.3-klein", "hidream-o1", "hunyuan-image-3", "ideogram-4",
-    "krea-2", "minimax-h3", "moss-image", "qwen3.5", "qwen3.6", "qwen-image", "qwen-image-2",
+    "krea-2", "minimax-h3", "moss-image", "qwen3", "qwen-image", "qwen-image-2",
     "relayvsr", "orbit", "p-h3-image", "pan2", "ltx-2.5", "sdxl", "seedvr2",
 ]
 strict = true
