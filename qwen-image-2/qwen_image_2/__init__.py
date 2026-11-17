@@ -9,7 +9,7 @@ from typing import Annotated, Literal
 import msgspec
 import torch
 from cozy_runtime.author import Adjustments, App, Context, OutputError, Seed, Telemetry
-from cozy_runtime.fields import Advanced, AspectRatio, FileBound, Image, MENTION, Placeholder, Prompt, Ratios, When
+from cozy_runtime.fields import Advanced, AspectRatio, FileBound, Image, MENTION, Prompt, Ratios, When
 from cozy_runtime.image import MEGAPIXEL, ImageRequest, ImageResult, Sizes, ratio_of
 from cozy_runtime.media import ImageFile
 from PIL import Image as PILImage
@@ -312,7 +312,7 @@ class UpscaleInput(msgspec.Struct, kw_only=True):
     image: Annotated[ImageFile, FileBound(max_decoded_bytes=256 << 20)]
     #: `upscale`: what the picture should show, after the restoration request, never in place of it: text too small to
     #: read, a colour, a face. Each picture it mentions is a reference after the picture, at its 1 MP (`_said`).
-    prompt: Annotated[Prompt[Image], Placeholder("Optional: what it should show (the sign says OPEN, green eyes)")] = Prompt()
+    prompt: Prompt[Image] = Prompt()
     #: `upscale`: the picture's ratio at this size (`SIZES.fit`), up to Qwen's 4 MP.
     megapixels: Literal[2, 4] = 4
     seed: Seed | None = None
