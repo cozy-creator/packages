@@ -304,6 +304,8 @@ class _ProbeInput(msgspec.Struct, kw_only=True):
     prompt: str
     size: int = 1024
     seed: int = 7
+    vae_dtype: str = "f32"
+    ref_bf16: bool = True
 
 
 @app.entrypoint(defaults={"model": _TURBO_MODEL, "reference": _TURBO_MODEL, "text_encoder": _TURBO_MODEL, "vae": _TURBO_MODEL},
@@ -312,9 +314,10 @@ def probe_stages(ctx: Context, payload: _ProbeInput, model: _ProbeDiT, reference
                  vae: Krea2VAE, tel: Telemetry) -> ImageResult:
     """se-157: ours against Diffusers stage by stage on one input: text conditioning, the first-step velocity at
     t=1 (each pipeline on its own text, then ours on Diffusers' text), and the decode of Diffusers' x0."""
-    vae.hold_vae()
-    _hold_dtype(reference.graph.components["transformer"], _torch.bfloat16)
-    _hold_dtype(reference.graph.components["vae"], _torch.bfloat16)
+    if payload.vae_dtype == "fp16":
+        vae.hold_vae()
+    if payload.ref_bf16:
+        _hold_dtype(reference.graph.components["transformer"], _torch.bfloat16)
     rows = columns = payload.size // 16
     noise = _rng.noise((1, 16, rows * 2, columns * 2), payload.seed, dtype=_torch.bfloat16)
     latents = noise.view(1, 16, rows, 2, columns, 2).permute(0, 2, 4, 1, 3, 5).reshape(1, rows * columns, 64)
