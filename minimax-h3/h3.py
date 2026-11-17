@@ -1572,6 +1572,49 @@ async def vae_round_trip(
     )
 
 
+class VaeEncodePicture(msgspec.Struct, kw_only=True):
+    """`vae_encode_picture`: one picture, within 1:4 and 4:1."""
+
+    image: Annotated[ImageFile, FileBound(max_decoded_bytes=IMAGE_READ_BYTES)]
+
+
+class VaeEncodePictureOutput(msgspec.Struct):
+    #: The normalized `(1, 24, 1, h, w)` latents, float32 safetensors (`latents`).
+    latents: LatentFile
+
+
+#: A picture reference's sides are multiples of this: the VAE's spatial ratio times the DiT's patch.
+_CANVAS_MULTIPLE = 32
+
+
+def _on_multiple(side: float) -> int:
+    return max(_CANVAS_MULTIPLE, round(side / _CANVAS_MULTIPLE) * _CANVAS_MULTIPLE)
+
+
+@app.entrypoint(defaults={"base_model": _MODEL}, components={"base_model": ("vae",)})
+async def vae_encode_picture(
+    ctx: Context, *, payload: VaeEncodePicture, base_model: H3VideoVAE, out: Outputs, tel: Telemetry
+) -> VaeEncodePictureOutput:
+    """The video VAE's encoder on one picture, as ref2va encodes a picture reference at `high` fidelity: resized to a
+    2048 px short edge as Diffusers' reference step resizes it, then one frame (`vae_encode`). Its release-gate cell
+    (cr-323): a lone frame meets only each causal conv's last temporal tap."""
+    with tel.stage("read_image"):
+        picture = payload.image.read().convert("RGB")
+        width, height = picture.size
+        if max(width, height) > 4 * min(width, height):
+            raise InvalidRequest(f"a picture within 1:4 and 4:1, not {width}x{height}", fields=["image"])
+        scale = REFERENCE_IMAGE_SHORT_EDGE / min(width, height)
+        size = (_on_multiple(width * scale), _on_multiple(height * scale))
+        pixels = torch.from_numpy(np.asarray(picture.resize(size, resample=PILImage.Resampling.LANCZOS)).copy())
+    with tel.stage("vae_encode"):
+        latents = base_model.encode_clip(pixels).cpu()
+    ctx.release_gpus()
+    tel.log("h3 picture encode", size=list(size), latents=list(latents.shape))
+    return VaeEncodePictureOutput(
+        out.save_bytes(save_tensors({"latents": latents.float().contiguous()}), media_type="application/octet-stream")
+    )
+
+
 # --- the three tools ---------------------------------------------------------------------
 # A tool is a CPU parent on the machine its render landed on. A shot renders in segments of at most 15 s, each going on
 # from the last from its carried latents, never decoded; a segment is an ordinary serving child memoized on its full
