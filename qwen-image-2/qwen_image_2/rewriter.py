@@ -75,7 +75,7 @@ _FOLLOW = re.compile(r"\s*<image(\d+)>\s*")
 #: A request for a transparent picture, in the model card's words or a person's: an alpha channel, RGBA, or a
 #: transparent background (not an object that is itself transparent, as glass is).
 _TRANSPARENT = re.compile(
-    r"\b(?:rgba|alpha[\s-]*channel|transparent\s+(?:back|bg\b)|background\s+(?:is\s+|that\s+is\s+)?transparent)",
+    r"\b(?:rgba|alpha[\s-]*channel|transparent[\s-]+(?:back|bg\b)|background\s+(?:is\s+|that\s+is\s+)?transparent)",
     re.IGNORECASE,
 )
 #: What a rewrite has lost a transparency request by: a background painted as transparency's stand-in.
