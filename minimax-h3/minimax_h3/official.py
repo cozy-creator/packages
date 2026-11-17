@@ -30,6 +30,7 @@ import msgspec
 import numpy as np
 import numpy.typing as npt
 import torch
+from PIL.Image import Resampling
 from diffusers.models.autoencoders.autoencoder_kl_minimax_h3_audio import AutoencoderKLMiniMaxH3Audio
 from diffusers.models.transformers.transformer_minimax_h3 import MiniMaxH3Transformer3DModel
 from diffusers.modular_pipelines.minimax_h3.modular_blocks_minimax_h3 import MiniMaxH3Blocks
@@ -817,11 +818,12 @@ def _encode_identity(
 
 
 def _fitted(image: PILImage.Image, height: int, width: int) -> npt.NDArray[np.uint8]:
-    """An image center-cropped to the canvas's aspect and resized to it, as uint8 `(H, W, 3)`."""
+    """An image center-cropped to the canvas's aspect and resized to it with LANCZOS (Diffusers' keyframe resize), as uint8
+    `(H, W, 3)`."""
     image = image.convert("RGB")
     scale = max(width / image.width, height / image.height)
     resized = image.resize((max(width, round(image.width * scale)), max(height, round(image.height * scale))),
-                           resample=3)
+                           resample=Resampling.LANCZOS)
     left, top = (resized.width - width) // 2, (resized.height - height) // 2
     return np.asarray(resized.crop((left, top, left + width, top + height)), dtype=np.uint8).copy()
 
