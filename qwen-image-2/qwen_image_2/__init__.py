@@ -314,8 +314,6 @@ class UpscaleInput(msgspec.Struct, kw_only=True):
     steps: int = _STEPS
     #: se-147 measurement only: which request.
     prompt: Literal["upscale", "restore", "restore2"] = "upscale"
-    #: se-147 measurement only: the picture the text encoder sees, as the reference or at 1 MP.
-    vision: Literal["reference", "1mp"] = "reference"
     #: se-147 measurement only: Fun Acc's 4 steps, else the base model's 40.
     turbo: bool = True
 
@@ -346,10 +344,7 @@ def upscale(ctx: Context, payload: UpscaleInput, model: QwenImage21DiT, text_enc
         if payload.denoise < 1:
             start = vae.encode_canvas(picture.resize((width, height), PILImage.Resampling.LANCZOS))
     with tel.stage("encoding prompt"):
-        seen = conditioning
-        if payload.vision == "1mp":
-            seen = [picture.resize(tuple(calculate_dimensions(1024 * 1024, picture.width / picture.height)[:2]), PILImage.Resampling.LANCZOS)]
-        embeds, mask, image_pad_mask = text_encoder.encode_image_prompt(prompt, seen)
+        embeds, mask, image_pad_mask = text_encoder.encode_image_prompt(prompt, conditioning)
     ctx.raise_if_cancelled()
     with tel.stage("generating image"):
         if payload.turbo:
@@ -365,5 +360,5 @@ def upscale(ctx: Context, payload: UpscaleInput, model: QwenImage21DiT, text_enc
     with tel.stage("saving image"):
         asset = ImageFile.from_image(image, format="png")
     tel.log("upscale", source=f"{picture.width}x{picture.height}", width=width, height=height, denoise=payload.denoise,
-            reference=payload.reference, prompt=payload.prompt, turbo=payload.turbo, steps=payload.steps, vision=payload.vision)
+            reference=payload.reference, prompt=payload.prompt, turbo=payload.turbo, steps=payload.steps)
     return ImageResult(asset, width, height, seed, prompt)
