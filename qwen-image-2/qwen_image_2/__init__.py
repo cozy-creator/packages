@@ -15,6 +15,7 @@ from cozy_runtime.media import ImageFile
 from PIL import Image as PILImage
 
 from . import quantize as quantize  # its recipes
+from .keep import keep_unchanged
 from .model import QwenImage21DiT, QwenImage21TextEncoder, QwenImage21VAE, reference_grids
 from .rewriter import Creativity, Enhancer, keeps_transparency, rewrite, transparent
 from .turbo import FunAccLoRA
@@ -30,6 +31,8 @@ SIZES = Sizes((MIN_MEGAPIXELS, MAX_MEGAPIXELS), (32, 2048 * 16), 32, "the 1-4 MP
 DEFAULT_MEGAPIXELS = 2
 #: The full model's steps; Turbo's are its overlay checkpoint's (`turbo.read_plan`).
 _STEPS = 40
+#: Upstream's conditioning area for a reference (Diffusers' `output_resolution` 1024): the pictures past the first.
+REFERENCE_AREA = 1024 * 1024
 
 
 #: The pictures Qwen-Image-2.1 takes: past them the last mentioned go, with a warning.
@@ -45,6 +48,8 @@ class GenerateInput(ImageRequest):
     prompt_upsampling: bool = True
     #: How far the rewrite goes beyond the words, so only with it (`_upsampled`); `balanced` is Qwen's own.
     creativity: Annotated[Creativity, When("prompt_upsampling")] = "balanced"
+    #: An edit keeps the first picture's own pixels wherever it left them unchanged (`keep.py`).
+    keep_unchanged: bool = True
 
 
 def label(n: int, key: str, count: int) -> str:
@@ -157,16 +162,19 @@ def _generate(
         payload, prompt = _upsampled(payload, prompt, reference_images or [], seed, enhancer, ctx.progress, tel, adj)
     vae.hold(tel)
     ctx.raise_if_cancelled()
-    reference_latents, image_pad_mask = None, None
-    conditioning_images: list[PILImage.Image] = []  # the references as encoded, at their 1 MP
-    if reference_images:
-        with tel.stage("encoding reference images"):
-            conditioning_images, reference_latents = vae.encode_reference_images(reference_images)
-        ctx.raise_if_cancelled()
     # What is not given is the first reference's (upstream takes the LAST reference's; every Cozy
     # image package takes the first, the image being edited).
     first = reference_images[0].size if reference_images else None
     width, height = payload.size(adj, first, SIZES, megapixels=DEFAULT_MEGAPIXELS)
+    reference_latents, image_pad_mask = None, None
+    conditioning_images: list[PILImage.Image] = []  # the references as encoded
+    if reference_images:
+        # The picture being edited at the canvas's area, so the model reads it at the detail it draws (se-153; upstream
+        # conditions every picture at 1 MP, `output_resolution`); the others at upstream's 1 MP.
+        areas = (width * height, *(REFERENCE_AREA,) * (len(reference_images) - 1))
+        with tel.stage("encoding reference images"):
+            conditioning_images, reference_latents = vae.encode_reference_images(reference_images, areas=areas)
+        ctx.raise_if_cancelled()
     with tel.stage("encoding prompt"):
         prompt, keep, given = text_encoder.fit_prompt(prompt, reference_grids(conditioning_images))
         if keep < given:
@@ -193,7 +201,12 @@ def _generate(
     ctx.raise_if_cancelled()
     with tel.stage("decoding image"):
         decoded = vae.decode(latents, width=width, height=height)
-        image = decoded_image(decoded)
+    if reference_images and payload.keep_unchanged:
+        with tel.stage("keeping what stayed"):
+            decoded, kept = keep_unchanged(reference_images[0], decoded)
+        tel.log("keep unchanged", kept=round(kept.fraction, 3), scale=round(kept.scale, 4),
+                shift=f"{kept.shift[0]:.1f},{kept.shift[1]:.1f}", skipped=kept.skipped)
+    image = decoded_image(decoded)
     with tel.stage("saving image"):
         asset = ImageFile.from_image(image)
     return ImageResult(asset, width, height, seed, prompt)
@@ -269,6 +282,8 @@ class ImageBox(msgspec.Struct, kw_only=True):
     prompt_upsampling: Annotated[bool, Advanced()] = True
     #: How far that rewrite goes beyond the words (`rewrite`), so only with it.
     creativity: Annotated[Creativity, Advanced(), When("prompt_upsampling")] = "balanced"
+    #: `GenerateInput.keep_unchanged`.
+    keep_unchanged: Annotated[bool, Advanced()] = True
 
 
 # The Turbo overlay is needed only when a box asks for it, and an enhancer only when the box upsamples: the edit's with
@@ -294,7 +309,8 @@ def image(
     """Qwen Image 2.1 on a canvas: Turbo (the base model and its Fun Acc overlay), or the full 40 steps."""
     request = GenerateInput(prompt=payload.instructions, aspect_ratio=payload.aspect_ratio,
                             megapixels=payload.megapixels, seed=payload.seed,
-                            prompt_upsampling=payload.prompt_upsampling, creativity=payload.creativity)  # fmt: skip
+                            prompt_upsampling=payload.prompt_upsampling, creativity=payload.creativity,
+                            keep_unchanged=payload.keep_unchanged)  # fmt: skip
     return _generate(ctx, request, expander_i2i, expander_t2i, model, text_encoder, vae, tel, adj,
                      turbo_lora if payload.turbo else None)  # fmt: skip
 

@@ -706,17 +706,18 @@ class QwenImage21VAE(Model[QwenImage21VAEGraph]):
     @memoize
     @uses_components("vae")
     def encode_reference_images(
-        self, images: list[Image.Image], canvas: tuple[int, int] | None = None
+        self, images: list[Image.Image], canvas: tuple[int, int] | None = None, areas: Sequence[int] = ()
     ) -> tuple[list[Image.Image], torch.Tensor]:
-        """Encode each reference once: at `canvas` (width, height), as Diffusers sizes a reference to its output
-        (`output_resolution`), else at its 1 MP, Diffusers' default. Returns them as sized, and their latents."""
+        """Encode each reference once: at `canvas` (width, height), else at its ratio over its pixel count in `areas`,
+        else at Diffusers' default 1 MP (`output_resolution` 1024). Returns them as sized, and their latents."""
         vae = self.graph.components["vae"]
         device = torch.device(str(self.device))
         resized, packed = [], []
         with torch.inference_mode():
-            for image in images:
+            for n, image in enumerate(images):
                 image = image.convert("RGBA")
-                width, height = canvas or calculate_dimensions(1024 * 1024, image.width / image.height)[:2]  # type: ignore[no-untyped-call]  # Diffusers' own, unannotated
+                area = areas[n] if n < len(areas) else 1024 * 1024
+                width, height = canvas or calculate_dimensions(area, image.width / image.height)[:2]  # type: ignore[no-untyped-call]  # Diffusers' own, unannotated
                 resized.append(cast(Image.Image, self.processor.resize(image, width=width, height=height)))  # a picture in, a picture out
                 pixels = (
                     self.processor.preprocess(image, width=width, height=height)
