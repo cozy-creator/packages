@@ -19,12 +19,14 @@ import numpy as np
 import torch
 from cozy_runtime import vlm
 from cozy_runtime.accel.attention import AttentionLayout, attention_scope
+from cozy_runtime.accel.kernels import Plan
 from cozy_runtime.author import Config, Loader, Model, Serving, memoize, preview, uses_components
 from diffusers.modular_pipelines.minimax_h3.before_denoise import _frame_position_grid, patchify_video_latents
 from PIL import Image, ImageOps
 from torch import nn
 from transformers import ProcessorMixin, Qwen3VLConfig, Qwen3VLForConditionalGeneration
 
+from . import fused
 from .transformer import ImageTransformer, TabledTransformer, build_transformer, compute_dtypes, parse_tables
 from .vae import PIXEL_MEAN, PIXEL_STD, ImageDecoder, ImageEncoder
 
@@ -164,6 +166,10 @@ class H3Image(Model[ImageGraph]):
 
     def unload(self, loader: Loader) -> None:
         return None
+
+    def execution_plan(self, plan: Plan) -> str:
+        """The DiT blocks' fused glue (`fused`), P-H3-Image's: the same H3 blocks and widths."""
+        return fused.install(self, self.graph, plan)
 
     @uses_components("transformer")
     def denoise(
