@@ -1,7 +1,8 @@
 """P-H3-Image's lanes. `bf16-full` is Pruna's upload as it is. `pruned` writes `bf16` from it: the DiT's time
-embedder and AdaLN projections replaced by exact tables of the rows the 8 steps read (`model.table_keys`), and
-the VAE's encoder, `quant_conv` and pixel projection stored float32, as upstream computes them. The quantized
+embedder and AdaLN projections replaced by exact tables of the rows the 8 steps read (`model.table_keys`), the
+VAE's encoder and `quant_conv` stored float16 (`F16`) and its pixel projection float32 (`WIDENED`). The quantized
 lanes are recipes over `bf16` (`cozy model quantize <bf16 checkpoint> --lane int8 --package p-h3-image`).
+`encoder_f16` rewrites a lane written before `bf16` stored the encoder float16.
 """
 
 from __future__ import annotations
@@ -9,7 +10,9 @@ from __future__ import annotations
 import json
 import math
 from importlib.resources import files
+from typing import Literal
 
+import msgspec
 import torch
 from cozy_runtime.author import (
     Context,
@@ -32,9 +35,13 @@ from .transformer import parse_tables
 
 #: The components a P-H3-Image checkpoint stores tensors for.
 COMPONENTS = ("prompt_upsampler", "text_connector", "text_encoder", "transformer", "vae")
-#: Upstream computes these in float32 from their bf16 bytes (`AutoencoderKLPH3Image._keep_in_fp32_modules`):
-#: `bf16` stores them widened, exactly.
-WIDENED = ("encoder.", "quant_conv.", "decoder.proj_out.")
+#: Upstream computes the pixel projection in float32 from its bf16 bytes (`AutoencoderKLPH3Image._keep_in_fp32_modules`):
+#: `bf16` stores it widened, exactly.
+WIDENED = ("decoder.proj_out.",)
+#: Upstream keeps the encoder and `quant_conv` float32 too; they compute in float16, as minimax-h3's and ComfyUI's
+#: under `--fast fp16_accumulation` (cr-306, se-150), fused (`vae.VAE_ENCODER`). Their bf16 bytes are exact in
+#: float16 but for subnormals.
+F16 = ("encoder.", "quant_conv.")
 MAX_PRUNED_BYTES = 6 << 30
 #: The DiT's modulation shape: hidden, blocks, timestep features, time embedder hidden and output widths.
 HIDDEN, BLOCKS, FREQ_DIM, TIME_HIDDEN, TIME_DIM = 5376, 50, 256, 5376, 2688
@@ -59,6 +66,21 @@ def _put(out: Output, component: str, key: str, value: torch.Tensor) -> int:
     raw = memoryview(data.view(torch.uint8).numpy()).cast("B")
     out.put(component, key, _NAMES[data.dtype], tuple(data.shape), raw)
     return len(raw)
+
+
+def _vae_row(source: Checkpoint, key: str) -> torch.Tensor:
+    """A VAE tensor of `source` in its stored dtype, on the CPU."""
+    row = source.components["vae"].tensors[key]
+    value = torch.empty(tuple(row.shape), dtype={v: k for k, v in _NAMES.items()}[row.dtype.upper()])
+    source.components["vae"].tensors.read_into(key, memoryview(value.view(torch.uint8).numpy()))
+    return value
+
+
+def _half(key: str, value: torch.Tensor) -> torch.Tensor:
+    half = value.to(torch.float16)
+    if not torch.isfinite(half).all():
+        raise UnsupportedInput(f"vae.{key} overflows float16", code="quantization_tripwire")
+    return half
 
 
 def _features(timesteps: torch.Tensor) -> torch.Tensor:
@@ -131,6 +153,7 @@ async def pruned(ctx: Context, *, source: Weights, tel: Telemetry) -> ModelArtif
         raise UnsupportedInput("this DiT is not P-H3-Image's", code="p_h3_image_source")
     rows = [(name, key) for name in present for key in (order if name == "transformer" else present[name])]
     widened = {key for key, row in present["vae"].items() if key.startswith(WIDENED) and row.dtype.lower() == "bf16"}
+    halved = {key for key, row in present["vae"].items() if key.startswith(F16) and row.dtype.lower() != "f16"}
     with ctx.output("bf16", Derivation(base=None, sources=(src,), order=rows)) as out:
         document: dict[str, object] = {name: dict(component.config) for name, component in src.components.items()}
         document["transformer"] = {**section, TABLES: table_keys()}
@@ -142,10 +165,9 @@ async def pruned(ctx: Context, *, source: Weights, tel: Telemetry) -> ModelArtif
                 if out.has(component, key) or (component == "transformer" and key in tables):
                     continue
                 if component == "vae" and key in widened:
-                    row = present["vae"][key]
-                    value = torch.empty(tuple(row.shape), dtype=torch.bfloat16)
-                    src.components["vae"].tensors.read_into(key, memoryview(value.view(torch.uint8).numpy()))
-                    _put(out, "vae", key, value.float())
+                    _put(out, "vae", key, _vae_row(src, key).float())
+                elif component == "vae" and key in halved:
+                    _put(out, "vae", key, _half(key, _vae_row(src, key)))
                 else:
                     out.copy(component, key, src)
                 ctx.progress(done - 1, len(rows))
@@ -153,11 +175,45 @@ async def pruned(ctx: Context, *, source: Weights, tel: Telemetry) -> ModelArtif
             written = _write_tables(ctx, src, out)
         artifact = ctx.adopt_model(out)
     tel.log("p-h3-image bf16", tables=len(tables), table_bytes=sum(2 * math.prod(s) for s in tables.values()),
-            widened=len(widened), written=written)  # fmt: skip
+            widened=len(widened), halved=len(halved), written=written)  # fmt: skip
     return artifact
 
 
 app.entrypoint(pruned, name="pruned", accelerator=True, weights=(WeightsOutput("bf16", max_new_bytes=MAX_PRUNED_BYTES),))
+
+#: The lanes `encoder_f16` rewrites.
+RELANED = ("bf16", "int8", "fp8", "nvfp4")
+
+
+class Relane(msgspec.Struct, kw_only=True):
+    #: The lane `source` is, which the output keeps.
+    lane: Literal["bf16", "int8", "fp8", "nvfp4"]
+
+
+async def encoder_f16(ctx: Context, payload: Relane, *, source: Weights, tel: Telemetry) -> ModelArtifact:
+    """A lane as it is, its VAE encoder's and `quant_conv`'s rows float16 (`F16`), as `pruned` now writes them, and
+    as the quantized lanes keep them from `bf16`. Every other tensor is the source's."""
+    src = ctx.tensorfs_source(source)
+    if "vae" not in src.components:
+        raise UnsupportedInput("this checkpoint holds no P-H3-Image VAE", code="p_h3_image_source")
+    tensors = src.components["vae"].tensors
+    keys = [key for key, row in tensors.items() if key.startswith(F16) and row.dtype.lower() != "f16"]
+    order = [(name, key) for name, component in src.components.items() for key in component.tensors]
+    written = 0
+    with ctx.output(payload.lane, Derivation(base=src, order=order)) as out:
+        with tel.stage("encoder rows"):
+            for done, key in enumerate(keys, 1):
+                ctx.raise_if_cancelled()
+                if not out.has("vae", key):
+                    written += _put(out, "vae", key, _half(key, _vae_row(src, key)))
+                ctx.progress(done - 1, len(keys))
+        artifact = ctx.adopt_model(out)
+    tel.log("p-h3-image encoder f16", lane=payload.lane, rows=len(keys), written=written)
+    return artifact
+
+
+app.entrypoint(encoder_f16, name="encoder_f16", accelerator=False,
+               weights=tuple(WeightsOutput(lane, max_new_bytes=1 << 30) for lane in RELANED))  # fmt: skip
 
 
 _BLOCKS = "transformer.transformer_blocks.*"

@@ -1,8 +1,8 @@
 """MiniMax-H3-Image's VAE (Diffusers 0.43 `AutoencoderKLMiniMaxH3Image`) as two components: `vae_encoder`, H3's causal
-3D CNN encoder over one frame (byte-identical to MiniMax-H3's), and `vae_decoder`, a 24-layer 2D ViT. A request
-without pictures never fetches the encoder. Both tile as Diffusers does (256 px tiles, at least 64 px of overlap,
-linearly blended); the decoder runs its tiles as one batch, block by block, its rows cut as the device holds them
-(the Runtime's `split`). The decoder is batch-independent, so each tile's arithmetic is Diffusers'.
+3D CNN encoder over one frame (MiniMax-H3's: float16 and fused, `VAE_ENCODER`), and `vae_decoder`, a 24-layer 2D ViT.
+A request without pictures never fetches the encoder. Both tile as Diffusers does (256 px tiles, at least 64 px of
+overlap, linearly blended); the decoder runs its tiles as one batch, block by block, its rows cut as the device holds
+them (the Runtime's `split`). The decoder is batch-independent, so each tile's arithmetic is Diffusers'.
 
 The 2D decoder is a port of Diffusers' `MiniMaxH3ImageViTDecoder2d` (Apache-2.0, Copyright 2026 The MiniMax and
 HuggingFace Teams); its blocks are Diffusers 0.41's `MiniMaxH3VideoTransformerBlock`, which 0.43's image block copies.
@@ -12,11 +12,17 @@ from __future__ import annotations
 
 import math
 from collections.abc import Mapping, Sequence
+from typing import Literal, cast
 
 import torch
+from cozy_runtime.accel import fusion
 from cozy_runtime.author import Cut, split
 from diffusers.models.autoencoders.autoencoder_kl_minimax_h3 import (
+    MiniMaxH3VideoCausalConv3d,
+    MiniMaxH3VideoDownsample3d,
     MiniMaxH3VideoEncoder3d,
+    MiniMaxH3VideoGroupNorm,
+    MiniMaxH3VideoResnetBlock3d,
     MiniMaxH3VideoTransformerBlock,
 )
 from diffusers.models.modeling_utils import get_parameter_dtype
@@ -75,8 +81,41 @@ def stitch(tiles: Sequence[Sequence[torch.Tensor]], height_overlaps: list[int], 
     return torch.cat(result_rows, dim=-2)
 
 
+def _causal_padding(conv: nn.Module) -> fusion.Padding:
+    """A causal conv's padding: `spatial_padding` pixels each side, reflected as the release's `spatial_padding_mode`
+    says, and `temporal_padding` zero frames before."""
+    layer = cast(MiniMaxH3VideoCausalConv3d, conv)  # `VAE_ENCODER` declares this class alone
+    side = int(layer.spatial_padding)
+    fills: dict[str, Literal["reflect", "zeros"]] = {"reflect": "reflect", "constant": "zeros", "zeros": "zeros"}
+    fill = fills.get(layer.spatial_padding_mode)
+    if fill is None:
+        raise ValueError(f"no fused {layer.spatial_padding_mode!r} padding")
+    return (side, side, side, side), int(layer.temporal_padding), fill
+
+
+def _downsample_pad(block: nn.Module) -> tuple[int, int, int, int]:
+    """A downsampler's reflected right column and bottom row before its 2x spatial stride."""
+    stride = cast(MiniMaxH3VideoDownsample3d, block).spatial_stride  # `VAE_ENCODER` declares it
+    return (0, 1, 0, 1) if stride == 2 else (0, 0, 0, 0)
+
+
+#: H3's causal-conv encoder as Runtime runs it (cr-306), minimax-h3's `VAE_ENCODER`: fp16 NDHWC, each GroupNorm, SiLU
+#: and pad one pass, each conv accumulating in fp16 with its block's residual in its epilogue, as ComfyUI's under
+#: `--fast fp16_accumulation`. It serves the encoder's f16 rows (`lanes.prepare`); f32 rows run eager.
+VAE_ENCODER = fusion.CausalConvEncoder(
+    fusion.CausalConv(MiniMaxH3VideoCausalConv3d, padding=_causal_padding),
+    norm=MiniMaxH3VideoGroupNorm,
+    blocks=(
+        fusion.ConvResidual(
+            MiniMaxH3VideoResnetBlock3d, steps=(("norm1", "conv1"), ("norm2", "conv2")), shortcut="conv_shortcut"
+        ),
+        fusion.PaddedConv(MiniMaxH3VideoDownsample3d, conv="conv", pad=_downsample_pad),
+    ),
+)
+
+
 class ImageEncoder(nn.Module):
-    """`encoder` and `quant_conv` of the VAE: pixels to the posterior's moments."""
+    """`encoder` and `quant_conv` of the VAE: pixels to the posterior's moments, in the rows' dtype."""
 
     def __init__(self, config: Mapping[str, object]) -> None:
         super().__init__()

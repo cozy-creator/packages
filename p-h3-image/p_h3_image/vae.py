@@ -10,21 +10,61 @@ tile is Diffusers'.
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import cast
+from typing import Literal, cast
 
 import torch
 from cozy_runtime import rng
+from cozy_runtime.accel import fusion
 from cozy_runtime.author import Cut, split
 from cozy_runtime.author import device as placed_device
 from diffusers.models.autoencoders.autoencoder_kl_minimax_h3 import (
     AutoencoderKLMiniMaxH3,
+    MiniMaxH3VideoCausalConv3d,
+    MiniMaxH3VideoDownsample3d,
+    MiniMaxH3VideoGroupNorm,
+    MiniMaxH3VideoResnetBlock3d,
     MiniMaxH3VideoViTDecoder3d,
 )
+from diffusers.models.autoencoders.vae import DiagonalGaussianDistribution
 from diffusers.models.modeling_utils import get_parameter_dtype
+from torch import nn
 
 PIXEL_MEAN, PIXEL_STD = (0.485, 0.456, 0.406), (0.229, 0.224, 0.225)
 #: Rotary time of every token of the decoder's one frame (Pruna's `PH3ImageViTDecoder`).
 FRAME_POSITION = 2.0 * (0.5 / 7) - 1.0
+
+
+def _causal_padding(conv: nn.Module) -> fusion.Padding:
+    """A causal conv's padding: `spatial_padding` pixels each side, reflected as the release's `spatial_padding_mode`
+    says, and `temporal_padding` zero frames before."""
+    layer = cast(MiniMaxH3VideoCausalConv3d, conv)  # `VAE_ENCODER` declares this class alone
+    side = int(layer.spatial_padding)
+    fills: dict[str, Literal["reflect", "zeros"]] = {"reflect": "reflect", "constant": "zeros", "zeros": "zeros"}
+    fill = fills.get(layer.spatial_padding_mode)
+    if fill is None:
+        raise ValueError(f"no fused {layer.spatial_padding_mode!r} padding")
+    return (side, side, side, side), int(layer.temporal_padding), fill
+
+
+def _downsample_pad(block: nn.Module) -> tuple[int, int, int, int]:
+    """A downsampler's reflected right column and bottom row before its 2x spatial stride."""
+    stride = cast(MiniMaxH3VideoDownsample3d, block).spatial_stride  # `VAE_ENCODER` declares it
+    return (0, 1, 0, 1) if stride == 2 else (0, 0, 0, 0)
+
+
+#: H3's causal-conv encoder as Runtime runs it (cr-306), minimax-h3's `VAE_ENCODER`: fp16 NDHWC, each GroupNorm, SiLU
+#: and pad one pass, each conv accumulating in fp16 with its block's residual in its epilogue, as ComfyUI's under
+#: `--fast fp16_accumulation`. It serves the encoder's f16 rows (`lanes.F16`); f32 rows run eager.
+VAE_ENCODER = fusion.CausalConvEncoder(
+    fusion.CausalConv(MiniMaxH3VideoCausalConv3d, padding=_causal_padding),
+    norm=MiniMaxH3VideoGroupNorm,
+    blocks=(
+        fusion.ConvResidual(
+            MiniMaxH3VideoResnetBlock3d, steps=(("norm1", "conv1"), ("norm2", "conv2")), shortcut="conv_shortcut"
+        ),
+        fusion.PaddedConv(MiniMaxH3VideoDownsample3d, conv="conv", pad=_downsample_pad),
+    ),
+)
 
 
 class ImageDecoder(MiniMaxH3VideoViTDecoder3d):
@@ -133,12 +173,14 @@ class _BlockRows:
 
 def encode_picture(vae: ImageVAE, pixels: torch.Tensor, seed: int) -> torch.Tensor:
     """A picture's `(H, W, 3)` uint8 pixels to latents `(1, 24, 1, h, w)` as Diffusers encodes a reference: over
-    255, normalized by `PIXEL_MEAN`/`PIXEL_STD`, a posterior sample under `seed` rounded to float16."""
+    255, normalized by `PIXEL_MEAN`/`PIXEL_STD`, a posterior sample under `seed` rounded to float16. The encoder
+    computes in its rows' dtype; the posterior is float32, as upstream draws it."""
     device = torch.device(str(placed_device()))
     pixels = pixels.to(device).permute(2, 0, 1)[None, :, None]
     mean = torch.tensor(PIXEL_MEAN, device=device).view(1, -1, 1, 1, 1)
     std = torch.tensor(PIXEL_STD, device=device).view(1, -1, 1, 1, 1)
     normalized = (pixels.to(torch.float32).div(255.0) - mean) / std
-    posterior = vae.encode(normalized, return_dict=False)[0]
+    moments = vae.encode(normalized, return_dict=False)[0].parameters
+    posterior = DiagonalGaussianDistribution(moments.float())
     latents: torch.Tensor = posterior.sample(generator=rng.generator(seed))
     return latents.to(torch.float16).float()

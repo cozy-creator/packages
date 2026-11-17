@@ -18,6 +18,7 @@ from typing import Literal, cast
 import numpy as np
 import torch
 from cozy_runtime import rng, vlm
+from cozy_runtime.accel import fusion
 from cozy_runtime.accel.attention import AttentionLayout, attention_scope
 from cozy_runtime.accel.kernels import Plan
 from cozy_runtime.author import Config, Loader, Model, Serving, memoize, preview, uses_components
@@ -36,7 +37,7 @@ from transformers import ProcessorMixin, Qwen3VLConfig, Qwen3VLForConditionalGen
 
 from . import fused
 from .transformer import MODALITIES, PH3ImageTransformer, build_transformer, compute_dtypes, parse_tables
-from .vae import ImageVAE, encode_picture
+from .vae import VAE_ENCODER, ImageVAE, encode_picture
 
 #: The checkpoint's sampling grid (`modular_model_index.json` `sample_sigmas`), used verbatim.
 SIGMAS = (1.0, 0.984753, 0.967905, 0.951688, 0.925372, 0.881923, 0.810083, 0.528718, 0.0)
@@ -235,7 +236,9 @@ class PH3Image(Model[ImageGraph]):
         return None
 
     def execution_plan(self, plan: Plan) -> str:
-        return fused.install(self, self.graph, plan)
+        """The DiT blocks' fused glue (`fused`) and the VAE's fused encoder (`VAE_ENCODER`)."""
+        plans = (fused.install(self, self.graph, plan), fusion.install_encoder(plan, VAE_ENCODER, self.graph.components["vae"]))
+        return "+".join(identity for identity in plans if identity)
 
     @memoize
     @uses_components("text_encoder", "text_connector")

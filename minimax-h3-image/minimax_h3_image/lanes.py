@@ -2,9 +2,10 @@
 
 The image model: `bf16-full` is MiniMax's Diffusers upload as it is (`transformer_diffusers`, `vae_diffusers`).
 `prepare` writes `bf16` from it (`source` the DiT, `vae` the VAE): the DiT's time embedder and AdaLN projections replaced by exact tables of the rows the
-6 steps read (`model.table_keys`), and the VAE split into `vae_encoder` (H3's encoder, float32, byte-identical) and
-`vae_decoder` (bf16 as Diffusers loads it, its norms and layer scales float32). `int8` (the default), `w4a8` and
-`nvfp4` are recipes over `bf16` (`cozy model quantize <bf16 checkpoint> --lane int8 --package minimax-h3-image`).
+6 steps read (`model.table_keys`), and the VAE split into `vae_encoder` (H3's encoder, float16 as MiniMax-H3 stores
+it, fused: `vae.VAE_ENCODER`) and `vae_decoder` (bf16 as Diffusers loads it, its norms and layer scales float32).
+`int8` (the default), `w4a8` and `nvfp4` are recipes over `bf16` (`cozy model quantize <bf16 checkpoint> --lane int8
+--package minimax-h3-image`). `encoder_f16` rewrites a lane written before `bf16` stored the encoder float16.
 
 The prompt expander: `nvfp4` is MiniMax's ModelOpt NVFP4 upload as it is. `expander_bf16` writes `bf16` from it, every
 NVFP4 linear decoded (its FP4 values times their block and global scales, rounded once to bf16), and, with
@@ -71,6 +72,14 @@ def _put(out: Output, component: str, key: str, value: torch.Tensor) -> int:
     raw = memoryview(data.view(torch.uint8).numpy()).cast("B")
     out.put(component, key, _NAMES[data.dtype], tuple(data.shape), raw)
     return len(raw)
+
+
+def _half(key: str, value: torch.Tensor) -> torch.Tensor:
+    """An encoder row in float16, as MiniMax-H3 stores and computes it."""
+    half = value.to(torch.float16)
+    if not torch.isfinite(half).all():
+        raise UnsupportedInput(f"vae_encoder.{key} overflows float16", code="quantization_tripwire")
+    return half
 
 
 def _features(timesteps: torch.Tensor) -> torch.Tensor:
@@ -165,6 +174,8 @@ async def prepare(ctx: Context, *, source: Weights, vae: Weights, tel: Telemetry
                     continue
                 if component == "transformer":
                     out.copy(component, key, src, from_component=dit)
+                elif component == "vae_encoder" and vae_src.components[vae_name].tensors[key].dtype.lower() != "f16":
+                    converted += _put(out, component, key, _half(key, _plain(vae_src, vae_name, key)))
                 elif component == "vae_decoder" and not kept_fp32(key) and vae_src.components[vae_name].tensors[key].dtype.lower() != "bf16":
                     converted += _put(out, component, key, _plain(vae_src, vae_name, key).to(torch.bfloat16))
                 else:
@@ -173,12 +184,42 @@ async def prepare(ctx: Context, *, source: Weights, vae: Weights, tel: Telemetry
         with tel.stage("AdaLN tables"):
             written = _write_tables(ctx, src, dit, out)
         artifact = ctx.adopt_model(out)
-    tel.log("minimax-h3-image bf16", tables=len(tables), table_bytes=written, decoder_bf16_bytes=converted)
+    tel.log("minimax-h3-image bf16", tables=len(tables), table_bytes=written, converted_bytes=converted)
     return artifact
 
 
 app.entrypoint(prepare, name="prepare", accelerator=False,
                weights=(WeightsOutput("bf16", max_new_bytes=MAX_PREPARED_BYTES),))  # fmt: skip
+
+
+class ImageLane(msgspec.Struct, kw_only=True):
+    #: The lane `source` is, which the output keeps.
+    lane: Literal["bf16", "int8", "w4a8", "nvfp4"]
+
+
+async def encoder_f16(ctx: Context, payload: ImageLane, *, source: Weights, tel: Telemetry) -> ModelArtifact:
+    """An image-model lane as it is, its `vae_encoder` rows float16, as `prepare` now writes them and the quantized
+    lanes keep them from `bf16`. Every other tensor is the source's."""
+    src = ctx.tensorfs_source(source)
+    if "vae_encoder" not in src.components:
+        raise UnsupportedInput("this checkpoint holds no MiniMax-H3-Image `vae_encoder`", code="minimax_h3_image_source")
+    keys = [key for key, row in src.components["vae_encoder"].tensors.items() if row.dtype.lower() != "f16"]
+    order = [(name, key) for name, component in src.components.items() for key in component.tensors]
+    written = 0
+    with ctx.output(payload.lane, Derivation(base=src, order=order)) as out:
+        with tel.stage("encoder rows"):
+            for done, key in enumerate(keys, 1):
+                ctx.raise_if_cancelled()
+                if not out.has("vae_encoder", key):
+                    written += _put(out, "vae_encoder", key, _half(key, _plain(src, "vae_encoder", key)))
+                ctx.progress(done - 1, len(keys))
+        artifact = ctx.adopt_model(out)
+    tel.log("minimax-h3-image encoder f16", lane=payload.lane, rows=len(keys), written=written)
+    return artifact
+
+
+app.entrypoint(encoder_f16, name="encoder_f16", accelerator=False,
+               weights=tuple(WeightsOutput(lane, max_new_bytes=1 << 30) for lane in ("bf16", "int8", "w4a8", "nvfp4")))  # fmt: skip
 
 
 _BLOCKS = "transformer.transformer_blocks.*"
