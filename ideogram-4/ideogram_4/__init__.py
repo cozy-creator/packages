@@ -114,9 +114,11 @@ _COMPONENTS = {"model": ("transformer", "unconditional_transformer", "vae"), "te
                "upsampler": ("model",)}
 
 
-# The upsampler is built and fetched only for a plain prompt with `prompt_upsampling` on. Model
-# parameters are in name order: Runtime refuses a binding set whose paths are not sorted.
-@app.entrypoint(defaults=_DEFAULTS, components=_COMPONENTS, on_demand=("upsampler",), memoize=True)
+# The upsampler is fetched only for a request with `prompt_upsampling` on (unset is on), and read only for a plain
+# prompt (`caption`): a JSON caption, which only its text shows, over-fetches it (cl-1103). Model parameters are in
+# name order: Runtime refuses a binding set whose paths are not sorted.
+@app.entrypoint(defaults=_DEFAULTS, components=_COMPONENTS, needs={"upsampler": "request.prompt_upsampling != false"},
+                memoize=True)
 def generate(ctx: Context, payload: GenerateInput, model: Ideogram4, text_encoder: QwenEncoder,
              upsampler: QwenUpsampler, tel: Telemetry, adj: Adjustments) -> ImageResult:
     """Ideogram 4, 48 steps at guidance 7: a JSON caption or a prompt, with `regions` placed by box.
@@ -163,8 +165,9 @@ class ImageBox(msgspec.Struct, kw_only=True):
     seed: Seed | None = None
 
 
-# A plain prompt is always upsampled into Ideogram's caption (`caption`); a JSON caption goes as given.
-@app.tool(label="Image", named="image", defaults=_DEFAULTS, components=_COMPONENTS, on_demand=("upsampler",),
+# A plain prompt is always upsampled into Ideogram's caption (`caption`); a JSON caption goes as given, but only its
+# text says so, so every box fetches the upsampler (cl-1103).
+@app.tool(label="Image", named="image", defaults=_DEFAULTS, components=_COMPONENTS, needs={"upsampler": "true"},
           memoize=True)  # fmt: skip
 def image(ctx: Context, payload: ImageBox, model: Ideogram4, text_encoder: QwenEncoder, upsampler: QwenUpsampler,
           tel: Telemetry, adj: Adjustments) -> ImageResult:
