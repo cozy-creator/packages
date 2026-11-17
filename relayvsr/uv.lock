@@ -44,8 +44,8 @@ wheels = [
 
 [[package]]
 name = "cozy-runtime"
-version = "0.47.0.dev2287+g1a53ab3c"
-source = { url = "https://github.com/cozy-creator/cozy-runtime/releases/download/rc-0.26.0/cozy_runtime-0.47.0.dev2287+g1a53ab3c-py3-none-any.whl" }
+version = "0.48.0.dev2315+g8082ed98"
+source = { url = "https://github.com/cozy-creator/cozy-runtime/releases/download/rc-0.27.0/cozy_runtime-0.48.0.dev2315+g8082ed98-py3-none-any.whl" }
 dependencies = [
     { name = "msgspec" },
     { name = "numpy" },
@@ -54,7 +54,7 @@ dependencies = [
     { name = "tensorfs" },
 ]
 wheels = [
-    { url = "https://github.com/cozy-creator/cozy-runtime/releases/download/rc-0.26.0/cozy_runtime-0.47.0.dev2287+g1a53ab3c-py3-none-any.whl", hash = "sha256:0a8738d1c9e970e58c6828467a423591265a992384ecdae27c216ffe54145eed" },
+    { url = "https://github.com/cozy-creator/cozy-runtime/releases/download/rc-0.27.0/cozy_runtime-0.48.0.dev2315+g8082ed98-py3-none-any.whl", hash = "sha256:e8fcb12ec0776b4a4c79b7305b304c2f94a5f9a897422517d9268b02091dbdc4" },
 ]
 
 [package.optional-dependencies]
@@ -243,7 +243,7 @@ wheels = [
 
 [[package]]
 name = "relayvsr"
-version = "0.3.0rc1"
+version = "0.4.0rc1"
 source = { editable = "." }
 dependencies = [
     { name = "cozy-runtime", extra = ["media"] },
@@ -253,7 +253,7 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
-    { name = "cozy-runtime", extras = ["media"], url = "https://github.com/cozy-creator/cozy-runtime/releases/download/rc-0.26.0/cozy_runtime-0.47.0.dev2287+g1a53ab3c-py3-none-any.whl" },
+    { name = "cozy-runtime", extras = ["media"], url = "https://github.com/cozy-creator/cozy-runtime/releases/download/rc-0.27.0/cozy_runtime-0.48.0.dev2315+g8082ed98-py3-none-any.whl" },
     { name = "msgspec", specifier = ">=0.19" },
     { name = "numpy", specifier = ">=2" },
     { name = "torch", marker = "sys_platform != 'win32'", specifier = ">=2.10" },

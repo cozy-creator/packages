@@ -4,7 +4,7 @@ version = "0.13.0rc1"
 description = "Cozy image generation and editing using Qwen-Image-2512 and Qwen-Image-Edit-2511, full and Lightning"
 requires-python = ">=3.12"
 dependencies = [
-    "cozy-runtime[adapters,media]>=0.47.0.dev0,<0.48",
+    "cozy-runtime[adapters,media]>=0.48.0.dev0,<0.49",
     "diffusers>=0.41,<0.42",
     "msgspec>=0.19",
     "numpy>=1.26",
