@@ -25,7 +25,11 @@ cozy run minimax-h3-image/generate instructions='Put the hat from <hat> on the w
   `int8` (the default), `w4a8` and `nvfp4` are recipes over `bf16` (`cozy model quantize <bf16 checkpoint>
   --lane int8 --package minimax-h3-image`). The expander's `nvfp4` is MiniMax's upload (`expander_config` drops
   ModelOpt's `quantization_config`); `expander_bf16` decodes it to `bf16`, and its `int8` and `w4a8` are recipes over
-  that. `abliterate` projects a refusal direction out of a `bf16` lane's residual writers.
+  that.
+- **Abliteration** (`abliteration.py`). This PE doesn't refuse: it rewrites a sensitive request into a sanitized
+  caption. `abliteration_study` searches Heretic-style ablations of its residual writers, scored with answers forced as
+  text: how much likelier faithful answers get than its sanitized ones, against the KL from it over its neutral answers.
+  Its best answer real requests beside the stock PE. `abliteration` bakes the chosen one into a `bf16` lane.
 - **Speed** (16.8 MP, int8, warm): RTX PRO 6000 12.4 s (6 x 1.6 s, decode 0.75 s); ComfyUI's int8 15.5 s on the same
   card. RTX 4090 39.7 s (the text encoder and DiT page; 6 x 2.7 s).
 

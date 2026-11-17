@@ -41,7 +41,7 @@ from cozy_runtime.author import (
     uses_components,
 )
 from cozy_runtime.media import File, Files, ImageFile
-from cozy_runtime.vlm import COMPONENT, Params, VisionLM
+from cozy_runtime.vlm import COMPONENT, Params, Question, VisionLM
 from cozy_runtime.weights_store import Derivation
 from PIL import Image
 from torch import nn
@@ -410,11 +410,11 @@ class StudyPE(H3ImagePE):
         """`fn`, the PE's weights held for it."""
         return fn()
 
-    def t2i(self, request: str, answer: str | None = None) -> list[int]:
-        """`request` under the T2I PE's prompts, the thought opened; then `answer` and the turn's end."""
-        content = [{"type": "text", "text": self.t2i_task.format(request)}]
+    def t2i(self, prompts: tuple[str, str], request: str, answer: str | None = None) -> list[int]:
+        """`request` under the T2I PE's `(system, task)` prompts, the thought opened; then `answer` and the turn's end."""
+        content = [{"type": "text", "text": prompts[1].format(request)}]
         chat = self.processor.apply_chat_template(
-            [{"role": "system", "content": self.t2i_system}, {"role": "user", "content": content}],
+            [{"role": "system", "content": prompts[0]}, {"role": "user", "content": content}],
             add_generation_prompt=True, tokenize=False, enable_thinking=True,
         )  # fmt: skip
         text = chat if answer is None else f"{chat}{answer}<|im_end|>"
@@ -434,14 +434,14 @@ def _shared(rows: Sequence[list[int]]) -> int:
 class _Data:
     """A study's evidence tokenized once: prompt-only rows (last token read) and answered rows (answer read)."""
 
-    def __init__(self, pe: StudyPE, evidence: Evidence) -> None:
+    def __init__(self, pe: StudyPE, t2i: tuple[str, str], evidence: Evidence) -> None:
         self.sets: dict[str, list[tuple[list[int], int]]] = {}
 
         def prompts(requests: list[str]) -> list[tuple[list[int], int]]:
-            return [((ids := pe.t2i(r)), len(ids) - 1) for r in requests]
+            return [((ids := pe.t2i(t2i, r)), len(ids) - 1) for r in requests]
 
         def answered(request: str, answer: str) -> tuple[list[int], int]:
-            ids, prompt = pe.t2i(request, answer), pe.t2i(request)
+            ids, prompt = pe.t2i(t2i, request, answer), pe.t2i(t2i, request)
             return ids, _shared([ids, prompt]) + 1  # where the answer's tokens start, should they merge with the prompt's
 
         self.sets["sensitive"] = prompts(evidence.sensitive)
@@ -674,8 +674,8 @@ def _search(ctx: Context, payload: Study, data: _Data, teacher: _Teacher, layers
     return [Arm(name=f"top{i + 1}", ablation=x[0]) for i, x in enumerate(within[: payload.top])]
 
 
-def _answer(pe: StudyPE, requests: Sequence[Request], pictures: list[Image.Image], payload: Study,
-            ctx: Context) -> list[dict[str, object]]:  # fmt: skip
+def _answer(pe: StudyPE, t2i: tuple[str, str], requests: Sequence[Request], pictures: list[Image.Image],
+            payload: Study, ctx: Context) -> list[dict[str, object]]:  # fmt: skip
     """Every request answered as the tool samples, edits and T2I in their own batches."""
     out: dict[str, dict[str, object]] = {}
     groups = [[r for r in requests if not r.pictures], [r for r in requests if r.pictures]]
@@ -683,7 +683,8 @@ def _answer(pe: StudyPE, requests: Sequence[Request], pictures: list[Image.Image
         for at in range(0, len(group), size):
             ctx.raise_if_cancelled()
             chunk = group[at : at + size]
-            built = [pe.question(r.text, [pictures[i] for i in r.pictures or []], r.aspect_ratio) for r in chunk]
+            built = [pe.question(r.text, [pictures[i] for i in r.pictures], r.aspect_ratio) if r.pictures
+                     else (Question(t2i[1].format(r.text)), t2i[0], "aspect_ratio") for r in chunk]  # fmt: skip
             system = built[0][1] + payload.system_suffix if not chunk[0].pictures else ""
             params = Params(system=system, thinking=True, reasoning_effort=None, stop=[], max_new_tokens=MAX_TOKENS,
                             temperature=TEMPERATURE, top_p=TOP_P, presence_penalty=0.0, seed=payload.seed)  # fmt: skip
@@ -703,9 +704,9 @@ def abliteration_study(ctx: Context, payload: Study, expander: StudyPE, out: Out
     """Directions from `evidence`, a search over ablations scored by forcing its answers, then each arm (stock, the
     search's best, `candidates`) answering `requests`; everything in one JSON report."""
     shown = [upright(p.read()) for p in pictures]
-    expander.t2i_system = expander.t2i_system if payload.t2i_system is None else payload.t2i_system
-    expander.t2i_task = expander.t2i_task if payload.t2i_task is None else payload.t2i_task
-    if not expander.t2i_task:
+    t2i = (expander.t2i_system if payload.t2i_system is None else payload.t2i_system,
+           expander.t2i_task if payload.t2i_task is None else payload.t2i_task)  # fmt: skip
+    if not t2i[1]:
         raise UnsupportedInput("this checkpoint carries no T2I PE prompts: give `t2i_system` and `t2i_task`", code="study_prompts")
     report: dict[str, object] = {"study": msgspec.to_builtins(msgspec.structs.replace(payload, evidence=None))}
     rng = random.Random(payload.seed)
@@ -719,7 +720,7 @@ def abliteration_study(ctx: Context, payload: Study, expander: StudyPE, out: Out
             chosen: list[Arm] = []
             if payload.evidence is not None:
                 with tel.stage("tokenizing"):
-                    data = _Data(expander, payload.evidence)
+                    data = _Data(expander, t2i, payload.evidence)
                 teacher = _Teacher(expander, _prefix_ids(data), payload.token_budget)
                 report["prefix_tokens"] = data.prefix
                 with tel.stage("prefix check"):
@@ -737,7 +738,7 @@ def abliteration_study(ctx: Context, payload: Study, expander: StudyPE, out: Out
                     baked = _Baked(layers, directions, arm.ablation) if arm.ablation is not None and directions else None
                     began = time.monotonic()
                     try:
-                        answers = _answer(expander, payload.requests, shown, payload, ctx) if payload.requests else []
+                        answers = _answer(expander, t2i, payload.requests, shown, payload, ctx) if payload.requests else []
                         held = baked is None or baked.held()
                     finally:
                         if baked is not None:
