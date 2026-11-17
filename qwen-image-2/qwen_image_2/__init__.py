@@ -15,6 +15,8 @@ from cozy_runtime.media import ImageFile
 from PIL import Image as PILImage
 
 from . import quantize as quantize  # its recipes
+from diffusers.pipelines.qwenimage21.pipeline_qwenimage21 import calculate_dimensions
+
 from .model import QwenImage21DiT, QwenImage21TextEncoder, QwenImage21VAE, reference_grids
 from .rewriter import Creativity, Enhancer, keeps_transparency, rewrite, transparent
 from .turbo import FunAccLoRA
@@ -303,8 +305,10 @@ class UpscaleInput(msgspec.Struct, kw_only=True):
     megapixels: Literal[2, 4] = 4
     denoise: Annotated[float, msgspec.Meta(gt=0, le=1)] = 0.2
     seed: Seed | None = None
-    #: se-147 measurement only: the reference at the canvas (Diffusers' `output_resolution`) or at 1 MP.
-    reference: Literal["canvas", "1mp"] = "1mp"
+    #: se-147 measurement only: the reference at the canvas (Diffusers' `output_resolution`), at 2 MP or at 1 MP.
+    reference: Literal["canvas", "2mp", "1mp"] = "1mp"
+    #: se-147 measurement only: the base model's steps (without Turbo).
+    steps: int = _STEPS
     #: se-147 measurement only: which request.
     prompt: Literal["upscale", "restore"] = "upscale"
     #: se-147 measurement only: Fun Acc's 4 steps, else the base model's 40.
@@ -327,7 +331,11 @@ def upscale(ctx: Context, payload: UpscaleInput, model: QwenImage21DiT, text_enc
     prompt = PROMPTS[payload.prompt]
     vae.hold(tel)
     with tel.stage("encoding reference images"):
-        canvas = (width, height) if payload.reference == "canvas" else None
+        canvas = None
+        if payload.reference == "canvas":
+            canvas = (width, height)
+        elif payload.reference == "2mp":
+            canvas = tuple(calculate_dimensions(2 * 1024 * 1024, picture.width / picture.height)[:2])
         conditioning, latents = vae.encode_reference_images([picture], canvas)
         start = None
         if payload.denoise < 1:
@@ -341,7 +349,7 @@ def upscale(ctx: Context, payload: UpscaleInput, model: QwenImage21DiT, text_enc
                                          progress=ctx.progress, reference_images=conditioning, reference_latents=latents,
                                          image_pad_mask=image_pad_mask, start=start, strength=payload.denoise)  # fmt: skip
         else:
-            latents = model.denoise(embeds, mask, width=width, height=height, steps=_STEPS, seed=seed, progress=ctx.progress,
+            latents = model.denoise(embeds, mask, width=width, height=height, steps=payload.steps, seed=seed, progress=ctx.progress,
                                     reference_images=conditioning, reference_latents=latents,
                                     image_pad_mask=image_pad_mask, start=start, strength=payload.denoise)  # fmt: skip
     with tel.stage("decoding image"):
@@ -349,5 +357,5 @@ def upscale(ctx: Context, payload: UpscaleInput, model: QwenImage21DiT, text_enc
     with tel.stage("saving image"):
         asset = ImageFile.from_image(image, format="png")
     tel.log("upscale", source=f"{picture.width}x{picture.height}", width=width, height=height, denoise=payload.denoise,
-            reference=payload.reference, prompt=payload.prompt, turbo=payload.turbo)
+            reference=payload.reference, prompt=payload.prompt, turbo=payload.turbo, steps=payload.steps)
     return ImageResult(asset, width, height, seed, prompt)
