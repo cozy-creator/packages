@@ -14,7 +14,8 @@ from cozy_runtime.vlm import VisionLM
 from cozy_runtime import rng
 from cozy_runtime.author import Config, InvalidRequest, Loader, Model, ModelAssets, Serving, uses_components
 from diffusers.models.autoencoders.autoencoder_kl_wan import AutoencoderKLWan
-from diffusers.models.transformers.transformer_pan2 import PAN2Transformer3DModel
+from diffusers.models.embeddings import TimestepEmbedding, Timesteps
+from diffusers.models.transformers.transformer_pan2 import PAN2Transformer3DModel, PAN2TransformerBlock
 from diffusers.schedulers.scheduling_flow_match_euler_discrete import FlowMatchEulerDiscreteScheduler
 from diffusers.guiders.classifier_free_guidance import ClassifierFreeGuidance
 from diffusers.modular_pipelines.modular_pipeline import BlockState, PipelineState
@@ -82,49 +83,60 @@ class Components(TypedDict):
 CURVE = ("adaln_curve_grid", "adaln_curve_dim")
 
 
-class _CurveCoordinates(nn.Module):
+class _CurveTimesteps(Timesteps):
     """`time_proj` of the curve form: each timestep (0-1000) as its lerped row of the transformer's table."""
 
-    def __init__(self, owner: PAN2Transformer3DModel) -> None:
-        super().__init__()
+    def __init__(self, owner: PAN2Transformer3DModel, dim: int) -> None:
+        super().__init__(num_channels=dim, flip_sin_to_cos=True, downscale_freq_shift=0)
         self._owner = weakref.ref(owner)  # not a submodule: the table is the transformer's own buffer
 
-    def forward(self, timestep: torch.Tensor) -> torch.Tensor:
+    def forward(self, timesteps: torch.Tensor) -> torch.Tensor:
         table = cast(torch.Tensor, cast(PAN2Transformer3DModel, self._owner()).adaln_t_table)
-        position = (timestep.float() / 1000).clamp(0, 1) * (table.shape[0] - 1)
+        position = (timesteps.float() / 1000).clamp(0, 1) * (table.shape[0] - 1)
         low = position.floor().long().clamp(max=table.shape[0] - 2)
         return torch.lerp(table[low], table[low + 1], (position - low).unsqueeze(1))
 
 
-class _Float32(nn.Module):
-    """Stands where the time embedder's `linear_1` was: Diffusers casts the time projection to its weight's dtype."""
+class _Float32(nn.Linear):
+    """Stands where the time embedder's `linear_1` was, holding no weight: Diffusers casts the time projection to
+    that weight's dtype, float32 here, as the table is."""
 
     def __init__(self) -> None:
-        super().__init__()
+        nn.Module.__init__(self)
+        self.in_features = self.out_features = 0
         self.register_buffer("weight", torch.empty(0), persistent=False)
+        self.register_parameter("bias", None)
 
 
-class _Coordinates(nn.Module):
-    """`time_embedder` of the curve form: the coordinates are already `vec(t)`."""
+class _CurveEmbedding(TimestepEmbedding):
+    """`time_embedder` of the curve form: its input, a row of the table, is `vec(t)` already."""
 
     def __init__(self) -> None:
-        super().__init__()
+        nn.Module.__init__(self)
         self.linear_1 = _Float32()
 
-    def forward(self, coordinates: torch.Tensor) -> torch.Tensor:
-        return coordinates
+    def forward(self, sample: torch.Tensor, condition: torch.Tensor | None = None) -> torch.Tensor:
+        return sample
+
+
+class _Applied(nn.SiLU):
+    """A modulation's SiLU in the curve form: the table holds coordinates of its output, so it passes them on."""
+
+    def forward(self, input: torch.Tensor) -> torch.Tensor:
+        return input
 
 
 def curved(model: PAN2Transformer3DModel, grid: int, dim: int) -> PAN2Transformer3DModel:
     """`model` in the curve form: its table, coordinate time embedding and `dim`-wide modulation linears."""
     inner = int(model.config["num_attention_heads"]) * int(model.config["attention_head_dim"])
     model.register_buffer("adaln_t_table", torch.empty(grid, dim, dtype=torch.float32))
-    model.time_proj = _CurveCoordinates(model)
-    model.time_embedder = _Coordinates()
+    model.time_proj = _CurveTimesteps(model, dim)
+    model.time_embedder = _CurveEmbedding()
     for block in model.transformer_blocks:
-        block.norm1.silu = nn.Identity()
+        assert isinstance(block, PAN2TransformerBlock)
+        block.norm1.silu = _Applied()
         block.norm1.linear = nn.Linear(dim, 6 * inner)
-    model.norm_out.silu = nn.Identity()
+    model.norm_out.silu = _Applied()
     model.norm_out.linear = nn.Linear(dim, 2 * inner)
     return model
 
@@ -133,7 +145,7 @@ def transformer(config: Config) -> PAN2Transformer3DModel:
     """The DiT as the checkpoint stores it: the full form, or the curve form its config names (`CURVE`)."""
     settings = config.section("transformer").mapping()
     curve = [settings.pop(key, None) for key in CURVE]
-    model = PAN2Transformer3DModel.from_config(settings)
+    model: PAN2Transformer3DModel = PAN2Transformer3DModel.from_config(settings)
     if curve[0] is not None:
         model = curved(model, int(curve[0]), int(curve[1]))
     return stored(model, "transformer", config)

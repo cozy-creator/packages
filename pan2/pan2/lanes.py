@@ -59,7 +59,9 @@ async def curve(ctx: Context, *, source: Weights, tel: Telemetry) -> ModelArtifa
     section = dict(src.components["transformer"].config)
     if CURVE[0] in section or "time_embedder.linear_1.weight" not in present.get("transformer", {}):
         raise UnsupportedInput("this PAN2 is not in the full form: write the curve from ifm/pan2's bf16", code="pan2_source")
-    blocks = int(section["num_layers"])
+    blocks = section.get("num_layers")
+    if not isinstance(blocks, int):
+        raise UnsupportedInput(f"this PAN2's num_layers is {blocks!r}, not a count", code="pan2_source")
     modulation = [f"transformer_blocks.{i}.norm1.linear.weight" for i in range(blocks)] + ["norm_out.linear.weight"]
     removed = {key for key in present["transformer"] if key.startswith("time_embedder.")}
     rows = [(name, key) for name in present for key in present[name] if not (name == "transformer" and key in removed)]
