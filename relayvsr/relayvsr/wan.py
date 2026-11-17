@@ -226,13 +226,20 @@ class Ring:
         k, v = self.frames[frame][1][block].get()
         return k, v
 
-    def keep(self, kv: list[tuple[torch.Tensor, torch.Tensor]]) -> None:
-        """The new keyframe's K/V; the one leaving the window goes."""
+    def begin(self, nbytes: int) -> None:
+        """The new keyframe's store, for `nbytes` of K/V over its blocks. The keyframe leaving the
+        window goes first: the new one never reads it (`slots`)."""
         f = self.count
-        store = retained(sum(k.nbytes + v.nbytes for k, v in kv))
-        self.frames[f] = (store, [store.put(k, v) for k, v in kv])
         for old in [s for s in self.frames if s <= f - self.context]:
             self.frames.pop(old)[0].close()
+        self.frames[f] = (retained(nbytes), [])
+
+    def put(self, k: torch.Tensor, v: torch.Tensor) -> None:
+        """The new keyframe's next block's K/V, which the store holds from now on."""
+        store, states = self.frames[self.count]
+        states.append(store.put(k, v))
+
+    def end(self) -> None:
         self.count += 1
 
     def close(self) -> None:
@@ -279,18 +286,21 @@ class WanVSR(nn.Module):
         k_rope = rope_tables(self.head_dim, ph, pw, [s - origin for s in slots], x.device)
         window = (min(self.window[0], ph), min(self.window[1], pw))
         local = window != (ph, pw)
-        made: list[tuple[torch.Tensor, torch.Tensor]] = []
-        for index, block in enumerate(cast(list[Block], list(self.blocks))):
+        blocks = cast(list[Block], list(self.blocks))
+        # Each block's K/V goes to the ring as it is made, held by the Runtime's memory (spilled to
+        # the host when the card is short), not kept on the card until the loop ends: 30 blocks'
+        # at 9216 tokens are 3.4 GB, which filled a 6 GiB cap (cr-324).
+        ring.begin(2 * len(blocks) * x.numel() * x.element_size())
+        for index, block in enumerate(blocks):
             shift, scale, gate, c_shift, c_scale, c_gate = (block.scale_shift_table[None] + projected.float()).unbind(2)
             h = (block.norm1(x.float()) * (1 + scale) + shift).type_as(x)
             attn = block.attn1
-            key, value = attn.keys(h)
-            made.append((key, value))
-            held = [(key, value) if s == f else ring.kv(s, index) for s in slots]
-            keys, values = [kv[0] for kv in held], [kv[1] for kv in held]
-            q = rotate(attn.query(h), *q_rope).to(value.dtype)
-            k = rotate(torch.cat(keys, dim=1), *k_rope).to(value.dtype)
-            v = torch.cat(values, dim=1)
+            ring.put(*attn.keys(h))
+            held = [ring.kv(s, index) for s in slots]
+            v = torch.cat([kv[1] for kv in held], dim=1)
+            q = rotate(attn.query(h), *q_rope).to(v.dtype)
+            k = rotate(torch.cat([kv[0] for kv in held], dim=1), *k_rope).to(v.dtype)
+            del held
             if local:
                 y = kernels.window_attention(q, k, v, ph, pw, window)
             else:
@@ -307,8 +317,7 @@ class WanVSR(nn.Module):
             h = (block.norm3(x.float()) * (1 + c_scale) + c_shift).type_as(x)
             x = (x.float() + block.ffn(h).float() * c_gate).type_as(x)
 
-        ring.keep(made)
-        del made
+        ring.end()
 
         shift, scale = (self.scale_shift_table[None] + temb[:, :, None]).unbind(2)
         x = (self.norm_out(x.float()) * (1 + scale) + shift).type_as(x)
