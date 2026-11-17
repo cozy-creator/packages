@@ -467,8 +467,8 @@ ClipWindow = tuple[int, int]
 
 
 def footage_frames(video: VideoFile) -> int:
-    """A clip's frames on the 24-fps clock."""
-    return math.floor(video.probe().duration * FPS + Fraction(1, 2))
+    """A clip's frames on the 24-fps clock: at least its first."""
+    return max(1, math.floor(video.probe().duration * FPS + Fraction(1, 2)))
 
 
 def shot_windows(clips: Sequence[tuple[StoryReference, float, float]], spans: Sequence[tuple[int, int]]
@@ -788,8 +788,8 @@ def plate_sound(out: Outputs, video: VideoFile, plate: VideoFile) -> tuple[Video
                             "encoded as AAC")  # fmt: skip
             sounds = _encoded(source, heard, joined, origin, end)
         ordered: list[Packet[VideoStream] | Packet[AudioStream]] = [*pictures, *sounds]
-        for packet in sorted(ordered, key=_at):
-            joined.mux(packet)
+        for muxed in sorted(ordered, key=_at):
+            joined.mux(muxed)
     return out.save_file(path, media_type="video/mp4"), warnings
 
 

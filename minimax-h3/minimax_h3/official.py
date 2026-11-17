@@ -2491,6 +2491,9 @@ def read_reference_video(
         raise InvalidRequest("reference video has no frames", code="reference_policy")
     end = min(end, origin + Fraction(frames, FPS))
     place(held[1], end)
+    if kept == 0 and held[1] is not None:
+        # A clip shorter than half a slot still shows its first frame.
+        out[0], kept = held[1], 1
     if kept == 0:
         raise InvalidRequest("reference video has no frame on the 24-fps clock", code="reference_policy")
     if guide and kept < frames:
