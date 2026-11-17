@@ -60,6 +60,12 @@ def canvas(ratio: AspectRatio | None, first: tuple[int, int] | None) -> tuple[in
     return max(32, round(math.sqrt(area * r) / 32) * 32), max(32, round(math.sqrt(area / r) / 32) * 32)
 
 
+def request(prompt: str, seconds: float) -> str:
+    """The rewriter's user message as its policy's input contract states it (`prompt-policy.md`, "Input contract"):
+    one JSON record, `original_prompt` and `duration_sec` at one decimal. Without a duration it writes 13 seconds."""
+    return json.dumps({"original_prompt": prompt, "duration_sec": round(seconds, 1)}, ensure_ascii=False)
+
+
 def caption(text: str) -> str:
     text = text.strip()
     if text.startswith("```"):
@@ -92,7 +98,7 @@ def generate(ctx: Context, payload: Generate, model: Pan2, reasoner: Reasoner, o
     if payload.prompt_upsampling:
         with tel.stage("writing action timeline"):
             replies = reasoner.ask(
-                [vlm.Question(f"Clip duration: {(frames - 1) / FPS:g} seconds.\nUser request: {prompt}", [picture] if picture else [], [])],
+                [vlm.Question(request(prompt, seconds), [picture] if picture else [], [])],
                 system=REWRITE, thinking=False, stop=[], max_new_tokens=3072, presence_penalty=0.0,
                 temperature=0.0, top_p=1.0, seed=seed,
                 progress=lambda _: ctx.raise_if_cancelled(),
