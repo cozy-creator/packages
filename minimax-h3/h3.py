@@ -2029,7 +2029,7 @@ def _three_taps_off(active: bool) -> Callable[[], None]:
 
 
 class LoneProbe(msgspec.Struct, kw_only=True):
-    images: list[Annotated[ImageFile, FileBound(max_decoded_bytes=1 << 30)]]
+    images: list[Annotated[ImageFile, FileBound(max_bytes=1 << 30, max_decoded_bytes=1 << 30)]]
     #: reference short edges: 1024 is ref2va's default fidelity, 2048 its `high`
     short_edges: list[int]
     passes: int = 3
