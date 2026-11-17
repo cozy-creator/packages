@@ -765,16 +765,18 @@ def plate_sound(out: Outputs, video: VideoFile, plate: VideoFile) -> tuple[Video
     are, so it decodes bit for bit; a codec an MP4 can't hold is encoded as AAC, with a note."""
     warnings: list[str] = []
     with ExitStack() as stack:
-        made = stack.enter_context(open_media(io.BytesIO(video.read_bytes())))
-        source = stack.enter_context(open_media(io.BytesIO(plate.read_bytes())))
+        made, source = open_media(io.BytesIO(video.read_bytes())), open_media(io.BytesIO(plate.read_bytes()))
+        stack.callback(made.close)
+        stack.callback(source.close)
         picture, heard, first = made.streams.video[0], source.streams.audio[0], source.streams.video[0]
         pictures = [packet for packet in made.demux(picture) if packet.size and packet.pts is not None]
         end = Fraction(len(pictures), FPS)  # an H3 video's frames, on its 24-fps clock from 0
         # The plate's clock starts at its first frame, as `read_reference_video` reads it.
         origin = (first.start_time or 0) * _ratio(first.time_base)
         path = out.temporary_file(".mp4")
-        joined = stack.enter_context(open_media(str(path), "w", format="mp4",
-                                                options={"fflags": "+bitexact", "movflags": "+faststart", "use_editlist": "1"}))  # fmt: skip
+        joined = open_media(str(path), "w", format="mp4",
+                            options={"fflags": "+bitexact", "movflags": "+faststart", "use_editlist": "1"})  # fmt: skip
+        stack.callback(joined.close)
         shown = joined.add_stream_from_template(picture)
         for packet in pictures:
             packet.stream = shown
@@ -844,7 +846,7 @@ def _encoded(source: InputContainer, heard: AudioStream, joined: OutputContainer
             samples = part.to_ndarray()[:, max(0, done - at) : max(0, stop - at)]
             at += part.samples
             if samples.shape[1]:
-                cut = AudioFrame.from_ndarray(np.ascontiguousarray(samples), format="fltp", layout=layout)
+                cut = AudioFrame.from_ndarray(np.ascontiguousarray(samples, dtype=np.float32), format="fltp", layout=layout)
                 cut.sample_rate, cut.pts, cut.time_base = rate, done, Fraction(1, rate)
                 done += int(samples.shape[1])
                 packets += sound.encode(cut)

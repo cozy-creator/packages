@@ -143,9 +143,10 @@ class ContinuationPlan:
     def sound_end(self) -> Fraction:
         """Where the delivered sound ends, in ticks: at the picture's end, or, when the
         successor carries it, on the first whole tick at or after it (the last sampled one
-        at most), so the carried second is whole ticks within a third of the join."""
+        at most), so the carried second is whole ticks within a third of the join. A cut
+        segment's ends with its last delivered frame."""
         picture = TICKS_PER_FRAME * self.delivery_end
-        if not self.successor.audio:
+        if not self.successor.audio or self.cut:
             return picture
         return Fraction(min(audio_ticks(self.sample_frames), math.ceil(picture)))
 
