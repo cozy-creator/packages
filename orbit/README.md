@@ -7,7 +7,7 @@ its `picture` field.
 `orbit` takes:
 
 - `picture`: the view the turn starts and ends on.
-- `subject`: what it shows, in a word or two (`motorcycle`); the caption names it.
+- `subject`: what it shows, in a word or two; the caption names it.
 - `duration`: one turn's length, 5 to 15 s (15 s by default; the clip is H3's `17n + 5` frames for those seconds).
 - `seed`: unset, a new one each render.
 
