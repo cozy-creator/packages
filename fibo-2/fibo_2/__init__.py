@@ -165,12 +165,19 @@ _TURBO = "briaai/fibo-2-edit-turbo@0.2.0"
 _VLM = "briaai/fibo-vlm@0.1.0"
 _EDIT_VLM = "briaai/fibo-edit-vlm@0.1.0"
 _COMPONENTS = {"model": _MODEL, "upsampler": ("model",), "edit_upsampler": ("model",)}
+#: Which requests need each VLM (cl-1103, `_caption`): upsampling on (unset is on), `upsampler` without a picture,
+#: `edit_upsampler` with one. Over-fetched: a JSON prompt, which neither reads, and several pictures, which go as typed.
+#: A picture is a reference of type `image`; a prompt drops any other.
+_NO_PICTURE = '.references.all(r, r.type != "image")'
+_PICTURE = '.references.exists(r, r.type == "image")'
+_NEEDS = {"upsampler": f"request.prompt_upsampling != false && request.prompt{_NO_PICTURE}",
+          "edit_upsampler": f"request.prompt_upsampling != false && request.prompt{_PICTURE}"}
 
 
-# A VLM is built and fetched on first use: a request that skips upsampling never pulls one. Model
+# A VLM is fetched only for a request `_NEEDS` says reads it, and built on first use. Model
 # parameters are in name order: Runtime refuses a binding set whose paths are not sorted.
 @app.entrypoint(defaults={"model": _DEV, "upsampler": _VLM, "edit_upsampler": _EDIT_VLM}, components=_COMPONENTS,
-                on_demand=("upsampler", "edit_upsampler"), memoize=True)
+                needs=_NEEDS, memoize=True)
 def generate(ctx: Context, payload: GenerateInput, edit_upsampler: Captioner, model: Fibo2, upsampler: Captioner,
              tel: Telemetry, adj: Adjustments) -> ImageResult:
     """Fibo 2.0 Dev, 50 steps with CFG 5: text to image, or an edit of up to four ordered pictures."""
@@ -178,7 +185,7 @@ def generate(ctx: Context, payload: GenerateInput, edit_upsampler: Captioner, mo
 
 
 @app.entrypoint(defaults={"model": _TURBO, "upsampler": _VLM, "edit_upsampler": _EDIT_VLM}, components=_COMPONENTS,
-                on_demand=("upsampler", "edit_upsampler"), memoize=True)
+                needs=_NEEDS, memoize=True)
 def generate_turbo(ctx: Context, payload: TurboInput, edit_upsampler: Captioner, model: Fibo2,
                    upsampler: Captioner, tel: Telemetry, adj: Adjustments) -> ImageResult:
     """Fibo 2.0 Edit Turbo, 4 steps without guidance: text to image, or an edit of up to four ordered pictures."""
@@ -198,11 +205,17 @@ class ImageBox(msgspec.Struct, kw_only=True):
     prompt_upsampling: Annotated[bool, Advanced()] = True
 
 
-# Each checkpoint and VLM is built, and its weights fetched, only when a render asks for it.
+# Each checkpoint and VLM is fetched only for a render that uses it: Edit Turbo (`model`) with `turbo`, else Dev
+# (`full`), and the VLMs as `_NEEDS` says.
+_BOX_NEEDS = {"full": "!request.turbo", "model": "request.turbo",
+              "upsampler": f"request.prompt_upsampling && request.instructions{_NO_PICTURE}",
+              "edit_upsampler": f"request.prompt_upsampling && request.instructions{_PICTURE}"}
+
+
 @app.tool(label="Image", named="image",
           defaults={"model": _TURBO, "full": _DEV, "upsampler": _VLM, "edit_upsampler": _EDIT_VLM},
           components={"model": _MODEL, "full": _MODEL, "upsampler": ("model",), "edit_upsampler": ("model",)},
-          on_demand=("edit_upsampler", "full", "model", "upsampler"), memoize=True)
+          needs=_BOX_NEEDS, memoize=True)
 def image(ctx: Context, payload: ImageBox, edit_upsampler: Captioner, full: Fibo2, model: Fibo2, upsampler: Captioner,
           tel: Telemetry, adj: Adjustments) -> ImageResult:
     """Fibo 2.0 on a canvas: Edit Turbo, or Dev."""
