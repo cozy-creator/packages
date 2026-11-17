@@ -2,30 +2,34 @@
 
 from __future__ import annotations
 
+import copy
 import json
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from typing import TypedDict, cast
 
 import numpy as np
 import torch
-from cozy_runtime.accel import sequence_parallel
+from cozy_runtime.accel import lora, sequence_parallel
 from cozy_runtime.author import Config, Loader, Model, ModelAssets, Serving, device, memoize, uses_components
 from diffusers.models.autoencoders.autoencoder_kl_ltx2_audio import AutoencoderKLLTX2Audio
 from diffusers.models.autoencoders.autoencoder_kl_ltx2 import AutoencoderKLLTX2Video
 from diffusers.models.transformers.transformer_ltx2 import LTX2VideoTransformer3DModel
 from diffusers.models.condition_embedders.condition_embedder_ltx2 import LTX2TextConnectors
 from diffusers.schedulers.scheduling_flow_match_euler_discrete import FlowMatchEulerDiscreteScheduler
-from diffusers.pipelines.ltx2.pipeline_ltx2 import LTX2Pipeline
-from diffusers.pipelines.ltx2.pipeline_ltx2_image2video import LTX2ImageToVideoPipeline, retrieve_latents
-from diffusers.pipelines.ltx2.utils import apply_image_conditioning_crf, resolve_default_image_crf
+from diffusers.pipelines.ltx2.pipeline_ltx2_condition import LTX2VideoCondition
+from diffusers.pipelines.ltx2.pipeline_ltx2_ic_lora import (
+    LTX2InContextPipeline, LTX2ReferenceCondition, calculate_shift, retrieve_timesteps,
+)
 from diffusers.pipelines.ltx2.pipeline_ltx2_latent_upsample import LTX2LatentUpsamplePipeline
 from diffusers.models.latent_upscaler.latent_upscaler_ltx2 import LTX2LatentUpsamplerModel
 from diffusers.pipelines.ltx2.vocoder import LTX2VocoderWithBWE
+from diffusers.utils.torch_utils import randn_tensor
 from PIL import Image
 from tokenizers import Tokenizer
 from torch import nn
 from transformers import AddedToken, Gemma4UnifiedConfig, Gemma4UnifiedForConditionalGeneration, GemmaTokenizer
 
+from . import sound
 from .vae import VideoVAE
 from .parallel import install
 
@@ -82,15 +86,7 @@ class Components(TypedDict):
 class Graph:
     components: Components
     def __init__(self, config: Config) -> None:
-        text_settings = config.section("text_encoder").mapping()
-        language_settings = config.section("text_encoder").section("text_config").mapping()
-        softcap = language_settings.get("final_logit_softcapping")
-        # Canonical JSON writes 30.0 as 30. Gemma's strict float-only field rejects
-        # that equivalent integer spelling; restore its Python type at this boundary.
-        if type(softcap) is int:
-            language_settings["final_logit_softcapping"] = float(softcap)
-        text_settings["text_config"] = language_settings
-        text = Gemma4UnifiedForConditionalGeneration(Gemma4UnifiedConfig(**text_settings))
+        text = Gemma4UnifiedForConditionalGeneration(Gemma4UnifiedConfig(**config.section("text_encoder").mapping()))
         # Prompt encoding uses hidden states, never vocabulary logits; this tied projection
         # is not a separate stored tensor and would otherwise allocate [tokens,vocabulary].
         text.lm_head = nn.Identity()
@@ -107,27 +103,126 @@ class Graph:
             "vocoder": LTX2VocoderWithBWE.from_config(config.section("vocoder").mapping()).float().eval(),
             "latent_upsampler": stored(LTX2LatentUpsamplerModel.from_config(config.section("latent_upsampler").mapping()), "latent_upsampler", config),
         }
+        #: Where an adapter's LoRA arms on the DiT (Lightricks' Ingredients, `adapter.Ingredients`): every linear.
+        self.sites = lora.Sites(self.components["transformer"])
         install(self.components["transformer"])
         self.scheduler_config = config.section("scheduler").mapping()
 
 
-class TextPipeline(LTX2Pipeline):
+#: What the video opens on: a picture (its first frame), or a clip's frames in turn (a pickup's carry).
+Opening = Image.Image | list[Image.Image]
+
+
+class Pipeline(LTX2InContextPipeline):
+    """Diffusers' LTX-2 in-context pipeline's conditioning, driven by one distilled loop of our own: the opening, an
+    IC-LoRA's reference, and sound held as it is, the way upstream's stages take them."""
+
     @property
     def _execution_device(self) -> torch.device:
         # The earlier stage's text root may be parked while the DiT is active. The first
         # component in Diffusers' registry is not the placement authority.
         return torch.device(str(device()))
 
-
-class ImagePipeline(LTX2ImageToVideoPipeline):
-    @property
-    def _execution_device(self) -> torch.device:
-        return torch.device(str(device()))
+    def run(self, embeds: tuple[torch.Tensor, torch.Tensor], opening: Opening | None, *,
+            reference: list[Image.Image] | None, downscale: int, held: torch.Tensor | None, width: int, height: int,
+            frames: int, sigmas: Sequence[float],
+            generator: torch.Generator, check: Callable[[], None], progress: Callable[[int], None],
+            latents: tuple[torch.Tensor, torch.Tensor] | None = None) -> tuple[torch.Tensor, torch.Tensor]:
+        """One distilled stage (no guidance): Diffusers' in-context latents (the opening at frame 0, at full strength as the
+        model card's `--image PATH 0 1.0`, then an IC-LoRA's reference video, at 1 / `downscale` of the stage's size),
+        upstream's first-frame keyframe marker, and `held` audio latents ([1, C, L, M], not normalized) kept clean
+        over the clip's first L audio latents: all of them is a soundtrack (upstream's `freeze_audio`), fewer a carry
+        (`AudioConditionByLatentIndex`). Returns the video's and the audio's latents, denormalized."""
+        device = self._execution_device
+        fps = float(FPS)
+        noise_scale = sigmas[0]
+        texts, audio_texts, text_mask = self.connectors(embeds[0], embeds[1], padding_side=self.tokenizer_padding_side)
+        f = (frames - 1) // self.vae_temporal_compression_ratio + 1
+        h, w = height // self.vae_spatial_compression_ratio, width // self.vae_spatial_compression_ratio
+        references = [LTX2ReferenceCondition(frames=reference, strength=1.0)] if reference else None
+        video, mask, clean, appended, _, _, _ = self.prepare_latents(
+            conditions=None if opening is None else [LTX2VideoCondition(frames=opening, index=0, strength=1.0)],
+            reference_conditions=references,
+            reference_downscale_factor=downscale, batch_size=1,
+            num_channels_latents=self.transformer.config.in_channels, height=height, width=width, num_frames=frames,
+            frame_rate=fps, noise_scale=noise_scale, dtype=torch.float32, device=device, generator=generator,
+            latents=None if latents is None else latents[0])
+        # The causal first latent frame encodes one pixel frame; upstream marks it for LTX-2.5's keyframe embedding
+        # whatever conditions it (ltx_core/tools.py `_first_frame_keyframes_mask`); appended tokens are unmarked.
+        marker = torch.zeros(video.shape[0], video.shape[1], 1, device=device, dtype=torch.float32)
+        marker[:, : h * w] = 1.0
+        length = round(frames / fps * self.audio_sampling_rate / self.audio_hop_length / self.audio_vae_temporal_compression_ratio)
+        bins = self.audio_mel_bins // self.audio_vae_mel_compression_ratio
+        if latents is None:
+            audio = randn_tensor((1, length, self.audio_latent_channels * bins), generator=generator, device=device,
+                                 dtype=torch.float32)
+        else:
+            audio = self._create_noised_state(self._normalize_audio_latents(
+                self._pack_audio_latents(latents[1]), self.audio_vae.latents_mean, self.audio_vae.latents_std),
+                noise_scale, generator).to(device=device, dtype=torch.float32)
+        open_ = torch.ones(1, length, 1, device=device, dtype=torch.float32)
+        fixed = torch.zeros_like(audio)
+        if held is not None:
+            kept = self._normalize_audio_latents(self._pack_audio_latents(held.to(device=device, dtype=torch.float32)),
+                                                 self.audio_vae.latents_mean, self.audio_vae.latents_std)[:, :length]
+            fixed[:, : kept.shape[1]] = kept
+            open_[:, : kept.shape[1]] = 0.0
+            audio = audio * open_ + fixed * (1 - open_)
+        frozen = bool(open_.max() == 0)
+        audio_scheduler = copy.deepcopy(self.scheduler)
+        mu = calculate_shift(video.shape[1], self.scheduler.config.get("base_image_seq_len", 1024),
+                             self.scheduler.config.get("max_image_seq_len", 4096),
+                             self.scheduler.config.get("base_shift", 0.95), self.scheduler.config.get("max_shift", 2.05))
+        audio_steps, _ = retrieve_timesteps(audio_scheduler, len(sigmas), device, None, sigmas=list(sigmas), mu=mu)
+        steps, _ = retrieve_timesteps(self.scheduler, len(sigmas), device, None, sigmas=list(sigmas), mu=mu)
+        video_coords = self.transformer.rope.prepare_video_coords(1, f, h, w, device, fps=fps)
+        if appended is not None:
+            video_coords = torch.cat([video_coords, appended], dim=2)
+        audio_coords = self.transformer.audio_rope.prepare_audio_coords(1, length, device)
+        dtype = embeds[0].dtype
+        for i, t in enumerate(steps):
+            check()
+            sigma = t.expand(1)
+            audio_sigma = audio_steps[i].expand(1)
+            with self.transformer.cache_context("cond_uncond"):
+                velocity, audio_velocity = self.transformer(
+                    hidden_states=video.to(dtype), audio_hidden_states=audio.to(dtype),
+                    encoder_hidden_states=texts, audio_encoder_hidden_states=audio_texts,
+                    timestep=sigma.unsqueeze(-1) * (1 - mask.squeeze(-1)),
+                    audio_timestep=audio_sigma.unsqueeze(-1) * open_.squeeze(-1),
+                    # A held soundtrack is clean conditioning: its sigma is 0 for the prompt AdaLN and the
+                    # cross-modal gates (ltx_pipelines/utils/helpers.py `modality_from_latent_state`).
+                    sigma=sigma, audio_sigma=torch.zeros_like(audio_sigma) if frozen else audio_sigma,
+                    encoder_attention_mask=text_mask, audio_encoder_attention_mask=text_mask,
+                    num_frames=f, height=h, width=w, fps=fps, audio_num_frames=length,
+                    video_coords=video_coords, audio_coords=audio_coords, video_keyframes_mask=marker,
+                    isolate_modalities=False, spatio_temporal_guidance_blocks=None, perturbation_mask=None,
+                    use_cross_timestep=True, return_dict=False,
+                )
+            denoised = self.convert_velocity_to_x0(video, velocity.float(), i, self.scheduler)
+            denoised = denoised * (1 - mask) + clean * mask
+            video = self.scheduler.step(self.convert_x0_to_velocity(video, denoised, i, self.scheduler), t, video,
+                                        return_dict=False)[0]
+            if not frozen:
+                sound = self.convert_velocity_to_x0(audio, audio_velocity.float(), i, audio_scheduler)
+                sound = sound * open_ + fixed * (1 - open_)
+                audio = audio_scheduler.step(self.convert_x0_to_velocity(audio, sound, i, audio_scheduler), t, audio,
+                                             return_dict=False)[0]
+            progress(i)
+        video = self._unpack_latents(video[:, : f * h * w], f, h, w, self.transformer_spatial_patch_size,
+                                     self.transformer_temporal_patch_size)
+        video = self._denormalize_latents(video, self.vae.latents_mean, self.vae.latents_std, self.vae.config.scaling_factor)
+        if frozen:
+            audio = fixed
+        audio = self._denormalize_audio_latents(audio, self.audio_vae.latents_mean, self.audio_vae.latents_std)
+        return video, self._unpack_audio_latents(audio, length, num_mel_bins=bins)
 
 
 @sequence_parallel(degrees=(2, 4, 8))
 class Ltx25(Model[Graph]):
-    serving = Serving(attention_bits={"transformer.transformer_blocks.": 8})
+    # 8-bit attention in the DiT's blocks (se-139); a request's LoRAs on both stages, as upstream's distilled stages take
+    # them (ltx_pipelines/distilled.py `loras` on its one `DiffusionStage`).
+    serving = Serving(attention_bits={"transformer.transformer_blocks.": 8}, loras=("transformer",))
     graph: Graph
     tokenizer: GemmaTokenizer
 
@@ -135,10 +230,9 @@ class Ltx25(Model[Graph]):
         self.graph = loader.construct(Graph)
         self.tokenizer = tokenizer(loader.assets)
 
-    def _pipeline(self, image: bool = False) -> LTX2Pipeline | LTX2ImageToVideoPipeline:
+    def pipeline(self) -> Pipeline:
         c = self.graph.components
-        cls = ImagePipeline if image else TextPipeline
-        pipe = cls(
+        pipe = Pipeline(
             scheduler=FlowMatchEulerDiscreteScheduler.from_config(self.graph.scheduler_config),
             vae=c["vae"], audio_vae=c["audio_vae"], text_encoder=c["text_encoder"],
             tokenizer=self.tokenizer, connectors=c["connectors"], transformer=c["transformer"], vocoder=c["vocoder"],
@@ -149,69 +243,41 @@ class Ltx25(Model[Graph]):
     @memoize
     @uses_components("text_encoder")
     def encode(self, prompt: str) -> tuple[torch.Tensor, torch.Tensor]:
-        pipe = self._pipeline()
+        pipe = self.pipeline()
         with torch.inference_mode():
             embeds, mask, _, _ = pipe.encode_prompt(prompt, do_classifier_free_guidance=False, max_sequence_length=1024,
                                                      device=torch.device(str(self.device)))
         return embeds, mask
 
     @uses_components("transformer", "connectors", "vae", "audio_vae")
-    def denoise(self, embeds: tuple[torch.Tensor, torch.Tensor], image: Image.Image | None, *, width: int, height: int,
+    def denoise(self, embeds: tuple[torch.Tensor, torch.Tensor], opening: Opening | None, *, width: int, height: int,
                 frames: int, generator: torch.Generator, check: Callable[[], None], progress: Callable[[int], None],
+                reference: list[Image.Image] | None = None, downscale: int = 1, held: torch.Tensor | None = None,
                 latents: tuple[torch.Tensor, torch.Tensor] | None = None) -> tuple[torch.Tensor, torch.Tensor]:
-        # Both returns are already denormalized by Diffusers' output_type='latent'.
-        # The VAE roots are also leased: their latent-statistic buffers participate here.
-        pipe = self._pipeline(image=image is not None)
-        sigmas = list(SIGMAS if latents is None else REFINE_SIGMAS)
-        if latents is not None and image is not None:
-            # Stage 2 conditions on the picture encoded at its own size, as native LTX-2.5 (ltx_pipelines'
-            # image_conditionings_for_chunk) and its ComfyUI template do; Diffusers' pipeline given `latents` would keep
-            # the upsampled half-size encode, a blurred first frame.
-            first = self._first_frame(pipe, image, width=width, height=height)
-            with torch.inference_mode():
-                video = latents[0].clone()
-                video[:, :, :1] = first.to(video.dtype)
-            latents = (video, latents[1])
-
-        def callback(_pipe: object, index: int, _t: torch.Tensor, values: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
-            check()
-            progress(index)
-            return values
-
-        kwargs: dict[str, object] = {
-            "prompt_embeds": embeds[0], "prompt_attention_mask": embeds[1],
-            "height": height, "width": width, "num_frames": frames, "frame_rate": float(FPS),
-            "sigmas": sigmas, "num_inference_steps": len(sigmas), "generator": generator,
-            "guidance_scale": 1.0, "audio_guidance_scale": 1.0,
-            "stg_scale": 0.0, "audio_stg_scale": 0.0,
-            "modality_scale": 1.0, "audio_modality_scale": 1.0,
-            "output_type": "latent", "return_dict": False, "callback_on_step_end": callback,
-            "callback_on_step_end_tensor_inputs": [],
-        }
-        if image is not None:
-            kwargs["image"] = image
-        if latents is not None:
-            kwargs.update(latents=latents[0], audio_latents=latents[1], noise_scale=REFINE_SIGMAS[0])
+        # The VAE roots are also leased: their latent-statistic buffers participate here, and they encode the opening and
+        # the reference at each stage's size, as upstream's stages do (ltx_pipelines/distilled.py `_video_conditionings`):
+        # the refinement re-encodes a first frame at full size, centre-cropped and at the model's CRF (se-161).
+        pipe = self.pipeline()
         check()
         try:
             with torch.inference_mode():
-                video, audio = pipe(**kwargs)
-            return video, audio
+                return pipe.run(embeds, opening, reference=reference, downscale=downscale, held=held, width=width,
+                                height=height, frames=frames,
+                                sigmas=SIGMAS if latents is None else REFINE_SIGMAS, generator=generator, check=check,
+                                progress=progress, latents=latents)
         finally:
             pipe.transformer._reset_stateful_cache()
 
-    def _first_frame(self, pipe: LTX2Pipeline | LTX2ImageToVideoPipeline, image: Image.Image, *, width: int,
-                     height: int) -> torch.Tensor:
-        """The picture's unnormalized latent at `width`x`height`, encoded as Diffusers' pipeline encodes a first frame:
-        CRF re-compression, resize, the posterior's mode."""
-        vae = self.graph.components["vae"]
-        crf = resolve_default_image_crf(pipe.text_encoder)
-        if crf:
-            image = Image.fromarray(apply_image_conditioning_crf(np.asarray(image.convert("RGB")), crf))
-        pixels = pipe.video_processor.preprocess(image, height=height, width=width)
+    @uses_components("audio_vae")
+    def encode_audio(self, waveform: torch.Tensor, rate: int) -> torch.Tensor:
+        """A waveform [channels, samples] as the audio VAE's latents [1, C, L, M], as upstream encodes a soundtrack
+        (ltx_core/model/audio_vae `encode_audio`: log-mel at the VAE's rate, its mode)."""
+        vae = self.graph.components["audio_vae"]
+        config = vae.config
         with torch.inference_mode():
-            pixels = pixels.to(torch.device(str(self.device)), vae.dtype)
-            return cast(torch.Tensor, retrieve_latents(vae.encode(pixels.unsqueeze(2)), None, "argmax"))
+            mel = sound.log_mel(waveform.to(torch.device(str(self.device))), rate, int(config["sample_rate"]), int(config["mel_bins"]),
+                                int(config["mel_hop_length"]), channels=int(config["in_channels"]))
+            return cast(torch.Tensor, vae.encode(mel.to(vae.dtype)).latent_dist.mode()).float()
 
     @uses_components("latent_upsampler", "vae")
     def upscale(self, latents: torch.Tensor) -> torch.Tensor:
