@@ -65,8 +65,8 @@ chat model towards a refusal. Each is one setting away from Qwen's own:
 | slot | default | Qwen's own |
 |---|---|---|
 | `text_encoder` | `atomicchat/qwen-image-2.1-text-encoder-abliterated` ([AtomicChat](https://huggingface.co/AtomicChat/Qwen-Image-2.1-Turbo-Uncensored-GGUF)) | `model.text_encoder=qwen/qwen-image-2.1@0.1.0` |
-| `expander` | `pottokao/qwen-image-2.1-pe-t2i-abliterated` ([pottokao](https://huggingface.co/pottokao/Qwen-Image-2.1-PE-T2I-Heretic)) | `model.expander=qwen/qwen-image-2.1-pe-t2i@0.1.0` |
-| `rewriter` | `darrellbest/qwen-image-2.1-pe-i2i-abliterated` ([darrellbest](https://huggingface.co/darrellbest/Qwen-Image-2.1-PE-I2I-Heretic)) | `model.rewriter=qwen/qwen-image-2.1-pe-i2i@0.1.0` |
+| `expander_t2i` | `pottokao/qwen-image-2.1-pe-t2i-abliterated` ([pottokao](https://huggingface.co/pottokao/Qwen-Image-2.1-PE-T2I-Heretic)) | `model.expander_t2i=qwen/qwen-image-2.1-pe-t2i@0.1.0` |
+| `expander_i2i` | `darrellbest/qwen-image-2.1-pe-i2i-abliterated` ([darrellbest](https://huggingface.co/darrellbest/Qwen-Image-2.1-PE-I2I-Heretic)) | `model.expander_i2i=qwen/qwen-image-2.1-pe-i2i@0.1.0` |
 
 `text_encoder` is its own slot, one for every function: it reads the `text_encoder` of a Qwen-Image-2.1 checkpoint,
 so any of them serves it (`qwen-image-2.1`'s is Qwen3-VL-8B-Instruct unmodified). `model` reads only the DiT.
@@ -271,7 +271,7 @@ The Hub package is the first-party `qwen-image-2` (no owner); its callables are 
 `generate_turbo` and the tool `image`. Their default models are `qwen/qwen-image-2.1@0.1.0` and,
 for Turbo, `alibaba-pai/qwen-image-2.1-fun-acc@0.1.1`; all read
 `atomicchat/qwen-image-2.1-text-encoder-abliterated@0.1.0` (`text_encoder`; the slot reads only its text encoder),
-`darrellbest/qwen-image-2.1-pe-i2i-abliterated@0.1.0` (`rewriter`) and
-`pottokao/qwen-image-2.1-pe-t2i-abliterated@0.1.0` (`expander`).
+`darrellbest/qwen-image-2.1-pe-i2i-abliterated@0.1.0` (`expander_i2i`) and
+`pottokao/qwen-image-2.1-pe-t2i-abliterated@0.1.0` (`expander_t2i`).
 The generated reference runs as a managed child job through `call`. Import implementation
 functions from `qwen_image_2` when you intend ordinary in-process execution.
