@@ -1,7 +1,7 @@
 """MiniMax-H3-Image's lanes and its prompt expander's.
 
 The image model: `bf16-full` is MiniMax's Diffusers upload as it is (`transformer_diffusers`, `vae_diffusers`).
-`prepare` writes `bf16` from it: the DiT's time embedder and AdaLN projections replaced by exact tables of the rows the
+`prepare` writes `bf16` from it (`source` the DiT, `vae` the VAE): the DiT's time embedder and AdaLN projections replaced by exact tables of the rows the
 6 steps read (`model.table_keys`), and the VAE split into `vae_encoder` (H3's encoder, float32, byte-identical) and
 `vae_decoder` (bf16 as Diffusers loads it, its norms and layer scales float32). `int8` (the default), `w4a8`, `nvfp4`
 and `fp8` are recipes over `bf16` (`cozy model quantize <bf16 checkpoint> --lane int8 --package minimax-h3-image`).
@@ -124,17 +124,18 @@ def _order(module: torch.nn.Module) -> list[str]:
     return list(module.state_dict().keys())
 
 
-async def prepare(ctx: Context, *, source: Weights, tel: Telemetry) -> ModelArtifact:
-    """MiniMax-H3-Image's `bf16` lane from its `bf16-full` upload: exact AdaLN tables for the 6 steps, the VAE as an
-    encoder and a decoder."""
-    src = ctx.tensorfs_source(source)
-    dit, vae = _named(src, "transformer_diffusers", "transformer"), _named(src, "vae_diffusers", "vae")
+async def prepare(ctx: Context, *, source: Weights, vae: Weights, tel: Telemetry) -> ModelArtifact:
+    """MiniMax-H3-Image's `bf16` lane from its `bf16-full` upload (`source` holds the DiT, `vae` the VAE: the same
+    checkpoint, or the VAE's own upload): exact AdaLN tables for the 6 steps, the VAE as an encoder and a decoder."""
+    src, vae_src = ctx.tensorfs_source(source), ctx.tensorfs_source(vae)
+    dit = _named(src, "transformer_diffusers", "transformer")
+    vae_name = _named(vae_src, "vae_diffusers", "vae")
     present = src.components[dit].tensors
     section = dict(src.components[dit].config)
     shape = tuple(section.get(n) for n in ("hidden_size", "num_layers", "freq_dim", "time_embed_hidden_dim", "time_embed_dim"))
     if shape != (HIDDEN, BLOCKS, FREQ_DIM, TIME_HIDDEN, TIME_DIM) or TABLES in section or not _removed() <= set(present):
         raise UnsupportedInput(f"this DiT ({shape}) is not MiniMax-H3-Image's as uploaded", code="minimax_h3_image_source")
-    vae_config = {k: v for k, v in dict(src.components[vae].config).items() if not k.startswith("_")}
+    vae_config = {k: v for k, v in dict(vae_src.components[vae_name].config).items() if not k.startswith("_")}
     dit_config = {**{k: v for k, v in section.items() if not k.startswith("_")}, TABLES: table_keys()}
     with torch.device("meta"):
         dit_order = _order(compute_dtypes(build_transformer(dit_config, parse_tables(table_keys()))))
@@ -142,13 +143,13 @@ async def prepare(ctx: Context, *, source: Weights, tel: Telemetry) -> ModelArti
     tables = {k for k in dit_order if k.endswith(".table")}
     if set(dit_order) != (set(present) - _removed()) | tables:
         raise UnsupportedInput("this DiT's tensors are not MiniMax-H3-Image's", code="minimax_h3_image_source")
-    vae_keys = set(src.components[vae].tensors)
+    vae_keys = set(vae_src.components[vae_name].tensors)
     if set(encoder_order) | set(decoder_order) != vae_keys:
         raise UnsupportedInput("this VAE's tensors are not MiniMax-H3-Image's", code="minimax_h3_image_source")
     rows = [("transformer", k) for k in dit_order] + [("vae_encoder", k) for k in encoder_order]
     rows += [("vae_decoder", k) for k in decoder_order]
     converted = 0
-    with ctx.output("bf16", Derivation(base=None, sources=(src,), order=rows)) as out:
+    with ctx.output("bf16", Derivation(base=None, sources=(src, vae_src), order=rows)) as out:
         configs = {"transformer": dit_config, "vae_encoder": vae_config, "vae_decoder": vae_config}
         for name, config in canonical_json.decode(canonical_json.encode(configs)).items():
             out.config(name, config)
@@ -162,10 +163,10 @@ async def prepare(ctx: Context, *, source: Weights, tel: Telemetry) -> ModelArti
                     continue
                 if component == "transformer":
                     out.copy(component, key, src, from_component=dit)
-                elif component == "vae_decoder" and not kept_fp32(key) and src.components[vae].tensors[key].dtype.lower() != "bf16":
-                    converted += _put(out, component, key, _plain(src, vae, key).to(torch.bfloat16))
+                elif component == "vae_decoder" and not kept_fp32(key) and vae_src.components[vae_name].tensors[key].dtype.lower() != "bf16":
+                    converted += _put(out, component, key, _plain(vae_src, vae_name, key).to(torch.bfloat16))
                 else:
-                    out.copy(component, key, src, from_component=vae)
+                    out.copy(component, key, vae_src, from_component=vae_name)
                 ctx.progress(done - 1, len(rows))
         with tel.stage("AdaLN tables"):
             written = _write_tables(ctx, src, dit, out)
