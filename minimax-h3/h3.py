@@ -1519,7 +1519,7 @@ class VaeRoundTripOutput(msgspec.Struct):
 _KEPT_EVERY = 32
 
 
-@app.entrypoint(private=True, defaults={"base_model": _MODEL}, components={"base_model": ("vae",)})
+@app.entrypoint(defaults={"base_model": _MODEL}, components={"base_model": ("vae",)})
 async def vae_round_trip(
     ctx: Context, *, payload: VaeRoundTrip, base_model: H3TurboBase, out: Outputs, tel: Telemetry
 ) -> VaeRoundTripOutput:
