@@ -422,7 +422,7 @@ wheels = [
 
 [[package]]
 name = "p-h3-image"
-version = "0.5.0rc1"
+version = "0.5.0rc2"
 source = { editable = "." }
 dependencies = [
     { name = "cozy-runtime", extra = ["adapters", "media"] },

@@ -114,6 +114,11 @@ VAE_ENCODER = fusion.CausalConvEncoder(
 )
 
 
+#: The encoder's device peak beside its moments, in tiles of them (`split`'s `holds`), before a pass is measured: a
+#: 256 px tile's 128-channel float16 activations, about four held at once (64 MiB), over its 48x16x16 moments (24 KiB).
+ENCODE_HOLDS = 2700
+
+
 class ImageEncoder(nn.Module):
     """`encoder` and `quant_conv` of the VAE: pixels to the posterior's moments, in the rows' dtype."""
 
@@ -139,8 +144,14 @@ class ImageEncoder(nn.Module):
         pixels = pixels.to(get_parameter_dtype(self.encoder))
         ys, y_lengths, y_overlaps = split_tiles(pixels.shape[-2], self.ratio)
         xs, x_lengths, x_overlaps = split_tiles(pixels.shape[-1], self.ratio)
-        rows = [[self._clip(pixels[..., y : y + h, x : x + w]) for x, w in zip(xs, x_lengths, strict=True)]
-                for y, h in zip(ys, y_lengths, strict=True)]  # fmt: skip
+        # The tiles go through the encoder as ONE batch, cut as the device holds them (cr-323): one by one, a 256 px tile
+        # is too little work for the card and its launches wait on the host. Every tile is the same size and the encoder
+        # is batch-independent (its GroupNorm normalizes each tile alone), so each tile's moments are the per-tile loop's.
+        tiles = [pixels[..., y : y + h, x : x + w] for y, h in zip(ys, y_lengths, strict=True)
+                 for x, w in zip(xs, x_lengths, strict=True)]  # fmt: skip
+        batch = tiles[0] if len(tiles) == 1 else torch.cat(tiles, dim=0)
+        moments = split(self._clip, batch, Cut(0), holds=ENCODE_HOLDS).split(pixels.shape[0], dim=0)
+        rows = [list(moments[row * len(xs) : (row + 1) * len(xs)]) for row in range(len(ys))]
         return stitch(rows, [o // self.ratio for o in y_overlaps], [o // self.ratio for o in x_overlaps])
 
 
