@@ -318,6 +318,8 @@ class UpscaleInput(msgspec.Struct, kw_only=True):
     x_reference: Literal["canvas", "native", "mp1"] = "canvas"
     #: se-149 exploration: the prompt.
     x_prompt: Literal["keep", "restore"] = "keep"
+    #: se-149 exploration: Klein Base (`full`) at its 50 steps and CFG 4, in place of the distilled model's 16.
+    x_base: bool = False
 
 
 #: se-149 exploration: a restoration instruction.
@@ -326,9 +328,9 @@ RESTORE_PROMPT = (f"Restore {tagged(1)} as a sharp, high-resolution picture: rem
                   "subject, composition, framing, colours and style.")
 
 
-@app.tool(label="Upscale", named="image", defaults={"model": _DISTILLED}, components={"model": _KLEIN},
-          memoize=True)  # fmt: skip
-def upscale(ctx: Context, payload: UpscaleInput, model: Klein, tel: Telemetry,
+@app.tool(label="Upscale", named="image", defaults={"model": _DISTILLED, "full": _BASE},
+          components={"model": _KLEIN, "full": _KLEIN}, on_demand=("model", "full"), memoize=True)  # fmt: skip
+def upscale(ctx: Context, payload: UpscaleInput, model: Klein, full: Klein, tel: Telemetry,
             adj: Adjustments) -> ImageResult:
     """The picture larger: Klein edits it at the size asked, the picture Lanczos-upscaled to the canvas both as the
     reference and, below `denoise`, as the start."""
@@ -337,6 +339,8 @@ def upscale(ctx: Context, payload: UpscaleInput, model: Klein, tel: Telemetry,
     width, height = SIZES.fit(adj, picture.size, payload.megapixels * MEGAPIXEL)
     canvas = picture.resize((width, height), PILImage.Resampling.LANCZOS)
     seed = payload.seed if payload.seed is not None else ImageRequest(prompt="").drawn_seed()
+    if payload.x_base:
+        model = full
     model.hold_vae(tel)
     shown = {"canvas": canvas, "native": prepare_reference(picture)[0],
              "mp1": picture.resize(SIZES.fit(adj, picture.size, MEGAPIXEL), PILImage.Resampling.LANCZOS)}[payload.x_reference]
@@ -350,9 +354,12 @@ def upscale(ctx: Context, payload: UpscaleInput, model: Klein, tel: Telemetry,
         embeds = model.encode(prompt)
     ctx.raise_if_cancelled()
     with tel.stage("generating image"):
+        negative = model.encode("") if payload.x_base else None
         tokens = model.denoise(
-            embeds, None, references, width=width, height=height, steps=_STEPS["generate_turbo"][0], guidance=None,
-            seed=seed, progress=ctx.progress, start=start, strength=payload.denoise,
+            embeds, negative, references, width=width, height=height,
+            steps=_STEPS["generate"][0] if payload.x_base else _STEPS["generate_turbo"][0],
+            guidance=_GUIDANCE if payload.x_base else None, seed=seed, progress=ctx.progress, start=start,
+            strength=payload.denoise,
         )
     with tel.stage("decoding image"):
         image = model.decode(tokens, width=width, height=height)

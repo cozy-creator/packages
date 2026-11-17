@@ -180,6 +180,8 @@ class UpscaleInput(msgspec.Struct, kw_only=True):
     x_reference: Literal["canvas", "native", "mp1"] = "canvas"
     #: se-149 exploration: the prompt.
     x_prompt: Literal["keep", "restore"] = "keep"
+    #: se-149 exploration: 0, Turbo's 8 steps at guidance 2.5; else [dev] without the LoRA, this many steps at guidance 4.
+    x_steps: Annotated[int, msgspec.Meta(ge=0, le=60)] = 0
 
 
 #: se-149 exploration: a restoration instruction.
@@ -211,13 +213,14 @@ def upscale(ctx: Context, payload: UpscaleInput, model: Flux2, turbo_lora: Flux2
     with tel.stage("encoding prompt"):
         embeds = model.encode(prompt)
     ctx.raise_if_cancelled()
-    timesteps = schedule(8, (height // PATCH) * (width // PATCH), TURBO_SIGMAS)
+    base = payload.x_steps > 0
+    timesteps = schedule(payload.x_steps if base else 8, (height // PATCH) * (width // PATCH), None if base else TURBO_SIGMAS)
     if start is not None:
         timesteps = [payload.denoise, *(t for t in timesteps if t < payload.denoise)]
     denoise = partial(model.denoise, embeds, None, references, width=width, height=height, timesteps=timesteps,
-                      guidance=2.5, seed=seed, progress=ctx.progress, start=start)  # fmt: skip
+                      guidance=4.0 if base else 2.5, seed=seed, progress=ctx.progress, start=start)  # fmt: skip
     with tel.stage("generating image"):
-        latents = turbo_lora.applied(model.graph.sites, denoise)
+        latents = denoise() if base else turbo_lora.applied(model.graph.sites, denoise)
     with tel.stage("decoding image"):
         image = model.decode(latents, width=width, height=height)
     with tel.stage("saving image"):
