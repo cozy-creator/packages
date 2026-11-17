@@ -242,8 +242,6 @@ class LoneMeasured(msgspec.Struct):
     #: each arm's latents against `seq_three`'s (the current fused path)
     psnr_db: dict[str, float]
     max_abs: dict[str, float]
-    #: torch's peak allocation over each arm's passes, GiB
-    peak_gib: dict[str, float]
 
 
 class LoneProbeOutput(msgspec.Struct):
@@ -273,22 +271,19 @@ async def lone_probe(ctx: Context, *, payload: LoneProbe, model: PH3ImageVAE, ou
                 with as_arm(name, vae):
                     latents[name], _ = model.encode(pixels)
             seconds: dict[str, list[float]] = {name: [] for name in ARMS}
-            peaks: dict[str, float] = dict.fromkeys(ARMS, 0.0)
             for _ in range(payload.passes):
                 for name in ARMS:
                     ctx.raise_if_cancelled()
                     with as_arm(name, vae):
-                        torch.cuda.reset_peak_memory_stats()
                         started = time.perf_counter()
                         with tel.stage(f"vae_encode_{name}"):
                             model.encode(pixels)
                         seconds[name].append(round(time.perf_counter() - started, 4))
-                        peaks[name] = max(peaks[name], round(torch.cuda.max_memory_allocated() / 2**30, 2))
             compared = {name: psnr(latents["seq_three"], latents[name]) for name in ARMS}
             for name in ARMS:
                 saved[f"{key}/{name}"] = latents[name].float().contiguous()
             measured[key] = LoneMeasured(list(size), seconds, {n: c["psnr_db"] for n, c in compared.items()},
-                                         {n: c["max_abs"] for n, c in compared.items()}, peaks)  # fmt: skip
-            tel.log("lone probe", key=key, size=list(size), seconds=seconds, psnr_db=measured[key].psnr_db, peak_gib=peaks)
+                                         {n: c["max_abs"] for n, c in compared.items()})  # fmt: skip
+            tel.log("lone probe", key=key, size=list(size), seconds=seconds, psnr_db=measured[key].psnr_db)
     blob = out.save_bytes(save_tensors(saved), media_type="application/octet-stream")
     return LoneProbeOutput(version("cozy-runtime"), hasattr(fusion, "_lone_frame"), measured, blob)

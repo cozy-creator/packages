@@ -170,7 +170,6 @@ class LoneMeasured(msgspec.Struct):
     seconds: dict[str, list[float]]
     psnr_db: dict[str, float]
     max_abs: dict[str, float]
-    peak_gib: dict[str, float]
 
 
 class LoneProbeOutput(msgspec.Struct):
@@ -201,17 +200,14 @@ async def lone_probe(
             with as_arm(name, encoder):
                 latents[name], _ = vae_encoder.latents(picture, noise)
         seconds: dict[str, list[float]] = {name: [] for name in ARMS}
-        peaks: dict[str, float] = dict.fromkeys(ARMS, 0.0)
         for _ in range(payload.passes):
             for name in ARMS:
                 ctx.raise_if_cancelled()
                 with as_arm(name, encoder):
-                    torch.cuda.reset_peak_memory_stats()
                     started = time.perf_counter()
                     with tel.stage(f"vae_encode_{name}"):
                         vae_encoder.latents(picture, noise)
                     seconds[name].append(round(time.perf_counter() - started, 4))
-                    peaks[name] = max(peaks[name], round(torch.cuda.max_memory_allocated() / 2**30, 2))
         a = latents["seq_three"].double()
         values: dict[str, float] = {}
         biggest: dict[str, float] = {}
@@ -221,7 +217,7 @@ async def lone_probe(
             values[name] = round(10 * math.log10(float(a.max() - a.min()) ** 2 / mse), 2) if mse > 0 else SAME
             biggest[name] = float((a - b).abs().max())
             saved[f"{key}/{name}"] = latents[name].float().contiguous()
-        measured[key] = LoneMeasured([h, w], seconds, values, biggest, peaks)
-        tel.log("lone probe", key=key, grid=[h, w], seconds=seconds, psnr_db=values, peak_gib=peaks)
+        measured[key] = LoneMeasured([h, w], seconds, values, biggest)
+        tel.log("lone probe", key=key, grid=[h, w], seconds=seconds, psnr_db=values)
     blob = out.save_bytes(save_tensors(saved), media_type="application/octet-stream")
     return LoneProbeOutput(version("cozy-runtime"), hasattr(fusion, "_lone_frame"), measured, blob)

@@ -2052,7 +2052,6 @@ class LoneMeasured(msgspec.Struct):
     seconds: dict[str, list[float]]
     psnr_db: dict[str, float]
     max_abs: dict[str, float]
-    peak_gib: dict[str, float]
 
 
 class LoneProbeOutput(msgspec.Struct):
@@ -2092,18 +2091,15 @@ async def lone_probe(
                 finally:
                     undo()
             seconds: dict[str, list[float]] = {name: [] for name in _ARMS}
-            peaks: dict[str, float] = dict.fromkeys(_ARMS, 0.0)
             for _ in range(payload.passes):
                 for name in _ARMS:
                     ctx.raise_if_cancelled()
                     undo = _as_arm(name, vae)
                     try:
-                        torch.cuda.reset_peak_memory_stats()
                         started = time.perf_counter()
                         with tel.stage(f"vae_encode_{name}"):
                             base_model.encode_clip(pixels).cpu()
                         seconds[name].append(round(time.perf_counter() - started, 4))
-                        peaks[name] = max(peaks[name], round(torch.cuda.max_memory_allocated() / 2**30, 2))
                     finally:
                         undo()
             a = latents["seq_three"].double()
@@ -2115,7 +2111,7 @@ async def lone_probe(
                 values[name] = round(10 * math.log10(float(a.max() - a.min()) ** 2 / mse), 2) if mse > 0 else 999.0
                 biggest[name] = float((a - b).abs().max())
                 saved[f"{key}/{name}"] = latents[name].float().contiguous()
-            measured[key] = LoneMeasured(list(size), seconds, values, biggest, peaks)
-            tel.log("lone probe", key=key, size=list(size), seconds=seconds, psnr_db=values, peak_gib=peaks)
+            measured[key] = LoneMeasured(list(size), seconds, values, biggest)
+            tel.log("lone probe", key=key, size=list(size), seconds=seconds, psnr_db=values)
     blob = out.save_bytes(save_tensors(saved), media_type="application/octet-stream")
     return LoneProbeOutput(version("cozy-runtime"), hasattr(fusion, "_lone_frame"), measured, blob)
