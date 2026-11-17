@@ -15,7 +15,7 @@ import msgspec
 import numpy as np
 import numpy.typing as npt
 from cozy_runtime.author import App, Context, Outputs, Seed, Telemetry, call
-from cozy_runtime.fields import FileBound, Image, ImagePreparation, Placeholder, Prompt, Range
+from cozy_runtime.fields import FileBound, Image, ImagePreparation, Prompt, Range
 from cozy_runtime.media import (
     DecodedMediaEvent,
     DecodedMediaHeader,
@@ -44,7 +44,7 @@ class Orbit(msgspec.Struct, kw_only=True):
     #: The view the turn starts and ends on: a picture put in this field.
     picture: Annotated[ImageFile, ImagePreparation(max_pixels=16 << 20)]
     #: What the picture shows, in a word or two: the caption names it.
-    subject: Annotated[str, Placeholder("What it shows, in a word or two")] = ""
+    subject: str = ""
     #: One turn's length. 15 s turns smoothest; 5 s ghosts drawn characters.
     duration: Annotated[int, Range(MIN_DURATION_S, MAX_DURATION_S, unit="s")] = MAX_DURATION_S
     seed: Seed | None = None
