@@ -1,7 +1,8 @@
 """se-157 proof only, never merged: Diffusers' `Krea2Pipeline` (0.42.1) as `from_pretrained(torch_dtype=bf16)`
 builds it, on the same weights, beside the package.
 
-Unmodified modules: `Krea2Transformer2DModel` in bf16 but its `_keep_in_fp32_modules` in F32, the whole
+Unmodified modules: `Krea2Transformer2DModel` all in bf16 (Krea's `inference.py`; Diffusers' bf16 load keeps
+its norms F32), the whole
 `Qwen3VLModel` (every layer, its final norm), the Qwen-Image VAE in bf16; the checkpoint's tokenizer; the pipeline's own `__call__` encodes (padded to 512 and masked), samples and
 decodes. The noise is the package's (`rng.noise`, bf16 on the CPU), passed as `latents`.
 """
@@ -13,6 +14,7 @@ from typing import cast
 import msgspec
 import torch
 from cozy_runtime import rng
+from cozy_runtime.accel import hold_dtype
 from cozy_runtime.author import Config, Context, Loader, Model, Telemetry, uses_components
 from cozy_runtime.image import ImageResult
 from cozy_runtime.media import ImageFile
@@ -23,7 +25,7 @@ from diffusers.schedulers.scheduling_flow_match_euler_discrete import FlowMatchE
 from transformers import Qwen3VLConfig, Qwen3VLModel
 from transformers import initialization as transformer_init
 
-from .model import PATCH, build_tokenizer, construct
+from .model import PATCH, as_stored, build_tokenizer, construct
 
 
 class RefGraph:
@@ -32,13 +34,12 @@ class RefGraph:
             transformer = construct(Krea2Transformer2DModel, config.section("transformer").mapping())
             encoder = Qwen3VLModel._from_config(Qwen3VLConfig(**config.section("text_encoder").mapping()), dtype=torch.bfloat16)  # type: ignore[no-untyped-call]
             vae = construct(AutoencoderKLQwenImage, config.section("vae").mapping())
-        transformer = transformer.to(dtype=torch.bfloat16)
-        keep = set(Krea2Transformer2DModel._keep_in_fp32_modules or ())
-        for name, module in transformer.named_modules():
-            if keep & set(name.split(".")):
-                module.to(dtype=torch.float32)
+        # Built as stored (the Runtime fills without a cast), then served in bf16 (`reference`): Krea's own
+        # inference.py casts the DiT and the VAE to bf16 whole.
+        as_stored(config, "transformer", transformer)
+        as_stored(config, "vae", vae)
         self.components: dict[str, torch.nn.Module] = {
-            "transformer": transformer.eval(), "text_encoder": encoder.eval(), "vae": vae.to(dtype=torch.bfloat16).eval(),
+            "transformer": transformer.eval(), "text_encoder": encoder.eval(), "vae": vae.eval(),
         }
         self.scheduler_config = dict(config.section("scheduler").mapping())
 
@@ -87,6 +88,8 @@ def reference(ctx: Context, payload: RefInput, model: RefKrea2, tel: Telemetry) 
     width, height = payload.width or side, payload.height or side
     steps = payload.steps or (8 if payload.turbo else 52)
     guidance = payload.guidance if payload.guidance is not None else (0.0 if payload.turbo else 3.5)
+    for part in ("transformer", "vae"):
+        hold_dtype(model.graph.components[part], torch.bfloat16)
     with tel.stage("generating image"):
         image = model.sample(payload.prompt, payload.negative_prompt, width, height, steps, guidance, payload.seed,
                              payload.turbo)

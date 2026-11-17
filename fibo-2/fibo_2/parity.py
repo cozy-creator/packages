@@ -15,6 +15,7 @@ from typing import Annotated, cast
 import msgspec
 import torch
 from cozy_runtime import rng, vlm
+from cozy_runtime.accel import hold_dtype
 from cozy_runtime.author import Config, Context, Loader, Model, Telemetry, uses_components
 from cozy_runtime.fields import FileBound
 from cozy_runtime.image import ImageResult
@@ -40,7 +41,7 @@ class RefGraph:
         encoder.lm_head = torch.nn.Identity()  # tied, not stored; the pipeline reads hidden states only
         self.components: dict[str, torch.nn.Module] = {
             "transformer": transformer.to(dtype=torch.bfloat16).eval(), "text_encoder": encoder.eval(),
-            "vae": vae.to(dtype=torch.bfloat16).eval(),
+            "vae": vae.to(dtype=torch.float32).eval(),  # stored f32; served bf16 (`reference`), the card's dtype
         }
         self.scheduler_config = dict(config.section("scheduler").mapping())
         self.processor_config = dict(config.section("processor").mapping())
@@ -92,6 +93,7 @@ def reference(ctx: Context, payload: RefInput, model: RefFibo2, tel: Telemetry) 
     steps = payload.steps or 30
     guidance = 5.0 if payload.guidance is None else payload.guidance
     width, height = payload.width or 1024, payload.height or 1024
+    hold_dtype(model.graph.components["vae"], torch.bfloat16)
     for name, text in model.styles.items():
         tel.log("style negative", name=name, sha=hashlib.sha256(text.encode()).hexdigest()[:16], text=text)
     with tel.stage("generating image"):

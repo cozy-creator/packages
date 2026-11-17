@@ -17,6 +17,7 @@ from typing import Annotated, TypeVar, cast
 import msgspec
 import torch
 from cozy_runtime import rng
+from cozy_runtime.accel import hold_dtype
 from cozy_runtime.author import Config, Context, Loader, Model, Telemetry, uses_components
 from cozy_runtime.fields import FileBound
 from cozy_runtime.image import ImageResult
@@ -44,7 +45,8 @@ class RefGraph:
         encoder.set_submodule("lm_head", torch.nn.Identity())  # the pipeline reads hidden states only
         self.components: dict[str, torch.nn.Module] = {
             "transformer": transformer.to(dtype=torch.bfloat16), "text_encoder": encoder.eval(),
-            "vae": vae.to(dtype=torch.bfloat16),
+            # As stored (the Runtime fills without a cast); served bf16, the card's dtype (`reference`).
+            "vae": vae.to(dtype=torch.float32 if config.tensor_dtype("vae.encoder.conv_in.weight", default="f32") == "f32" else torch.bfloat16),
         }
         self.scheduler_config = dict(config.section("scheduler").mapping())
 
@@ -126,6 +128,7 @@ def reference(ctx: Context, payload: RefInput, model: RefFlux2, turbo_lora: RefT
     height = payload.height or (images[0].height if images else 1024)
     steps = payload.steps or (8 if payload.turbo else 50)
     guidance = payload.guidance or (2.5 if payload.turbo else 4.0)
+    hold_dtype(model.graph.components["vae"], torch.bfloat16)
     with tel.stage("encoding prompt"):
         embeds = model.encode(payload.prompt)
 
