@@ -31,6 +31,7 @@ import msgspec
 import torch
 from cozy_runtime.author import (
     Context,
+    Loader,
     ModelArtifact,
     Outputs,
     Telemetry,
@@ -40,7 +41,7 @@ from cozy_runtime.author import (
     uses_components,
 )
 from cozy_runtime.media import File, Files, ImageFile
-from cozy_runtime.vlm import COMPONENT, Params
+from cozy_runtime.vlm import COMPONENT, Params, VisionLM
 from cozy_runtime.weights_store import Derivation
 from PIL import Image
 from torch import nn
@@ -130,6 +131,10 @@ class Study(msgspec.Struct, frozen=True, kw_only=True):
     seed: int = 0
     #: Text appended to the T2I PE's system prompt for every arm (a faithful-rewrite run); "" keeps MiniMax's.
     system_suffix: str = ""
+    #: MiniMax's T2I system and task prompts, for a checkpoint that carries none (another Qwen3.8 writing faithful
+    #: answers); None reads the checkpoint's.
+    t2i_system: str | None = None
+    t2i_task: str | None = None
     batch: int = 16
     edit_batch: int = 4
     #: Answer the requests with the stock PE too.
@@ -392,6 +397,13 @@ class _Teacher:
 class StudyPE(H3ImagePE):
     """The PE with what a study reads: its language model's layers, forced sequences, and answers with their
     thoughts."""
+
+    def load(self, loader: Loader) -> None:
+        if "prompt/t2i/task_prompt.txt" in loader.assets.names():
+            super().load(loader)
+            return
+        VisionLM.load(self, loader)  # a Qwen3.8 without MiniMax's prompts: the study's payload gives them
+        self.t2i_system = self.t2i_task = self.edit_task = ""
 
     @uses_components(COMPONENT)
     def holding[T](self, fn: Callable[[], T]) -> T:
@@ -691,6 +703,10 @@ def abliteration_study(ctx: Context, payload: Study, expander: StudyPE, out: Out
     """Directions from `evidence`, a search over ablations scored by forcing its answers, then each arm (stock, the
     search's best, `candidates`) answering `requests`; everything in one JSON report."""
     shown = [upright(p.read()) for p in pictures]
+    expander.t2i_system = expander.t2i_system if payload.t2i_system is None else payload.t2i_system
+    expander.t2i_task = expander.t2i_task if payload.t2i_task is None else payload.t2i_task
+    if not expander.t2i_task:
+        raise UnsupportedInput("this checkpoint carries no T2I PE prompts: give `t2i_system` and `t2i_task`", code="study_prompts")
     report: dict[str, object] = {"study": msgspec.to_builtins(msgspec.structs.replace(payload, evidence=None))}
     rng = random.Random(payload.seed)
 
