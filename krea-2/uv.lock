@@ -346,7 +346,7 @@ wheels = [
 
 [[package]]
 name = "krea-2"
-version = "0.10.0rc2"
+version = "0.11.0rc1"
 source = { editable = "." }
 dependencies = [
     { name = "cozy-runtime", extra = ["adapters", "media"] },
