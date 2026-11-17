@@ -158,12 +158,15 @@ from minimax_h3.shot import (
     cut_latents,
     fitted,
     fl2va_text,
+    footage_frames,
     frame_at,
     here,
     join_kept,
     plan_segments,
+    plate_sound,
     prompt_parts,
     ratio_frame,
+    segment_plans,
     segment_seed,
     segment_texts,
     shot_latents_file,
@@ -181,6 +184,7 @@ from story import (
     IMAGE_READ_BYTES,
     REFERENCE_AUDIO,
     VIDEO_READ_BYTES,
+    PlateSound,
     SegmentCall,
     StoryReference,
     encoder_prompt,
@@ -231,17 +235,21 @@ ReferenceFiles = Annotated[
 
 
 class VideoUse(msgspec.Struct, frozen=True):
-    """How a call uses one of its videos: whether its frames are anchored in the output (`anchor_video`), and the
-    frames of it, on the 24-fps clock, the call's window starts and stops at (`shot_windows`)."""
+    """How a call uses one of its videos: whether its frames are anchored in the output (`anchor_video`), the
+    frames of it, on the 24-fps clock, the call's window starts and stops at (`shot_windows`), and whether an anchor's
+    soundtrack conditions the render on its clock (`guide_rows`), as Alissonerdx's `with_audio` does."""
 
     anchor: bool = False
     start: Annotated[int, msgspec.Meta(ge=0)] = 0
     stop: Annotated[int, msgspec.Meta(ge=0)] = 0
+    sound: bool = False
 
 
-def video_uses(references: Sequence[StoryReference], windows: dict[str, ClipWindow]) -> tuple[VideoUse, ...]:
-    """Each of a call's videos, in packed order, from its `windows`."""
-    return tuple(VideoUse(ref.kind == "anchor_video", *windows[ref.name]) for ref in references if ref.kind in CLIPS)
+def video_uses(references: Sequence[StoryReference], windows: dict[str, ClipWindow], *, sound: bool = False
+               ) -> tuple[VideoUse, ...]:  # fmt: skip
+    """Each of a call's videos, in packed order, from its `windows`; an anchor's `sound` with it."""
+    return tuple(VideoUse(ref.kind == "anchor_video", *windows[ref.name], sound and ref.kind == "anchor_video")
+                 for ref in references if ref.kind in CLIPS)  # fmt: skip
 
 
 def _call_assets(
@@ -392,8 +400,8 @@ def assets_to_h3_refs(
     A video is read over its window: from its `videos` entry's `start` to its `stop` (per video in
     packed order), the call's `frames` at most, which is all the official pipeline keeps of it, and
     budgeted at that length. It streams straight to the size it is used at on the 24-fps clock
-    (`read_reference_video`), without its sound. An anchor video is not a reference (`guide_rows`):
-    Qwen never sees it. A character's picture (`characters`: its name per picture, in packed order)
+    (`read_reference_video`), without its sound, but for an anchor whose `sound` is set. An anchor video is not a
+    reference (`guide_rows`): Qwen never sees it. A character's picture (`characters`: its name per picture, in packed order)
     that is opaque is said: its background goes into the shot.
     """
     audio_duration = Fraction(0)
@@ -453,10 +461,10 @@ def assets_to_h3_refs(
             white = PILImage.new("RGBA", picture.size, (255, 255, 255, 255))
             prepared.append(pipe.image_reference(PILImage.alpha_composite(white, picture).convert("RGB")))
         elif isinstance(reference, VideoFile):
-            start, stop = uses[index].start, uses[index].stop
+            start, stop, heard = uses[index].start, uses[index].stop, uses[index].anchor and uses[index].sound
             with reference.stream(start=Fraction(start, FPS), end=Fraction(min(start + frames, stop), FPS),
-                                  audio=False) as events:  # fmt: skip
-                clip = read_reference_video(events, frames=frames, audio=False, guide=uses[index].anchor)
+                                  audio=heard) as events:  # fmt: skip
+                clip = read_reference_video(events, frames=frames, audio=heard, guide=uses[index].anchor)
             if uses[index].anchor:
                 guide = pipe.guide_clip(clip)
             else:
@@ -482,22 +490,25 @@ def _finish(
     sampled_frames: int | None = None,
     ended: Callable[[Tensor], None] | None = None,
     earlier: _Earlier | None = None,
+    sound: bool = True,
 ) -> H3VideoOutput:
-    """Decode and encode the render, with `earlier` segments before it as one video."""
+    """Decode and encode the render, with `earlier` segments before it as one video; without `sound`, silent: its
+    soundtrack isn't decoded."""
     cancel()
     if completed is not None:
         # The successor's carry: a slice of the denoised latents, before either decode.
         completed(state)
     frames = frames_for(duration_s) if delivered_frames is None else delivered_frames
-    waveform, sample_rate = _soundtrack(model, task, state, frames=frames, tel=tel, cancel=cancel)
+    waveform, sample_rate = _soundtrack(model, task, state, frames=frames, tel=tel, cancel=cancel) if sound else (None, 0)
     decode = partial(model.decode_video, task, state)
     if earlier is not None:
         # The whole shot as one latent: the VAE cross-fades its chunks across every join,
         # where decoding segment by segment steps the picture (run 20751: luma +3.7 at a join).
         latents = torch.cat([earlier.latents.to(state.latents.device), state.latents[:, :, earlier.head :]], dim=2)
-        decode = partial(model.decode_latents, latents)
         frames += earlier.frames
-        waveform = torch.cat([earlier.waveform, waveform], dim=1)
+        decode = partial(model.decode_latents, latents, upto=frames)
+        if waveform is not None and earlier.waveform is not None:
+            waveform = torch.cat([earlier.waveform, waveform], dim=1)
 
     # The encoder runs under the decode (h3a-017): each chunk is quantized on its device
     # and landed in the host buffer while a worker feeds the runtime's streaming MP4 sink.
@@ -1121,6 +1132,7 @@ def _references_to_video(
         model, task, state, schedule, duration_s=payload.duration_s, out=out, tel=tel, progress=ctx.progress,
         cancel=ctx.raise_if_cancelled, completed=completed, ended=ended,
         delivered_frames=delivery.delivered_frames, sampled_frames=delivery.sample_frames, earlier=earlier,
+        sound=payload.soundtrack,
     )  # fmt: skip
     return H3VideoOutput(result.video, notes + result.warnings)
 
@@ -1180,6 +1192,8 @@ class Ref2VAInput(msgspec.Struct):
     context_audio: bool = False
     next_context_frames: ContextFrames = 0
     next_context_audio: bool = False
+    #: Frames at the end it samples and never delivers: an edit's last segment past its plate (`ContinuationPlan.cut`).
+    cut_frames: Annotated[int, msgspec.Meta(ge=0)] = 0
     previous_provenance: RenderProvenance | None = None
     context: ContextFile | None = None
     #: Keyframes, anchored as ComfyUI's Add Guide anchors them (`anchor_rows`).
@@ -1195,6 +1209,9 @@ class Ref2VAInput(msgspec.Struct):
     earlier_latents: tuple[LatentFile, ...] = ()
     earlier_videos: tuple[SegmentVideo, ...] = ()
     quality: Quality = "standard"
+    #: Decode H3's soundtrack into the video; False leaves it silent, for a caller that lays its own (an edit that keeps
+    #: its plate's).
+    soundtrack: bool = True
 
 
 class SegmentOutput(msgspec.Struct):
@@ -1217,11 +1234,11 @@ class SegmentOutput(msgspec.Struct):
 class _Earlier:
     """A shot's segments before its last: their delivered latents end to end, their sound end to
     end (each starts where the last ended, as continuation cut it; a cut video's, kept in its
-    latents, first), and their frames; and the last segment's head to leave out, whole VAE cycles,
-    so its latents follow in phase."""
+    latents, first; None when they are silent), and their frames; and the last segment's head to
+    leave out, whole VAE cycles, so its latents follow in phase."""
 
     latents: Tensor
-    waveform: Tensor
+    waveform: Tensor | None
     frames: int
     head: int
 
@@ -1230,11 +1247,12 @@ class _Earlier:
         loaded = [load_tensors(file.read_bytes()) for file in latents]
         parts = [tensors["sound"].numpy() for tensors in loaded if "sound" in tensors]
         for video in videos:
-            parts.extend(sound_chunks(video.stream(pictures=False)))
+            if video.probe().soundtrack is not None:
+                parts.extend(sound_chunks(video.stream(pictures=False)))
         joined = torch.cat([tensors["latents"] for tensors in loaded], dim=2)
         # 5k + 2 latents decode to 17k + 5 frames (`continuation.video_tokens`).
         frames = (int(joined.shape[2]) - 2) // 5 * 17 + 5
-        return cls(joined, torch.from_numpy(np.concatenate(parts, axis=1)), frames, head)
+        return cls(joined, torch.from_numpy(np.concatenate(parts, axis=1)) if parts else None, frames, head)
 
 
 class _Segments:
@@ -1303,6 +1321,7 @@ async def ref2va_segment(
         payload.duration_s,
         Carry(int(payload.context_frames), payload.context_audio),
         Carry(int(payload.next_context_frames), payload.next_context_audio),
+        payload.cut_frames,
     )
     context: AVContext | None = None
     sound = None
@@ -1640,11 +1659,13 @@ def _anchor(name: str, people: bool) -> StoryReference:
 
 
 async def _render(ctx: Context, shot: Shot, out: Outputs, tel: Telemetry, *, plate: VideoFile | None = None,
-                  lora: ModelChoice | None = None, keep_latents: bool = True) -> ShotResult:  # fmt: skip
+                  lora: ModelChoice | None = None, keep_latents: bool = True, sound: EditAudio = "new") -> ShotResult:  # fmt: skip
     """A shot's segments, rendered in order, each going on from the last from its carried latents, decoded as one video
     and published as it grows. A pickup goes on from its take at its frame: from the take's latents, else as a new video
-    opening on that frame, joined after the take's kept start. A `plate` is followed frame by frame, and its length is
-    the shot's. `lora` serves every segment. Without `keep_latents`, the video's latents aren't kept."""
+    opening on that frame, joined after the take's kept start. A `plate` is followed frame by frame, and its frames are
+    the shot's: the last segment samples H3's grid past them, its guide holding the plate's last frame, and what runs
+    past is never decoded. Its `sound` (`Edit.audio`) is heard by H3 but for `new`, and laid under the video for `keep`.
+    `lora` serves every segment. Without `keep_latents`, the video's latents aren't kept."""
     ctx.raise_if_cancelled()
     warnings: list[str] = []
     # Asking for steps asks for the full model, the only one that has a choice of them.
@@ -1734,8 +1755,9 @@ async def _render(ctx: Context, shot: Shot, out: Outputs, tel: Telemetry, *, pla
     if not FIRST_SHOT.search(script.prompt):
         warnings.append("this prompt has no `[Shot 1]`, which MiniMax's guide opens a shot with; it goes as written")
     steps = None if turbo else shot.steps
-    # Every segment carries into a successor, its last too: the video's latents keep that carry, which a pickup resumes.
-    plans = [ContinuationPlan(length, carry if index or carried else Carry(), carry) for index, length in enumerate(segments)]
+    plans = segment_plans(segments, carry, carried=carried, plate=None if plate is None else footage_frames(plate))
+    del segments[len(plans) :], opens[len(plans) :]
+    count = len(plans)
     *starts, total = accumulate((plan.delivered_frames for plan in plans), initial=done)
     seams = [*kept, *([done] if done else []), *starts[1:]]
     followed = StoryReference(name="Plate", kind="anchor_video", video=plate) if plate is not None else None
@@ -1763,8 +1785,9 @@ async def _render(ctx: Context, shot: Shot, out: Outputs, tel: Telemetry, *, pla
         # guide 3), so a redo from a seam reads as that segment did. An edit's later segments keep their tags.
         role = {"keyframes": bool(index == 0 and opening or index + 1 == count and ending),
                 "continues": carried if index == 0 else plate is None}
+        heard = PLATE_SOUND[sound] if plate is not None else ""
         segment = segment_call(text, refs, soundscape=script.soundscape, music=script.music, index=index,
-                               retained=retained, added=added, forced=forced, **role)  # fmt: skip
+                               retained=retained, added=added, forced=forced, sound=heard, **role)  # fmt: skip
         if index == 0 and (plate is not None or carried) and not any(FILE[ref.kind] == "image" for ref in segment.references):
             # Ref2VA needs a picture: a plate's own first frame (se-101), or the frame the take goes on from (h3a-098,
             # run 25881), as the same world state.
@@ -1773,7 +1796,8 @@ async def _render(ctx: Context, shot: Shot, out: Outputs, tel: Telemetry, *, pla
                 warnings.append("a plate with no picture beside it uses its own first frame as the picture")
             files[begin.name] = frame_at(plate, 1) if plate is not None else frame_at(cast(ShotVideo, take).file, done)
             segment = segment_call(text, [*refs, begin], soundscape=script.soundscape, music=script.music, index=index,
-                                   retained=retained, added=added | {begin.name}, forced=forced | {begin.name}, **role)  # fmt: skip
+                                   retained=retained, added=added | {begin.name}, forced=forced | {begin.name}, sound=heard,
+                                   **role)  # fmt: skip
         files |= {ref.name: file for ref in segment.references if (file := getattr(ref, FILE[ref.kind])) is not None}
         calls.append(segment if segment.references else SegmentCall(fl2va_text(text, script.soundscape, script.music), [], segment.warnings))
         warnings += segment.warnings
@@ -1803,7 +1827,7 @@ async def _render(ctx: Context, shot: Shot, out: Outputs, tel: Telemetry, *, pla
                 log_prompt(tel, "h3 segment prompt", segment.prompt, segment=index + 1,
                            references=", ".join(ref.name for ref in segment.references))  # fmt: skip
                 if segment.references:
-                    uses = video_uses(segment.references, windows[index])
+                    uses = video_uses(segment.references, windows[index], sound=sound != "new")
                     pictures = [ref for ref in segment.references if FILE[ref.kind] == "image"]
                     result = await call(
                         ref2va_segment,
@@ -1814,8 +1838,8 @@ async def _render(ctx: Context, shot: Shot, out: Outputs, tel: Telemetry, *, pla
                             context_frames=cast(ContextFrames, plan.carried.frames),
                             context_audio=plan.carried.audio,
                             next_context_frames=cast(ContextFrames, plan.successor.frames),
-                            next_context_audio=plan.successor.audio, first_frame=first, last_frame=last, canvas=shape,
-                            latents=True,
+                            next_context_audio=plan.successor.audio, cut_frames=plan.cut, first_frame=first,
+                            last_frame=last, canvas=shape, latents=True, soundtrack=sound != "keep",
                             earlier_latents=(*before[0], *(r.latents for r in returned)) if end_segment else (),
                             earlier_videos=(*before[1], *(r.video for r in returned)) if end_segment else (),
                             picture_edges=tuple(_LOOSE_EDGE if ref.kind == "world_state" else 0 for ref in pictures),
@@ -1843,11 +1867,16 @@ async def _render(ctx: Context, shot: Shot, out: Outputs, tel: Telemetry, *, pla
         files[f"Segment {whole + index + 1} end"] = result.last_frame
         # Each segment shows as it lands, after those before it, so its box plays all made so far while the next renders.
         if index + 1 == count and (take is None or carried):
-            out.publish("video", result.video, label="Video")
+            if sound != "keep":
+                out.publish("video", result.video, label="Video")
         else:
             so_far = so_far or SoFar(out, tel, result.video)
             out.publish("video", so_far.add(result.video), label=f"Segments 1-{index + 1} of {count}" if index else f"Segment 1 of {count}")
     video, saved = returned[-1].video, None
+    if sound == "keep" and plate is not None:
+        video, said = plate_sound(out, video, plate)
+        warnings += said
+        out.publish("video", video, label="Video")
     if take is not None and not carried:
         video, said = join_kept(out, take.file, done, video)
         warnings += said
@@ -1940,6 +1969,9 @@ EDITS: dict[str, EditLoRA] = {
     "motion_transfer": EditLoRA("alissonerdx/minimax-h3-motion-transfer@0.1.0", "motion_transfer:"),
 }
 ShotFootage = Annotated[VideoFile, FileBound(max_decoded_bytes=VIDEO_READ_BYTES)]
+EditAudio = Literal["keep", "regenerate", "new"]
+#: What the plate's soundtrack is to an edit's text (`segment_call`), by its `audio`.
+PLATE_SOUND: dict[EditAudio, PlateSound] = {"keep": "fully_copy", "regenerate": "reference", "new": ""}
 
 
 class Edit(msgspec.Struct, kw_only=True):
@@ -1961,6 +1993,16 @@ class Edit(msgspec.Struct, kw_only=True):
     ] = "vfx_edit"  # fmt: skip
     summary: Prompt[Image | Video | Audio] = Prompt()
     beats: Annotated[list[Beat], Count(min=1)]
+    #: The edit's sound (Paul, 11-17). Either way but `new`, H3 hears the plate's soundtrack on its own clock, as
+    #: Alissonerdx's character swap does, so mouths follow its speech; a plate with no sound makes it `new`.
+    audio: Annotated[
+        EditAudio,
+        Label("Audio", options={
+            "keep": ("Keep the plate's", "The plate's own soundtrack, untouched"),
+            "regenerate": ("Remake from the plate's", "H3 makes the sound again, following the plate's"),
+            "new": ("New from the text", "H3 makes the sound from the summary and beats alone"),
+        }),
+    ] = "regenerate"  # fmt: skip
     turbo: bool = True
     quality: Quality = "standard"
     seed: Seed | None = None
@@ -1970,13 +2012,20 @@ class Edit(msgspec.Struct, kw_only=True):
 @app.tool(label="MiniMax H3 Edit", named="edit", reserved=_RESERVED, needs={"ref2va_segment": "true", "fl2va_segment": "false"})
 async def edit(ctx: Context, payload: Edit, out: Outputs, tel: Telemetry) -> ShotResult:
     """A plate edited by its summary and beats, on Ref2VA under the chosen edit LoRA, its trigger opening each beat. With
-    no picture in a beat, the plate's own first frame is the picture."""
+    no picture in a beat, the plate's own first frame is the picture. The video is the plate's frames, and its sound
+    the plate's (`keep`), H3's following the plate's (`regenerate`), or H3's from the text (`new`)."""
     lora = EDITS[payload.edit]
     beats = [replace(beat, description=replace(beat.description, text=f"{lora.trigger} {beat.description.text}".rstrip()))
              for beat in payload.beats]  # fmt: skip
     shot = Shot(summary=payload.summary, beats=beats, turbo=payload.turbo, quality=payload.quality, seed=payload.seed)
     choice = ModelChoice(lora=(Lora(lora.model, lora.strength),))
-    return await _render(ctx, shot, out, tel, plate=payload.plate, lora=choice)
+    sound = payload.audio
+    if sound != "new" and payload.plate.probe().soundtrack is None:
+        sound = "new"
+    made = await _render(ctx, shot, out, tel, plate=payload.plate, lora=choice, sound=sound)
+    if sound == payload.audio:
+        return made
+    return replace(made, warnings=[f"the plate has no sound, so H3 makes it from the text, not {payload.audio}", *made.warnings])
 
 
 class Upscale(msgspec.Struct, kw_only=True):

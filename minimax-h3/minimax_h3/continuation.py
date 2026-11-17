@@ -99,15 +99,19 @@ class ContinuationPlan:
     picture ends at the last sampled frame, where a successor's picture window must end;
     a successor carrying sound alone needs the sound to reach the join, so the picture
     then ends on the last frame the sound covers (one frame earlier when the grid rounds
-    the sound down)."""
+    the sound down). `cut` frames at the sample's end are sampled and never delivered: an
+    edit's last segment past its plate's end (Paul, 11-17)."""
 
     seconds: int
     carried: Carry = Carry()
     successor: Carry = Carry()
+    cut: int = 0
 
     def __post_init__(self) -> None:
         if type(self.seconds) is not int or not 5 <= self.seconds <= 15:
             _refuse("a segment delivers 5-15 new seconds")
+        if type(self.cut) is not int or not 0 <= self.cut < self.sample_frames - self.prefix_frames:
+            _refuse("a segment's cut leaves at least one of its new frames")
         if self.sample_frames > MAX_FRAMES:
             _refuse(
                 f"{self.seconds} s plus {self.prefix_frames} carried frames samples "
@@ -126,9 +130,10 @@ class ContinuationPlan:
 
     @property
     def delivery_end(self) -> int:
+        end = self.sample_frames - self.cut
         if self.successor.audio and not self.successor.frames:
-            return min(self.sample_frames, 3 * audio_ticks(self.sample_frames) // 5)
-        return self.sample_frames
+            return min(end, 3 * audio_ticks(self.sample_frames) // 5)
+        return end
 
     @property
     def delivered_frames(self) -> int:
@@ -348,7 +353,8 @@ def align_context_rows(state: PipelineState, context: AVContext, patch_size: Seq
 
 
 class DeliveredFrames:
-    """A streamed decode's delivered picture: frames `[prefix, delivery_end)` of the sample."""
+    """A streamed decode's delivered picture: frames `[prefix, delivery_end)` of the sample; the decode stops once
+    they're out (`done`)."""
 
     def __init__(self, plan: ContinuationPlan) -> None:
         self.plan = plan
@@ -365,8 +371,12 @@ class DeliveredFrames:
         self.delivered += int(selected.shape[0])
         return selected
 
+    @property
+    def done(self) -> bool:
+        return self.seen >= self.plan.delivery_end
+
     def finish(self) -> int:
-        if self.seen != self.plan.sample_frames or self.delivered != self.plan.delivered_frames:
+        if not self.done or self.delivered != self.plan.delivered_frames:
             _refuse("completed continuation decode differs from its sampled/delivered frame plan")
         return self.delivered
 
