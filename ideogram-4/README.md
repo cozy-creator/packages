@@ -10,7 +10,7 @@ Qwen3-VL-8B-Instruct (13 of its layers' hidden states, concatenated); the VAE is
 
 | function | checkpoints | default steps | guidance |
 | --- | --- | --- | --- |
-| `generate` | `ideogram-ai/ideogram-4@0.2.0` (int8, fp8), text encoder `qwen/qwen3-vl-8b-instruct@0.1.1` (int8) | 48 | 7, then 3 on the last `ceil(steps/16)` |
+| `generate` | `ideogram-ai/ideogram-4@0.2.0` (int8, fp8), text encoder and upsampler `pottokao/qwen-image-2.1-text-encoder-heretic@0.1.0` (int8) | 48 | 7, then 3 on the last `ceil(steps/16)` |
 
 There is no distilled checkpoint, so no `generate_turbo`; Ideogram's 20- and 12-step presets are
 `steps=20` and `steps=12`.
@@ -40,6 +40,14 @@ defaults to 1:1 at 1 MP (1024×1024, the reference CLI's); sizes are held to 256
 6:1 and 4 MP, on the 16 px grid, and anything outside is a `clamp` adjustment. Ideogram 4 is text to image only: its prompt is words, so a picture mentioned in it goes as its name ([references](../docs/references.md)). It has no
 `negative_prompt`: its unconditional DiT reads no text. Outputs: `image` (PNG), `width`, `height`, `seed`
 and `prompt`, the caption the image was made from.
+
+## Abliterated by default
+
+Ideogram's text encoder is stock Qwen3-VL-8B-Instruct, and the upsampler is the same model with its language head, so
+both default to an abliterated one (Paul, 11-17: "use abliterated models wherever possible"):
+[pottokao's Heretic](https://huggingface.co/pottokao/Qwen-Image-2.1-Text-Encoder-Heretic)
+(`pottokao/qwen-image-2.1-text-encoder-heretic`, 5/100 refusals, KL 0.022 from stock), one checkpoint for both slots.
+Qwen's own is one setting away: `--model text_encoder=qwen/qwen3-vl-8b-instruct@0.1.1 --model upsampler=qwen/qwen3-vl-8b-instruct@0.1.1`.
 
 ## Captions and regions
 
