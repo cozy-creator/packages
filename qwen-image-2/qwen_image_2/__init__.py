@@ -41,7 +41,7 @@ class GenerateInput(ImageRequest):
     prompt: Prompt[Image] = Prompt()  # type: ignore[assignment]  # a prompt with pictures, in place of the base's text
     #: Qwen Image 2.1 renders at 1, 2 or 4 MP (its native 2K); 2 by default (Paul, 11-06).
     megapixels: Literal[1, 2, 4] = DEFAULT_MEGAPIXELS  # type: ignore[assignment]  # 2, a Literal member
-    #: Qwen's prompt enhancer rewrites the request first (`rewriter`): an edit from its pictures, else the words.
+    #: Qwen's prompt enhancer rewrites the request first (`rewriter.py`): an edit from its pictures, else the words.
     prompt_upsampling: bool = True
     #: How far the rewrite goes beyond the words, so only with it (`_upsampled`); `balanced` is Qwen's own.
     creativity: Annotated[Creativity, When("prompt_upsampling")] = "balanced"
@@ -133,9 +133,9 @@ def _upsampled(
 def _generate(
     ctx: Context,
     payload: GenerateInput,
-    expander: Enhancer,
+    expander_i2i: Enhancer,
+    expander_t2i: Enhancer,
     model: QwenImage21DiT,
-    rewriter: Enhancer,
     text_encoder: QwenImage21TextEncoder,
     vae: QwenImage21VAE,
     tel: Telemetry,
@@ -152,7 +152,7 @@ def _generate(
     # Upstream feeds the VAE RGBA; its vision encoder sees alpha composited over white.
     reference_images = [picture.file.read(mode="RGBA") for picture in pictures] or None
     if payload.prompt_upsampling:
-        enhancer = rewriter if reference_images else expander
+        enhancer = expander_i2i if reference_images else expander_t2i
         payload, prompt = _upsampled(payload, prompt, reference_images or [], seed, enhancer, ctx.progress, tel, adj)
     vae.hold(tel)
     ctx.raise_if_cancelled()
@@ -198,47 +198,52 @@ def _generate(
     return ImageResult(asset, width, height, seed, prompt)
 
 
-#: Qwen's prompt enhancers (QwenLM/Qwen-Image-2.1 `prompt_rewrite/`), a picture from words' and an edit's, and the
-#: text encoder, the `text_encoder` of a Qwen-Image-2.1 checkpoint and one for every function, are abliterated by
+#: Qwen's prompt enhancers (QwenLM/Qwen-Image-2.1 `prompt_rewrite/`), a picture from words' (`expander_t2i`) and an
+#: edit's (`expander_i2i`), and the text encoder, the `text_encoder` of a Qwen-Image-2.1 checkpoint and one for every function, are abliterated by
 #: default (Paul, 11-06). Qwen's own are `qwen/qwen-image-2.1-pe-t2i@0.1.0`, `qwen/qwen-image-2.1-pe-i2i@0.1.0` and
 #: any Qwen-Image-2.1 checkpoint (`model.text_encoder=qwen/qwen-image-2.1@0.1.0`). Turbo is the base model with
 #: Alibaba PAI's Fun Acc over it (`turbo_lora`). `vae` encodes the pictures and decodes the image: the base model's
 #: own by default, or another Qwen-Image-2.1 VAE (`model.vae=madebyollin/texture-fix-vae`).
-_FULL = {"expander": "pottokao/qwen-image-2.1-pe-t2i-abliterated@0.1.0", "model": "qwen/qwen-image-2.1@0.1.0",
-         "rewriter": "darrellbest/qwen-image-2.1-pe-i2i-abliterated@0.1.0",
+_FULL = {"expander_i2i": "darrellbest/qwen-image-2.1-pe-i2i-abliterated@0.1.0",
+         "expander_t2i": "pottokao/qwen-image-2.1-pe-t2i-abliterated@0.1.0", "model": "qwen/qwen-image-2.1@0.1.0",
          "text_encoder": "atomicchat/qwen-image-2.1-text-encoder-abliterated@0.1.0", "vae": "qwen/qwen-image-2.1@0.1.0"}
-_TURBO = {"expander": "pottokao/qwen-image-2.1-pe-t2i-abliterated@0.1.0", "model": "qwen/qwen-image-2.1@0.1.0",
-          "rewriter": "darrellbest/qwen-image-2.1-pe-i2i-abliterated@0.1.0",
+_TURBO = {"expander_i2i": "darrellbest/qwen-image-2.1-pe-i2i-abliterated@0.1.0",
+          "expander_t2i": "pottokao/qwen-image-2.1-pe-t2i-abliterated@0.1.0", "model": "qwen/qwen-image-2.1@0.1.0",
           "text_encoder": "atomicchat/qwen-image-2.1-text-encoder-abliterated@0.1.0",
           "turbo_lora": "alibaba-pai/qwen-image-2.1-fun-acc@0.1.1", "vae": "qwen/qwen-image-2.1@0.1.0"}
 _COMPONENTS = {"model": ("transformer",), "text_encoder": ("text_encoder",), "vae": ("vae",)}
-#: Built and fetched on first use: an edit never pulls the expander, `prompt_upsampling=False` neither enhancer.
-_ON_DEMAND = ("rewriter", "expander")
+#: Which requests need each enhancer (cl-1103): one with pictures the edit's, one without the other, and
+#: `prompt_upsampling=False` neither. A machine fetches the one its request needs before it starts, never the other.
+#: A picture is a reference of type `image`: Runtime leaves any other kind out of a `Prompt[Image]`.
+_PICTURES = '.references.exists(r, r.type == "image")'
+_NO_PICTURES = '.references.all(r, r.type != "image")'
+_NEEDS = {"expander_i2i": f"request.prompt_upsampling && request.prompt{_PICTURES}",
+          "expander_t2i": f"request.prompt_upsampling && request.prompt{_NO_PICTURES}"}  # fmt: skip
 
 
-@app.entrypoint(defaults=_FULL, components=_COMPONENTS, on_demand=_ON_DEMAND, memoize=True)  # fmt: skip
+@app.entrypoint(defaults=_FULL, components=_COMPONENTS, needs=_NEEDS, memoize=True)  # fmt: skip
 def generate(
     ctx: Context,
     payload: GenerateInput,
-    expander: Enhancer,
+    expander_i2i: Enhancer,
+    expander_t2i: Enhancer,
     model: QwenImage21DiT,
-    rewriter: Enhancer,
     text_encoder: QwenImage21TextEncoder,
     vae: QwenImage21VAE,
     tel: Telemetry,
     adj: Adjustments,
 ) -> ImageResult:
     """Qwen-Image-2.1, the 40-step base model."""
-    return _generate(ctx, payload, expander, model, rewriter, text_encoder, vae, tel, adj, None)
+    return _generate(ctx, payload, expander_i2i, expander_t2i, model, text_encoder, vae, tel, adj, None)
 
 
-@app.entrypoint(defaults=_TURBO, components=_COMPONENTS, on_demand=_ON_DEMAND, memoize=True)  # fmt: skip
+@app.entrypoint(defaults=_TURBO, components=_COMPONENTS, needs=_NEEDS, memoize=True)  # fmt: skip
 def generate_turbo(
     ctx: Context,
     payload: GenerateInput,
-    expander: Enhancer,
+    expander_i2i: Enhancer,
+    expander_t2i: Enhancer,
     model: QwenImage21DiT,
-    rewriter: Enhancer,
     text_encoder: QwenImage21TextEncoder,
     turbo_lora: FunAccLoRA,
     vae: QwenImage21VAE,
@@ -246,7 +251,7 @@ def generate_turbo(
     adj: Adjustments,
 ) -> ImageResult:
     """Qwen-Image-2.1 with Alibaba PAI's Fun Acc: the same inputs, in 4 steps."""
-    return _generate(ctx, payload, expander, model, rewriter, text_encoder, vae, tel, adj, turbo_lora)
+    return _generate(ctx, payload, expander_i2i, expander_t2i, model, text_encoder, vae, tel, adj, turbo_lora)
 
 
 class ImageBox(msgspec.Struct, kw_only=True):
@@ -265,16 +270,20 @@ class ImageBox(msgspec.Struct, kw_only=True):
     creativity: Annotated[Creativity, Advanced(), When("prompt_upsampling")] = "balanced"
 
 
-# The Turbo overlay is built, and its weights fetched, only when a box asks for it, and an enhancer only when the
-# box upsamples; a LoRA dropped on the box adapts the base model either way.
-@app.tool(label="Image", named="image", defaults=_TURBO, components=_COMPONENTS,
-          on_demand=("rewriter", "expander", "turbo_lora"), memoize=True)  # fmt: skip
+# The Turbo overlay is needed only when a box asks for it, and an enhancer only when the box upsamples: the edit's with
+# pictures, else the other; a LoRA dropped on the box adapts the base model either way.
+_BOX_NEEDS = {"expander_i2i": f"request.prompt_upsampling && request.instructions{_PICTURES}",
+              "expander_t2i": f"request.prompt_upsampling && request.instructions{_NO_PICTURES}",
+              "turbo_lora": "request.turbo"}  # fmt: skip
+
+
+@app.tool(label="Image", named="image", defaults=_TURBO, components=_COMPONENTS, needs=_BOX_NEEDS, memoize=True)  # fmt: skip
 def image(
     ctx: Context,
     payload: ImageBox,
-    expander: Enhancer,
+    expander_i2i: Enhancer,
+    expander_t2i: Enhancer,
     model: QwenImage21DiT,
-    rewriter: Enhancer,
     text_encoder: QwenImage21TextEncoder,
     turbo_lora: FunAccLoRA,
     vae: QwenImage21VAE,
@@ -285,7 +294,7 @@ def image(
     request = GenerateInput(prompt=payload.instructions, aspect_ratio=payload.aspect_ratio,
                             megapixels=payload.megapixels, seed=payload.seed,
                             prompt_upsampling=payload.prompt_upsampling, creativity=payload.creativity)  # fmt: skip
-    return _generate(ctx, request, expander, model, rewriter, text_encoder, vae, tel, adj,
+    return _generate(ctx, request, expander_i2i, expander_t2i, model, text_encoder, vae, tel, adj,
                      turbo_lora if payload.turbo else None)  # fmt: skip
 
 
