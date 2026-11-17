@@ -88,7 +88,7 @@ def psnr(reference: torch.Tensor, other: torch.Tensor) -> dict[str, float]:
 
 class EncodeProbe(msgspec.Struct, kw_only=True):
     images: list[Picture]
-    megapixels: list[float] = msgspec.field(default_factory=lambda: [8.0, 16.0])
+    megapixels: list[float]
     #: timed passes per arm, alternating, after one untimed pass each
     passes: int = 3
 
