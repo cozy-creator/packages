@@ -1630,24 +1630,26 @@ def _cpu_model() -> str:
 
 
 def _contended(payload: VaeRoundTrip, base_model: H3VideoVAE, tel: Telemetry) -> dict[str, object]:
-    """Evidence only: a noisy neighbour, emulated. Twice as many threads as this process may run on, each copying and
-    transforming 16 MiB arrays in numpy (no GIL held, no device work), while the clip is read, encoded and decoded again."""
+    """Evidence only: a noisy neighbour, emulated without a GIL convoy. CPU matmuls (each call holds no GIL for its
+    length) keep as many threads busy as this process may run on, while the clip is read, encoded and decoded again."""
     import threading
 
     stop = threading.Event()
+    cores = len(os.sched_getaffinity(0))
+    pool = max(torch.get_num_threads(), 1)
 
     def burn() -> None:
-        a = np.ones(4 << 20, dtype=np.float32)
-        b = np.empty_like(a)
+        a = torch.full((2048, 2048), 0.5)
+        b = torch.full((2048, 2048), 0.25)
+        c = torch.empty(2048, 2048)
         while not stop.is_set():
-            np.copyto(b, a)
-            np.sin(a, out=b)
+            torch.mm(a, b, out=c)
 
-    count = min(2 * len(os.sched_getaffinity(0)), 96)
+    count = max(1, min(cores // pool, 64))
     threads = [threading.Thread(target=burn, daemon=True) for _ in range(count)]
     for thread in threads:
         thread.start()
-    result: dict[str, object] = {"threads": count}
+    result: dict[str, object] = {"threads": count, "pool": pool, "cores": cores}
     try:
         host_before = _host_cpu()
         t0 = time.perf_counter()
