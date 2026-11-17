@@ -312,8 +312,8 @@ class H3Model(Model[OfficialH3Pipeline]):
 
 
 class H3VideoVAE(Model[OfficialH3VideoVAE]):
-    """H3's video VAE alone, its release's `vae` and nothing else loaded (`vae_round_trip`): the encode and decode
-    `H3Model` runs, with the same fused encoder and decoder blocks and 8-bit decoder attention."""
+    """H3's video VAE alone, its release's `vae` and nothing else loaded (`vae_round_trip`, `vae_encode_picture`): the
+    encode and decode `H3Model` runs, with the same fused encoder and decoder blocks and 8-bit decoder attention."""
 
     serving = Serving(attention_bits={"vae": 8})
 
