@@ -1971,7 +1971,7 @@ EDITS: dict[str, EditLoRA] = {
 ShotFootage = Annotated[VideoFile, FileBound(max_decoded_bytes=VIDEO_READ_BYTES)]
 EditAudio = Literal["keep", "regenerate", "new"]
 #: What the plate's soundtrack is to an edit's text (`segment_call`), by its `audio`.
-PLATE_SOUND: dict[EditAudio, PlateSound] = {"keep": "fully_copy", "regenerate": "reference", "new": ""}
+PLATE_SOUND: dict[EditAudio, PlateSound] = {"keep": "fully_copy", "regenerate": "partially_copy", "new": ""}
 
 
 class Edit(msgspec.Struct, kw_only=True):

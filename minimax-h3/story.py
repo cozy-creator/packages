@@ -60,7 +60,7 @@ TASKS = ("video editing", "video continuation", "keyframe completion", "referenc
          "audio reuse", "audio reference")
 #: What a plate's own soundtrack is to an edit's target (ref guide 4.2): its final track, what its sound follows, or
 #: nothing.
-PlateSound = Literal["", "fully_copy", "reference"]
+PlateSound = Literal["", "fully_copy", "reference", "partially_copy"]
 #: Each marker's definition (after "<Audio N> is the synchronized audio track of <Video M>, "), retention line and soundscape.
 _PLATE_SOUND = {
     "fully_copy": ("and is reused in the target video.",
@@ -70,6 +70,10 @@ _PLATE_SOUND = {
                   "the target video's sound follows {0}'s voice timbre, delivery, dialogue content, rhythm and sound "
                   "texture without copying the original signal.",
                   "The target video's speech, ambience and sound effects follow {0} on the same timeline."),
+    "partially_copy": ("which the target video's sound copies in part.",
+                       "the target video's sound copies {0}'s speech and sound on its timeline, with what the edit "
+                       "changes made anew.",
+                       "The target video's speech, ambience and sound effects copy {0} on the same timeline."),
 }
 
 
