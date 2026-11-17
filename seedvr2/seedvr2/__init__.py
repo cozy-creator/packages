@@ -8,7 +8,7 @@ from collections import deque
 from collections.abc import Iterator
 from dataclasses import replace
 from enum import StrEnum
-from typing import Annotated
+from typing import Annotated, Literal
 
 import msgspec
 import torch
@@ -239,6 +239,10 @@ class UpscaleImageInput(Restoration, kw_only=True):
     resolution: Annotated[Resolution, Shape(pixels=_RESOLUTIONS)] = Resolution.UHD
     #: `restore_window`.
     seed: Seed = 42  # type: ignore[assignment]  # a literal: the interface is read from source (Seed is an int NewType)
+    #: proof/se-161 only: Lanczos (ours) or upstream's torchvision bicubic.
+    resize: Annotated[Literal["lanczos", "bicubic"], Advanced()] = "lanczos"
+    #: proof/se-161 only: the VAE over spatial tiles (ours) or whole (upstream).
+    vae_tiles: Annotated[bool, Advanced()] = True
 
 
 class UpscaleImageOutput(msgspec.Struct):
@@ -287,6 +291,8 @@ def upscale_image(
             correction=payload.color_correction,
             input_noise=payload.input_noise_scale,
             latent_noise=payload.latent_noise_scale,
+            resize=payload.resize,
+            tiles=payload.vae_tiles,
         )
     ctx.raise_if_cancelled()
     with tel.stage("saving picture"):

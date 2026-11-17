@@ -11,6 +11,7 @@ import numpy as np
 import torch
 from omegaconf import DictConfig, OmegaConf
 from PIL import Image, ImageOps
+from torchvision.transforms import functional as vision
 from cozy_runtime import rng
 from cozy_runtime.author import Config, Cut, Loader, Model, ModelAssets, Serving, Telemetry, split, uses_components
 
@@ -295,10 +296,21 @@ def restore(
     correction: Correction,
     input_noise: float,
     latent_noise: float,
+    resize: str = "lanczos",
+    tiles: bool = True,
 ) -> list[Image.Image]:
     """One window: encode, denoise and decode, each its own component scope."""
     if not frames:
         raise ValueError("SeedVR2 restoration needs at least one frame")
+    if not tiles:  # proof/se-161: the VAE in one tile, as upstream runs it
+        from .upstream.models.video_vae_v3.modules import attn_video_vae
+
+        saved, attn_video_vae.TILE = attn_video_vae.TILE, 1 << 40
+        try:
+            return restore(model, frames, width, height, seed, tel, correction=correction, input_noise=input_noise,
+                           latent_noise=latent_noise, resize=resize)
+        finally:
+            attn_video_vae.TILE = saved
     padded = extend(frames, (1 - len(frames)) % 4)
     canvas = ((width + 15) // 16 * 16, (height + 15) // 16 * 16)
     left, top = (canvas[0] - width) // 2, (canvas[1] - height) // 2
@@ -307,7 +319,7 @@ def restore(
     source = torch.from_numpy(
         np.stack(
             [
-                np.asarray(ImageOps.expand(f.resize((width, height), Image.Resampling.LANCZOS), border))
+                np.asarray(ImageOps.expand(_resized(f, width, height, resize), border))
                 for f in padded
             ]
         )
@@ -344,3 +356,14 @@ def restore(
 def _signed(image: torch.Tensor, dtype: torch.dtype) -> torch.Tensor:
     """Bytes to [-1, 1]."""
     return image.to(dtype).div(127.5).sub(1)
+
+
+def _resized(frame: Image.Image, width: int, height: int, resize: str) -> Image.Image:
+    """proof/se-161: Lanczos on bytes (ours), or upstream's torchvision bicubic (antialiased) on [0, 1], clamped."""
+    if resize == "lanczos":
+        return frame.resize((width, height), Image.Resampling.LANCZOS)
+    from torchvision.transforms import InterpolationMode
+
+    x = vision.pil_to_tensor(frame.convert("RGB")).float().div(255)
+    x = vision.resize(x, [height, width], interpolation=InterpolationMode.BICUBIC, antialias=True).clamp(0, 1)
+    return Image.fromarray(x.mul(255).round().to(torch.uint8).permute(1, 2, 0).numpy())

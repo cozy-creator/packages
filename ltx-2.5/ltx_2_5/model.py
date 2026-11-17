@@ -15,8 +15,10 @@ from diffusers.models.autoencoders.autoencoder_kl_ltx2 import AutoencoderKLLTX2V
 from diffusers.models.transformers.transformer_ltx2 import LTX2VideoTransformer3DModel
 from diffusers.models.condition_embedders.condition_embedder_ltx2 import LTX2TextConnectors
 from diffusers.schedulers.scheduling_flow_match_euler_discrete import FlowMatchEulerDiscreteScheduler
+from diffusers.schedulers.scheduling_ltx_euler_ancestral_rf import LTXEulerAncestralRFScheduler
 from diffusers.pipelines.ltx2.pipeline_ltx2 import LTX2Pipeline
-from diffusers.pipelines.ltx2.pipeline_ltx2_image2video import LTX2ImageToVideoPipeline
+from diffusers.pipelines.ltx2.pipeline_ltx2_image2video import LTX2ImageToVideoPipeline, retrieve_latents
+from diffusers.pipelines.ltx2.utils import apply_image_conditioning_crf, resolve_default_image_crf
 from diffusers.pipelines.ltx2.pipeline_ltx2_latent_upsample import LTX2LatentUpsamplePipeline
 from diffusers.models.latent_upscaler.latent_upscaler_ltx2 import LTX2LatentUpsamplerModel
 from diffusers.pipelines.ltx2.vocoder import LTX2VocoderWithBWE
@@ -24,6 +26,8 @@ from PIL import Image
 from tokenizers import Tokenizer
 from torch import nn
 from transformers import AddedToken, Gemma4UnifiedConfig, Gemma4UnifiedForConditionalGeneration, GemmaTokenizer
+
+from cozy_runtime import rng
 
 from .vae import VideoVAE
 from .parallel import install
@@ -124,6 +128,31 @@ class ImagePipeline(LTX2ImageToVideoPipeline):
         return torch.device(str(device()))
 
 
+class _Stream:
+    """One noise stream shared by the video and audio schedulers (the pipeline deep-copies its scheduler)."""
+
+    def __init__(self, generator: torch.Generator) -> None:
+        self.generator = generator
+
+    def __deepcopy__(self, memo: object) -> _Stream:
+        return self
+
+
+class Ancestral(LTXEulerAncestralRFScheduler):
+    """proof/se-161: native LTX-2.5's Euler ancestral (eta 1, s_noise 1; ltx_pipelines/distilled.py), video's
+    noise drawn before audio's each step, from its own stream."""
+
+    stream: _Stream
+
+    def set_timesteps(self, num_inference_steps: int | None = None, device: str | torch.device | None = None,
+                      sigmas: list[float] | torch.Tensor | None = None, **kwargs: object) -> None:
+        super().set_timesteps(device=device, sigmas=[*(float(s) for s in (sigmas or [])), 0.0])
+        self.timesteps = self.timesteps[:-1]  # the terminal zero is the last step's target, not a step
+
+    def step(self, model_output, timestep, sample, generator=None, return_dict=True):  # type: ignore[no-untyped-def,override]
+        return super().step(model_output, timestep, sample, generator=self.stream.generator, return_dict=return_dict)
+
+
 @sequence_parallel(degrees=(2, 4, 8))
 class Ltx25(Model[Graph]):
     serving = Serving(attention_bits={"transformer.transformer_blocks.": 8})
@@ -134,11 +163,17 @@ class Ltx25(Model[Graph]):
         self.graph = loader.construct(Graph)
         self.tokenizer = tokenizer(loader.assets)
 
-    def _pipeline(self, image: bool = False) -> LTX2Pipeline | LTX2ImageToVideoPipeline:
+    def _pipeline(self, image: bool = False, noise: int | None = None) -> LTX2Pipeline | LTX2ImageToVideoPipeline:
         c = self.graph.components
         cls = ImagePipeline if image else TextPipeline
+        scheduler: FlowMatchEulerDiscreteScheduler | Ancestral
+        if noise is None:
+            scheduler = FlowMatchEulerDiscreteScheduler.from_config(self.graph.scheduler_config)
+        else:
+            scheduler = Ancestral(eta=1.0, s_noise=1.0)
+            scheduler.stream = _Stream(rng.generator(noise))
         pipe = cls(
-            scheduler=FlowMatchEulerDiscreteScheduler.from_config(self.graph.scheduler_config),
+            scheduler=scheduler,  # type: ignore[arg-type]
             vae=c["vae"], audio_vae=c["audio_vae"], text_encoder=c["text_encoder"],
             tokenizer=self.tokenizer, connectors=c["connectors"], transformer=c["transformer"], vocoder=c["vocoder"],
         )
@@ -157,11 +192,20 @@ class Ltx25(Model[Graph]):
     @uses_components("transformer", "connectors", "vae", "audio_vae")
     def denoise(self, embeds: tuple[torch.Tensor, torch.Tensor], image: Image.Image | None, *, width: int, height: int,
                 frames: int, generator: torch.Generator, check: Callable[[], None], progress: Callable[[int], None],
-                latents: tuple[torch.Tensor, torch.Tensor] | None = None) -> tuple[torch.Tensor, torch.Tensor]:
+                latents: tuple[torch.Tensor, torch.Tensor] | None = None, noise: int | None = None,
+                encoded: bool = False) -> tuple[torch.Tensor, torch.Tensor]:
         # Both returns are already denormalized by Diffusers' output_type='latent'.
         # The VAE roots are also leased: their latent-statistic buffers participate here.
-        pipe = self._pipeline(image=image is not None)
+        pipe = self._pipeline(image=image is not None, noise=noise)
         sigmas = list(SIGMAS if latents is None else REFINE_SIGMAS)
+        if latents is not None and image is not None and encoded:
+            # Native LTX-2.5 and its ComfyUI template condition stage 2 on the picture encoded at stage 2's size;
+            # Diffusers' pipeline given `latents` keeps the upsampled stage-1 encode instead.
+            first = self._first_frame(pipe, image, width=width, height=height)
+            with torch.inference_mode():
+                video = latents[0].clone()
+                video[:, :, :1] = first.to(video.dtype)
+            latents = (video, latents[1])
 
         def callback(_pipe: object, index: int, _t: torch.Tensor, values: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
             check()
@@ -189,6 +233,19 @@ class Ltx25(Model[Graph]):
             return video, audio
         finally:
             pipe.transformer._reset_stateful_cache()
+
+    def _first_frame(self, pipe: LTX2Pipeline | LTX2ImageToVideoPipeline, image: Image.Image, *, width: int,
+                     height: int) -> torch.Tensor:
+        """The picture's latent at `width`x`height`, as Diffusers' pipeline encodes a first frame (CRF re-compression,
+        resize, the posterior's mode), unnormalized."""
+        vae = self.graph.components["vae"]
+        crf = resolve_default_image_crf(pipe.text_encoder)
+        if crf:
+            image = Image.fromarray(apply_image_conditioning_crf(np.asarray(image.convert("RGB")), crf))
+        pixels = pipe.video_processor.preprocess(image, height=height, width=width)
+        with torch.inference_mode():
+            pixels = pixels.to(torch.device(str(self.device)), vae.dtype)
+            return cast(torch.Tensor, retrieve_latents(vae.encode(pixels.unsqueeze(2)), None, "argmax"))
 
     @uses_components("latent_upsampler", "vae")
     def upscale(self, latents: torch.Tensor) -> torch.Tensor:
