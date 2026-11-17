@@ -169,11 +169,13 @@ def _generate(ctx: Context, payload: TurboInput, model: Krea2DiT, text_encoder: 
 _RAW_MODEL = "krea/krea-2@0.1.0"
 _TURBO_MODEL = "krea/krea-2-turbo@0.1.0"
 #: Each slot reads its part of a Krea 2 checkpoint, and builds only that (xs-192): `model` the DiT, `text_encoder` the
-#: Qwen3-VL-4B, the function's own by default (Raw's and Turbo's are byte-identical) or an abliterated one
-#: (`model.text_encoder=quiho/qwen3-vl-4b-abliterated@0.1.0`), `vae` the VAE (Raw's and Turbo's are the same). A
-#: model of one part alone serves its slot: a transformer with its scheduler, a text encoder with its tokenizer.
+#: Qwen3-VL-4B, `vae` the VAE (Raw's and Turbo's are the same). The encoder is stock Qwen3-VL-4B-Instruct, so its
+#: default is DreamFast's Heretic abliteration (Paul, 11-17: "use abliterated models wherever possible"); Krea's own is
+#: either checkpoint's (`model.text_encoder=krea/krea-2-turbo@0.1.0`, Raw's and Turbo's are byte-identical). A model of
+#: one part alone serves its slot: a transformer with its scheduler, a text encoder with its tokenizer.
 _KREA = ("transformer",)
 _TEXT = ("text_encoder",)
+_TEXT_ENCODER = "dreamfast/qwen3-vl-4b-heretic@0.1.0"
 _VAE = ("vae",)
 #: Each adapter's mirror on the Hub, by slot (`adapters.py`), its one component; each is built and fetched only
 #: when a request needs it.
@@ -191,7 +193,7 @@ _NEEDS = {"edit": f"request.prompt{_PICTURE}", "depth": f'{_MAP}"depth")', "pose
           "lineart": f'{_MAP}"lineart")', "inpaint": f'{_MAP}"inpaint")'}
 
 
-@app.entrypoint(defaults={"model": _RAW_MODEL, "text_encoder": _RAW_MODEL, "vae": _RAW_MODEL, "edit": _EDIT,
+@app.entrypoint(defaults={"model": _RAW_MODEL, "text_encoder": _TEXT_ENCODER, "vae": _RAW_MODEL, "edit": _EDIT,
                           "depth": _DEPTH, "pose": _POSE, "lineart": _LINEART, "inpaint": _INPAINT},
                 components={"model": _KREA, "text_encoder": _TEXT, "vae": _VAE, "edit": _LORA, "depth": _LORA,
                             "pose": _LORA, "lineart": _LORA, "inpaint": _LORA},
@@ -204,7 +206,7 @@ def generate(ctx: Context, payload: GenerateInput, model: Krea2DiT, text_encoder
     return _generate(ctx, payload, model, text_encoder, vae, adapters, tel, adj, distilled=False)
 
 
-@app.entrypoint(defaults={"model": _TURBO_MODEL, "text_encoder": _TURBO_MODEL, "vae": _TURBO_MODEL, "edit": _EDIT,
+@app.entrypoint(defaults={"model": _TURBO_MODEL, "text_encoder": _TEXT_ENCODER, "vae": _TURBO_MODEL, "edit": _EDIT,
                           "depth": _DEPTH, "pose": _POSE, "lineart": _LINEART, "inpaint": _INPAINT},
                 components={"model": _KREA, "text_encoder": _TEXT, "vae": _VAE, "edit": _LORA, "depth": _LORA,
                             "pose": _LORA, "lineart": _LORA, "inpaint": _LORA},
@@ -238,7 +240,7 @@ _BOX_NEEDS = {"full": "!request.turbo", "model": "request.turbo", "edit": f"requ
 
 
 @app.tool(label="Image", named="image",
-          defaults={"full": _RAW_MODEL, "model": _TURBO_MODEL, "text_encoder": _TURBO_MODEL, "vae": _TURBO_MODEL,
+          defaults={"full": _RAW_MODEL, "model": _TURBO_MODEL, "text_encoder": _TEXT_ENCODER, "vae": _TURBO_MODEL,
                     "edit": _EDIT, "depth": _DEPTH, "pose": _POSE, "lineart": _LINEART, "inpaint": _INPAINT},
           components={"full": _KREA, "model": _KREA, "text_encoder": _TEXT, "vae": _VAE, "edit": _LORA,
                       "depth": _LORA, "pose": _LORA, "lineart": _LORA, "inpaint": _LORA},
