@@ -17,10 +17,12 @@ returned. Seeds range from 0 through 9007199254740991 (the interoperable 53-bit
 integer range); omitting one chooses a random seed in that range. Inputs: `prompt` (its text and the pictures it mentions), `aspect_ratio` (any W:H), `megapixels` (any size, 1024² pixels each), `seed`, `prompt_upsampling` and `creativity`. The full model runs 40 steps, Turbo 4 on Fun Acc's
 grid, with its own output head each step and an F32 state (`qwenimage21_pdd.py`). Qwen runs no CFG, so it has no `guidance` or `negative_prompt`. Unknown fields are ignored with a warning. The result is `image`, `width`, `height`, `seed` and `prompt`, the prompt the image was made from.
 
-`upscale` (the Upscale tool on a picture box) makes the box's picture larger, at 2 or 4 MP: Turbo edits it with the picture
-as its reference and, Lanczos-upscaled to the canvas, below `denoise` (0.2) as the start. Downscaled back, 29 dB PSNR to
-the input on a photo and a woodblock print, against SeedVR2's 26.5 and 30.3; at `denoise` 1 it redraws (16-19 dB, se-123).
-`megapixels`, `denoise` and `seed`.
+`upscale` (the Upscale tool on a picture box) restores the box's picture at 2 or 4 MP: the base model, 20 steps, edits it from
+noise with a restoration request, the picture its reference at the canvas's size, as Diffusers sizes a reference to its
+output (`output_resolution`), so the edit keeps to it. On 225 px JPEGs of clean pictures (cozy-creator
+`release-gate/sessions/fixtures/upscale-bench`, se-147) its DISTS to the clean original is 0.13 against the Lanczos
+blow-up's 0.34; a start from the blow-up keeps its blur and JPEG blocks at any strength, and Fun Acc's 4 steps zoom and
+redraw it. 29 s on an RTX 4090 at 4 MP. `megapixels` and `seed`.
 
 ## Prompt upsampling
 
@@ -183,14 +185,14 @@ cozy model upload \
 cozy model publish alibaba-pai/qwen-image-2.1-fun-acc 0.1.0 sha256:COMMIT
 ```
 
-The enhancers are mirrored as uploaded, and `qwen3.5`'s int8 recipe writes their lane (the same Qwen3.5-9B):
+The enhancers are mirrored as uploaded, and `qwen3`'s int8 recipe writes their lane (the same Qwen3.5-9B):
 
 ```sh
 cozy model upload hf://Qwen/Qwen-Image-2.1-PE-I2I@72927bc08afc99b7888ceb7d7d51a12db3700bbd \
   qwen/qwen-image-2.1-pe-i2i --lane bf16 --mirror --on YOUR_MACHINE
 cozy model upload hf://Qwen/Qwen-Image-2.1-PE-T2I@f3ed7985c788ad75b3ab7223e0c4c51e2a43545b \
   qwen/qwen-image-2.1-pe-t2i --lane bf16 --mirror --on YOUR_MACHINE
-cozy model quantize qwen/qwen-image-2.1-pe-i2i@sha256:BF16_COMMIT --lane int8 --package qwen3.5 --on YOUR_MACHINE
+cozy model quantize qwen/qwen-image-2.1-pe-i2i@sha256:BF16_COMMIT --lane int8 --package qwen3 --on YOUR_MACHINE
 ```
 
 The abliterated enhancers upload the same way (`hf://pottokao/Qwen-Image-2.1-PE-T2I-Heretic@96e92081`,
