@@ -120,9 +120,9 @@ class UpscaleInput(msgspec.Struct, kw_only=True):
 
 
 #: se-149 exploration: a restoration instruction.
-RESTORE_PROMPT = ("Restore <Picture 1> as a sharp, high-resolution picture: remove the JPEG compression artifacts, "
-                  "blockiness, blur and noise, and render clean, crisp, finely detailed edges and textures. Keep the same "
-                  "subject, composition, framing, colours and style.")
+RESTORE_PROMPT = ("Edit <Picture 1>. A sharp, clean, high-resolution picture with no compression artifacts, blockiness, "
+                  "blur or noise, its edges and textures crisp and finely detailed. Keep the subject, composition, framing, "
+                  "colours and style exactly as they are.")
 
 
 @app.tool(label="Upscale", named="image", defaults={"model": MODEL}, components={"model": IMAGE_COMPONENTS},
