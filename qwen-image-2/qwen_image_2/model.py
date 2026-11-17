@@ -205,9 +205,9 @@ ROPE_POSITIONS = 8192
 
 
 def reference_grids(images: Sequence[Image.Image]) -> list[tuple[int, int]]:
-    """Each reference's latent grid (rows, columns) as `denoise` lays it out, at its 1 MP conditioning size."""
-    sizes = [calculate_dimensions(1024 * 1024, image.width / image.height)[:2] for image in images]  # type: ignore[no-untyped-call]  # Diffusers' own
-    return [(height // 16, width // 16) for width, height in sizes]
+    """Each reference's latent grid (rows, columns) as `denoise` lays it out: the references as
+    `encode_reference_images` sized them."""
+    return [(image.height // 16, image.width // 16) for image in images]
 
 
 def _stored(config: Config, component: str, module: torch.nn.Module) -> torch.dtype:
@@ -530,7 +530,8 @@ class QwenImage21DiT(Model[QwenImage21DiTGraph]):
         strength: float = 1.0,
     ) -> torch.Tensor:
         """With `start` (`encode_canvas`), img2img: the steps whose sigma is above `strength` are skipped and the
-        state begins as `start` noised to the first kept sigma.
+        state begins as `start` noised to the first kept sigma. `reference_images`: the references as
+        `encode_reference_images` sized them, which lays out their latents.
 
         `QwenImage21Pipeline.__call__`'s loop, the references' latent tokens before the target's.
         Its preparation mirrors the pipeline's, reusing its `prepare_latents`, `calculate_shift`
@@ -553,7 +554,7 @@ class QwenImage21DiT(Model[QwenImage21DiTGraph]):
         width = width // multiple_of * multiple_of
         height = height // multiple_of * multiple_of
         factor = pipeline.vae_scale_factor
-        sizes = [calculate_dimensions(1024 * 1024, image.width / image.height)[:2] for image in reference_images or []]  # type: ignore[no-untyped-call]  # Diffusers' own
+        sizes = [image.size for image in reference_images or []]
 
         with torch.no_grad():
             embeds = embeds.to(device=device, dtype=transformer.dtype)
@@ -704,15 +705,18 @@ class QwenImage21VAE(Model[QwenImage21VAEGraph]):
 
     @memoize
     @uses_components("vae")
-    def encode_reference_images(self, images: list[Image.Image]) -> tuple[list[Image.Image], torch.Tensor]:
-        """Encode each reference once, using Diffusers' 1 MP conditioning size."""
+    def encode_reference_images(
+        self, images: list[Image.Image], canvas: tuple[int, int] | None = None
+    ) -> tuple[list[Image.Image], torch.Tensor]:
+        """Encode each reference once: at `canvas` (width, height), as Diffusers sizes a reference to its output
+        (`output_resolution`), else at its 1 MP, Diffusers' default. Returns them as sized, and their latents."""
         vae = self.graph.components["vae"]
         device = torch.device(str(self.device))
         resized, packed = [], []
         with torch.inference_mode():
             for image in images:
                 image = image.convert("RGBA")
-                width, height, _ = calculate_dimensions(1024 * 1024, image.width / image.height)  # type: ignore[no-untyped-call]  # Diffusers' own, unannotated
+                width, height = canvas or calculate_dimensions(1024 * 1024, image.width / image.height)[:2]  # type: ignore[no-untyped-call]  # Diffusers' own, unannotated
                 resized.append(cast(Image.Image, self.processor.resize(image, width=width, height=height)))  # a picture in, a picture out
                 pixels = (
                     self.processor.preprocess(image, width=width, height=height)
