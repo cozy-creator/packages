@@ -2015,17 +2015,29 @@ async def upscale(ctx: Context, payload: Upscale, out: Outputs, tel: Telemetry) 
 
 # --- cr-323's measurement, not merged ------------------------------------------------------------------------------
 
+#: sequential tiles (Diffusers' loop) or one batch, each through all three temporal taps or the last alone
+_ARMS = ("seq_three", "seq_last", "batch_three", "batch_last")
 
-def _three_taps_off(active: bool) -> Callable[[], None]:
-    """While `active`, the fused encoder as before cr-323 (a lone frame through all three temporal taps): undone by the
-    returned call. A Runtime before cr-323 runs three taps either way."""
+
+def _as_arm(name: str, vae: object) -> Callable[[], None]:
+    """The encoder as arm `name` runs it, undone by the returned call: `seq_*` tile by tile (Diffusers' `_encode_clip`),
+    `*_three` with the Runtime's `fusion._lone_frame` answering no (before cr-323)."""
     from cozy_runtime.accel import fusion
+    from diffusers.models.autoencoders.autoencoder_kl_minimax_h3 import AutoencoderKLMiniMaxH3
 
     lone = getattr(fusion, "_lone_frame", None)
-    if not active or lone is None:
-        return lambda: None
-    setattr(fusion, "_lone_frame", lambda *_: False)
-    return lambda: setattr(fusion, "_lone_frame", lone)
+    if name.endswith("three") and lone is not None:
+        setattr(fusion, "_lone_frame", lambda *_: False)
+    if name.startswith("seq"):
+        setattr(vae, "_encode_clip", partial(AutoencoderKLMiniMaxH3._encode_clip, vae))
+
+    def undo() -> None:
+        if name.startswith("seq"):
+            delattr(vae, "_encode_clip")
+        if lone is not None:
+            setattr(fusion, "_lone_frame", lone)
+
+    return undo
 
 
 class LoneProbe(msgspec.Struct, kw_only=True):
@@ -2037,10 +2049,10 @@ class LoneProbe(msgspec.Struct, kw_only=True):
 
 class LoneMeasured(msgspec.Struct):
     size: list[int]
-    three_taps_s: list[float]
-    last_tap_s: list[float]
-    psnr_db: float
-    max_abs: float
+    seconds: dict[str, list[float]]
+    psnr_db: dict[str, float]
+    max_abs: dict[str, float]
+    peak_gib: dict[str, float]
 
 
 class LoneProbeOutput(msgspec.Struct):
@@ -2055,13 +2067,13 @@ async def lone_probe(
     ctx: Context, *, payload: LoneProbe, base_model: H3VideoVAE, out: Outputs, tel: Telemetry
 ) -> LoneProbeOutput:
     """cr-323: each picture resized as ref2va resizes a picture reference to each short edge, encoded as one frame
-    (`encode_clip`, ref2va's `encode_condition`) with all three temporal taps and with the last tap alone, `passes` timed
-    passes each, alternating, and the two latents' PSNR."""
+    (`encode_clip`, ref2va's `encode_condition`) in each arm (`_ARMS`), `passes` timed passes each, alternating, and each
+    arm's latents' PSNR against the current fused path's (`seq_three`)."""
     from importlib.metadata import version
 
     from cozy_runtime.accel import fusion
 
-    lone_path = hasattr(fusion, "_lone_frame")
+    vae = base_model.pipe.components["vae"]
     saved: dict[str, Tensor] = {}
     measured: dict[str, LoneMeasured] = {}
     for index, image in enumerate(payload.images):
@@ -2072,29 +2084,38 @@ async def lone_probe(
             size = (_on_multiple(width * scale), _on_multiple(height * scale))
             pixels = torch.from_numpy(np.asarray(picture.resize(size, resample=PILImage.Resampling.LANCZOS)).copy())
             key = f"{index}@{edge}"
-            undo = _three_taps_off(True)
-            try:
-                before = base_model.encode_clip(pixels).cpu()
-            finally:
-                undo()
-            after = base_model.encode_clip(pixels).cpu()
-            times: dict[str, list[float]] = {"three_taps": [], "last_tap": []}
+            latents: dict[str, Tensor] = {}
+            for name in _ARMS:
+                undo = _as_arm(name, vae)
+                try:
+                    latents[name] = base_model.encode_clip(pixels).cpu()
+                finally:
+                    undo()
+            seconds: dict[str, list[float]] = {name: [] for name in _ARMS}
+            peaks: dict[str, float] = dict.fromkeys(_ARMS, 0.0)
             for _ in range(payload.passes):
-                for arm in times:
+                for name in _ARMS:
                     ctx.raise_if_cancelled()
-                    undo = _three_taps_off(arm == "three_taps")
+                    undo = _as_arm(name, vae)
                     try:
+                        torch.cuda.reset_peak_memory_stats()
                         started = time.perf_counter()
-                        with tel.stage(f"vae_encode_{arm}"):
+                        with tel.stage(f"vae_encode_{name}"):
                             base_model.encode_clip(pixels).cpu()
-                        times[arm].append(round(time.perf_counter() - started, 4))
+                        seconds[name].append(round(time.perf_counter() - started, 4))
+                        peaks[name] = max(peaks[name], round(torch.cuda.max_memory_allocated() / 2**30, 2))
                     finally:
                         undo()
-            saved[f"{key}/three_taps"], saved[f"{key}/last_tap"] = before.float().contiguous(), after.float().contiguous()
-            a, b = before.double(), after.double()
-            mse = float((a - b).square().mean())
-            value = round(10 * math.log10(float(a.max() - a.min()) ** 2 / mse), 2) if mse > 0 else 999.0
-            measured[key] = LoneMeasured(list(size), times["three_taps"], times["last_tap"], value, float((a - b).abs().max()))
-            tel.log("lone probe", key=key, size=list(size), psnr_db=value, three_taps_s=times["three_taps"], last_tap_s=times["last_tap"])
+            a = latents["seq_three"].double()
+            values: dict[str, float] = {}
+            biggest: dict[str, float] = {}
+            for name in _ARMS:
+                b = latents[name].double()
+                mse = float((a - b).square().mean())
+                values[name] = round(10 * math.log10(float(a.max() - a.min()) ** 2 / mse), 2) if mse > 0 else 999.0
+                biggest[name] = float((a - b).abs().max())
+                saved[f"{key}/{name}"] = latents[name].float().contiguous()
+            measured[key] = LoneMeasured(list(size), seconds, values, biggest, peaks)
+            tel.log("lone probe", key=key, size=list(size), seconds=seconds, psnr_db=values, peak_gib=peaks)
     blob = out.save_bytes(save_tensors(saved), media_type="application/octet-stream")
-    return LoneProbeOutput(version("cozy-runtime"), lone_path, measured, blob)
+    return LoneProbeOutput(version("cozy-runtime"), hasattr(fusion, "_lone_frame"), measured, blob)

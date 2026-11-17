@@ -8,6 +8,7 @@ import io
 import math
 import time
 from collections.abc import Iterator
+from functools import partial
 from contextlib import contextmanager
 import urllib.request
 from typing import Annotated, cast
@@ -20,6 +21,7 @@ from cozy_runtime.accel.kernels import Plan
 from cozy_runtime.author import Config, Context, Loader, Model, Outputs, Telemetry, uses_components
 from cozy_runtime.fields import FileBound
 from cozy_runtime.media import File, ImageFile
+from diffusers.models.autoencoders.autoencoder_kl_minimax_h3 import AutoencoderKLMiniMaxH3
 from PIL import Image
 from safetensors.torch import save as save_tensors
 from torch import nn
@@ -204,25 +206,26 @@ async def compare_images(ctx: Context, *, payload: Pair) -> Compared:
 
 # --- cr-323's measurement, not merged ------------------------------------------------------------------------------
 
+#: sequential tiles (upstream's loop) or one batch, each through all three temporal taps or the last alone
+ARMS = ("seq_three", "seq_last", "batch_three", "batch_last")
+
 
 @contextmanager
-def three_taps(active: bool) -> Iterator[None]:
-    """While `active`, the fused encoder as before cr-323: a lone frame through all three temporal taps (the Runtime's
-    `fusion._lone_frame` answers no). A Runtime before cr-323 runs three taps either way."""
+def as_arm(name: str, vae: nn.Module) -> Iterator[None]:
+    """The encoder as arm `name` runs it: `seq_*` encodes tile by tile (Diffusers' `_encode_clip`), `*_three` with the
+    Runtime's `fusion._lone_frame` answering no (before cr-323). A Runtime before cr-323 runs three taps either way."""
     lone = getattr(fusion, "_lone_frame", None)
-    if not active or lone is None:
-        yield
-        return
-    setattr(fusion, "_lone_frame", lambda *_: False)
+    if name.endswith("three") and lone is not None:
+        setattr(fusion, "_lone_frame", lambda *_: False)
+    if name.startswith("seq"):
+        setattr(vae, "_encode_clip", partial(AutoencoderKLMiniMaxH3._encode_clip, vae))
     try:
         yield
     finally:
-        setattr(fusion, "_lone_frame", lone)
-
-
-def fused_convs(root: nn.Module) -> int:
-    """The convs and blocks under `root` the fused encoder took over."""
-    return sum(1 for m in root.modules() if getattr(type(m), "_cozy_fused", "") in ("causal-conv", "conv-residual", "padded-conv"))
+        if name.startswith("seq"):
+            delattr(vae, "_encode_clip")
+        if lone is not None:
+            setattr(fusion, "_lone_frame", lone)
 
 
 class LoneProbe(msgspec.Struct, kw_only=True):
@@ -234,30 +237,29 @@ class LoneProbe(msgspec.Struct, kw_only=True):
 
 class LoneMeasured(msgspec.Struct):
     size: list[int]
-    #: the fused encoder as before cr-323 (all three taps) and as after it (the last tap), seconds per pass
-    three_taps_s: list[float]
-    last_tap_s: list[float]
-    #: the last tap's latents against the three taps'
-    psnr_db: float
-    max_abs: float
+    #: seconds per pass, per arm
+    seconds: dict[str, list[float]]
+    #: each arm's latents against `seq_three`'s (the current fused path)
+    psnr_db: dict[str, float]
+    max_abs: dict[str, float]
+    #: torch's peak allocation over each arm's passes, GiB
+    peak_gib: dict[str, float]
 
 
 class LoneProbeOutput(msgspec.Struct):
     runtime: str
-    #: whether this Runtime has cr-323's lone-frame path (else both arms ran three taps)
     lone_path: bool
-    fused: int
     measured: dict[str, LoneMeasured]
     latents: LatentFile
 
 
 @app.entrypoint(defaults={"model": MODEL}, components={"model": ("vae",)})
 async def lone_probe(ctx: Context, *, payload: LoneProbe, model: PH3ImageVAE, out: Outputs, tel: Telemetry) -> LoneProbeOutput:
-    """cr-323: each picture at each size through the fused encoder with all three temporal taps and with the last tap
-    alone, `passes` timed passes each, alternating, and the two latents' PSNR."""
+    """cr-323: each picture at each size through the fused encoder in each arm (`ARMS`), `passes` timed passes each,
+    alternating, and each arm's latents' PSNR against the current fused path's."""
     from importlib.metadata import version
 
-    lone_path = hasattr(fusion, "_lone_frame")
+    vae = model.graph.components["vae"]
     saved: dict[str, torch.Tensor] = {}
     measured: dict[str, LoneMeasured] = {}
     for index, image in enumerate(payload.images):
@@ -266,22 +268,27 @@ async def lone_probe(ctx: Context, *, payload: LoneProbe, model: PH3ImageVAE, ou
             size = size_at_area(*picture.size, round(mp * MEGAPIXEL))
             pixels = torch.from_numpy(np.array(resized(picture, size)))
             key = f"{index}@{mp:g}"
-            with three_taps(True):
-                before, _ = model.encode(pixels)
-            after, _ = model.encode(pixels)
-            times: dict[str, list[float]] = {"three_taps": [], "last_tap": []}
+            latents: dict[str, torch.Tensor] = {}
+            for name in ARMS:
+                with as_arm(name, vae):
+                    latents[name], _ = model.encode(pixels)
+            seconds: dict[str, list[float]] = {name: [] for name in ARMS}
+            peaks: dict[str, float] = dict.fromkeys(ARMS, 0.0)
             for _ in range(payload.passes):
-                for arm in times:
+                for name in ARMS:
                     ctx.raise_if_cancelled()
-                    with three_taps(arm == "three_taps"):
+                    with as_arm(name, vae):
+                        torch.cuda.reset_peak_memory_stats()
                         started = time.perf_counter()
-                        with tel.stage(f"vae_encode_{arm}"):
+                        with tel.stage(f"vae_encode_{name}"):
                             model.encode(pixels)
-                        times[arm].append(round(time.perf_counter() - started, 4))
-            saved[f"{key}/three_taps"], saved[f"{key}/last_tap"] = before.float().contiguous(), after.float().contiguous()
-            compared = psnr(before, after)
-            measured[key] = LoneMeasured(list(size), times["three_taps"], times["last_tap"], compared["psnr_db"], compared["max_abs"])
-            tel.log("lone probe", key=key, size=list(size), **compared, three_taps_s=times["three_taps"], last_tap_s=times["last_tap"])
-    fused = fused_convs(model.graph.components["vae"])
+                        seconds[name].append(round(time.perf_counter() - started, 4))
+                        peaks[name] = max(peaks[name], round(torch.cuda.max_memory_allocated() / 2**30, 2))
+            compared = {name: psnr(latents["seq_three"], latents[name]) for name in ARMS}
+            for name in ARMS:
+                saved[f"{key}/{name}"] = latents[name].float().contiguous()
+            measured[key] = LoneMeasured(list(size), seconds, {n: c["psnr_db"] for n, c in compared.items()},
+                                         {n: c["max_abs"] for n, c in compared.items()}, peaks)  # fmt: skip
+            tel.log("lone probe", key=key, size=list(size), seconds=seconds, psnr_db=measured[key].psnr_db, peak_gib=peaks)
     blob = out.save_bytes(save_tensors(saved), media_type="application/octet-stream")
-    return LoneProbeOutput(version("cozy-runtime"), lone_path, fused, measured, blob)
+    return LoneProbeOutput(version("cozy-runtime"), hasattr(fusion, "_lone_frame"), measured, blob)

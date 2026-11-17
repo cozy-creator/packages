@@ -8,6 +8,7 @@ import math
 import time
 from collections.abc import Iterator
 from contextlib import contextmanager
+from functools import partial
 from typing import Annotated, cast
 
 import msgspec
@@ -16,13 +17,14 @@ from cozy_runtime.accel import fusion
 from cozy_runtime.author import Context, Outputs, Telemetry
 from cozy_runtime.fields import FileBound
 from cozy_runtime.media import File, ImageFile
+from diffusers.models.modeling_utils import get_parameter_dtype
 from PIL import Image
 from safetensors.torch import save as save_tensors
 from torch import nn
 
 from .application import app
 from .model import LATENT_CHANNELS, H3ImageEncoder, latent_grid, upright
-from .vae import ImageEncoder
+from .vae import ImageEncoder, split_tiles, stitch
 
 MODEL = "minimaxai/minimax-h3-image@0.1.0"
 LatentFile = Annotated[File, FileBound(max_bytes=1 << 40, media_types=("application/octet-stream",))]
@@ -125,20 +127,36 @@ async def encode_probe(
 
 # --- cr-323's measurement, not merged ------------------------------------------------------------------------------
 
+#: sequential tiles (the loop before cr-323) or one batch, each through all three temporal taps or the last alone
+ARMS = ("seq_three", "seq_last", "batch_three", "batch_last")
+
+
+def _sequential(encoder: ImageEncoder, pixels: torch.Tensor) -> torch.Tensor:
+    """`ImageEncoder.forward` before cr-323: tile by tile."""
+    pixels = pixels.to(get_parameter_dtype(encoder.encoder))
+    ys, y_lengths, y_overlaps = split_tiles(pixels.shape[-2], encoder.ratio)
+    xs, x_lengths, x_overlaps = split_tiles(pixels.shape[-1], encoder.ratio)
+    rows = [[encoder._clip(pixels[..., y : y + h, x : x + w]) for x, w in zip(xs, x_lengths, strict=True)]
+            for y, h in zip(ys, y_lengths, strict=True)]  # fmt: skip
+    return stitch(rows, [o // encoder.ratio for o in y_overlaps], [o // encoder.ratio for o in x_overlaps])
+
 
 @contextmanager
-def three_taps(active: bool) -> Iterator[None]:
-    """While `active`, the fused encoder as before cr-323: a lone frame through all three temporal taps (the Runtime's
-    `fusion._lone_frame` answers no). A Runtime before cr-323 runs three taps either way."""
+def as_arm(name: str, encoder: ImageEncoder) -> Iterator[None]:
+    """The encoder as arm `name` runs it: `seq_*` tile by tile, `*_three` with the Runtime's `fusion._lone_frame`
+    answering no (before cr-323). A Runtime before cr-323 runs three taps either way."""
     lone = getattr(fusion, "_lone_frame", None)
-    if not active or lone is None:
-        yield
-        return
-    setattr(fusion, "_lone_frame", lambda *_: False)
+    if name.endswith("three") and lone is not None:
+        setattr(fusion, "_lone_frame", lambda *_: False)
+    if name.startswith("seq"):
+        setattr(encoder, "forward", partial(_sequential, encoder))
     try:
         yield
     finally:
-        setattr(fusion, "_lone_frame", lone)
+        if name.startswith("seq"):
+            delattr(encoder, "forward")
+        if lone is not None:
+            setattr(fusion, "_lone_frame", lone)
 
 
 class LoneProbe(msgspec.Struct, kw_only=True):
@@ -149,16 +167,15 @@ class LoneProbe(msgspec.Struct, kw_only=True):
 
 class LoneMeasured(msgspec.Struct):
     grid: list[int]
-    three_taps_s: list[float]
-    last_tap_s: list[float]
-    psnr_db: float
-    max_abs: float
+    seconds: dict[str, list[float]]
+    psnr_db: dict[str, float]
+    max_abs: dict[str, float]
+    peak_gib: dict[str, float]
 
 
 class LoneProbeOutput(msgspec.Struct):
     runtime: str
     lone_path: bool
-    fused: int
     measured: dict[str, LoneMeasured]
     latents: LatentFile
 
@@ -167,11 +184,11 @@ class LoneProbeOutput(msgspec.Struct):
 async def lone_probe(
     ctx: Context, *, payload: LoneProbe, vae_encoder: ProbeEncoder, out: Outputs, tel: Telemetry
 ) -> LoneProbeOutput:
-    """cr-323: each reference as `generate` encodes it (noise from seed 0) through the fused encoder with all three
-    temporal taps and with the last tap alone, `passes` timed passes each, alternating, and the two latents' PSNR."""
+    """cr-323: each reference as `generate` encodes it (noise from seed 0) in each arm (`ARMS`), `passes` timed passes
+    each, alternating, and each arm's latents' PSNR against the current fused path's (`seq_three`)."""
     from importlib.metadata import version
 
-    lone_path = hasattr(fusion, "_lone_frame")
+    encoder = cast(ImageEncoder, vae_encoder.graph.components["vae_encoder"])
     saved: dict[str, torch.Tensor] = {}
     measured: dict[str, LoneMeasured] = {}
     for index, image in enumerate(payload.images):
@@ -179,25 +196,32 @@ async def lone_probe(
         h, w = latent_grid(picture)
         noise = torch.randn((1, LATENT_CHANNELS, h, w), generator=torch.Generator().manual_seed(0))
         key = str(index)
-        with three_taps(True):
-            before, _ = vae_encoder.latents(picture, noise)
-        after, _ = vae_encoder.latents(picture, noise)
-        times: dict[str, list[float]] = {"three_taps": [], "last_tap": []}
+        latents: dict[str, torch.Tensor] = {}
+        for name in ARMS:
+            with as_arm(name, encoder):
+                latents[name], _ = vae_encoder.latents(picture, noise)
+        seconds: dict[str, list[float]] = {name: [] for name in ARMS}
+        peaks: dict[str, float] = dict.fromkeys(ARMS, 0.0)
         for _ in range(payload.passes):
-            for arm in times:
+            for name in ARMS:
                 ctx.raise_if_cancelled()
-                with three_taps(arm == "three_taps"):
+                with as_arm(name, encoder):
+                    torch.cuda.reset_peak_memory_stats()
                     started = time.perf_counter()
-                    with tel.stage(f"vae_encode_{arm}"):
+                    with tel.stage(f"vae_encode_{name}"):
                         vae_encoder.latents(picture, noise)
-                    times[arm].append(round(time.perf_counter() - started, 4))
-        saved[f"{key}/three_taps"], saved[f"{key}/last_tap"] = before.float().contiguous(), after.float().contiguous()
-        a, b = before.double(), after.double()
-        mse = float((a - b).square().mean())
-        value = round(10 * math.log10(float(a.max() - a.min()) ** 2 / mse), 2) if mse > 0 else SAME
-        measured[key] = LoneMeasured([h, w], times["three_taps"], times["last_tap"], value, float((a - b).abs().max()))
-        tel.log("lone probe", key=key, grid=[h, w], psnr_db=value, three_taps_s=times["three_taps"], last_tap_s=times["last_tap"])
-    encoder = cast(ImageEncoder, vae_encoder.graph.components["vae_encoder"])
-    fused = sum(1 for m in encoder.modules() if getattr(type(m), "_cozy_fused", "") in ("causal-conv", "conv-residual", "padded-conv"))
+                    seconds[name].append(round(time.perf_counter() - started, 4))
+                    peaks[name] = max(peaks[name], round(torch.cuda.max_memory_allocated() / 2**30, 2))
+        a = latents["seq_three"].double()
+        values: dict[str, float] = {}
+        biggest: dict[str, float] = {}
+        for name in ARMS:
+            b = latents[name].double()
+            mse = float((a - b).square().mean())
+            values[name] = round(10 * math.log10(float(a.max() - a.min()) ** 2 / mse), 2) if mse > 0 else SAME
+            biggest[name] = float((a - b).abs().max())
+            saved[f"{key}/{name}"] = latents[name].float().contiguous()
+        measured[key] = LoneMeasured([h, w], seconds, values, biggest, peaks)
+        tel.log("lone probe", key=key, grid=[h, w], seconds=seconds, psnr_db=values, peak_gib=peaks)
     blob = out.save_bytes(save_tensors(saved), media_type="application/octet-stream")
-    return LoneProbeOutput(version("cozy-runtime"), lone_path, fused, measured, blob)
+    return LoneProbeOutput(version("cozy-runtime"), hasattr(fusion, "_lone_frame"), measured, blob)
