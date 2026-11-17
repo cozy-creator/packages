@@ -765,7 +765,7 @@ def plate_sound(out: Outputs, video: VideoFile, plate: VideoFile) -> tuple[Video
     are, so it decodes bit for bit; a codec an MP4 can't hold is encoded as AAC, with a note."""
     warnings: list[str] = []
     with ExitStack() as stack:
-        made, source = open_media(io.BytesIO(video.read_bytes())), open_media(io.BytesIO(plate.read_bytes()))
+        made, source = open_media(io.BytesIO(video.read_bytes()), "r"), open_media(io.BytesIO(plate.read_bytes()), "r")
         stack.callback(made.close)
         stack.callback(source.close)
         picture, heard, first = made.streams.video[0], source.streams.audio[0], source.streams.video[0]
