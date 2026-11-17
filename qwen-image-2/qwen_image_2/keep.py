@@ -13,6 +13,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+import numpy as np
 import torch
 from PIL import Image
 from torch.nn import functional as F
@@ -146,7 +147,7 @@ def keep_unchanged(picture: Image.Image, decoded: torch.Tensor) -> tuple[torch.T
     _, channels, height, width = decoded.shape
     if channels != 3:
         return decoded, Kept(0.0, 1.0, (0.0, 0.0), "the output has transparency")
-    if picture.mode in ("RGBA", "LA", "PA") and picture.getextrema()[-1][0] < 255:
+    if "A" in picture.getbands() and int(np.asarray(picture.getchannel("A")).min()) < 255:
         return decoded, Kept(0.0, 1.0, (0.0, 0.0), "the picture has transparency")
     if abs(picture.width / picture.height / (width / height) - 1) > RATIO_TOLERANCE:
         return decoded, Kept(0.0, 1.0, (0.0, 0.0), "the framing changed")
