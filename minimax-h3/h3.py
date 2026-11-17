@@ -806,7 +806,7 @@ def _nonfinite_fraction(torch: ModuleType, value: Tensor) -> float:
 _MODEL = "minimaxai/minimax-h3@1.0.0-rc.8"
 _TURBO_LORA = "alibaba-pai/minimax-h3-turbo-lora@1.0.1"
 _REGENERATE_LORA = "efficient-large-model/open-h3-regenerate-2k@0.1.0"
-_LATENT_UPSCALER = "lbh-123-ai/h3-latent-upscaler@0.1.1"
+_LATENT_UPSCALER = "lbh-123-ai/h3-latent-upscaler@0.1.2"
 
 #: The components each task runs. A machine downloads these first and the rest behind the
 #: run, so a pod's first request pays for one DiT, not two.
