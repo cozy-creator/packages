@@ -29,7 +29,6 @@ from typing import Any, Literal
 
 import msgspec
 import torch
-from cozy_runtime import lm
 from cozy_runtime.author import (
     Context,
     ModelArtifact,
@@ -227,8 +226,8 @@ def bake(directions: Directions, ablation: Ablation) -> Bake:
 
 
 class _Ablator:
-    """Every residual writer's output `y` becomes `y - w (y · d) d`. `w` and `d` are set in place, so a decode graph
-    captured with these hooks reads each arm's values where they are."""
+    """Forward hooks for forced (eager) passes: every residual writer's output `y` becomes `y - w (y · d) d`, `w` and
+    `d` set in place per trial."""
 
     def __init__(self, layers: Sequence[nn.Module], hidden: int, device: torch.device) -> None:
         self.weights = torch.zeros(len(layers), 2, device=device)
@@ -258,6 +257,45 @@ class _Ablator:
     def remove(self) -> None:
         for handle in self.handles:
             handle.remove()
+
+
+class _Baked:
+    """An ablation baked into the writers' bf16 weights in place, as `abliteration` writes it (float32, rounded once),
+    then taken out again: an arm decodes through Runtime's captured graphs, which refuse forward hooks."""
+
+    def __init__(self, layers: Sequence[nn.Module], directions: Directions, ablation: Ablation) -> None:
+        d, w = directions.per_layer(ablation), weights(ablation, len(layers))
+        self.saved: list[tuple[nn.Parameter, torch.Tensor]] = []
+        self.probe: tuple[nn.Parameter, float] | None = None
+        try:
+            for i, layer in enumerate(layers):
+                for c, writer in enumerate(_writers(layer)):
+                    weight = float(w[i, c])
+                    if not weight:
+                        continue
+                    param = writer.weight
+                    if param.dtype != torch.bfloat16 or param.device.type != "cuda":
+                        raise UnsupportedInput(f"an ablated arm answers on a `bf16` lane on a GPU, not {param.dtype} on "
+                                               f"{param.device}", code="study_lane")  # fmt: skip
+                    self.saved.append((param, param.detach().to("cpu", copy=True)))
+                    vec = d[i].to(param.device)
+                    value = param.detach().float()
+                    value -= weight * vec[:, None] * (vec @ value)[None, :]
+                    param.data.copy_(value.to(torch.bfloat16))
+                    del value
+                    self.probe = (param, float(param.detach().float().sum()))
+        except BaseException:
+            self.restore()
+            raise
+
+    def held(self) -> bool:
+        """Whether the baked weights are still in place (a paged-out weight comes back as stored)."""
+        return self.probe is None or float(self.probe[0].detach().float().sum()) == self.probe[1]
+
+    def restore(self) -> None:
+        for param, original in self.saved:
+            param.data.copy_(original.to(param.device))
+        self.saved.clear()
 
 
 class _Seq:
@@ -575,6 +613,55 @@ def _mutated(rng: random.Random, parent: Ablation, sources: list[str], last: int
                     mlp=kernel(parent.mlp))  # fmt: skip
 
 
+def _search(ctx: Context, payload: Study, data: _Data, teacher: _Teacher, layers: Sequence[nn.Module],
+            directions: Directions, rng: random.Random, last: int, report: dict[str, object],
+            tel: Telemetry) -> list[Arm]:  # fmt: skip
+    """The stock reading, `payload.trials` ablations and the given candidates scored by forcing the evidence's
+    answers (writer hooks, removed after), and the `top` best within the KL budget."""
+    scorer = _Scorer(data, teacher)
+    ablator = _Ablator(layers, layers[0].hidden_size, teacher.device)
+    trials: list[dict[str, object]] = []
+    measured: list[tuple[Ablation, _Measure, float]] = []
+    try:
+        if scorer.unfaithful or scorer.references:
+            with tel.stage("stock reading"):
+                ablator.set(None, None)
+                scorer.baseline()
+        if scorer.stock is None:
+            return []
+        sources = directions.sources()
+        with tel.stage("search"):
+            for t in range(payload.trials):
+                ctx.raise_if_cancelled()
+                if t < payload.startup or rng.random() < 0.15 or not measured:
+                    ablation = _space(rng, sources, last)
+                else:
+                    best = sorted(measured, key=lambda m: -m[2])[:5]
+                    parent = best[min(len(best) - 1, int(rng.expovariate(1.0)))][0]
+                    ablation = _mutated(rng, parent, sources, last, 0.12 * (1 - t / payload.trials) + 0.03)
+                began = time.monotonic()
+                ablator.set(directions, ablation)
+                m = scorer.measure()
+                score = m.faith - payload.kl_penalty * max(0.0, m.kl - payload.kl_budget)
+                measured.append((ablation, m, score))
+                trials.append({"trial": t, "ablation": msgspec.to_builtins(ablation), **msgspec.to_builtins(m),
+                               "score": round(score, 5), "seconds": round(time.monotonic() - began, 1)})  # fmt: skip
+                tel.log("trial", t=t, faith=round(m.faith, 4), prefer=round(m.prefer, 3), kl=round(m.kl, 4),
+                        score=round(score, 4))  # fmt: skip
+                ctx.progress(t, payload.trials)
+            for arm in payload.candidates or []:
+                if arm.ablation is not None:
+                    ablator.set(directions, arm.ablation)
+                    m = scorer.measure()
+                    trials.append({"trial": arm.name, "ablation": msgspec.to_builtins(arm.ablation), **msgspec.to_builtins(m)})
+                    tel.log("candidate", name=arm.name, faith=round(m.faith, 4), prefer=round(m.prefer, 3), kl=round(m.kl, 4))
+    finally:
+        ablator.remove()
+        report["trials"] = trials
+    within = sorted((x for x in measured if x[1].kl <= payload.kl_budget), key=lambda x: -x[1].faith)
+    return [Arm(name=f"top{i + 1}", ablation=x[0]) for i, x in enumerate(within[: payload.top])]
+
+
 def _answer(pe: StudyPE, requests: Sequence[Request], pictures: list[Image.Image], payload: Study,
             ctx: Context) -> list[dict[str, object]]:  # fmt: skip
     """Every request answered as the tool samples, edits and T2I in their own batches."""
@@ -611,80 +698,42 @@ def abliteration_study(ctx: Context, payload: Study, expander: StudyPE, out: Out
         model = expander.pipe.components[COMPONENT]
         layers = list(model.model.language_model.layers)
         last = len(layers) - 1
-        ablator = _Ablator(layers, layers[0].hidden_size, next(model.lm_head.parameters()).device)
-        lm.release(model)  # decode graphs captured before the hooks don't run them
-        try:
-            with torch.inference_mode():
-                directions = None
-                trials: list[dict[str, object]] = []
-                if payload.evidence is not None:
-                    with tel.stage("tokenizing"):
-                        data = _Data(expander, payload.evidence)
-                    teacher = _Teacher(expander, _prefix_ids(data), payload.token_budget)
-                    report["prefix_tokens"] = data.prefix
-                    with tel.stage("prefix check"):
-                        report["prefix_check"] = _prefix_check(expander, data, payload.token_budget)
-                    with tel.stage("directions"):
-                        directions = _directions(data, teacher, layers, tel)
-                    report["directions"] = directions.stats()
-                    scorer = _Scorer(data, teacher)
-                    if scorer.unfaithful or scorer.references:
-                        with tel.stage("stock reading"):
-                            ablator.set(None, None)
-                            scorer.baseline()
-                    sources = directions.sources()
-                    arms_given = list(payload.candidates or [])
-                    measured: list[tuple[Ablation, _Measure, float]] = []
-                    with tel.stage("search"):
-                        for t in range(payload.trials):
-                            ctx.raise_if_cancelled()
-                            if t < payload.startup or rng.random() < 0.15 or not measured:
-                                ablation = _space(rng, sources, last)
-                            else:
-                                best = sorted(measured, key=lambda m: -m[2])[:5]
-                                parent = best[min(len(best) - 1, int(rng.expovariate(1.0)))][0]
-                                ablation = _mutated(rng, parent, sources, last, 0.12 * (1 - t / payload.trials) + 0.03)
-                            began = time.monotonic()
-                            ablator.set(directions, ablation)
-                            m = scorer.measure()
-                            score = m.faith - payload.kl_penalty * max(0.0, m.kl - payload.kl_budget)
-                            measured.append((ablation, m, score))
-                            trials.append({"trial": t, "ablation": msgspec.to_builtins(ablation), **msgspec.to_builtins(m),
-                                           "score": round(score, 5), "seconds": round(time.monotonic() - began, 1)})  # fmt: skip
-                            tel.log("trial", t=t, faith=round(m.faith, 4), prefer=round(m.prefer, 3), kl=round(m.kl, 4),
-                                    score=round(score, 4))  # fmt: skip
-                            ctx.progress(t, payload.trials)
-                        for arm in arms_given:
-                            if arm.ablation is not None:
-                                ablator.set(directions, arm.ablation)
-                                m = scorer.measure()
-                                trials.append({"trial": arm.name, "ablation": msgspec.to_builtins(arm.ablation),
-                                               **msgspec.to_builtins(m)})  # fmt: skip
-                    report["trials"] = trials
-                    within = sorted((x for x in measured if x[1].kl <= payload.kl_budget), key=lambda x: -x[1].faith)
-                    chosen = [Arm(name=f"top{i + 1}", ablation=x[0]) for i, x in enumerate(within[: payload.top])]
-                else:
-                    chosen = []
-                arms = ([Arm(name="stock", ablation=None)] if payload.stock else []) + chosen + list(payload.candidates or [])
-                answered = []
-                with tel.stage("answering"):
-                    for arm in arms:
-                        if arm.ablation is not None and directions is None:
-                            raise UnsupportedInput("an ablated arm needs `evidence` for its directions", code="study_evidence")
-                        ablator.set(directions, arm.ablation)
-                        began = time.monotonic()
+        with torch.inference_mode():
+            directions = None
+            chosen: list[Arm] = []
+            if payload.evidence is not None:
+                with tel.stage("tokenizing"):
+                    data = _Data(expander, payload.evidence)
+                teacher = _Teacher(expander, _prefix_ids(data), payload.token_budget)
+                report["prefix_tokens"] = data.prefix
+                with tel.stage("prefix check"):
+                    report["prefix_check"] = _prefix_check(expander, data, payload.token_budget)
+                with tel.stage("directions"):
+                    directions = _directions(data, teacher, layers, tel)
+                report["directions"] = directions.stats()
+                chosen = _search(ctx, payload, data, teacher, layers, directions, rng, last, report, tel)
+            arms = ([Arm(name="stock", ablation=None)] if payload.stock else []) + chosen + list(payload.candidates or [])
+            answered = []
+            with tel.stage("answering"):
+                for arm in arms:
+                    if arm.ablation is not None and directions is None:
+                        raise UnsupportedInput("an ablated arm needs `evidence` for its directions", code="study_evidence")
+                    baked = _Baked(layers, directions, arm.ablation) if arm.ablation is not None and directions else None
+                    began = time.monotonic()
+                    try:
                         answers = _answer(expander, payload.requests, shown, payload, ctx) if payload.requests else []
-                        row: dict[str, object] = {"name": arm.name, "seconds": round(time.monotonic() - began, 1),
-                                                  "answers": answers}  # fmt: skip
-                        if arm.ablation is not None and directions is not None:
-                            row["ablation"] = msgspec.to_builtins(arm.ablation)
-                            row["bake"] = msgspec.to_builtins(bake(directions, arm.ablation))
-                        answered.append(row)
-                        tel.log("arm", name=arm.name, seconds=row["seconds"])
-                report["arms"] = answered
-        finally:
-            ablator.remove()
-            lm.release(model)
+                        held = baked is None or baked.held()
+                    finally:
+                        if baked is not None:
+                            baked.restore()
+                    row: dict[str, object] = {"name": arm.name, "seconds": round(time.monotonic() - began, 1),
+                                              "held": held, "answers": answers}  # fmt: skip
+                    if arm.ablation is not None and directions is not None:
+                        row["ablation"] = msgspec.to_builtins(arm.ablation)
+                        row["bake"] = msgspec.to_builtins(bake(directions, arm.ablation))
+                    answered.append(row)
+                    tel.log("arm", name=arm.name, seconds=row["seconds"], held=held)
+            report["arms"] = answered
 
     expander.holding(run)
     names = [str(a["name"]) for a in report.get("arms", [])]  # type: ignore[attr-defined]  # a list of rows
