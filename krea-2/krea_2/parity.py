@@ -95,3 +95,37 @@ def reference(ctx: Context, payload: RefInput, model: RefKrea2, tel: Telemetry) 
                              payload.turbo)
     tel.log("reference", steps=steps, guidance=guidance, width=width, height=height, turbo=payload.turbo)
     return ImageResult(ImageFile.from_image(image, format="png"), image.width, image.height, payload.seed, payload.prompt)  # type: ignore[attr-defined]
+
+
+# ------------------------------------------------------------------ stage probe: where ours and Diffusers part
+
+
+def _gap(a: torch.Tensor, b: torch.Tensor) -> dict[str, float]:
+    a, b = a.float().cpu(), b.float().cpu()
+    return {"rel": float((a - b).norm() / b.norm()), "max": float((a - b).abs().max()), "cos": float(
+        torch.nn.functional.cosine_similarity(a.flatten(), b.flatten(), dim=0))}
+
+
+class RefProbe(RefKrea2):
+    @uses_components("transformer", "text_encoder", "vae")
+    def stages(self, prompt: str, latents: torch.Tensor, rows: int, columns: int) -> dict[str, torch.Tensor]:
+        """Diffusers' text conditioning (real tokens), its first-step velocity at t=1 on `latents`, and its decode
+        of the x0 that velocity predicts."""
+        device = torch.device(str(self.device))
+        c = self.graph.components
+        pipe = Krea2Pipeline(
+            scheduler=FlowMatchEulerDiscreteScheduler.from_config(self.graph.scheduler_config), vae=c["vae"],  # type: ignore[arg-type]
+            text_encoder=c["text_encoder"], tokenizer=self.tokenizer, transformer=c["transformer"], is_distilled=True,  # type: ignore[arg-type]
+        )
+        with torch.inference_mode():
+            embeds, mask = pipe.encode_prompt(prompt, device=device)
+            ids = pipe.prepare_position_ids(embeds.shape[1], rows, columns, device)
+            x = latents.to(device, torch.bfloat16)
+            v = c["transformer"](hidden_states=x, encoder_hidden_states=embeds, timestep=torch.ones(1, device=device, dtype=torch.bfloat16),
+                                 position_ids=ids, encoder_attention_mask=mask, return_dict=False)[0]
+            x0 = (x.float() - v.float()).to(torch.bfloat16)
+            z = pipe._unpack_latents(x0, rows * 16, columns * 16).to(c["vae"].dtype)
+            mean = torch.tensor(c["vae"].config.latents_mean).view(1, -1, 1, 1, 1).to(z)
+            inv = 1.0 / torch.tensor(c["vae"].config.latents_std).view(1, -1, 1, 1, 1).to(z)
+            image = c["vae"].decode(z / inv + mean, return_dict=False)[0][:, :, 0]
+        return {"text": embeds[mask].cpu(), "velocity": v.cpu(), "x0": x0.cpu(), "image": image.float().cpu()}

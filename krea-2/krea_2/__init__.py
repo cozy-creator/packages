@@ -279,3 +279,56 @@ def probe_bf16(ctx: Context, payload: TurboInput, model: Krea2DiT, text_encoder:
     """se-157: `generate_turbo` with the DiT served all-bf16 (as Krea's inference.py casts it), no adapters."""
     _hold_dtype(model.graph.components["transformer"], _torch.bfloat16)
     return _generate(ctx, payload, model, text_encoder, vae, {}, tel, adj, distilled=True)
+
+
+from .model import Branch as _Branch  # noqa: E402
+from .parity import RefProbe as _RefProbe, _gap  # noqa: E402
+from cozy_runtime import rng as _rng  # noqa: E402
+from cozy_runtime.author import uses_components as _uses  # noqa: E402
+import numpy as _np  # noqa: E402
+from PIL import Image as _PIL  # noqa: E402
+
+
+class _ProbeDiT(Krea2DiT):
+    @_uses("transformer")
+    def velocity(self, text: _torch.Tensor, latents: _torch.Tensor, rows: int, columns: int) -> _torch.Tensor:
+        device = _torch.device(str(self.device))
+        with _torch.no_grad():
+            stream = self._stream(_Branch(text), rows, columns, device)
+            (v,) = self.graph.components["transformer"](latents.to(device, _torch.bfloat16),
+                                                         _torch.ones(1, device=device, dtype=_torch.bfloat16), [stream])
+        return v.cpu()
+
+
+class _ProbeInput(msgspec.Struct, kw_only=True):
+    prompt: str
+    size: int = 1024
+    seed: int = 7
+
+
+@app.entrypoint(defaults={"model": _TURBO_MODEL, "reference": _TURBO_MODEL, "text_encoder": _TURBO_MODEL, "vae": _TURBO_MODEL},
+                components={"model": _KREA, "reference": ("transformer", "text_encoder", "vae"), "text_encoder": _TEXT, "vae": _VAE})
+def probe_stages(ctx: Context, payload: _ProbeInput, model: _ProbeDiT, reference: _RefProbe, text_encoder: Krea2TextEncoder,
+                 vae: Krea2VAE, tel: Telemetry) -> ImageResult:
+    """se-157: ours against Diffusers stage by stage on one input: text conditioning, the first-step velocity at
+    t=1 (each pipeline on its own text, then ours on Diffusers' text), and the decode of Diffusers' x0."""
+    vae.hold_vae()
+    _hold_dtype(reference.graph.components["transformer"], _torch.bfloat16)
+    _hold_dtype(reference.graph.components["vae"], _torch.bfloat16)
+    rows = columns = payload.size // 16
+    noise = _rng.noise((1, 16, rows * 2, columns * 2), payload.seed, dtype=_torch.bfloat16)
+    latents = noise.view(1, 16, rows, 2, columns, 2).permute(0, 2, 4, 1, 3, 5).reshape(1, rows * columns, 64)
+    ours_text = text_encoder.encode(payload.prompt)
+    ref = reference.stages(payload.prompt, latents, rows, columns)
+    tel.log("text", **_gap(ours_text[0], ref["text"]), tokens=int(ours_text.shape[1]), ref_tokens=int(ref["text"].shape[0]))
+    v_ours = model.velocity(ours_text, latents, rows, columns)
+    tel.log("velocity", **_gap(v_ours, ref["velocity"]))
+    v_same_text = model.velocity(ref["text"][None].to(_torch.bfloat16), latents, rows, columns)
+    tel.log("velocity on Diffusers' text", **_gap(v_same_text, ref["velocity"]))
+    image = vae.decode(ref["x0"], width=payload.size, height=payload.size)
+    ref_pixels = ((ref["image"][0].clamp(-1, 1) * 0.5 + 0.5).clamp(0, 1) * 255).round().to(_torch.uint8).permute(1, 2, 0).numpy()
+    ours_pixels = _np.asarray(image)
+    mse = float(((ours_pixels.astype(_np.float64) - ref_pixels) ** 2).mean())
+    tel.log("decode", psnr=10 * _np.log10(255**2 / max(mse, 1e-12)), max=int(_np.abs(ours_pixels.astype(int) - ref_pixels).max()))
+    return ImageResult(ImageFile.from_image(_PIL.fromarray(ref_pixels), format="png"), payload.size, payload.size,
+                       payload.seed, payload.prompt)
