@@ -36,9 +36,9 @@ class RemoveBackgroundOutput(msgspec.Struct):
     ]
 
 
-def white_background(image: Image.Image, mask: Image.Image) -> Image.Image:
-    """Alpha-composite the original subject onto white with Pillow's standard operation."""
-    return Image.composite(image, Image.new("RGB", image.size, "white"), mask)
+def white_background(foreground: Image.Image, mask: Image.Image) -> Image.Image:
+    """The cutout composited onto white with Pillow's standard operation."""
+    return Image.composite(foreground, Image.new("RGB", foreground.size, "white"), mask)
 
 
 @app.tool(
@@ -58,8 +58,8 @@ def remove_background(
     with tel.stage("reading reference"):
         image = payload.image.read()
     with tel.stage("removing background"):
-        mask = model.mask(image)
+        foreground, mask = model.cutout(image)
     ctx.raise_if_cancelled()
     with tel.stage("saving character reference"):
-        result = ImageFile.from_image(white_background(image, mask), format="webp")
+        result = ImageFile.from_image(white_background(foreground, mask), format="webp")
     return RemoveBackgroundOutput(result)
