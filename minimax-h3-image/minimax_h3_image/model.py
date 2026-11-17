@@ -232,7 +232,7 @@ class H3Image(Model[ImageGraph]):
                     )[0].float()  # fmt: skip
                     sigma, after = grid[i], grid[i + 1]
                     target = latents[reference_rows:]
-                    preview(lambda: _unpatchify(target + sigma * velocity, latent_height, latent_width), "minimax-h3")  # noqa: B023  # fmt: skip
+                    preview(lambda x=target, v=velocity, s=sigma: _unpatchify(x + s * v, latent_height, latent_width), "minimax-h3")  # fmt: skip
                     latents[reference_rows:] = target + (f32(sigma) - f32(after)) * velocity
                     del velocity
                     on_step(i)
