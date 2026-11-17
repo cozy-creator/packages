@@ -66,6 +66,7 @@ from cozy_runtime.author import (
     ModelAssets,
     ThreadPoolExecutor,
 )
+from cozy_runtime.author import device as placed_device
 from cozy_runtime.media import DecodedAudio, DecodedAudioChunk, DecodedMediaEvent, DecodedVideoFrame
 from minimax_h3.preparation.table_layout import TableLayout
 
@@ -1036,6 +1037,8 @@ class OfficialH3Pipeline:
             for name in _WORKFLOW_TASKS
         }
         pipes = {name: MiniMaxH3ModularPipeline(blocks=block) for name, block in blocks.items()}
+        if any((tuple(p.pixel_mean), tuple(p.pixel_std)) != PIXEL_STATS for p in pipes.values()):
+            raise ValueError("Diffusers' H3 pipeline normalizes pixels otherwise than PIXEL_STATS")
         dits = {trunk: _build_dit(upstream, layout) for trunk, (upstream, layout) in dit_specs.items()}
         _validate_dual_topology(dits, _DIT_COMPONENT)
         text_encoder = build_text_conditioner(config.section("text_encoder").mapping())
@@ -1746,32 +1749,11 @@ class OfficialH3Pipeline:
         """
         workflow = self._workflow(task, state)
         components = _ScopedPipeline(self._pipes[workflow], self.components["vae"])
-        device = components._execution_device
-        vae = components.vae
-        latents_mean = torch.tensor(vae.config["latents_mean"], device=device).view(1, -1, 1, 1, 1)
-        latents_std = torch.tensor(vae.config["latents_std"], device=device).view(1, -1, 1, 1, 1)
-        pixel_mean = torch.tensor(components.pixel_mean, device=device).view(1, -1, 1, 1, 1)
-        pixel_std = torch.tensor(components.pixel_std, device=device).view(1, -1, 1, 1, 1)
-        frames = 0
         delivery: ContinuationPlan | None = state.values.get("continuation_delivery")
-        tail = DeliveredFrames(delivery) if delivery is not None else None
-        equalize = CellEqualizer(VAE_SPATIAL_RATIO)
-        with torch.no_grad():
-            chunks = vae.decode_chunks(state.latents * latents_std + latents_mean)
-            while True:
-                with torch.autocast(
-                    device_type=device.type, dtype=torch.float16, enabled=device.type == "cuda"
-                ):
-                    chunk = next(chunks, None)
-                if chunk is None:
-                    return frames if tail is None else tail.finish()
-                video = chunk.float() * pixel_std + pixel_mean
-                frames += int(video.shape[2])
-                selected = equalize(video[0].permute(1, 0, 2, 3))
-                if tail is not None:
-                    selected = tail.push(selected)
-                if selected.shape[0]:
-                    on_chunk(selected)
+        return decode_chunks(
+            components.vae, components._execution_device, state.latents,
+            (tuple(components.pixel_mean), tuple(components.pixel_std)), on_chunk, delivery,
+        )  # fmt: skip
 
     def decode_latents(self, latents: torch.Tensor, on_chunk: Callable[[torch.Tensor], None]) -> int:
         """`decode_video_chunks` of normalized `(1, 24, T, H, W)` latents at any canvas."""
@@ -1784,11 +1766,8 @@ class OfficialH3Pipeline:
         official keyframe encode (`encode_condition`) over the whole clip, posterior sampled
         under `seed`, as `open_h3` encodes a draft video."""
         components = _ScopedPipeline(self._pipes["t2va"], self.components["vae"])
-        vae = components.vae
-        raw = encode_condition(vae, pixels, components.pixel_mean, components.pixel_std, seed)
-        mean = torch.tensor(vae.config["latents_mean"], device=raw.device).view(1, -1, 1, 1, 1)
-        std = torch.tensor(vae.config["latents_std"], device=raw.device).view(1, -1, 1, 1, 1)
-        return (raw - mean) / std
+        pixel = (tuple(components.pixel_mean), tuple(components.pixel_std))
+        return encode_clip(components.vae, pixels, pixel, seed)
 
     def _sound_rows(self, waveform: torch.Tensor) -> torch.Tensor:
         """A stereo waveform's `(2, latents, 32)` rows at the posterior mean, on the audio VAE's device."""
@@ -2155,6 +2134,75 @@ def _apply_transformer_dtype[M: MiniMaxH3Transformer3DModel](transformer: M) -> 
         dtype = torch.float32 if name in transformer._keep_in_fp32_modules else torch.bfloat16
         component.to(dtype=dtype)
     return transformer.eval()
+
+
+#: The video VAE's pixel normalization, ImageNet's (`MiniMaxH3ModularPipeline.pixel_mean`/`pixel_std`): what
+#: `OfficialH3VideoVAE` uses, the pipeline's held to it.
+PIXEL_STATS = ((0.485, 0.456, 0.406), (0.229, 0.224, 0.225))
+
+
+def encode_clip(
+    vae: AutoencoderKLMiniMaxH3, pixels: torch.Tensor, pixel: tuple[Sequence[float], Sequence[float]], seed: int
+) -> torch.Tensor:
+    """A `(T, H, W, 3)` uint8 clip's normalized `(1, 24, T', H/16, W/16)` latents: the official keyframe encode
+    (`encode_condition`) over the whole clip, posterior sampled under `seed`, as `open_h3` encodes a draft video."""
+    raw = encode_condition(vae, pixels, pixel[0], pixel[1], seed)
+    mean = torch.tensor(vae.config["latents_mean"], device=raw.device).view(1, -1, 1, 1, 1)
+    std = torch.tensor(vae.config["latents_std"], device=raw.device).view(1, -1, 1, 1, 1)
+    return (raw - mean) / std
+
+
+def decode_chunks(
+    vae: TileBatchedVideoVAE,
+    device: torch.device,
+    latents: torch.Tensor,
+    pixel: tuple[Sequence[float], Sequence[float]],
+    on_chunk: Callable[[torch.Tensor], None],
+    delivery: ContinuationPlan | None = None,
+) -> int:
+    """Upstream's `MiniMaxH3VideoDecodeStep` per temporal chunk (`OfficialH3Pipeline.decode_video_chunks`):
+    `latents` denormalized, decoded under float16 autocast, the ImageNet normalization reverted, each
+    `(t, 3, H, W)` float32 piece handed to `on_chunk` before clipping. Returns the frame count."""
+    latents_mean = torch.tensor(vae.config["latents_mean"], device=device).view(1, -1, 1, 1, 1)
+    latents_std = torch.tensor(vae.config["latents_std"], device=device).view(1, -1, 1, 1, 1)
+    pixel_mean = torch.tensor(pixel[0], device=device).view(1, -1, 1, 1, 1)
+    pixel_std = torch.tensor(pixel[1], device=device).view(1, -1, 1, 1, 1)
+    frames = 0
+    tail = DeliveredFrames(delivery) if delivery is not None else None
+    equalize = CellEqualizer(VAE_SPATIAL_RATIO)
+    with torch.no_grad():
+        chunks = vae.decode_chunks(latents * latents_std + latents_mean)
+        while True:
+            with torch.autocast(device_type=device.type, dtype=torch.float16, enabled=device.type == "cuda"):
+                chunk = next(chunks, None)
+            if chunk is None:
+                return frames if tail is None else tail.finish()
+            video = chunk.float() * pixel_std + pixel_mean
+            frames += int(video.shape[2])
+            selected = equalize(video[0].permute(1, 0, 2, 3))
+            if tail is not None:
+                selected = tail.push(selected)
+            if selected.shape[0]:
+                on_chunk(selected)
+
+
+@dataclass(frozen=True)
+class OfficialH3VideoVAE:
+    """The release's video VAE alone, `components["vae"]`: the encode and decode `OfficialH3Pipeline` runs."""
+
+    components: Mapping[str, TileBatchedVideoVAE]
+
+    def encode_clip(self, pixels: torch.Tensor, seed: int) -> torch.Tensor:
+        return encode_clip(self.components["vae"], pixels, PIXEL_STATS, seed)
+
+    def decode_latents(self, latents: torch.Tensor, on_chunk: Callable[[torch.Tensor], None]) -> int:
+        device = torch.device(str(placed_device()))
+        return decode_chunks(self.components["vae"], device, latents, PIXEL_STATS, on_chunk)
+
+
+def build_h3_video_vae(config: Config) -> OfficialH3VideoVAE:
+    """H3's video VAE from the release's `vae` section, its stored dtypes as the full construction's."""
+    return OfficialH3VideoVAE({"vae": _apply_video_vae_dtype(TileBatchedVideoVAE.from_config(config.section("vae").mapping()), config)})
 
 
 def _apply_video_vae_dtype(vae: TileBatchedVideoVAE, config: Config | None = None) -> TileBatchedVideoVAE:

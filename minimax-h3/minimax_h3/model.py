@@ -33,6 +33,7 @@ from .official import (
     REGENERATE_COMPONENT,
     OfficialH3Pipeline,
     OfficialH3RegenerateLoRA,
+    OfficialH3VideoVAE,
     OfficialH3TurboLoRA,
     ReferenceMemo,
     Schedule,
@@ -43,6 +44,7 @@ from .official import (
     build_h3_regenerate_lora,
     build_h3_turbo_base,
     build_h3_turbo_lora,
+    build_h3_video_vae,
     model_plans,
     regenerate_plan,
 )
@@ -266,17 +268,16 @@ class H3Model(Model[OfficialH3Pipeline]):
         return self.pipe.denoise("ref2va", state, on_step=on_step, cancel=cancel, **recipe.denoise())
 
 
-class H3VideoVAE(Model[OfficialH3Pipeline]):
+class H3VideoVAE(Model[OfficialH3VideoVAE]):
     """H3's video VAE alone, its release's `vae` and nothing else loaded (`vae_round_trip`): the encode and decode
     `H3Model` runs, with the same fused encoder and decoder blocks and 8-bit decoder attention."""
 
     serving = Serving(attention_bits={"vae": 8})
 
-    pipe: OfficialH3Pipeline
+    pipe: OfficialH3VideoVAE
 
     def load(self, loader: Loader) -> None:
-        plans = model_plans(loader.assets)
-        self.pipe = loader.construct(partial(build_h3_pipeline, plans=plans, assets=loader.assets))
+        self.pipe = loader.construct(build_h3_video_vae)
 
     def unload(self, loader: Loader) -> None:
         return None
