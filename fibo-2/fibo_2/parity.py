@@ -37,6 +37,7 @@ class RefGraph:
                 Qwen3VLConfig(**config.section("text_encoder").mapping()), dtype=torch.bfloat16
             )
             vae = construct(AutoencoderKLFlux2, config.section("vae").mapping())
+        encoder.lm_head = torch.nn.Identity()  # tied, not stored; the pipeline reads hidden states only
         self.components: dict[str, torch.nn.Module] = {
             "transformer": transformer.to(dtype=torch.bfloat16).eval(), "text_encoder": encoder.eval(),
             "vae": vae.to(dtype=torch.bfloat16).eval(),

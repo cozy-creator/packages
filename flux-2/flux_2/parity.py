@@ -41,6 +41,7 @@ class RefGraph:
             transformer = construct(Flux2Transformer2DModel, config.section("transformer").mapping())
             encoder = text_encoder(config.section("text_encoder").mapping())
             vae = construct(AutoencoderKLFlux2, config.section("vae").mapping())
+        encoder.set_submodule("lm_head", torch.nn.Identity())  # the pipeline reads hidden states only
         self.components: dict[str, torch.nn.Module] = {
             "transformer": transformer.to(dtype=torch.bfloat16), "text_encoder": encoder.eval(),
             "vae": vae.to(dtype=torch.bfloat16),
