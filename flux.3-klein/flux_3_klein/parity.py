@@ -38,8 +38,13 @@ class RefGraph:
                 Qwen3VLConfig(**config.section("text_encoder").mapping()), dtype=torch.bfloat16
             )
             vae = construct(AutoencoderKLFlux2, config.section("vae").mapping())
-        text_encoder.lm_head = torch.nn.Identity()  # hidden states only; every layer and the final norm stay
-        del text_encoder.model.visual  # the checkpoint stores no vision tower (text prompts never reach it)
+        # BFL's checkpoint stores layers 0-31 only (353 tensors: no vision tower, layers 32-35, final norm or head);
+        # BFL's `from_pretrained` leaves those random and never reads them for hidden state 32 (pre-norm).
+        language = text_encoder.model.language_model
+        language.layers = torch.nn.ModuleList(list(language.layers)[:32])
+        language.norm = torch.nn.Identity()
+        text_encoder.lm_head = torch.nn.Identity()
+        del text_encoder.model.visual
         self.components: dict[str, torch.nn.Module] = {
             "transformer": transformer.to(dtype=torch.bfloat16),
             "text_encoder": text_encoder.eval(),
