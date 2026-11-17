@@ -292,16 +292,23 @@ def image(
 #: What Qwen Image 2 is asked of a picture it upscales; a lone picture is named in words (`label`).
 UPSCALE_PROMPT = ("Upscale the picture to a higher resolution. Keep the picture exactly as it is: the same composition, "
                   "framing, colours, lighting and every detail; only make it sharper and more finely detailed.")
+#: se-147 measurement only: a restoration request, after ausboss's Qwen-Image-2.1 Restore LoRA card.
+RESTORE_PROMPT = ("Restore the picture at a higher resolution: remove the blur, noise and JPEG compression artifacts and "
+                  "recover sharp, clean detail and edges, keeping the same composition, subject, line work and colours.")
+PROMPTS = {"upscale": UPSCALE_PROMPT, "restore": RESTORE_PROMPT}
 
 
 class UpscaleInput(msgspec.Struct, kw_only=True):
-    #: `upscale`: the picture, the box's own version.
     image: Annotated[ImageFile, FileBound(max_decoded_bytes=256 << 20)]
-    #: `upscale`: the picture's ratio at this size (`SIZES.fit`), up to Qwen's 4 MP.
     megapixels: Literal[2, 4] = 4
-    #: `QwenImage21DiT.denoise`'s `strength`: the noise the picture starts under; 1 redraws it from noise (se-123).
-    denoise: Annotated[float, msgspec.Meta(gt=0, le=1), Advanced()] = 0.2
+    denoise: Annotated[float, msgspec.Meta(gt=0, le=1)] = 0.2
     seed: Seed | None = None
+    #: se-147 measurement only: the reference at the canvas (Diffusers' `output_resolution`) or at 1 MP.
+    reference: Literal["canvas", "1mp"] = "1mp"
+    #: se-147 measurement only: which request.
+    prompt: Literal["upscale", "restore"] = "upscale"
+    #: se-147 measurement only: Fun Acc's 4 steps, else the base model's 40.
+    turbo: bool = True
 
 
 _UPSCALE = {"model": "qwen/qwen-image-2.1@0.1.0", "text_encoder": "atomicchat/qwen-image-2.1-text-encoder-abliterated@0.1.0",
@@ -312,28 +319,35 @@ _UPSCALE = {"model": "qwen/qwen-image-2.1@0.1.0", "text_encoder": "atomicchat/qw
           components={"model": ("transformer",), "text_encoder": ("text_encoder",), "vae": ("vae",)}, memoize=True)  # fmt: skip
 def upscale(ctx: Context, payload: UpscaleInput, model: QwenImage21DiT, text_encoder: QwenImage21TextEncoder,
             turbo_lora: FunAccLoRA, vae: QwenImage21VAE, tel: Telemetry, adj: Adjustments) -> ImageResult:
-    """The picture larger: Qwen Image 2 Turbo edits it at the size asked, the picture its reference and, Lanczos-upscaled
-    to the canvas, below `denoise` its start."""
+    """se-147 measurement build: the reference, start strength, request and steps as asked."""
     with tel.stage("reading picture"):
         picture = payload.image.read(mode="RGBA")
     width, height = SIZES.fit(adj, picture.size, payload.megapixels * MEGAPIXEL)
     seed = payload.seed if payload.seed is not None else ImageRequest(prompt="").drawn_seed()
+    prompt = PROMPTS[payload.prompt]
     vae.hold(tel)
     with tel.stage("encoding reference images"):
-        conditioning, latents = vae.encode_reference_images([picture])
+        canvas = (width, height) if payload.reference == "canvas" else None
+        conditioning, latents = vae.encode_reference_images([picture], canvas)
         start = None
         if payload.denoise < 1:
             start = vae.encode_canvas(picture.resize((width, height), PILImage.Resampling.LANCZOS))
     with tel.stage("encoding prompt"):
-        embeds, mask, image_pad_mask = text_encoder.encode_image_prompt(UPSCALE_PROMPT, conditioning)
+        embeds, mask, image_pad_mask = text_encoder.encode_image_prompt(prompt, conditioning)
     ctx.raise_if_cancelled()
     with tel.stage("generating image"):
-        latents = turbo_lora.denoise(model, embeds, mask, width=width, height=height, steps=turbo_lora.steps, seed=seed,
-                                     progress=ctx.progress, reference_images=conditioning, reference_latents=latents,
-                                     image_pad_mask=image_pad_mask, start=start, strength=payload.denoise)  # fmt: skip
+        if payload.turbo:
+            latents = turbo_lora.denoise(model, embeds, mask, width=width, height=height, steps=turbo_lora.steps, seed=seed,
+                                         progress=ctx.progress, reference_images=conditioning, reference_latents=latents,
+                                         image_pad_mask=image_pad_mask, start=start, strength=payload.denoise)  # fmt: skip
+        else:
+            latents = model.denoise(embeds, mask, width=width, height=height, steps=_STEPS, seed=seed, progress=ctx.progress,
+                                    reference_images=conditioning, reference_latents=latents,
+                                    image_pad_mask=image_pad_mask, start=start, strength=payload.denoise)  # fmt: skip
     with tel.stage("decoding image"):
         image = decoded_image(vae.decode(latents, width=width, height=height))
     with tel.stage("saving image"):
         asset = ImageFile.from_image(image, format="png")
-    tel.log("upscale", source=f"{picture.width}x{picture.height}", width=width, height=height)
-    return ImageResult(asset, width, height, seed, UPSCALE_PROMPT)
+    tel.log("upscale", source=f"{picture.width}x{picture.height}", width=width, height=height, denoise=payload.denoise,
+            reference=payload.reference, prompt=payload.prompt, turbo=payload.turbo)
+    return ImageResult(asset, width, height, seed, prompt)
