@@ -1539,24 +1539,26 @@ async def vae_round_trip(
     frames = steps // LATENTS_PER_CHUNK * FRAMES_PER_CHUNK + 5
     kept: list[Tensor] = []
     index: list[int] = []
+    # The decode lands each chunk's RGB8 frames on the host and nothing else: the MP4 is written after it (`save_video`),
+    # so `vae_decode` times the VAE, not a host's video encoder running beside it (gate 44090355818's pod: 7.8 s, 4.5 s on
+    # another), as ComfyUI's VAEDecode is timed.
+    landed: list[Tensor] = []
     with tel.stage("vae_decode"):
-        stream = _VideoStream(torch, out, frames=frames, waveform=None, sample_rate=0, cancel=ctx.raise_if_cancelled,
-                              progress=ctx.progress)  # fmt: skip
 
         def push(chunk: Tensor) -> None:
-            first = stream.landed
+            first = sum(int(piece.shape[0]) for piece in landed)
             for at in range(-first % _KEPT_EVERY, int(chunk.shape[0]), _KEPT_EVERY):
                 kept.append(chunk[at].float().cpu())
                 index.append(first + at)
-            stream.push(chunk)
+            landed.append(chunk.clamp(0, 1).mul(255).round().to(torch.uint8).cpu())
 
-        try:
-            base_model.decode_latents(latents.to(str(base_model.device), torch.float32), on_chunk=push)
-        except BaseException:
-            stream.abandon()
-            raise
+        base_model.decode_latents(latents.to(str(base_model.device), torch.float32), on_chunk=push)
+    stream = _VideoStream(torch, out, frames=frames, waveform=None, sample_rate=0, cancel=ctx.raise_if_cancelled,
+                          progress=ctx.progress)  # fmt: skip
     try:
         with tel.stage("save_video"):
+            for piece in landed:
+                stream.push(piece.float().div_(255))
             saved = stream.finish(ctx.progress)
     except BaseException:
         stream.abandon()
