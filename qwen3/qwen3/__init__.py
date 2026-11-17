@@ -64,6 +64,39 @@ W4A8 = Recipe(
     ),
 )
 
+#: llama.cpp's lanes (xs-213): every weight llama-quantize quantizes, in ggml's block types and byte for byte what it
+#: writes (no importance matrix). The vision tower is llama.cpp's mmproj and keeps its bytes.
+_GGML = (
+    "model.model.language_model.embed_tokens.weight",
+    "model.lm_head.weight",
+    "model.model.language_model.layers.*.linear_attn.in_proj_*.weight",
+    "model.model.language_model.layers.*.linear_attn.out_proj.weight",
+    "model.model.language_model.layers.*.self_attn.[qkvo]_proj.weight",
+    "model.model.language_model.layers.*.mlp.*_proj.weight",
+    "model.mtp.fc.weight",
+    "model.mtp.layers.*_proj.weight",
+)
+
+#: llama.cpp's Q8_0: every one of those weights in `ggml.q8_0`.
+Q8_0 = Recipe(
+    lane="q8_0",
+    model=VisionLM,
+    plan=QuantizationPlan(
+        encoding="ggml.q8_0", components=("model",), include=_GGML, output_precision="preserve"
+    ),
+)
+
+#: llama.cpp's Q4_K_M: Q4_K, with Q6_K where llama-quantize's per-tensor rule puts it (the LM head, and the value and
+#: gated-delta QKV projections and MLP down projections of the first and last eighth of the layers and every third
+#: between).
+Q4_K_M = Recipe(
+    lane="q4_k_m",
+    model=VisionLM,
+    plan=QuantizationPlan(
+        encoding="ggml.q4_k_m", components=("model",), include=_GGML, output_precision="preserve"
+    ),
+)
+
 
 @app.entrypoint(defaults={"model": MODEL}, memoize=True)
 def ask(ctx: Context, payload: AskRequest, model: VisionLM, tel: Telemetry) -> AskResult:
