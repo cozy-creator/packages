@@ -20,8 +20,8 @@ Describe sounds and any spoken dialogue in the prompt. `audio: false` returns a 
 The output carries the actual width, height, fps, frame count, seed and prompt.
 
 `resolution` is `1080p` (1920x1088) or `720p` (1280x704), on the model's native two-stage grid.
-An explicit `aspect_ratio` overrides the first frame's ratio; without a frame it defaults to
-the listed landscape size. Other ratios keep approximately the same pixel count. `duration_s`
+An explicit `aspect_ratio` overrides the first frame's ratio, and the frame's centre is cropped to it (as native LTX
+and its ComfyUI template do), never stretched; without a frame it defaults to the listed landscape size. Other ratios keep approximately the same pixel count. `duration_s`
 accepts 1-20 seconds, snapped up to the causal `8k+1` frame grid.
 
 The package stages the customized Gemma4-12B encoder, text connectors, transformer, spatial
@@ -37,6 +37,8 @@ layers, [`quantize.py`](ltx_2_5/quantize.py)). A GPU with int8 tensor cores runs
 cozy model quantize lightricks/ltx-2.5@0.1.0 --lane int8 --package ./ltx-2.5 --on <machine>
 ```
 
+Each stage conditions on the first frame encoded at that stage's size: the refinement re-encodes it at full size, as
+native LTX-2.5 and its ComfyUI template do, rather than keeping the upsampled half-size encode (se-161).
 Sampling follows the released Diffusers Euler path. The newer native LTX pipeline's Euler
 ancestral path has different intermediate arithmetic; matching its numerical output is a
 separate comparison. See the [source assessment](../research/ltx-2.5/README.md).
