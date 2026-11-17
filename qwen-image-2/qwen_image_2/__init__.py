@@ -278,7 +278,9 @@ def generate_turbo(
 #: Proof only (se-153): Qwen-Image-2.1-Turbo's own 8-step schedule, its `model_index.json` `sample_sigmas`
 #: (hf://Qwen/Qwen-Image-2.1-Turbo@fc13ba19).
 QWEN_TURBO_SIGMAS = (1.0, 0.978453, 0.95418, 0.926626, 0.89508, 0.845148, 0.704534, 0.414568)
-_QWEN_TURBO = {**_FULL, "model": "qwen/qwen-image-2.1-turbo@0.1.1"}
+_QWEN_TURBO = {"expander_i2i": "darrellbest/qwen-image-2.1-pe-i2i-abliterated@0.1.0",
+               "expander_t2i": "pottokao/qwen-image-2.1-pe-t2i-abliterated@0.1.0", "model": "qwen/qwen-image-2.1-turbo@0.1.1",
+               "text_encoder": "atomicchat/qwen-image-2.1-text-encoder-abliterated@0.1.0", "vae": "qwen/qwen-image-2.1@0.1.0"}
 
 
 @app.entrypoint(defaults=_QWEN_TURBO, components=_COMPONENTS, needs=_NEEDS, memoize=True)  # fmt: skip
