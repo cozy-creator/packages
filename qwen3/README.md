@@ -37,7 +37,8 @@ The request and the model code are Runtime's shared Qwen-VL ones (`cozy_runtime.
 - `temperature` (default 0: greedy), `top_p`, `seed`. Qwen recommends 0.7 and 0.8 without
   thinking, 1.0 and 0.95 with it; Qwen3.8's card gives a `presence_penalty` of 1.5 without thinking and 0 with it.
 - `thinking`: the model reasons first; only the answer after its thought is returned. A thought
-  that `max_tokens` cuts off leaves an empty answer. Qwen3.8 thinks at its chat template's default effort (`xhigh`).
+  that `max_tokens` cuts off leaves an empty answer. The checkpoint's chat template sets the effort (Qwen3.8's `reasoning_effort`: upstream's
+  defaults to xhigh, the default's to none).
 - Video reading as Qwen-VL defines it: `fps`, `min_frames`, `max_frames` (null: the checkpoint's
   2 fps, 4 to 768 frames), `max_edge`, `video_end`.
 
@@ -50,7 +51,7 @@ divergence from the stock model are the author's own numbers (Heretic's 100 harm
 
 | model | of | parameters | bf16 | refusals (stock) | KL |
 | --- | --- | --- | --- | --- | --- |
-| `heretic-org/qwen3.8-27b-heretic-ara` (default) | Qwen3.8-27B | 27.78B dense | 55.6 GB | 0/100 (99) | 0.054 |
+| `llmfan46/qwen3.8-27b-uncensored-heretic-native-mtp-preserved` (default) | Qwen3.8-27B | 27.78B dense | 55.6 GB | 3/100 (91) | 0.024 |
 | `llmfan46/qwen3.6-35b-a3b-uncensored-heretic-native-mtp-preserved` | Qwen3.6-35B-A3B | 35.95B, 256 experts, ~3B active | 71.9 GB | 10/100 (83) | 0.002 |
 | `llmfan46/qwen3.6-27b-uncensored-heretic-v2-native-mtp-preserved` | Qwen3.6-27B | 27.78B dense | 55.6 GB | 6/100 (92) | 0.002 |
 | `huihui-ai/huihui-qwen3.5-9b-abliterated` | Qwen3.5-9B | 9B dense | 19.3 GB | not stated | not stated |
@@ -70,7 +71,7 @@ Each checkpoint is its author's, mirrored as uploaded under the author's org: th
 are written from the bf16 commit on the same machine:
 
 ```sh
-cozy model upload hf://heretic-org/Qwen3.8-27B-heretic-ara@2dc9b364104881cbb85e390f00195ba6b9d745e9 heretic-org/qwen3.8-27b-heretic-ara --lane bf16 --mirror https://huggingface.co/heretic-org/Qwen3.8-27B-heretic-ara --on <name>
+cozy model upload hf://llmfan46/Qwen3.8-27B-Uncensored-Heretic-Native-MTP-Preserved@4b9e1517a43fdca25872318ed272a1c88e72c360 llmfan46/qwen3.8-27b-uncensored-heretic-native-mtp-preserved --lane bf16 --mirror https://huggingface.co/llmfan46/Qwen3.8-27B-Uncensored-Heretic-Native-MTP-Preserved --on <name>
 cozy model upload hf://llmfan46/Qwen3.6-35B-A3B-uncensored-heretic-Native-MTP-Preserved@9599ac17d26daf33daf0fdd8f6c897ff4c6dc89a llmfan46/qwen3.6-35b-a3b-uncensored-heretic-native-mtp-preserved --lane bf16 --mirror https://huggingface.co/llmfan46/Qwen3.6-35B-A3B-uncensored-heretic-Native-MTP-Preserved --on <name>
 cozy model upload hf://llmfan46/Qwen3.6-27B-uncensored-heretic-v2-Native-MTP-Preserved@4928dd14830859583b97f35dfaba9018f7310b3e llmfan46/qwen3.6-27b-uncensored-heretic-v2-native-mtp-preserved --lane bf16 --mirror https://huggingface.co/llmfan46/Qwen3.6-27B-uncensored-heretic-v2-Native-MTP-Preserved --on <name>
 cozy model upload hf://huihui-ai/Huihui-Qwen3.5-9B-abliterated@05b9e7c9b978ba29bdb8f50a49c30e4b91183339 huihui-ai/huihui-qwen3.5-9b-abliterated --lane bf16 --mirror https://huggingface.co/huihui-ai/Huihui-Qwen3.5-9B-abliterated --on <name>

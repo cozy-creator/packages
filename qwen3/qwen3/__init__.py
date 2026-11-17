@@ -10,8 +10,8 @@ from cozy_runtime.vlm import AskRequest, AskResult, TextBox, TextResult, VisionL
 
 app = App()
 
-#: The default checkpoint: the newest Qwen3.x, abliterated (Heretic's ARA of Qwen3.8-27B).
-MODEL = "heretic-org/qwen3.8-27b-heretic-ara@0.1.0"
+#: The default checkpoint: the newest Qwen3.x, abliterated (llmfan46's Heretic of Qwen3.8-27B, its MTP head kept).
+MODEL = "llmfan46/qwen3.8-27b-uncensored-heretic-native-mtp-preserved@0.1.0"
 
 #: The int8 lane (`int8.convrot`, W8A8 on int8 tensor cores): every attention, gated-delta-net and MLP projection of the
 #: language layers and of the multi-token-prediction layer where the checkpoint has one; in a MoE every routed and shared
