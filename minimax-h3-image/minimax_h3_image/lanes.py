@@ -3,8 +3,8 @@
 The image model: `bf16-full` is MiniMax's Diffusers upload as it is (`transformer_diffusers`, `vae_diffusers`).
 `prepare` writes `bf16` from it (`source` the DiT, `vae` the VAE): the DiT's time embedder and AdaLN projections replaced by exact tables of the rows the
 6 steps read (`model.table_keys`), and the VAE split into `vae_encoder` (H3's encoder, float32, byte-identical) and
-`vae_decoder` (bf16 as Diffusers loads it, its norms and layer scales float32). `int8` (the default), `w4a8`, `nvfp4`
-and `fp8` are recipes over `bf16` (`cozy model quantize <bf16 checkpoint> --lane int8 --package minimax-h3-image`).
+`vae_decoder` (bf16 as Diffusers loads it, its norms and layer scales float32). `int8` (the default), `w4a8` and
+`nvfp4` are recipes over `bf16` (`cozy model quantize <bf16 checkpoint> --lane int8 --package minimax-h3-image`).
 
 The prompt expander: `nvfp4` is MiniMax's ModelOpt NVFP4 upload as it is. `expander_bf16` writes `bf16` from it, every
 NVFP4 linear decoded (its FP4 values times their block and global scales, rounded once to bf16), and, with

@@ -20,10 +20,14 @@ cozy run minimax-h3-image/generate instructions='Put the hat from <hat> on the w
   whose decoder is a 2D ViT. A request fetches the expander only when it upsamples and the VAE encoder only when it
   has pictures. A port of Diffusers 0.43's `minimax_h3_image` pipeline.
 - **Lanes.** `bf16-full` is MiniMax's Diffusers upload as it is. `bf16` replaces the DiT's time embedder and AdaLN
-  projections with exact tables of the rows its 6 steps read (`cozy run ./minimax-h3-image/prepare source=<bf16-full>`).
-  `int8` (the default), `w4a8`, `nvfp4` and `fp8` are recipes over `bf16` (`cozy model quantize <bf16 checkpoint>
-  --lane int8 --package minimax-h3-image`). The expander's `nvfp4` is MiniMax's upload; `expander_bf16` decodes it to
-  `bf16`, `abliterate` projects its refusal direction out, and its `int8` and `w4a8` are recipes over a `bf16`.
+  projections with exact tables of the rows its 6 steps read (`cozy run ./minimax-h3-image/prepare --model
+  source=<DiT> --model vae=<VAE>`).
+  `int8` (the default), `w4a8` and `nvfp4` are recipes over `bf16` (`cozy model quantize <bf16 checkpoint>
+  --lane int8 --package minimax-h3-image`). The expander's `nvfp4` is MiniMax's upload (`expander_config` drops
+  ModelOpt's `quantization_config`); `expander_bf16` decodes it to `bf16`, and its `int8` and `w4a8` are recipes over
+  that. `abliterate` projects a refusal direction out of a `bf16` lane's residual writers.
+- **Speed** (16.8 MP, int8, warm): RTX PRO 6000 12.4 s (6 x 1.6 s, decode 0.75 s); ComfyUI's int8 15.5 s on the same
+  card. RTX 4090 39.7 s (the text encoder and DiT page; 6 x 2.7 s).
 
 License: the MiniMax-H3-Image Community License (its LICENSE and NOTICE are in the mirror). It grants no rights in the
 EU, the UK, South Korea or the USA, and needs MiniMax's written authorization above USD 1M annual revenue or for a
