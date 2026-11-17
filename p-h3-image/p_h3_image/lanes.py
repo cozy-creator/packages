@@ -39,8 +39,8 @@ COMPONENTS = ("prompt_upsampler", "text_connector", "text_encoder", "transformer
 #: `bf16` stores it widened, exactly.
 WIDENED = ("decoder.proj_out.",)
 #: Upstream keeps the encoder and `quant_conv` float32 too; they compute in float16, as minimax-h3's and ComfyUI's
-#: under `--fast fp16_accumulation` (cr-306, se-150), fused (`vae.VAE_ENCODER`). Their bf16 bytes are exact in
-#: float16 but for subnormals.
+#: under `--fast fp16_accumulation` (cr-306), fused (`vae.VAE_ENCODER`). Their bf16 bytes are exact in float16 but
+#: for subnormals. se-150, real photos at 8 and 16 MP: largest activation 111, latents 59-63 dB from float32's.
 F16 = ("encoder.", "quant_conv.")
 MAX_PRUNED_BYTES = 6 << 30
 #: The DiT's modulation shape: hidden, blocks, timestep features, time embedder hidden and output widths.
