@@ -39,6 +39,7 @@ class RefGraph:
             )
             vae = construct(AutoencoderKLFlux2, config.section("vae").mapping())
         text_encoder.lm_head = torch.nn.Identity()  # hidden states only; every layer and the final norm stay
+        del text_encoder.model.visual  # the checkpoint stores no vision tower (text prompts never reach it)
         self.components: dict[str, torch.nn.Module] = {
             "transformer": transformer.to(dtype=torch.bfloat16),
             "text_encoder": text_encoder.eval(),
