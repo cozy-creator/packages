@@ -22,7 +22,6 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from fractions import Fraction
 
-import torch
 from cozy_runtime.author import Loader, uses_components
 from cozy_runtime.vlm import COMPONENT, Question, VisionLM
 from PIL import Image
@@ -115,44 +114,33 @@ class H3ImagePE(VisionLM):
         self.t2i_task = read("prompt/t2i/task_prompt.txt").decode("utf-8")
         self.edit_task = read("prompt/edit/task_prompt.txt").decode("utf-8")
 
+    def question(self, request: str, pictures: list[Image.Image], aspect_ratio: str | None) -> tuple[Question, str, str]:
+        """`request` as the PE reads it, its system turn and its answer's ratio key: with pictures, the edit PE, told
+        `aspect_ratio` (`adaptive` when None); else the T2I PE."""
+        if not pictures:
+            return Question(self.t2i_task.format(request)), self.t2i_system, "aspect_ratio"
+        count = len(pictures)
+        parts: list[str | Image.Image] = [
+            self.edit_task,
+            f"Reference Image Count:\n{count} input image(s), labeled <Picture 1> through <Picture {count}>.",
+        ]
+        for index, picture in enumerate(pictures, 1):
+            parts += [f"Reference Media:\n- <Picture {index}> [aspect_ratio {reduced(*picture.size)}]", shown(picture)]
+        parts.append(
+            f"\nUser Editing Instruction (JSON string):\n{json.dumps(request, ensure_ascii=False)}\n\n"
+            f"User Aspect Ratio Selection:\n{aspect_ratio or 'adaptive'}\n\n"
+            "Apply the instructions above to the supplied inputs and reference images. "
+            "Output only the required two-field JSON object."
+        )
+        return Question(parts=parts), "", "target_aspect_ratio"
+
     @uses_components(COMPONENT)
     def expand(
         self, request: str, pictures: list[Image.Image], aspect_ratio: str | None, *, seed: int,
         progress: Callable[[int], None] | None = None,
     ) -> tuple[Expansion | None, str]:
-        """The expansion of `request` (None when the answer doesn't parse) and the raw answer. With pictures, the
-        edit PE, told `aspect_ratio` (`adaptive` when None); else the T2I PE."""
-        if pictures:
-            count = len(pictures)
-            parts: list[str | Image.Image] = [
-                self.edit_task,
-                f"Reference Image Count:\n{count} input image(s), labeled <Picture 1> through <Picture {count}>.",
-            ]
-            for index, picture in enumerate(pictures, 1):
-                parts += [f"Reference Media:\n- <Picture {index}> [aspect_ratio {reduced(*picture.size)}]", shown(picture)]
-            parts.append(
-                f"\nUser Editing Instruction (JSON string):\n{json.dumps(request, ensure_ascii=False)}\n\n"
-                f"User Aspect Ratio Selection:\n{aspect_ratio or 'adaptive'}\n\n"
-                "Apply the instructions above to the supplied inputs and reference images. "
-                "Output only the required two-field JSON object."
-            )
-            question, system, key = Question(parts=parts), "", "target_aspect_ratio"
-        else:
-            question, system, key = Question(self.t2i_task.format(request)), self.t2i_system, "aspect_ratio"
+        """The expansion of `request` (None when the answer doesn't parse) and the raw answer (`question`)."""
+        question, system, key = self.question(request, pictures, aspect_ratio)
         answer = self.ask([question], system=system, thinking=True, stop=[], max_new_tokens=MAX_TOKENS,
                           presence_penalty=0.0, temperature=TEMPERATURE, top_p=TOP_P, seed=seed, progress=progress)[0]  # fmt: skip
         return parse(answer, key), answer
-
-    @uses_components(COMPONENT)
-    def residuals(self, requests: list[str]) -> torch.Tensor:
-        """Each request's residual stream at its last prompt token under the T2I PE's prompts, the thought opened, at
-        every hidden state: `(layers + 1, requests, hidden)` float32 on the CPU (`lanes.abliterate`)."""
-        model = self.pipe.components[COMPONENT].model
-        rows = []
-        for request in requests:
-            inputs = self._inputs(text=[self._chat(Question(self.t2i_task.format(request)), self.t2i_system, True)])
-            with torch.no_grad():
-                out = model(input_ids=inputs["input_ids"], attention_mask=inputs["attention_mask"], use_cache=False,
-                            output_hidden_states=True)  # fmt: skip
-            rows.append(torch.stack([state[0, -1].float().cpu() for state in out.hidden_states]))
-        return torch.stack(rows, dim=1)

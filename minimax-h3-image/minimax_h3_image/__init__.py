@@ -12,6 +12,7 @@ from cozy_runtime.fields import Advanced, AspectRatio, Image, Prompt, Range, Rat
 from cozy_runtime.image import MEGAPIXEL, ImageRequest, ImageResult, Sizes, ratio_of
 from cozy_runtime.media import ImageFile
 
+from . import abliteration as abliteration  # the expander's abliteration study and writer
 from . import lanes as lanes  # the lane functions and the quantized lanes' recipes
 from .application import app as app
 from .expander import H3ImagePE

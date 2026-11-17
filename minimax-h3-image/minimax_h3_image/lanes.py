@@ -8,9 +8,9 @@ it, fused: `vae.VAE_ENCODER`) and `vae_decoder` (bf16 as Diffusers loads it, its
 --package minimax-h3-image`). `encoder_f16` rewrites a lane written before `bf16` stored the encoder float16.
 
 The prompt expander: `nvfp4` is MiniMax's ModelOpt NVFP4 upload as it is. `expander_bf16` writes `bf16` from it, every
-NVFP4 linear decoded (its FP4 values times their block and global scales, rounded once to bf16), and, with
-`abliterate`, the refusal direction projected out of every residual writer. `int8`, `w4a8` and `nvfp4` are recipes
-over a `bf16`. Its int8 can be no better than the NVFP4 it decodes: the FP4 grid is the source.
+NVFP4 linear decoded (its FP4 values times their block and global scales, rounded once to bf16); `abliteration`
+writes an abliterated `bf16` from that. `int8`, `w4a8` and `nvfp4` are recipes over a `bf16`. Its int8 can be no
+better than the NVFP4 it decodes: the FP4 grid is the source.
 """
 
 from __future__ import annotations
@@ -316,9 +316,6 @@ def _nvfp4(source: Checkpoint, key: str) -> torch.Tensor:
     return (values.reshape(rows, cols // 16, 16) * scales[..., None] * glob).reshape(rows, cols)
 
 
-#: Residual writers: each writes the stream the refusal direction lives in.
-_WRITERS = ("linear_attn.out_proj.weight", "self_attn.o_proj.weight", "mlp.down_proj.weight")
-_EMBED = "model.language_model.embed_tokens.weight"
 
 
 def _plain_config(source: Checkpoint) -> dict[str, object]:
@@ -373,60 +370,3 @@ async def expander_config(ctx: Context, payload: Relane, *, source: Weights, tel
 app.entrypoint(expander_config, name="expander_config", accelerator=False,
                weights=tuple(WeightsOutput(lane, max_new_bytes=64 << 20) for lane in ("nvfp4", "bf16", "int8", "w4a8")))  # fmt: skip
 
-
-class Abliteration(msgspec.Struct, kw_only=True):
-    #: Requests the expander refuses or tones down, and ones it expands as asked: the refusal direction is the
-    #: difference of their mean residuals.
-    refused: list[str]
-    expanded: list[str]
-    #: The hidden state the direction is read at; None: the one of widest separation in the middle 30-80% of the
-    #: stack.
-    layer: int | None = None
-
-
-async def abliterate(ctx: Context, payload: Abliteration, expander: H3ImagePE, *, source: Weights,
-                     tel: Telemetry) -> ModelArtifact:  # fmt: skip
-    """The expander's `bf16` lane (`source`) abliterated, as FailSpy's and Arditi et al.'s abliteration does: the
-    refusal direction `r` (`expander`, any lane, reads each request's residual at its last prompt token) projected
-    out of every residual writer (`W - r rᵀW`) and of the embeddings (`E - (E r) rᵀ`). Every other tensor is the
-    source's."""
-    src = ctx.tensorfs_source(source)
-    tensors = src.components[COMPONENT].tensors
-    if any(row.encoding is not None for row in tensors.values()):
-        raise UnsupportedInput("abliterate a `bf16` lane (`expander_bf16`)", code="expander_source")
-    with tel.stage("refusal direction"):
-        refused, expanded = expander.residuals(payload.refused), expander.residuals(payload.expanded)
-    difference = refused.mean(dim=1) - expanded.mean(dim=1)
-    spread = torch.cat([refused, expanded], dim=1).std(dim=1).mean(dim=-1)
-    separation = (difference.norm(dim=-1) / (spread * math.sqrt(difference.shape[-1]))).tolist()
-    layer = payload.layer
-    if layer is None:
-        layer = max(range(int(0.3 * len(separation)), int(0.8 * len(separation))), key=lambda i: separation[i])
-    r = difference[layer].float()
-    r = r / r.norm()
-    tel.log("refusal direction", layer=layer, separation=[round(s, 4) for s in separation])
-    writers = [k for k in tensors if (k.startswith("model.language_model.layers.") and k.endswith(_WRITERS)) or k == _EMBED]
-    with ctx.output("bf16", Derivation(base=src, order=[(COMPONENT, k) for k in tensors])) as out:
-        with tel.stage("orthogonalizing"):
-            for done, key in enumerate(writers, 1):
-                ctx.raise_if_cancelled()
-                if out.has(COMPONENT, key):
-                    continue
-                value = _plain(src, COMPONENT, key)
-                if key == _EMBED:  # each token's row alone, a block of rows at a time: 1.3B values
-                    for rows in value.split(1 << 14):
-                        block = rows.float()
-                        rows.copy_(block - (block @ r)[:, None] * r[None, :])
-                else:
-                    block = value.float()
-                    value = (block - r[:, None] * (r @ block)[None, :]).to(torch.bfloat16)
-                    del block
-                _put(out, COMPONENT, key, value)
-                del value
-                ctx.progress(done - 1, len(writers))
-        artifact = ctx.adopt_model(out)
-    tel.log("abliterated", layer=layer, writers=len(writers))
-    return artifact
-
-
-app.entrypoint(abliterate, name="abliterate", weights=(WeightsOutput("bf16", max_new_bytes=24 << 30),))
