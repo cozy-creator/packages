@@ -30,6 +30,7 @@ import msgspec
 import numpy as np
 import numpy.typing as npt
 import torch
+from minimax_h3._phases import phase
 from diffusers.models.autoencoders.autoencoder_kl_minimax_h3_audio import AutoencoderKLMiniMaxH3Audio
 from diffusers.models.transformers.transformer_minimax_h3 import MiniMaxH3Transformer3DModel
 from diffusers.modular_pipelines.minimax_h3.modular_blocks_minimax_h3 import MiniMaxH3Blocks
@@ -2174,13 +2175,15 @@ def decode_chunks(
     with torch.no_grad():
         chunks = vae.decode_chunks(latents * latents_std + latents_mean)
         while True:
-            with torch.autocast(device_type=device.type, dtype=torch.float16, enabled=device.type == "cuda"):
+            with phase("decoder"), torch.autocast(device_type=device.type, dtype=torch.float16, enabled=device.type == "cuda"):
                 chunk = next(chunks, None)
             if chunk is None:
                 return frames if tail is None else tail.finish()
-            video = chunk.float() * pixel_std + pixel_mean
+            with phase("normalize"):
+                video = chunk.float() * pixel_std + pixel_mean
             frames += int(video.shape[2])
-            selected = equalize(video[0].permute(1, 0, 2, 3))
+            with phase("equalize"):
+                selected = equalize(video[0].permute(1, 0, 2, 3))
             if tail is not None:
                 selected = tail.push(selected)
             if selected.shape[0]:

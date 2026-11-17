@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import hashlib
 import math
+import os
+import time
 import queue
 import re
 from collections.abc import Callable, Iterator, Sequence
@@ -83,6 +85,7 @@ from torch import Tensor
 
 from gates import MediaFacts, refuse_before_encode
 from minimax_h3.application import app
+from minimax_h3 import _phases
 from minimax_h3 import regenerate as refine_math
 from minimax_h3 import shot_latents
 from minimax_h3.continuation import (
@@ -1506,6 +1509,8 @@ class VaeRoundTrip(msgspec.Struct, kw_only=True):
     video: Annotated[VideoFile, FileBound(max_decoded_bytes=2 << 30)]
     #: A `vae_round_trip`'s `latents`, decoded in place of this call's own: two builds' decodes of the same latents.
     latents: LatentFile | None = None
+    #: Evidence only: decode once more under torch.profiler and print its kernel and sync totals.
+    profile: bool = True
 
 
 class VaeRoundTripOutput(msgspec.Struct):
@@ -1526,9 +1531,11 @@ async def vae_round_trip(
 ) -> VaeRoundTripOutput:
     """The video VAE alone: `video` encoded as `upscale` encodes a video (`vae_encode`), then decoded as `generate` decodes
     a shot, streamed to its MP4 (`vae_decode`). Its benchmark and release-gate cell (cr-306)."""
+    read_started = time.perf_counter()
     with tel.stage("read_video"):
         pixels, _, _, count, warnings = _read_draft(payload.video, _draft_size(payload.video))
         pixels = pixels[:count]
+    read_ms = round((time.perf_counter() - read_started) * 1000, 1)
     with tel.stage("vae_encode"):
         own = base_model.encode_clip(pixels).cpu()
     del pixels
@@ -1543,16 +1550,30 @@ async def vae_round_trip(
     # so `vae_decode` times the VAE, not a host's video encoder running beside it (gate 44090355818's pod: 7.8 s, 4.5 s on
     # another), as ComfyUI's VAEDecode is timed.
     landed: list[Tensor] = []
+
+    def push(chunk: Tensor) -> None:
+        first = sum(int(piece.shape[0]) for piece in landed)
+        with _phases.phase("land.quantize"):
+            rgb = chunk.clamp(0, 1).mul(255).round().to(torch.uint8)
+            keep = [(first + at, chunk[at].float()) for at in range(-first % _KEPT_EVERY, int(chunk.shape[0]), _KEPT_EVERY)]
+        with _phases.phase("land.copy"):
+            for at, frame in keep:
+                kept.append(frame.cpu())
+                index.append(at)
+            landed.append(rgb.cpu())
+
+    _phases.ON[0] = True
+    _phases.TOTALS.clear()
+    host_before = _host_cpu()
+    started = time.perf_counter()
     with tel.stage("vae_decode"):
-
-        def push(chunk: Tensor) -> None:
-            first = sum(int(piece.shape[0]) for piece in landed)
-            for at in range(-first % _KEPT_EVERY, int(chunk.shape[0]), _KEPT_EVERY):
-                kept.append(chunk[at].float().cpu())
-                index.append(first + at)
-            landed.append(chunk.clamp(0, 1).mul(255).round().to(torch.uint8).cpu())
-
         base_model.decode_latents(latents.to(str(base_model.device), torch.float32), on_chunk=push)
+    host_after = _host_cpu()
+    tel.log(_phases.dump("timed", decode_ms=round((time.perf_counter() - started) * 1000, 1), read_ms=read_ms, cpu=_cpu_model(),
+                         host=_host_delta(host_before, host_after)))
+    _phases.ON[0] = False
+    if payload.profile:
+        tel.log(_profile_decode(base_model, latents))
     stream = _VideoStream(torch, out, frames=frames, waveform=None, sample_rate=0, cancel=ctx.raise_if_cancelled,
                           progress=ctx.progress)  # fmt: skip
     try:
@@ -1570,6 +1591,95 @@ async def vae_round_trip(
         out.save_bytes(save_tensors({"latents": own.float().contiguous()}), media_type="application/octet-stream"),
         out.save_bytes(blob, media_type="application/octet-stream"),
     )
+
+
+def _host_cpu() -> tuple[list[int], str]:
+    """/proc/stat's aggregate cpu line and /proc/loadavg: in a container, the whole host's."""
+    try:
+        with open("/proc/stat") as f:
+            fields = [int(v) for v in f.readline().split()[1:]]
+        with open("/proc/loadavg") as f:
+            return fields, f.read().strip()
+    except OSError:
+        return [], "?"
+
+
+def _host_delta(before: tuple[list[int], str], after: tuple[list[int], str]) -> dict[str, object]:
+    a, b = before[0], after[0]
+    if len(a) < 8 or len(b) < 8:
+        return {"loadavg": after[1]}
+    d = [y - x for x, y in zip(a, b, strict=False)]
+    total = max(sum(d[:8]), 1)
+    idle = d[3] + d[4]
+    return {"busy_share": round(1 - idle / total, 3), "steal_share": round(d[7] / total, 3), "loadavg": after[1],
+            "cpus": os.cpu_count()}
+
+
+def _cpu_model() -> str:
+    try:
+        for line in open("/proc/cpuinfo"):
+            if line.startswith("model name"):
+                return line.split(":", 1)[1].strip() + f" x{os.cpu_count()}"
+    except OSError:
+        pass
+    return "?"
+
+
+def _profile_decode(base_model: H3VideoVAE, latents: Tensor) -> str:
+    """Evidence only: one more decode under torch.profiler; GPU busy (kernel union) against wall, and the host's
+    synchronizing calls."""
+    import json as _json
+    import sys as _sys
+
+    from torch.profiler import ProfilerActivity, profile
+
+    landed: list[Tensor] = []
+    try:
+        torch.cuda.synchronize()
+        with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA]) as prof:
+            started = time.perf_counter()
+            base_model.decode_latents(
+                latents.to(str(base_model.device), torch.float32),
+                on_chunk=lambda c: landed.append(c.clamp(0, 1).mul(255).round().to(torch.uint8).cpu()),
+            )
+            torch.cuda.synchronize()
+            wall = (time.perf_counter() - started) * 1000
+        spans: list[tuple[float, float]] = []
+        kernels = 0
+        host: dict[str, list[float]] = {}
+        for ev in prof.events():
+            kind = str(getattr(ev, "device_type", ""))
+            if kind.endswith("CUDA"):
+                spans.append((ev.time_range.start, ev.time_range.end))
+                kernels += 1
+            elif ev.name.startswith("cuda") or ev.name.startswith("cu"):
+                row = host.setdefault(ev.name, [0, 0.0])
+                row[0] += 1
+                row[1] += ev.time_range.elapsed_us() / 1000
+        spans.sort()
+        busy, end = 0.0, -1.0
+        for a, b in spans:
+            if a > end:
+                busy += b - a
+                end = b
+            elif b > end:
+                busy += b - end
+                end = b
+        top = sorted(host.items(), key=lambda kv: -kv[1][1])[:12]
+        names: dict[str, list[float]] = {}
+        for ev in prof.events():
+            if str(getattr(ev, "device_type", "")).endswith("CUDA"):
+                row = names.setdefault(ev.name[:60], [0, 0.0])
+                row[0] += 1
+                row[1] += ev.time_range.elapsed_us() / 1000
+        heavy = sorted(names.items(), key=lambda kv: -kv[1][1])[:20]
+        line = "CR306PROFILE " + _json.dumps({"wall_ms": round(wall, 1), "gpu_busy_ms": round(busy / 1000, 1),
+            "device_ops": kernels, "host_calls": {k: [v[0], round(v[1], 1)] for k, v in top},
+            "kernels": {k: [v[0], round(v[1], 1)] for k, v in heavy}})
+    except Exception as exc:  # evidence only: a profiler that cannot run says so
+        line = f"CR306PROFILE failed: {exc!r}"
+    print(line, file=_sys.stderr, flush=True)
+    return line
 
 
 class VaeEncodePicture(msgspec.Struct, kw_only=True):
