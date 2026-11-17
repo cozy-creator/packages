@@ -42,6 +42,8 @@ from diffusers.pipelines.ideogram4.pipeline_ideogram4 import (
 )
 from PIL import Image
 
+from . import latent_norm
+
 if TYPE_CHECKING:
     from diffusers.models._modeling_parallel import ParallelConfig
 
@@ -296,16 +298,16 @@ class Ideogram4(Model[IdeogramGraph]):
 
     @uses_components("vae")
     def decode(self, latents: torch.Tensor, *, width: int, height: int) -> Image.Image:
-        """The pipeline's decode: the VAE's BatchNorm statistics undone on the packed latents,
-        2x2 patches unpacked, then the decoder."""
+        """Ideogram's decode (`Ideogram4Pipeline._decode`): its own latent normalization undone on the packed
+        latents (`latent_norm`; Diffusers undoes the VAE's BatchNorm statistics instead), 2x2 patches unpacked,
+        then the decoder."""
         vae = self.graph.components["vae"]
         device = torch.device(str(self.device))
         rows, columns = height // PATCH, width // PATCH
         with torch.inference_mode():
             z = latents.to(device)
-            mean = vae.bn.running_mean.view(1, 1, -1).to(z)  # type: ignore[union-attr]  # tracked: it keeps its statistics
-            std = torch.sqrt(vae.bn.running_var + vae.config["batch_norm_eps"]).view(1, 1, -1).to(z)
-            z = z * std + mean
+            scale = torch.tensor(latent_norm.SCALE, dtype=z.dtype, device=device).view(1, 1, -1)
+            z = z * scale + torch.tensor(latent_norm.SHIFT, dtype=z.dtype, device=device).view(1, 1, -1)
             channels = z.shape[-1] // 4
             z = z.view(1, rows, columns, 2, 2, channels).permute(0, 5, 1, 3, 2, 4).reshape(1, channels, rows * 2, columns * 2)
             pixels = vae.decode(z.to(vae.dtype), return_dict=False)[0]
