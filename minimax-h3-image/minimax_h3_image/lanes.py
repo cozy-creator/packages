@@ -370,12 +370,17 @@ async def abliterate(ctx: Context, payload: Abliteration, expander: H3ImagePE, *
                 ctx.raise_if_cancelled()
                 if out.has(COMPONENT, key):
                     continue
-                value = _plain(src, COMPONENT, key).float()
-                if key == _EMBED:
-                    value -= (value @ r)[:, None] * r[None, :]
+                value = _plain(src, COMPONENT, key)
+                if key == _EMBED:  # each token's row alone, a block of rows at a time: 1.3B values
+                    for rows in value.split(1 << 14):
+                        block = rows.float()
+                        rows.copy_(block - (block @ r)[:, None] * r[None, :])
                 else:
-                    value -= r[:, None] * (r @ value)[None, :]
-                _put(out, COMPONENT, key, value.to(torch.bfloat16))
+                    block = value.float()
+                    value = (block - r[:, None] * (r @ block)[None, :]).to(torch.bfloat16)
+                    del block
+                _put(out, COMPONENT, key, value)
+                del value
                 ctx.progress(done - 1, len(writers))
         artifact = ctx.adopt_model(out)
     tel.log("abliterated", layer=layer, writers=len(writers))
