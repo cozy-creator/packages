@@ -34,8 +34,8 @@ app = App()
 
 #: MATLOWAI's ORB360 step 1500 (hf://MATLOWAI/MiniMax-H3-ORB360-CardSpin), trained on H3's Ref2VA DiT, clockwise only.
 ORB360 = "matlowai/orb360@0.1.1"
-#: What the video is, for its viewer: one clockwise turn whose end is its start.
-TURN = {"degrees": 360, "direction": "cw", "loops": True}
+#: What the video is, for its viewer (its `orbit` metadata): one clockwise turn whose end is its start, so the canvas turns it on drag.
+TURN: dict[str, str | int | bool] = {"degrees": 360, "direction": "cw", "loops": True}
 #: The share of the turn the loop's join redraws, from about 330 degrees (se-114: a longer one reversed and stalled).
 JOINED = 1 / 12
 
@@ -273,6 +273,7 @@ async def orbit(ctx: Context, payload: Orbit, out: Outputs, tel: Telemetry) -> O
     else:
         turned = await bridged(payload, subject, text, out, tel)
     with tel.stage("writing the turn"):
-        saved = out.save_video_stream(silent(turned.frames))
+        # Every frame a keyframe, so the canvas shows any angle at once.
+        saved = out.save_video_stream(silent(turned.frames), keyframe_interval=1)
     tel.log("orbit", method=ENDS, backdrop=plain or "scene", frames=saved.frame_count, seam_db=round(turned.seam_db, 2))
-    return OrbitResult(saved.video, list(dict.fromkeys(turned.warnings)))
+    return OrbitResult(saved.video.with_metadata({"orbit": TURN}), list(dict.fromkeys(turned.warnings)))
