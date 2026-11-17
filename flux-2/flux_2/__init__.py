@@ -217,3 +217,13 @@ def upscale(ctx: Context, payload: UpscaleInput, model: Flux2, turbo_lora: Flux2
         asset = ImageFile.from_image(image, format="png")
     tel.log("upscale", source=f"{picture.width}x{picture.height}", width=width, height=height, denoise=payload.denoise)
     return ImageResult(asset, width, height, seed, UPSCALE_PROMPT)
+
+
+# se-157 proof only, never merged: the upstream reference on the same weights (`parity.py`).
+from .parity import RefFlux2 as _RefFlux2, RefInput as _RefInput, reference as _reference  # noqa: E402
+
+
+@app.entrypoint(defaults={"model": _DEV}, components={"model": ("transformer", "text_encoder", "vae")})
+def reference(ctx: Context, payload: _RefInput, model: _RefFlux2, tel: Telemetry) -> ImageResult:
+    """se-157: Diffusers' Flux2Pipeline as fal's Turbo card runs it, beside the package."""
+    return _reference(ctx, payload, model, tel)

@@ -256,3 +256,13 @@ def image(ctx: Context, payload: ImageBox, full: Krea2DiT, model: Krea2DiT, text
     adapters = {"edit": edit, "depth": depth, "pose": pose, "lineart": lineart, "inpaint": inpaint}
     return _generate(ctx, request, model if payload.turbo else full, text_encoder, vae, adapters, tel, adj,
                      distilled=payload.turbo)
+
+
+# se-157 proof only, never merged: the upstream reference on the same weights (`parity.py`).
+from .parity import RefInput as _RefInput, RefKrea2 as _RefKrea2, reference as _reference  # noqa: E402
+
+
+@app.entrypoint(defaults={"model": _TURBO_MODEL}, components={"model": ("transformer", "text_encoder", "vae")})
+def reference(ctx: Context, payload: _RefInput, model: _RefKrea2, tel: Telemetry) -> ImageResult:
+    """se-157: Diffusers' Krea2Pipeline whole, beside the package."""
+    return _reference(ctx, payload, model, tel)

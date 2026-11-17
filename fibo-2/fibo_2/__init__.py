@@ -223,3 +223,13 @@ def image(ctx: Context, payload: ImageBox, edit_upsampler: Captioner, full: Fibo
     request = kind(prompt=payload.instructions, aspect_ratio=payload.aspect_ratio,
                    seed=payload.seed, prompt_upsampling=payload.prompt_upsampling)
     return _generate(ctx, function, request, dit, upsampler, edit_upsampler, tel, adj)
+
+
+# se-157 proof only, never merged: the upstream reference on the same weights (`parity.py`).
+from .parity import RefFibo2 as _RefFibo2, RefInput as _RefInput, reference as _reference  # noqa: E402
+
+
+@app.entrypoint(defaults={"model": _DEV}, components={"model": _MODEL})
+def reference(ctx: Context, payload: _RefInput, model: _RefFibo2, tel: Telemetry) -> ImageResult:
+    """se-157: Diffusers' BriaFibo2Pipeline whole, beside the package."""
+    return _reference(ctx, payload, model, tel)

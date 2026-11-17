@@ -351,3 +351,13 @@ def upscale(ctx: Context, payload: UpscaleInput, model: Klein, tel: Telemetry,
         asset = ImageFile.from_image(image, format="png")
     tel.log("upscale", source=f"{picture.width}x{picture.height}", width=width, height=height, denoise=payload.denoise)
     return ImageResult(asset, width, height, seed, UPSCALE_PROMPT)
+
+
+# se-157 proof only, never merged: the upstream reference on the same weights (`parity.py`).
+from .parity import RefInput as _RefInput, RefKlein as _RefKlein, reference as _reference  # noqa: E402
+
+
+@app.entrypoint(defaults={"model": _DISTILLED}, components={"model": _KLEIN})
+def reference(ctx: Context, payload: _RefInput, model: _RefKlein, tel: Telemetry) -> ImageResult:
+    """se-157: BFL's pipeline (bfc8889) over Diffusers' unmodified modules, beside the package."""
+    return _reference(ctx, payload, model, tel)
