@@ -266,3 +266,16 @@ from .parity import RefInput as _RefInput, RefKrea2 as _RefKrea2, reference as _
 def reference(ctx: Context, payload: _RefInput, model: _RefKrea2, tel: Telemetry) -> ImageResult:
     """se-157: Diffusers' Krea2Pipeline whole, beside the package."""
     return _reference(ctx, payload, model, tel)
+
+
+from cozy_runtime.accel import hold_dtype as _hold_dtype  # noqa: E402
+import torch as _torch  # noqa: E402
+
+
+@app.entrypoint(defaults={"model": _TURBO_MODEL, "text_encoder": _TURBO_MODEL, "vae": _TURBO_MODEL},
+                components={"model": _KREA, "text_encoder": _TEXT, "vae": _VAE})
+def probe_bf16(ctx: Context, payload: TurboInput, model: Krea2DiT, text_encoder: Krea2TextEncoder, vae: Krea2VAE,
+               tel: Telemetry, adj: Adjustments) -> ImageResult:
+    """se-157: `generate_turbo` with the DiT served all-bf16 (as Krea's inference.py casts it), no adapters."""
+    _hold_dtype(model.graph.components["transformer"], _torch.bfloat16)
+    return _generate(ctx, payload, model, text_encoder, vae, {}, tel, adj, distilled=True)
