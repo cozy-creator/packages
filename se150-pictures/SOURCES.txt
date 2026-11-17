@@ -1,0 +1,4 @@
+se-150 measurement inputs (not for merge), from Wikimedia Commons:
+ts.jpg  File:Times_Square,_New_York_City_(HDR).jpg (3896x2606, original)
+mw.jpg  File:Milky_Way_Night_Sky_Black_Rock_Desert_Nevada.jpg (2912x4078, original)
+lm.jpg  File:Lower_Manhattan_skyline_-_June_2017.jpg (9507x3625, Lanczos to 8192x3124, JPEG q92)
