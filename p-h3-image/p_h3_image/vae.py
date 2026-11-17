@@ -74,8 +74,13 @@ class ImageDecoder(MiniMaxH3VideoViTDecoder3d):
         super().__init__(patch_size_t=1, **config)  # type: ignore[arg-type]  # the VAE's decoder keywords
 
 
+#: The encoder's device peak beside its moments, in tiles of them (`split`'s `holds`), before a pass is measured: a
+#: 256 px tile's 128-channel float16 activations, about four held at once (64 MiB), over its 48x16x16 moments (24 KiB).
+ENCODE_HOLDS = 2700
+
+
 class ImageVAE(AutoencoderKLMiniMaxH3):
-    """`AutoencoderKLPH3Image`, its tiles decoded as one batch."""
+    """`AutoencoderKLPH3Image`, its tiles encoded and decoded as one batch."""
 
     @classmethod
     def build(cls, config: Mapping[str, object]) -> ImageVAE:
@@ -93,6 +98,36 @@ class ImageVAE(AutoencoderKLMiniMaxH3):
     def _encode(self, x: torch.Tensor) -> torch.Tensor:
         """A picture is one frame: one clip."""
         return self._encode_clip(x)
+
+    def _encode_clip(self, x: torch.Tensor) -> torch.Tensor:
+        """Diffusers' tiled encode with the tiles through the encoder as ONE batch, cut as the device holds them (cr-323).
+        One by one, a 256 px tile is too little work for the card and its launches wait on the host (8 MP: 228 tiles at
+        ~10 ms each on an RTX 5090, whatever the conv work). Every tile is the same size and the encoder is
+        batch-independent (its GroupNorm normalizes each frame of each tile alone), so each tile's moments are the
+        per-tile loop's, stitched by the unchanged `_stitch_tiles`."""
+        if not self.use_tiling or x.shape[2] != 1:
+            return super()._encode_clip(x)
+        ys, heights, y_overlaps = self._split_tiles(
+            x.shape[-2], self.tile_sample_min_height, self.tile_sample_min_overlap_height
+        )
+        xs, widths, x_overlaps = self._split_tiles(
+            x.shape[-1], self.tile_sample_min_width, self.tile_sample_min_overlap_width
+        )
+        tiles = [
+            x[..., y : y + h, left : left + w]
+            for y, h in zip(ys, heights, strict=True)
+            for left, w in zip(xs, widths, strict=True)
+        ]
+        batch = tiles[0] if len(tiles) == 1 else torch.cat(tiles, dim=0)
+        moments = split(self._encode_tiles, batch, Cut(0), holds=ENCODE_HOLDS).split(x.shape[0], dim=0)
+        columns = len(xs)
+        rows = [moments[row * columns : (row + 1) * columns] for row in range(len(ys))]
+        ratio = self.spatial_compression_ratio
+        return self._stitch_tiles(rows, [o // ratio for o in y_overlaps], [o // ratio for o in x_overlaps])
+
+    def _encode_tiles(self, batch: torch.Tensor) -> torch.Tensor:
+        moments: torch.Tensor = self.quant_conv(self.encoder(batch))
+        return moments
 
     def decode_image(self, latents: torch.Tensor) -> torch.Tensor:
         """Normalized `(1, 24, 1, h, w)` latents to `(1, 3, H, W)` RGB in 0..1."""
