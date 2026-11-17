@@ -19,6 +19,7 @@ from .model import COMPONENTS, DEFAULT_STEPS, FPS, Pan2, Reasoner
 
 app = App()
 MODEL = "ifm/pan2@0.3.0"
+REASONER = "huihui-ai/huihui-qwen3.5-9b-abliterated@0.1.0"
 
 from . import lanes as lanes  # noqa: E402  # the `curve` lane function; it registers on `app`
 
@@ -75,8 +76,10 @@ def caption(text: str) -> str:
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
 
 
-# The reasoner only for a request that upsamples, which it rewrites into the event timeline (cl-1103).
-@app.tool(label="PAN2", named="video", defaults={"model": MODEL, "reasoner": "qwen/qwen3.5-9b@0.2.0"},
+# The reasoner only for a request that upsamples, which it rewrites into the event timeline (cl-1103). It is
+# huihui-ai's abliterated Qwen3.5-9B by default (Paul, 11-17: "use abliterated models wherever possible"); Qwen's own
+# is `model.reasoner=qwen/qwen3.5-9b@0.2.0`.
+@app.tool(label="PAN2", named="video", defaults={"model": MODEL, "reasoner": REASONER},
           components={"model": COMPONENTS}, needs={"reasoner": "request.prompt_upsampling"}, memoize=True)
 def generate(ctx: Context, payload: Generate, model: Pan2, reasoner: Reasoner, out: Outputs,
              tel: Telemetry, adj: Adjustments) -> VideoResult:

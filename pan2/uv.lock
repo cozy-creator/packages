@@ -452,7 +452,7 @@ wheels = [
 
 [[package]]
 name = "pan2"
-version = "0.3.0rc1"
+version = "0.3.0rc2"
 source = { editable = "." }
 dependencies = [
     { name = "cozy-runtime", extra = ["adapters", "media"] },
