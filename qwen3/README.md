@@ -53,7 +53,7 @@ divergence from the stock model are the author's own numbers (Heretic's 100 harm
 | `heretic-org/qwen3.8-27b-heretic-ara` (default) | Qwen3.8-27B | 27.78B dense | 55.6 GB | 0/100 (99) | 0.054 |
 | `llmfan46/qwen3.6-35b-a3b-uncensored-heretic-native-mtp-preserved` | Qwen3.6-35B-A3B | 35.95B, 256 experts, ~3B active | 71.9 GB | 10/100 (83) | 0.002 |
 | `llmfan46/qwen3.6-27b-uncensored-heretic-v2-native-mtp-preserved` | Qwen3.6-27B | 27.78B dense | 55.6 GB | 6/100 (92) | 0.002 |
-| `darrellbest/qwen3.5-9b-heretic` | Qwen3.5-9B | 9B dense | 19.3 GB | 5/100 (100) | 0.040 |
+| `huihui-ai/huihui-qwen3.5-9b-abliterated` | Qwen3.5-9B | 9B dense | 19.3 GB | not stated | not stated |
 | `huihui-ai/huihui-qwen3.5-0.8b-abliterated` | Qwen3.5-0.8B | 0.8B dense | 1.7 GB | not stated | not stated |
 
 Each keeps the vision tower (unedited, by its card), video processing and multi-token-prediction head. The 35B-A3B reads images and video
@@ -73,7 +73,7 @@ are written from the bf16 commit on the same machine:
 cozy model upload hf://heretic-org/Qwen3.8-27B-heretic-ara@2dc9b364104881cbb85e390f00195ba6b9d745e9 heretic-org/qwen3.8-27b-heretic-ara --lane bf16 --mirror https://huggingface.co/heretic-org/Qwen3.8-27B-heretic-ara --on <name>
 cozy model upload hf://llmfan46/Qwen3.6-35B-A3B-uncensored-heretic-Native-MTP-Preserved@9599ac17d26daf33daf0fdd8f6c897ff4c6dc89a llmfan46/qwen3.6-35b-a3b-uncensored-heretic-native-mtp-preserved --lane bf16 --mirror https://huggingface.co/llmfan46/Qwen3.6-35B-A3B-uncensored-heretic-Native-MTP-Preserved --on <name>
 cozy model upload hf://llmfan46/Qwen3.6-27B-uncensored-heretic-v2-Native-MTP-Preserved@4928dd14830859583b97f35dfaba9018f7310b3e llmfan46/qwen3.6-27b-uncensored-heretic-v2-native-mtp-preserved --lane bf16 --mirror https://huggingface.co/llmfan46/Qwen3.6-27B-uncensored-heretic-v2-Native-MTP-Preserved --on <name>
-cozy model upload hf://darrellbest/Qwen3.5-9B-Heretic@c0e25d8788b25629582e507a2d51fa69448e1295 darrellbest/qwen3.5-9b-heretic --lane bf16 --mirror https://huggingface.co/darrellbest/Qwen3.5-9B-Heretic --on <name>
+cozy model upload hf://huihui-ai/Huihui-Qwen3.5-9B-abliterated@05b9e7c9b978ba29bdb8f50a49c30e4b91183339 huihui-ai/huihui-qwen3.5-9b-abliterated --lane bf16 --mirror https://huggingface.co/huihui-ai/Huihui-Qwen3.5-9B-abliterated --on <name>
 cozy model upload hf://huihui-ai/Huihui-Qwen3.5-0.8B-abliterated@4813135658fe51b2e535b8e77927d2f23909ce42 huihui-ai/huihui-qwen3.5-0.8b-abliterated --lane bf16 --mirror https://huggingface.co/huihui-ai/Huihui-Qwen3.5-0.8B-abliterated --on <name>
 cozy model quantize <org/name>@sha256:<bf16 commit> --lane int8 --package ./qwen3 --on <name>    # and nvfp4, w4a8
 ```
