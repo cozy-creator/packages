@@ -180,10 +180,10 @@ class ImageBox(msgspec.Struct, kw_only=True):
     seed: Seed | None = None
 
 
-# Each checkpoint is built, and its weights fetched, only when a box asks for it.
+# Each checkpoint is fetched only for a box that uses it (cl-1103): Dev (`model`) with `turbo`, else the full model.
 @app.tool(label="Image", named="image", defaults={"full": _FULL, "model": _DEV},
-          components={"full": ("model",), "model": ("model",)}, on_demand=("full", "model"),
-          memoize=True)  # fmt: skip
+          components={"full": ("model",), "model": ("model",)},
+          needs={"full": "!request.turbo", "model": "request.turbo"}, memoize=True)  # fmt: skip
 def image(ctx: Context, payload: ImageBox, full: HiDreamO1, model: HiDreamO1, tel: Telemetry,
           adj: Adjustments) -> ImageResult:
     """HiDream-O1-Image on a canvas: Dev, or the full model, which loads only when asked for."""
