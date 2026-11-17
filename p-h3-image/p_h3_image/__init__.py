@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
-from typing import Annotated
+from typing import Annotated, Literal
 
 import msgspec
 from cozy_runtime.author import Adjustments, Context, Seed, Telemetry
@@ -113,6 +113,16 @@ class UpscaleInput(msgspec.Struct, kw_only=True):
     #: `start`); 1 redraws it from noise. 0.85 runs the last 3 of 8 (se-123).
     denoise: Annotated[float, msgspec.Meta(gt=0, le=1), Advanced()] = 0.85
     seed: Seed | None = None
+    #: se-149 exploration: Picture 1 as the canvas (the blow-up), or held to 1-8 MP as an edit reads it (1 MP here).
+    x_reference: Literal["canvas", "mp1"] = "canvas"
+    #: se-149 exploration: the prompt.
+    x_prompt: Literal["keep", "restore"] = "keep"
+
+
+#: se-149 exploration: a restoration instruction.
+RESTORE_PROMPT = ("Restore <Picture 1> as a sharp, high-resolution picture: remove the JPEG compression artifacts, "
+                  "blockiness, blur and noise, and render clean, crisp, finely detailed edges and textures. Keep the same "
+                  "subject, composition, framing, colours and style.")
 
 
 @app.tool(label="Upscale", named="image", defaults={"model": MODEL}, components={"model": IMAGE_COMPONENTS},
@@ -125,19 +135,24 @@ def upscale(ctx: Context, payload: UpscaleInput, model: PH3Image, tel: Telemetry
         picture = payload.image.read().convert("RGB")
     width, height = SIZES.fit(adj, picture.size, payload.megapixels * MEGAPIXEL)
     seed = _Request(seed=payload.seed).drawn_seed()
+    shown = (width, height) if payload.x_reference == "canvas" else size_in_range(*picture.size, *PICTURE_PIXELS)
+    prompt = UPSCALE_PROMPT if payload.x_prompt == "keep" else RESTORE_PROMPT
     with tel.stage("encoding pictures"):
-        conditions = model.encode_pictures([resized(picture, (width, height))])
+        conditions = model.encode_pictures([resized(picture, shown)])
     first = min(sum(sigma > payload.denoise for sigma in SIGMAS[:-1]), STEPS - 1)
+    start = None
+    if first:
+        start = conditions[0] if shown == (width, height) else model.encode_pictures([resized(picture, (width, height))])[0]
     with tel.stage("encoding prompt"):
-        embeds, tags = model.encode_text(UPSCALE_PROMPT, [picture])
+        embeds, tags = model.encode_text(prompt, [picture])
     ctx.raise_if_cancelled()
     with tel.stage("generating image"):
         latents = model.denoise(embeds, tags, conditions, width=width, height=height, seed=seed,
-                                on_step=lambda step: ctx.progress(step, STEPS),
-                                start=conditions[0] if first else None, first=first)  # fmt: skip
+                                on_step=lambda step: ctx.progress(step, STEPS), start=start, first=first)  # fmt: skip
     with tel.stage("decoding image"):
         image = model.decode(latents)
     with tel.stage("saving image"):
         asset = ImageFile.from_image(image, format="png")
-    tel.log("upscale", source=f"{picture.width}x{picture.height}", width=width, height=height, steps=STEPS - first)
-    return ImageResult(asset, width, height, seed, UPSCALE_PROMPT)
+    tel.log("upscale", source=f"{picture.width}x{picture.height}", width=width, height=height, steps=STEPS - first,
+            reference=payload.x_reference, prompt=payload.x_prompt)
+    return ImageResult(asset, width, height, seed, prompt)

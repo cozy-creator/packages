@@ -673,6 +673,34 @@ class UpscaleInput(msgspec.Struct, kw_only=True):
     #: `SdxlModel.generate`'s `strength`: the share of the 30 steps run over the picture (se-123).
     denoise: Annotated[float, msgspec.Meta(gt=0, le=1), Advanced()] = 0.2
     seed: Seed | None = None
+    #: se-149 exploration: a first pass at 1 MP from the picture at this strength (0: none).
+    x_first: Annotated[float, msgspec.Meta(ge=0, le=1)] = 0.0
+    #: se-149 exploration: the last pass in tiles of this side, overlapping by an eighth, feathered (0: one canvas).
+    x_tile: Annotated[int, msgspec.Meta(ge=0, le=2048)] = 0
+
+
+def _start(picture: PILImage.Image) -> torch.Tensor:
+    """A picture as `SdxlModel.generate`'s `start`: [1, 3, H, W] in -1..1."""
+    pixels = torch.frombuffer(bytearray(picture.convert("RGB").tobytes()), dtype=torch.uint8).view(picture.height, picture.width, 3)
+    return pixels.permute(2, 0, 1)[None].float() / 127.5 - 1.0
+
+
+def _spans(size: int, tile: int, overlap: int) -> list[int]:
+    """Tile origins covering `size`, evenly spread, each overlapping the next by at least `overlap`."""
+    if size <= tile:
+        return [0]
+    n = math.ceil((size - overlap) / (tile - overlap))
+    return [round(i * (size - tile) / (n - 1) / 8) * 8 for i in range(n)]
+
+
+def _feather(size: int, overlap: int, first: bool, last: bool) -> torch.Tensor:
+    ramp = torch.ones(size)
+    edge = torch.linspace(0, 1, overlap + 2)[1:-1]
+    if not first:
+        ramp[:overlap] = edge
+    if not last:
+        ramp[-overlap:] = edge.flip(0)
+    return ramp
 
 
 @app.tool(label="Upscale", named="image", defaults=_DEFAULTS, memoize=True)
@@ -683,22 +711,48 @@ def upscale(ctx: Context, payload: UpscaleInput, model: SdxlModel, tel: Telemetr
     with tel.stage("reading picture"):
         picture = payload.image.read()
     width, height = _SIZES.fit(adj, picture.size, payload.megapixels * MEGAPIXEL)
-    canvas = picture.resize((width, height), PILImage.Resampling.LANCZOS)
-    pixels = torch.frombuffer(bytearray(canvas.tobytes()), dtype=torch.uint8).view(height, width, 3)
-    start = (pixels.permute(2, 0, 1)[None].float() / 127.5 - 1.0)
     seed = payload.seed if payload.seed is not None else ImageRequest(prompt="").drawn_seed()
     with tel.stage("tokenize"):
         tokens = _tokenize(model.tokenizers, UPSCALE_PROMPT)
         negative = _tokenize(model.tokenizers, UPSCALE_NEGATIVE)
+
+    def img2img(start: PILImage.Image, strength: float) -> torch.Tensor:
+        image, *_ = model.generate(tokens, negative, width=start.width, height=start.height, steps=30, guidance=7.0,
+                                   hidiffusion=False, seed=seed, progress=ctx.progress, start=_start(start),
+                                   strength=strength)  # fmt: skip
+        return image[0].float().cpu()
+
+    def pil(image: torch.Tensor) -> PILImage.Image:
+        rgb = ((image / 2 + 0.5).clamp(0, 1) * 255).round().to(torch.uint8).permute(1, 2, 0).contiguous()
+        return PILImage.fromarray(rgb.numpy())
+
+    if payload.x_first:
+        w1, h1 = _SIZES.fit(adj, picture.size, MEGAPIXEL)
+        with tel.stage("first pass"):
+            picture = pil(img2img(picture.convert("RGB").resize((w1, h1), PILImage.Resampling.LANCZOS), payload.x_first))
+    canvas = picture.convert("RGB").resize((width, height), PILImage.Resampling.LANCZOS)
     with tel.stage("generate"):
-        image, *_ = model.generate(tokens, negative, width=width, height=height, steps=30, guidance=7.0,
-                                   hidiffusion=False, seed=seed, progress=ctx.progress, start=start,
-                                   strength=payload.denoise)  # fmt: skip
+        if not payload.x_tile or (width <= payload.x_tile and height <= payload.x_tile):
+            out = img2img(canvas, payload.denoise)
+        else:
+            tw, th = min(payload.x_tile, width), min(payload.x_tile, height)
+            overlap = payload.x_tile // 8
+            total, weight = torch.zeros(3, height, width), torch.zeros(1, height, width)
+            ys, xs = _spans(height, th, overlap), _spans(width, tw, overlap)
+            for i, y in enumerate(ys):
+                for j, x in enumerate(xs):
+                    ctx.raise_if_cancelled()
+                    tile = img2img(canvas.crop((x, y, x + tw, y + th)), payload.denoise)
+                    w = _feather(th, overlap, i == 0, i == len(ys) - 1)[:, None] * _feather(tw, overlap, j == 0, j == len(xs) - 1)[None]
+                    total[:, y:y + th, x:x + tw] += tile * w
+                    weight[:, y:y + th, x:x + tw] += w
+            out = total / weight
+    image = out[None]
     rgb = ((image[0].float() / 2 + 0.5).clamp(0, 1) * 255).round().to(torch.uint8).permute(1, 2, 0).contiguous()
     _integrity(image, rgb, tel)
     with tel.stage("saving image"):
         asset = ImageFile.from_image(ImageFrame(width, height, bytes(rgb.cpu().numpy().tobytes())), format="png")
-    tel.log("upscale", source=f"{picture.width}x{picture.height}", width=width, height=height, denoise=payload.denoise)
+    tel.log("upscale", width=width, height=height, denoise=payload.denoise, first=payload.x_first, tile=payload.x_tile)
     return ImageResult(asset, width, height, seed, UPSCALE_PROMPT)
 
 

@@ -314,6 +314,16 @@ class UpscaleInput(msgspec.Struct, kw_only=True):
     #: `Klein.denoise`'s `strength`: the noise the picture starts under; 1 redraws it from noise (se-123).
     denoise: Annotated[float, msgspec.Meta(gt=0, le=1), Advanced()] = 0.35
     seed: Seed | None = None
+    #: se-149 exploration: the reference as the canvas (the blow-up), the picture as Klein prepares it, or ~1 MP.
+    x_reference: Literal["canvas", "native", "mp1"] = "canvas"
+    #: se-149 exploration: the prompt.
+    x_prompt: Literal["keep", "restore"] = "keep"
+
+
+#: se-149 exploration: a restoration instruction.
+RESTORE_PROMPT = (f"Restore {tagged(1)} as a sharp, high-resolution picture: remove the JPEG compression artifacts, "
+                  "blockiness, blur and noise, and render clean, crisp, finely detailed edges and textures. Keep the same "
+                  "subject, composition, framing, colours and style.")
 
 
 @app.tool(label="Upscale", named="image", defaults={"model": _DISTILLED}, components={"model": _KLEIN},
@@ -328,20 +338,26 @@ def upscale(ctx: Context, payload: UpscaleInput, model: Klein, tel: Telemetry,
     canvas = picture.resize((width, height), PILImage.Resampling.LANCZOS)
     seed = payload.seed if payload.seed is not None else ImageRequest(prompt="").drawn_seed()
     model.hold_vae(tel)
+    shown = {"canvas": canvas, "native": prepare_reference(picture)[0],
+             "mp1": picture.resize(SIZES.fit(adj, picture.size, MEGAPIXEL), PILImage.Resampling.LANCZOS)}[payload.x_reference]
+    prompt = UPSCALE_PROMPT if payload.x_prompt == "keep" else RESTORE_PROMPT
     with tel.stage("encoding reference images"):
-        references = model.encode_references([canvas])
+        references = model.encode_references([shown])
+        start = None
+        if payload.denoise < 1:
+            start = references[0] if payload.x_reference == "canvas" else model.encode_references([canvas])[0]
     with tel.stage("encoding prompt"):
-        embeds = model.encode(UPSCALE_PROMPT)
+        embeds = model.encode(prompt)
     ctx.raise_if_cancelled()
     with tel.stage("generating image"):
         tokens = model.denoise(
             embeds, None, references, width=width, height=height, steps=_STEPS["generate_turbo"][0], guidance=None,
-            seed=seed, progress=ctx.progress, start=references[0] if payload.denoise < 1 else None,
-            strength=payload.denoise,
+            seed=seed, progress=ctx.progress, start=start, strength=payload.denoise,
         )
     with tel.stage("decoding image"):
         image = model.decode(tokens, width=width, height=height)
     with tel.stage("saving image"):
         asset = ImageFile.from_image(image, format="png")
-    tel.log("upscale", source=f"{picture.width}x{picture.height}", width=width, height=height, denoise=payload.denoise)
-    return ImageResult(asset, width, height, seed, UPSCALE_PROMPT)
+    tel.log("upscale", source=f"{picture.width}x{picture.height}", width=width, height=height, denoise=payload.denoise,
+            reference=payload.x_reference, prompt=payload.x_prompt)
+    return ImageResult(asset, width, height, seed, prompt)

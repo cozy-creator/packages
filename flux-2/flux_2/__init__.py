@@ -176,6 +176,16 @@ class UpscaleInput(msgspec.Struct, kw_only=True):
     #: `Flux2.denoise`'s `start`: the time the picture starts at; 1 redraws it from noise (se-123).
     denoise: Annotated[float, msgspec.Meta(gt=0, le=1), Advanced()] = 0.6
     seed: Seed | None = None
+    #: se-149 exploration: the reference as the canvas (the blow-up), the picture as BFL prepares it, or ~1 MP.
+    x_reference: Literal["canvas", "native", "mp1"] = "canvas"
+    #: se-149 exploration: the prompt.
+    x_prompt: Literal["keep", "restore"] = "keep"
+
+
+#: se-149 exploration: a restoration instruction.
+RESTORE_PROMPT = ("Restore image 1 as a sharp, high-resolution picture: remove the JPEG compression artifacts, blockiness, "
+                  "blur and noise, and render clean, crisp, finely detailed edges and textures. Keep the same subject, "
+                  "composition, framing, colours and style.")
 
 
 @app.tool(label="Upscale", named="image", defaults={"model": _DEV, "turbo_lora": _TURBO},
@@ -190,13 +200,16 @@ def upscale(ctx: Context, payload: UpscaleInput, model: Flux2, turbo_lora: Flux2
     canvas = picture.resize((width, height), PILImage.Resampling.LANCZOS)
     seed = payload.seed if payload.seed is not None else ImageRequest(prompt="").drawn_seed()
     model.hold_vae(tel)
+    shown = {"canvas": canvas, "native": picture,
+             "mp1": picture.resize(SIZES.fit(adj, picture.size, MEGAPIXEL), PILImage.Resampling.LANCZOS)}[payload.x_reference]
+    prompt = UPSCALE_PROMPT if payload.x_prompt == "keep" else RESTORE_PROMPT
     with tel.stage("encoding reference images"):
-        references = model.encode_references(prepare_references([canvas]))
+        references = model.encode_references(prepare_references([shown]))
         start = None
         if payload.denoise < 1:
             start = model.encode_references([canvas])[0]
     with tel.stage("encoding prompt"):
-        embeds = model.encode(UPSCALE_PROMPT)
+        embeds = model.encode(prompt)
     ctx.raise_if_cancelled()
     timesteps = schedule(8, (height // PATCH) * (width // PATCH), TURBO_SIGMAS)
     if start is not None:
@@ -209,5 +222,6 @@ def upscale(ctx: Context, payload: UpscaleInput, model: Flux2, turbo_lora: Flux2
         image = model.decode(latents, width=width, height=height)
     with tel.stage("saving image"):
         asset = ImageFile.from_image(image, format="png")
-    tel.log("upscale", source=f"{picture.width}x{picture.height}", width=width, height=height, denoise=payload.denoise)
-    return ImageResult(asset, width, height, seed, UPSCALE_PROMPT)
+    tel.log("upscale", source=f"{picture.width}x{picture.height}", width=width, height=height, denoise=payload.denoise,
+            reference=payload.x_reference, prompt=payload.x_prompt)
+    return ImageResult(asset, width, height, seed, prompt)

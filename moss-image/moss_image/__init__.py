@@ -305,6 +305,8 @@ class UpscaleInput(msgspec.Struct, kw_only=True):
     #: `MossImage.denoise`'s `strength`: the noise the picture starts under (se-123).
     denoise: Annotated[float, msgspec.Meta(gt=0, le=1), Advanced()] = 0.4
     seed: Seed | None = None
+    #: se-149 exploration: a first pass at 1 MP from the picture at this strength (0: none), then `denoise` at the size.
+    x_first: Annotated[float, msgspec.Meta(ge=0, le=1)] = 0.0
 
 
 @app.tool(label="Upscale", named="image", defaults=_DEFAULTS, components=_COMPONENTS, memoize=True)
@@ -315,6 +317,10 @@ def upscale(ctx: Context, payload: UpscaleInput, model: MossImage, tel: Telemetr
         picture = payload.image.read()
     width, height = SIZES.fit(adj, picture.size, payload.megapixels * MEGAPIXEL)
     seed = payload.seed if payload.seed is not None else ImageRequest(prompt="").drawn_seed()
+    if payload.x_first:
+        w1, h1 = SIZES.fit(adj, picture.size, MEGAPIXEL)
+        picture = remade(ctx, model, tel, picture, UPSCALE_PROMPT, "", width=w1, height=h1, steps=STEPS,
+                         guidance=GUIDANCE, seed=seed, strength=payload.x_first)  # fmt: skip
     result = remake(ctx, model, tel, picture, UPSCALE_PROMPT, "", width=width, height=height, steps=STEPS,
                     guidance=GUIDANCE, seed=seed, strength=payload.denoise)  # fmt: skip
     tel.log("upscale", source=f"{picture.width}x{picture.height}", width=width, height=height, denoise=payload.denoise)
@@ -358,6 +364,17 @@ def remake(ctx: Context, model: MossImage, tel: Telemetry, picture: PILImage.Ima
     """Image-to-image: the picture Lanczos to `width` x `height`, encoded, noised to the sigma `strength` (or the
     schedule's last `denoise` fraction) and denoised from there (`MossImage.denoise`'s `start`), CFG against
     `negative_prompt`."""
+    image = remade(ctx, model, tel, picture, prompt, negative_prompt, width=width, height=height, steps=steps,
+                   guidance=guidance, seed=seed, strength=strength, denoise=denoise)  # fmt: skip
+    with tel.stage("saving image"):
+        asset = ImageFile.from_image(image, format="png")
+    return ImageResult(asset, width, height, seed, prompt)
+
+
+def remade(ctx: Context, model: MossImage, tel: Telemetry, picture: PILImage.Image, prompt: str,
+           negative_prompt: str, *, width: int, height: int, steps: int, guidance: float, seed: int,
+           strength: float = 1.0, denoise: float | None = None) -> PILImage.Image:
+    """`remake`'s picture."""
     model.hold_vae(tel)
     with tel.stage("encoding picture"):
         start = model.encode_image(picture.convert("RGB").resize((width, height), PILImage.Resampling.LANCZOS))
@@ -369,7 +386,4 @@ def remake(ctx: Context, model: MossImage, tel: Telemetry, picture: PILImage.Ima
         latents = model.denoise(positive, negative, width=width, height=height, steps=steps, guidance=guidance, seed=seed,
                                 tel=tel, progress=ctx.progress, start=start, strength=strength, denoise=denoise)  # fmt: skip
     with tel.stage("decoding image"):
-        image = model.decode(latents)
-    with tel.stage("saving image"):
-        asset = ImageFile.from_image(image, format="png")
-    return ImageResult(asset, width, height, seed, prompt)
+        return model.decode(latents)
