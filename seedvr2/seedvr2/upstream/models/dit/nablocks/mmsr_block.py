@@ -82,7 +82,12 @@ class NaSwinAttention(MMWindowAttention):
 
         The layout orders the windows by length (cached for the forward), so a group is runs of
         equal windows: a run is one batch of `[window rows | text rows]`, built by one concat each
-        for q, k and v, with no index plan, gather or host sync per group."""
+        for q, k and v, with no index plan, gather or host sync per group.
+
+        Each group's output goes into its own rows of `vid`, which only that group reads (the
+        windows partition the tokens), so the call allocates no whole beside its input (cr-324:
+        0.74 GiB at 1440p, refused at a 6 GiB cap). `vid` is the block's fresh, modulated
+        `attn_norm` output, which nothing reads after this call."""
         txt_qkv = rearrange(self.proj_qkv.txt(txt), "l (o h d) -> l o h d", o=3, d=self.head_dim)
         txt_q, txt_k, txt_v = txt_qkv.unbind(1)
         txt_q, txt_k = self.norm_q.txt(txt_q), self.norm_k.txt(txt_k)
@@ -103,7 +108,7 @@ class NaSwinAttention(MMWindowAttention):
 
         rows, window_shape, lengths, windows = cache_win("win_rows_by_length", layout)
         freqs = cache_win("rope_freqs_3d_by_length", lambda: self.rope.get_freqs(window_shape)) if self.rope else None
-        out = None
+        out = None  # `vid`, unless the output's dtype differs from it
         txt_sum = None
         first = 0
         for group in _groups(lengths, GROUP):
@@ -127,7 +132,9 @@ class NaSwinAttention(MMWindowAttention):
                 txt_sum = o_txt if txt_sum is None else txt_sum + o_txt
                 start += count * length
             o_vid = self.proj_out.vid(rearrange(torch.cat(o_vid) if len(o_vid) > 1 else o_vid[0], "l h d -> l (h d)"))
-            out = o_vid.new_empty((vid.shape[0], o_vid.shape[1])) if out is None else out
+            if out is None:
+                same = vid.dtype == o_vid.dtype and vid.shape[1] == o_vid.shape[1]
+                out = vid if same else o_vid.new_empty((vid.shape[0], o_vid.shape[1]))
             out.index_copy_(0, at, o_vid)
             first = last
         assert out is not None and txt_sum is not None
