@@ -31,6 +31,11 @@ The checkpoint includes its Qwen text encoder, Wan2.2 VAE, configs and tokenizer
 loading and residency; inference does not fetch models from Hugging Face. The separate conceptual
 reasoner is an on-demand model slot (`reasoner`), defaulting to `huihui-ai/huihui-qwen3.5-9b-abliterated@0.1.0`.
 
+The text encoder (stock Qwen3.5-9B's language model) is its own slot, `text_encoder`; `model` reads the DiT and the VAE.
+By default it is pottokao's Heretic abliteration of Qwen3.5-9B (`pottokao/moss-image-text-encoder-heretic-pan2`: 32 of
+its tensors changed, 2/100 refusals against 100/100, KL 0.050), the weights moss-image encodes with (se-160). PAN2's own
+is any PAN2 checkpoint: `model.text_encoder=ifm/pan2@0.3.0`.
+
 `ifm/pan2@0.3.0` has two lanes: `bf16` and `int8` (int8 ConvRot on the DiT blocks and the Qwen encoder's language
 layers, [`quantize.py`](pan2/quantize.py)). A GPU with int8 tensor cores runs `int8`; `--lane bf16` pins 16 bits.
 The `int8` DiT is in the curve form (ComfyUI's, se-140): its modulation input is a table of 192 coordinates at 4097
