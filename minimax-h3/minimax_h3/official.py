@@ -1722,9 +1722,44 @@ class OfficialH3Pipeline:
         context: AVContext | None = state.values.get("continuation_context")
         entry = context.audio_offset if context is not None else Fraction(0)
         start, end = delivery.audio_samples(entry, int(state.sampling_rate))
+        # Probe (cl-1210 sound joins, never merged): this segment's own rendering of the second it carried, which the cut
+        # below drops, and how far back from a cut its decode changes.
+        if context is not None and context.audio is not None and start > 0:
+            state.values["probe_head"] = audio[0, :, :start].float().cpu().contiguous()
+        state.values["probe_reach"] = self._reach(state.audio_latents)
         delivered = audio[..., start:end]
         # Only a picture end the grid rounds the sound short of: at most a third of a tick.
         return torch.nn.functional.pad(delivered, (0, end - start - delivered.shape[-1]))
+
+    def _reach(self, latents: torch.Tensor) -> torch.Tensor:
+        """Probe (cl-1210): per cut of n ticks off the end, the samples decoded, how many before the cut differ from the
+        whole decode by more than 1e-4 and 1e-3, and the largest difference: the decoder's right context in effect."""
+        audio_vae = self.components["audio_vae"]
+        device = next(audio_vae.parameters()).device
+        mean = torch.tensor(audio_vae.config.latents_mean, device=device).view(1, -1, 1)
+        std = torch.tensor(audio_vae.config.latents_std, device=device).view(1, -1, 1)
+        rows = latents.to(device)
+
+        def decode(part: torch.Tensor) -> torch.Tensor:
+            return audio_vae.decode(part * std + mean, return_dict=False)[0].float()
+
+        found: list[list[float]] = []
+        with torch.no_grad(), _audio_weight_norm_scope(audio_vae):
+            whole = decode(rows)
+            ticks = int(rows.shape[-1])
+            for n in (2, 4, 8, 12, 16, 20, 25, 30):
+                if ticks - n < 40:
+                    continue
+                cut = decode(rows[..., : ticks - n])
+                length = int(cut.shape[-1])
+                diff = (cut - whole[..., :length]).abs().amax(dim=tuple(range(cut.ndim - 1)))
+                row = [float(n), float(length)]
+                for eps in (1e-4, 1e-3):
+                    bad = torch.nonzero(diff > eps)
+                    row.append(float(length - int(bad[0, 0])) if bad.numel() else 0.0)
+                row.append(float(diff.max()))
+                found.append(row)
+        return torch.tensor(found, dtype=torch.float64).reshape(-1, 6)
 
     def decode_video(self, task: Task, state: PipelineState) -> torch.Tensor:
         if state.get("continuation_delivery") is not None:

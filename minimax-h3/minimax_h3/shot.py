@@ -50,7 +50,7 @@ from cozy_runtime.media import (
 from PIL import Image as PILImage
 from safetensors.torch import load as load_tensors
 
-from minimax_h3 import shot_latents
+from minimax_h3 import shot_latents, sound_probe
 from minimax_h3.continuation import AUDIO_TICKS_PER_S, Carry, ContinuationPlan, audio_ticks, carries, decode_context
 from minimax_h3.official import FPS, MAX_CANVAS_RATIO, MAX_FRAMES, clip_size, shown_width, within_ratio
 from story import _HEADER, MENTION, MIN_CLIP_SECONDS, StoryReference, description_span, later_part, name_key, without_sections
@@ -661,6 +661,8 @@ class SoFar:
         self._join: _Join | None = None
         self._format: DecodedAudioFormat | None = None
         self._frames, self._samples = 0, 0
+        #: Probe (cl-1210 sound joins, never merged): what the last `add` measured, as log lines.
+        self.probed: list[tuple[str, dict[str, str]]] = []
 
     def add(self, piece: VideoFile, decode: File, *, last: bool) -> VideoFile:
         """`piece` after the others, under its stretch of the shot's sound, the segment's in its `decode` file: the
@@ -672,6 +674,14 @@ class SoFar:
             self._format = DecodedAudioFormat(channels=int(sound.shape[0]), sample_rate=rate, channel_layout=layout,
                                               channel_names=names, time_base=Fraction(1, rate))  # fmt: skip
             self._join = self._out.join_video(self._format)
+        self.probed = []
+        if "probe_reach" in tensors:
+            self.probed.append(("h3 probe reach", sound_probe.reach(tensors["probe_reach"].numpy(), rate)))
+        if "probe_head" in tensors and self._sound:
+            head = tensors["probe_head"].numpy().astype(np.float32)
+            wave = self._sound[0] if len(self._sound) == 1 else np.concatenate(self._sound, axis=1)
+            n = min(int(head.shape[1]), int(wave.shape[1]))
+            self.probed.append(("h3 probe seam", sound_probe.seam(wave[:, -n:], head[:, -n:], rate)))
         self._sound.append(sound)
         return self._join.append(piece, lambda frames: self._stretch(frames, last), last=last)
 

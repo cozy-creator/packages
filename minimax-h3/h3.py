@@ -530,7 +530,8 @@ def _finish(
     _, height, width, _ = (int(value) for value in pixels.shape)
     if shot is not None:
         with tel.stage("decode_end"):
-            shot.hand_on(model, out, latents, waveform, sample_rate, ended=None if shot.ends else ended)
+            probe = {name: state.values[name] for name in ("probe_head", "probe_reach") if name in state.values}
+            shot.hand_on(model, out, latents, waveform, sample_rate, ended=None if shot.ends else ended, probe=probe)
     if ended is not None and (shot is None or shot.ends):
         ended(pixels)
 
@@ -1291,7 +1292,7 @@ class _ShotPart:
         return (vae.windows_ready(tokens) - self.at.window) * vae.window_frames()
 
     def hand_on(self, model: H3Model, out: Outputs, latents: Tensor, sound: Tensor, sample_rate: int, *,
-                ended: Callable[[Tensor], None] | None) -> None:  # fmt: skip
+                ended: Callable[[Tensor], None] | None, probe: dict[str, Tensor] | None = None) -> None:  # fmt: skip
         """What the next segment goes on from: where the decode stands, and a file of its equalizer's totals and this
         segment's sound. `ended` gets where this segment ends: its windows still to come decoded as if the shot ended
         here, which the shot's frame there will be close to, the decode itself going on unchanged."""
@@ -1308,7 +1309,7 @@ class _ShotPart:
             rest = ShotWindows(first=after.window - self._origin, end=True, equalizer=CellEqualizer.going_on(VAE_SPATIAL_RATIO, sums))
             model.decode_shot(latents, rest, on_chunk=keep)
             ended(last[-1].clamp(0, 1).mul(255).round().to(torch.uint8).permute(0, 2, 3, 1).cpu())
-        data = save_tensors({**sums, "sound": sound.to(torch.float32).contiguous(), "sample_rate": torch.tensor(sample_rate)})
+        data = save_tensors({**sums, **(probe or {}), "sound": sound.to(torch.float32).contiguous(), "sample_rate": torch.tensor(sample_rate)})
         self.handed = after, out.save_bytes(data, media_type="application/octet-stream")
 
     @property
@@ -1948,6 +1949,8 @@ async def _render(ctx: Context, shot: Shot, out: Outputs, tel: Telemetry, *, pla
         # Each segment's part shows as it lands, after those before it, so its box plays all made so far while the next
         # renders; the last revision is the take, read again by no one: only its new part and index move.
         revision = so_far.add(result.video, result.decode, last=ends)
+        for name, fields in so_far.probed:
+            tel.log(name, segment=index + 1, **fields)
         if ends and (take is None or carried):
             video = so_far.finish().video
             out.publish("video", video, label="Video")
