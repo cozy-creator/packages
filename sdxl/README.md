@@ -12,8 +12,9 @@ It takes pictures as Anima's does:
   is redrawn, the rest put back each step. Control runs base SDXL, without HiDiffusion.
 - A picture mentioned in `instructions` steers subject and style through h94's
   [IP-Adapter Plus](https://huggingface.co/h94/IP-Adapter) (`ip-adapter-plus_sdxl_vit-h`, LAION's ViT-H/14 encoder), at
-  `reference_strength` (0.5, tencent-ailab's for a picture with words; above it the picture's own backdrop wins over
-  the words, below it the words win the setting); up to 4 pictures. The mention reads as its description, else as nothing.
+  `reference_strength` (0.4: the words set the scene, the picture gives its subject and style; from 0.5 up the picture's
+  own backdrop wins over the words, at 0.3 its subject fades); up to 4 pictures. The mention reads as its description,
+  else as nothing.
 
 Each adapter is a model slot (`controlnet`, `image_encoder`, `ip_adapter`), fetched only when a request uses it.
 

@@ -116,7 +116,7 @@ Kind = Literal["depth", "pose", "lineart", "sketch", "canny", "inpaint"]
 #: The pictures the IP-Adapter takes at once (InvokeAI's cap, Anima's): past them the last mentioned go, with a warning.
 MAX_PICTURES = 4
 #: `GenerateInput.reference_strength`'s default.
-REFERENCE_STRENGTH = 0.5
+REFERENCE_STRENGTH = 0.4
 
 
 class GenerateInput(ImageRequest):
@@ -129,9 +129,9 @@ class GenerateInput(ImageRequest):
     #: Control maps, each through its mode of the union ControlNet; `inpaint`'s is the picture with the area to redraw
     #: transparent.
     control: list[Control[Kind]] = msgspec.field(default_factory=list)
-    #: How strongly the mentioned pictures steer, the IP-Adapter's scale. 0.5 is tencent-ailab's "Best Practice" for a
-    #: picture with words: at 0.6 and above IP-Adapter Plus redraws the picture, its backdrop too, past the words; at
-    #: 0.4 the words win the setting (se-175, SE175-41..56).
+    #: How strongly the mentioned pictures steer, the IP-Adapter's scale. 0.4: the words set the scene while the picture
+    #: gives its subject and style. At tencent-ailab's 0.5 and above, IP-Adapter Plus redraws the picture, its backdrop
+    #: too, past the words; at 0.3 the subject fades (se-175, SE175-41..56, 61..72).
     reference_strength: Annotated[float, msgspec.Meta(ge=0.0, le=2.0), Advanced()] = REFERENCE_STRENGTH
     steps: Steps = None
     guidance: Guidance = None
