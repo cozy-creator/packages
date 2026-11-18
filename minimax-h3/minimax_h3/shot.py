@@ -119,6 +119,10 @@ class Shot(msgspec.Struct, kw_only=True):
     #: The full model's steps: asking for them runs it.
     steps: Annotated[FullSteps | None, Advanced()] = None
     carried_frames: CarriedFrames = 22
+    #: Probe (cl-1210 join pairs, never merged): a segment holds at most this many seconds, so each 5 s beat is its own
+    #: segment (0: the plan as it is); and the segments' sound butted as today, in place of the join.
+    probe_segment_s: int = 0
+    probe_butt: bool = False
     seed: Seed | None = None
     pickup: ShotPickup | None = None
 
@@ -309,19 +313,23 @@ class ShotPlan(NamedTuple):
 
 
 def plan_segments(duration_s: float, marks: Iterable[float], carried: bool = False, carry: Carry = _CARRY,
-                  split: bool = False) -> ShotPlan:  # fmt: skip
+                  split: bool = False, hold: int = 0) -> ShotPlan:  # fmt: skip
     """A shot's segments: whole blocks of its text (from one of `marks`, its timestamps, to the next), as many as fit
     each segment, so the fewest, and each later segment opens on a timestamp. A segment holds 15 s, or 14 when it
     continues a video: `carried`, or any but the first. A block longer than that renders that long and warns, and what
     follows comes straight after it; with `split` (an edit, whose plate the text holds throughout) it's split across
     segments instead. Lengths are H3's whole seconds on its 17n+5 grid, each the nearest to the next timestamp from what
-    is delivered so far, and at least 5 s; the last reaches the end."""
+    is delivered so far, and at least 5 s; the last reaches the end. Probe (cl-1210, never merged): with `hold`, a segment
+    holds at most that many seconds."""
     fresh = not carried
     # A later segment's new seconds: its carried frames share the 362-frame window.
     most_next = (MAX_FRAMES - carry.head_frames) // FPS
+    most_first = MAX_DURATION_S
+    if hold:
+        most_first, most_next = min(most_first, max(hold, MIN_DURATION_S)), min(most_next, max(hold, MIN_DURATION_S))
 
     def limit(index: int) -> int:
-        return _delivered(MAX_DURATION_S, True, carry) if index == 0 and fresh else _delivered(most_next, False, carry)
+        return _delivered(most_first, True, carry) if index == 0 and fresh else _delivered(most_next, False, carry)
 
     edges = sorted({mark for mark in marks if 0 < mark < duration_s})
     groups: list[list[float]] = []
@@ -331,7 +339,7 @@ def plan_segments(duration_s: float, marks: Iterable[float], carried: bool = Fal
             continue
         while split and math.ceil((end - start) * FPS - 1e-6) > limit(len(groups)):
             # Whole segments of it, leaving at least the shortest piece for the rest.
-            most = MAX_DURATION_S if len(groups) == 0 and fresh else most_next
+            most = most_first if len(groups) == 0 and fresh else most_next
             take = min(_delivered(most, not groups and fresh, carry), math.floor((end - start) * FPS) - _delivered(MIN_DURATION_S, False, carry))
             groups.append([start, start + take / FPS])
             start += take / FPS
@@ -341,7 +349,7 @@ def plan_segments(duration_s: float, marks: Iterable[float], carried: bool = Fal
     past = 0  # the frames delivered beyond the last timestamp reached
     for index, (start, end) in enumerate(groups):
         first = index == 0 and fresh
-        most = MAX_DURATION_S if first else most_next
+        most = most_first if first else most_next
         asked = math.ceil((end - start) * FPS - 1e-6)
         wanted = min(asked - past, _delivered(most, first, carry))
         lengths = range(MIN_DURATION_S, most + 1)
@@ -661,8 +669,10 @@ class SoFar:
     (`Outputs.join_video`) under the shot's soundtrack, encoded once from the segments' own sound (a pickup's kept sound
     first), so its box plays all made so far while the next renders. Its last revision is the take."""
 
-    def __init__(self, out: Outputs, kept: npt.NDArray[np.float32] | None = None) -> None:
+    def __init__(self, out: Outputs, kept: npt.NDArray[np.float32] | None = None, butt: bool = False) -> None:
         self._out = out
+        #: Probe (cl-1210 join pairs, never merged): each segment's own sound after the last one's, as today.
+        self._butt = butt
         self._sound = [kept] if kept is not None and kept.size else []
         self._join: _Join | None = None
         self._format: DecodedAudioFormat | None = None
@@ -685,7 +695,7 @@ class SoFar:
             self._join = self._out.join_video(self._format)
         self._rate = rate
         self.probed = []
-        if "join_sound" in tensors and self._sound:
+        if "join_sound" in tensors and self._sound and not self._butt:
             self._joined(tensors, sound, rate)
         else:
             self._sound.append(sound)
@@ -729,14 +739,14 @@ class SoFar:
         self._frames += frames
         wave = self._sound[0] if len(self._sound) == 1 else np.concatenate(self._sound, axis=1)
         self._sound = [wave]
-        if last:
+        if last and not self._butt:
             # Probe (cl-1210): the take's sound as long as its pictures, to the sample, padded or cut by the last displacement.
             pictures = round(self._frames * sound.sample_rate / FPS)
             self.probed.append(("h3 join take", {"sound": str(int(wave.shape[1])), "pictures": str(pictures), "diff": str(int(wave.shape[1]) - pictures)}))
             wave = wave[:, :pictures] if wave.shape[1] >= pictures else np.pad(wave, ((0, 0), (0, pictures - wave.shape[1])))
             self._sound = [wave]
         # Held back: the stretch a joined successor's sound replaces (`_joined`).
-        held = _SWITCH_TICKS * (sound.sample_rate // 40)
+        held = 0 if self._butt else _SWITCH_TICKS * (sound.sample_rate // 40)
         end = int(wave.shape[1]) if last else min(int(wave.shape[1]) - held, self._frames * sound.sample_rate // FPS)
         if end > self._samples:
             stretch = wave[:, self._samples : end].astype(np.float32)

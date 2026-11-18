@@ -1801,7 +1801,7 @@ async def _render(ctx: Context, shot: Shot, out: Outputs, tel: Telemetry, *, pla
                              "add a beat, or pick up earlier", fields=["pickup"])  # fmt: skip
     timed, timing = blocks(prompt_parts(script.prompt)[1], duration_s)
     segments, opens, planned = plan_segments(duration_s - begun, [block.at - begun for block in timed if block.at > begun + JOIN_S],
-                                             carried=carried, carry=carry, split=plate is not None)  # fmt: skip
+                                             carried=carried, carry=carry, split=plate is not None, hold=shot.probe_segment_s)  # fmt: skip
     warnings += [*timing, *planned]
     count = len(segments)
     # The shot's canvas: a take it goes on from or a plate sets it; else the shape asked for; else Auto: its first or
@@ -1892,7 +1892,7 @@ async def _render(ctx: Context, shot: Shot, out: Outputs, tel: Telemetry, *, pla
     expected = None
     models = {} if lora is None else {"base_model": lora}
     returned: list[SegmentOutput] = []
-    so_far = SoFar(out, kept_pcm) if joined else None
+    so_far = SoFar(out, kept_pcm, butt=shot.probe_butt) if joined else None
     video: VideoFile | None = None
     for index, (segment, plan) in enumerate(zip(calls, plans, strict=True)):
         ctx.raise_if_cancelled()
