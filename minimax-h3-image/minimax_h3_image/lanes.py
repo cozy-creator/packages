@@ -287,30 +287,30 @@ EXPANDER_W4A8 = Recipe(
 _E2M1 = torch.tensor([0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0, -0.0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0])
 
 
-def _part(source: Checkpoint, key: str, role: str, nbytes: int) -> torch.Tensor:
+def _part(source: Checkpoint, component: str, key: str, role: str, nbytes: int) -> torch.Tensor:
     data = torch.empty(nbytes, dtype=torch.uint8)
     step = 32 << 20
     for start in range(0, nbytes, step):
-        read_into(source, COMPONENT, key, role, start, memoryview(data[start : start + step].numpy()))
+        read_into(source, component, key, role, start, memoryview(data[start : start + step].numpy()))
     return data
 
 
-def _nvfp4(source: Checkpoint, key: str) -> torch.Tensor:
+def _nvfp4(source: Checkpoint, component: str, key: str) -> torch.Tensor:
     """An NVFP4 weight's values in float32: each FP4 code times its 16-element block's E4M3 scale times the tensor's
     global scale (`multiply`), the scales row-major."""
-    row = source.components[COMPONENT].tensors[key]
+    row = source.components[component].tensors[key]
     encoding = row.encoding
     params = dict(encoding.params) if encoding is not None else {}
     if encoding is None or encoding.scheme != "nvfp4" or params.get("scale_layout", "row_major") != "row_major":
         raise UnsupportedInput(f"{key} is not a row-major NVFP4 weight", code="expander_source")
     rows, cols = (int(n) for n in row.shape)
-    codes = _part(source, key, "weight", rows * cols // 2)
+    codes = _part(source, component, key, "weight", rows * cols // 2)
     low, high = codes & 0x0F, codes >> 4
     if params.get("nibble_order", "low_first") != "low_first":
         low, high = high, low
     values = _E2M1[torch.stack((low, high), dim=-1).reshape(rows, cols).long()]
-    scales = _part(source, key, "scale", rows * cols // 16).view(torch.float8_e4m3fn).float().reshape(rows, cols // 16)
-    glob = _part(source, key, "scale_2", 4).view(torch.float32)[0]
+    scales = _part(source, component, key, "scale", rows * cols // 16).view(torch.float8_e4m3fn).float().reshape(rows, cols // 16)
+    glob = _part(source, component, key, "scale_2", 4).view(torch.float32)[0]
     if params.get("global_scale", "multiply") != "multiply":
         glob = 1.0 / glob
     return (values.reshape(rows, cols // 16, 16) * scales[..., None] * glob).reshape(rows, cols)
@@ -329,19 +329,19 @@ def _plain_config(source: Checkpoint) -> dict[str, object]:
 
 
 async def expander_bf16(ctx: Context, *, source: Weights, tel: Telemetry) -> ModelArtifact:
-    """The expander's `bf16` lane from its NVFP4 upload: each NVFP4 weight decoded and rounded once to bf16; every
-    other tensor is the upload's."""
+    """The expander's `bf16` lane from its NVFP4 upload: each NVFP4 weight of every component (the model, and its
+    vision tower and MTP head where the upload stores them apart) decoded and rounded once to bf16; every other
+    tensor is the upload's."""
     src = ctx.tensorfs_source(source)
-    tensors = src.components[COMPONENT].tensors
-    order = list(tensors)
+    order = [(component, key) for component, held in src.components.items() for key in held.tensors]
     decoded = 0
-    with ctx.output("bf16", Derivation(base=src, order=[(COMPONENT, k) for k in order])) as out:
+    with ctx.output("bf16", Derivation(base=src, order=order)) as out:
         out.config(COMPONENT, _plain_config(src))
         with tel.stage("decoding"):
-            for done, key in enumerate(order, 1):
+            for done, (component, key) in enumerate(order, 1):
                 ctx.raise_if_cancelled()
-                if tensors[key].encoding is not None and not out.has(COMPONENT, key):
-                    _put(out, COMPONENT, key, _nvfp4(src, key).to(torch.bfloat16))
+                if src.components[component].tensors[key].encoding is not None and not out.has(component, key):
+                    _put(out, component, key, _nvfp4(src, component, key).to(torch.bfloat16))
                     decoded += 1
                 ctx.progress(done - 1, len(order))
         artifact = ctx.adopt_model(out)
@@ -392,7 +392,7 @@ async def abliterate(ctx: Context, payload: Abliteration, expander: H3ImagePE, *
     source's."""
     src = ctx.tensorfs_source(source)
     tensors = src.components[COMPONENT].tensors
-    if any(row.encoding is not None for row in tensors.values()):
+    if any(row.encoding is not None for held in src.components.values() for row in held.tensors.values()):
         raise UnsupportedInput("abliterate a `bf16` lane (`expander_bf16`)", code="expander_source")
     with tel.stage("refusal direction"):
         refused, expanded = expander.residuals(payload.refused), expander.residuals(payload.expanded)
