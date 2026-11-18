@@ -1773,7 +1773,7 @@ class OfficialH3Pipeline:
 
     def video_vae(self) -> TileBatchedVideoVAE:
         """The video VAE, for its temporal geometry."""
-        return cast(TileBatchedVideoVAE, self.components["vae"])
+        return self.components["vae"]
 
     def encode_clip(self, pixels: torch.Tensor, seed: int) -> torch.Tensor:
         """A `(T, H, W, 3)` uint8 clip's normalized `(1, 24, T', H/16, W/16)` latents: the
@@ -2187,8 +2187,8 @@ def decode_chunks(
     tail = DeliveredFrames(delivery) if delivery is not None else None
     equalize = CellEqualizer(VAE_SPATIAL_RATIO) if shot is None else shot.equalizer
     with torch.no_grad():
-        windows = {} if shot is None else {"first": shot.first, "end": shot.end}
-        chunks = vae.decode_chunks(latents * latents_std + latents_mean, **windows)
+        z = latents * latents_std + latents_mean
+        chunks = vae.decode_chunks(z) if shot is None else vae.decode_chunks(z, first=shot.first, end=shot.end)
         while True:
             with torch.autocast(device_type=device.type, dtype=torch.float16, enabled=device.type == "cuda"):
                 chunk = next(chunks, None)

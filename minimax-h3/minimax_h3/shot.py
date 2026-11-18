@@ -6,17 +6,17 @@ from __future__ import annotations
 import hashlib
 import math
 import re
-from collections.abc import Collection, Iterable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Collection, Iterable, Iterator, Mapping, Sequence
 from contextlib import AbstractContextManager
 from fractions import Fraction
 from itertools import accumulate, pairwise
-from typing import Annotated, Literal, NamedTuple
+from typing import Annotated, Literal, NamedTuple, Protocol
 
 import msgspec
 import numpy as np
 import numpy.typing as npt
 import torch
-from cozy_runtime.author import InvalidRequest, OutputError, Outputs, SavedVideo, Seed, VideoJoin
+from cozy_runtime.author import InvalidRequest, OutputError, Outputs, SavedVideo, Seed
 from cozy_runtime.fields import (
     Advanced,
     AspectRatio,
@@ -641,6 +641,15 @@ def _frame_event(rgb: bytes, index: int, size: tuple[int, int]) -> DecodedVideoF
                              pixel_aspect_ratio=Fraction(1), **VIDEO_COLOR)  # fmt: skip
 
 
+class _Join(Protocol):
+    """What `SoFar` asks of `Outputs.join_video`'s join."""
+
+    def append(self, video: VideoFile, soundtrack: Callable[[int], Iterable[DecodedMediaEvent]] = ..., *,
+               last: bool = False) -> VideoFile: ...  # fmt: skip
+
+    def finish(self) -> SavedVideo: ...
+
+
 class SoFar:
     """A shot's video as it arrives (cl-1210): each segment's part of the shot's one decode, joined by packet copy
     (`Outputs.join_video`) under the shot's soundtrack, encoded once from the segments' own sound (a pickup's kept sound
@@ -649,7 +658,7 @@ class SoFar:
     def __init__(self, out: Outputs, kept: npt.NDArray[np.float32] | None = None) -> None:
         self._out = out
         self._sound = [kept] if kept is not None and kept.size else []
-        self._join: VideoJoin | None = None
+        self._join: _Join | None = None
         self._format: DecodedAudioFormat | None = None
         self._frames, self._samples = 0, 0
 

@@ -85,29 +85,26 @@ class TileBatchedVideoVAE(AutoencoderKLMiniMaxH3):
     def windows_ready(self, tokens: int) -> int:
         """How many of a shot's temporal windows `tokens` latents hold whole: those its decode
         hands out the same whatever follows (`decode_chunks` without `end`)."""
-        return max(0, (tokens - self.tokens_chunk_size - self.token_overlap) // self.tokens_chunk_size + 1)
+        return max(0, (tokens - int(self.tokens_chunk_size) - int(self.token_overlap)) // int(self.tokens_chunk_size) + 1)
 
     def window_frames(self) -> int:
         """The frames each window hands out."""
-        return self.tokens_chunk_size * self.temporal_compression_ratio - self.frame_pre_padding
+        return int(self.tokens_chunk_size) * int(self.temporal_compression_ratio) - int(self.frame_pre_padding)
 
     def decoded_frames(self, tokens: int) -> int:
         """The frames `decode_chunks` of `tokens` latents hands out in all."""
-        token_drop = self.config["token_drop"]
-        pad_tokens = (-(tokens + token_drop)) % self.tokens_chunk_size
-        windows = (tokens + token_drop + pad_tokens) // self.tokens_chunk_size - int(token_drop > 0)
-        ratio = self.temporal_compression_ratio
-        tail = max(0, min(self.tokens_chunk_size, self.token_overlap) * ratio - self.frame_pre_padding) if token_drop > 0 else 0
+        token_drop, chunk = int(self.config["token_drop"]), int(self.tokens_chunk_size)
+        pad_tokens = (-(tokens + token_drop)) % chunk
+        windows = (tokens + token_drop + pad_tokens) // chunk - int(token_drop > 0)
+        ratio = int(self.temporal_compression_ratio)
+        tail = max(0, min(chunk, int(self.token_overlap)) * ratio - int(self.frame_pre_padding)) if token_drop > 0 else 0
         return windows * self.window_frames() + tail - self._pad_frames(tokens, pad_tokens)
 
     def _pad_frames(self, tokens: int, pad_tokens: int) -> int:
         """The frames `pad_tokens` repeated latents add past `tokens`: cut off again."""
-        ratio = self.temporal_compression_ratio
-        intra_tail = self.config["clip_length"] % ratio
-        return sum(
-            intra_tail if intra_tail and (tokens + k) % self.tokens_chunk_size == 0 else ratio
-            for k in range(pad_tokens)
-        )
+        ratio, chunk = int(self.temporal_compression_ratio), int(self.tokens_chunk_size)
+        intra_tail = int(self.config["clip_length"]) % ratio
+        return sum(intra_tail if intra_tail and (tokens + k) % chunk == 0 else ratio for k in range(pad_tokens))
 
     def _decode_pieces(
         self, z: torch.Tensor, pad_tokens: int, first: int = 0, stop: int | None = None

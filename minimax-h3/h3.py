@@ -497,6 +497,7 @@ def _finish(
     waveform, sample_rate = _soundtrack(model, task, state, frames=delivered, tel=tel, cancel=cancel)
     decode = partial(model.decode_video, task, state)
     sound: Tensor | None = waveform
+    latents = state.latents
     if shot is not None:
         latents = shot.latents(state.latents)
         decode = partial(model.decode_shot, latents, shot.windows())
@@ -1270,7 +1271,7 @@ class _ShotPart:
             raise InvalidRequest("a segment after others needs the latents before it", fields=["payload.before"])
         data = totals.read_bytes() if totals is not None else b""
         held_sums = load_tensors(data) if data else {}
-        sums = {name: held_sums[name] for name in ("energy", "tile", "weight") if name in held_sums}
+        sums: dict[str, Tensor] = {name: held_sums[name] for name in ("energy", "tile", "weight") if name in held_sums}
         return cls(latents, start, at, CellEqualizer.going_on(VAE_SPATIAL_RATIO, sums), head, ends)
 
     def latents(self, sampled: Tensor) -> Tensor:
@@ -1878,16 +1879,16 @@ async def _render(ctx: Context, shot: Shot, out: Outputs, tel: Telemetry, *, pla
     # A shot of more than one segment, or going on from a take's latents, decodes once, its windows as their latents
     # arrive (cl-1210), a take's kept latents first; its join plays the shot's sound under them, a take's kept sound first.
     joined = count > 1 or carried
-    decoded, kept = ShotDecode(), None
+    decoded, kept_pcm = ShotDecode(), None
     if latents is not None:
-        tokens, kept = kept_sound(latents, None if trimmed else cast(ShotVideo, take).file)
+        tokens, kept_pcm = kept_sound(latents, None if trimmed else cast(ShotVideo, take).file)
         decoded = ShotDecode(tokens=tokens)
     previous, totals = latents, None  # the latents before the next segment, and its shot decode's file
     context: File | None = latents
     expected = None
     models = {} if lora is None else {"base_model": lora}
     returned: list[SegmentOutput] = []
-    so_far = SoFar(out, kept) if joined else None
+    so_far = SoFar(out, kept_pcm) if joined else None
     video: VideoFile | None = None
     for index, (segment, plan) in enumerate(zip(calls, plans, strict=True)):
         ctx.raise_if_cancelled()
