@@ -30,9 +30,10 @@ ALIGNED_GAIN = 0.02
 CHANGED_DELTA_E = 10.0
 #: Below it a pixel fits the colour correction.
 STILL_DELTA_E = 6.0
-#: Past this fraction of the canvas changed, or under this fraction still, the edit is global and nothing is kept.
+#: Past this fraction of the canvas changed, or under this fraction still, the edit is global and nothing is kept: a
+#: relight, a style or black and white left 0-3% still, a new background 11-47% (se-153's bench).
 GLOBAL_FRACTION = 0.85
-MIN_STILL = 0.2
+MIN_STILL = 0.08
 #: A colour shift this large over what stayed is an intended relight, and nothing is kept.
 GLOBAL_SHIFT = 8.0
 #: Past this fraction of pixels under half opaque, a picture or an output is transparent and nothing is kept.
