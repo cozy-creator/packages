@@ -45,7 +45,10 @@ from diffusers.models.autoencoders.autoencoder_kl_qwenimage import (
     QwenImageRMS_norm,
     QwenImageUpsample,
 )
+from diffusers.models.transformers import transformer_krea2
 from diffusers.models.transformers.transformer_krea2 import (
+    Krea2Attention,
+    Krea2AttnProcessor,
     Krea2FinalLayer,
     Krea2TextProjection,
     Krea2TimestepEmbedding,
@@ -283,6 +286,46 @@ class Branch:
 
 
 @dataclass(frozen=True)
+class RowBias:
+    """An attention bias that is one row of keys over each range of query rows: `rows` are (start, stop, a
+    [1, 1, 1, keys] bias or None), in order and covering the sequence. A target's logits on its references raised
+    by log `boost` and an isolated `after` blind to the rest are such: held dense, [1, 1, keys, keys] bf16 was
+    1.59 GiB a branch at 2 MP, two with CFG, through every step (var-030 5.7)."""
+
+    rows: tuple[tuple[int, int, torch.Tensor | None], ...]
+
+
+class Attention(Krea2AttnProcessor):
+    """Diffusers' processor, with a `RowBias` attended one range of query rows at a time against every key,
+    each with its own bias: the same softmax a row takes under the dense mask. Its RoPE and attention are
+    the module's own names at each call, as Diffusers' processor reads them (the Runtime cuts and selects there)."""
+
+    def __call__(self, attn: Krea2Attention, hidden_states: torch.Tensor,
+                 attention_mask: torch.Tensor | RowBias | None = None,
+                 image_rotary_emb: tuple[torch.Tensor, torch.Tensor] | None = None) -> torch.Tensor:
+        if not isinstance(attention_mask, RowBias):
+            return cast(torch.Tensor, super().__call__(attn, hidden_states, attention_mask, image_rotary_emb))
+        query = attn.to_q(hidden_states).unflatten(-1, (attn.num_heads, attn.head_dim))
+        key = attn.to_k(hidden_states).unflatten(-1, (attn.num_kv_heads, attn.head_dim))
+        value = attn.to_v(hidden_states).unflatten(-1, (attn.num_kv_heads, attn.head_dim))
+        gate = attn.to_gate(hidden_states)
+        query, key = attn.norm_q(query), attn.norm_k(key)
+        if image_rotary_emb is not None:
+            query = transformer_krea2.apply_rotary_emb(query, image_rotary_emb, sequence_dim=1)
+            key = transformer_krea2.apply_rotary_emb(key, image_rotary_emb, sequence_dim=1)
+        groups = attn.num_heads // attn.num_kv_heads
+        if groups > 1:  # as Diffusers' processor: every kernel takes repeated heads beside a bias
+            key, value = key.repeat_interleave(groups, dim=2), value.repeat_interleave(groups, dim=2)
+        out = torch.cat([
+            transformer_krea2.dispatch_attention_fn(query[:, start:stop], key, value, attn_mask=bias,
+                                                    backend=self._attention_backend,
+                                                    parallel_config=self._parallel_config)
+            for start, stop, bias in attention_mask.rows
+        ], dim=1)
+        return cast(torch.Tensor, attn.to_out[0](out.flatten(2, 3) * torch.sigmoid(gate)))
+
+
+@dataclass(frozen=True)
 class Stream:
     """A branch as each step reads it, built once: its fused text, its pictures through `img_in`, its
     rotary tables, its attention bias, and where its target tokens sit."""
@@ -291,7 +334,7 @@ class Stream:
     before: torch.Tensor | None
     after: torch.Tensor | None
     rotary: tuple[torch.Tensor, torch.Tensor]
-    mask: torch.Tensor | None
+    mask: RowBias | None
     target: int
 
 
@@ -375,6 +418,7 @@ def _transformer(config: Config) -> Transformer:
     transformer.__class__ = Transformer
     for block in transformer.transformer_blocks:
         block.__class__ = Block
+        cast(Krea2Attention, block.attn).set_processor(Attention())
     as_stored(config, "transformer", transformer)
     return cast(Transformer, transformer.eval())  # its class, set above
 
@@ -593,12 +637,28 @@ class Krea2DiT(Model[Krea2DiTGraph]):
         isolated = branch.isolated and after is not None
         mask = None
         if isolated or any(boost != 1.0 for _, _, boost in boosts):
-            mask = torch.zeros(1, 1, at, at, device=device, dtype=DTYPE)
-            for start, end, boost in boosts:
-                if boost != 1.0:
-                    mask[..., target:target + size, start:end] = math.log(max(boost, 1e-4))
+            # The target's rows raise its logits on each boosted reference; an isolated `after`'s rows see only
+            # themselves; every other row is unbiased. One bias row per range, never [at, at].
+            boosted = None
+            if any(boost != 1.0 for _, _, boost in boosts):
+                boosted = torch.zeros(1, 1, 1, at, device=device, dtype=DTYPE)
+                for start, end, boost in boosts:
+                    if boost != 1.0:
+                        boosted[..., start:end] = math.log(max(boost, 1e-4))
+            blind = None
             if isolated:
-                mask[..., target + size:, :target + size] = float("-inf")
+                blind = torch.zeros(1, 1, 1, at, device=device, dtype=DTYPE)
+                blind[..., :target + size] = float("-inf")
+            rows = [(0, target, None), (target, target + size, boosted), (target + size, at, blind)]
+            merged: list[tuple[int, int, torch.Tensor | None]] = []
+            for start, stop, bias in rows:
+                if stop <= start:
+                    continue
+                if merged and bias is None and merged[-1][2] is None:
+                    merged[-1] = (merged[-1][0], stop, None)
+                else:
+                    merged.append((start, stop, bias))
+            mask = RowBias(tuple(merged))
         return Stream(text, before, after, transformer.rotary_emb(torch.cat(ids)), mask, target)
 
     @uses_components("transformer")
