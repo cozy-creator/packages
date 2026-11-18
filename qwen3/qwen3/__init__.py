@@ -10,31 +10,37 @@ from cozy_runtime.vlm import AskRequest, AskResult, TextBox, TextResult, VisionL
 
 app = App()
 
-#: The default checkpoint: the newest Qwen3.x, abliterated (llmfan46's Heretic of Qwen3.8-27B, its MTP head kept).
-MODEL = "llmfan46/qwen3.8-27b-uncensored-heretic-native-mtp-preserved@0.1.0"
+#: The default checkpoint: the newest Qwen3.x, abliterated (llmfan46's Heretic of Qwen3.8-27B, its MTP head kept). 0.2.0
+#: stores its language model, vision tower and MTP head as their own components (`model`, `vision`, `mtp`).
+MODEL = "llmfan46/qwen3.8-27b-uncensored-heretic-native-mtp-preserved@0.2.0"
+
+#: A question shows a picture or a video: only then is the vision tower fetched (`model.vision`).
+_SEES = "size(request.images) > 0 || size(request.videos) > 0 || request.prompts.exists(p, size(p.images) > 0 || size(p.videos) > 0)"
+#: The instructions mention a picture or a video.
+_SHOWN = 'request.instructions.references.exists(r, r.type == "image" || r.type == "video")'
 
 #: The int8 lane (`int8.convrot`, W8A8 on int8 tensor cores): every attention, gated-delta-net and MLP projection of the
-#: language layers and of the multi-token-prediction layer where the checkpoint has one; in a MoE every routed and shared
-#: expert. The vision tower, embeddings, routers, the decay/gate projections, norms and the LM head keep their bytes.
+#: language layers (`model`) and of the multi-token-prediction layer (`mtp`); in a MoE every routed and shared expert. The
+#: vision tower (`vision`), embeddings, routers, the decay/gate projections, norms and the LM head keep their bytes.
 INT8 = Recipe(
     lane="int8",
     model=VisionLM,
     plan=QuantizationPlan(
         encoding="int8.convrot",
-        components=("model",),
+        components=("model", "mtp"),
         include=(
             "model.model.language_model.layers.*.linear_attn.in_proj_[qz]*.weight",
             "model.model.language_model.layers.*.linear_attn.out_proj.weight",
             "model.model.language_model.layers.*.self_attn.[qkvo]_proj.weight",
             "model.model.language_model.layers.*.mlp.*_proj.weight",
-            "model.mtp.layers.*_proj.weight",
+            "mtp.mtp.layers.*_proj.weight",
         ),
         output_precision="preserve",
     ),
 )
 
 #: The MLPs (dense, routed and shared experts) of the language and multi-token-prediction layers.
-_MLPS = ("model.model.language_model.layers.*.mlp.*", "model.mtp.layers.*.mlp.*")
+_MLPS = ("model.model.language_model.layers.*.mlp.*", "mtp.mtp.layers.*.mlp.*")
 
 #: The int8 lane with every MLP in NVFP4 (Blackwell's FP4 tensor cores): what a decoded token reads is mostly MLP
 #: weights (all of a MoE's experts), so this nearly halves its bytes.
@@ -65,7 +71,7 @@ W4A8 = Recipe(
 )
 
 
-@app.entrypoint(defaults={"model": MODEL}, memoize=True)
+@app.entrypoint(defaults={"model": MODEL}, needs={"model.vision": _SEES}, memoize=True)
 def ask(ctx: Context, payload: AskRequest, model: VisionLM, tel: Telemetry) -> AskResult:
     """Answer each prompt about its text, images and videos, all prompts in one pass."""
     return vlm.ask(ctx, payload, model, tel)
@@ -81,7 +87,7 @@ def caption(ctx: Context, payload: AskRequest, model: VisionLM, tel: Telemetry) 
     return vlm.ask(ctx, msgspec.structs.replace(payload, prompt=_CAPTION), model, tel)
 
 
-@app.tool(label="Write", named="text", defaults={"model": MODEL}, memoize=True)
+@app.tool(label="Write", named="text", defaults={"model": MODEL}, needs={"model.vision": _SHOWN}, memoize=True)
 def write(ctx: Context, payload: TextBox, model: VisionLM, tel: Telemetry) -> TextResult:
     """Words on a canvas: what the instructions ask, about the pictures and videos they mention."""
     return vlm.write(ctx, payload, model, tel)

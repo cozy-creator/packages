@@ -151,8 +151,8 @@ def case(name: str, moe_layout: bool) -> None:
     want = asking.processor.batch_decode(out[:, inputs["input_ids"].shape[1]:], skip_special_tokens=True)[0].strip()  # type: ignore[no-untyped-call, unused-ignore]  # Transformers leaves it unannotated
     def answer(**decoding: float) -> list[str]:
         sampling = {"temperature": 0.0, "top_p": 1.0, "seed": 0} | decoding
-        answered: list[str] = vlm.VisionLM.ask.__wrapped__(asking, [q], system="Answer briefly.", thinking=False, stop=[],  # type: ignore[attr-defined]  # uses_components keeps the method
-                                                           max_new_tokens=12, presence_penalty=0.0, **sampling)
+        answered: list[str] = vlm.VisionLM.ask(asking, [q], system="Answer briefly.", thinking=False, stop=[],
+                                               max_new_tokens=12, presence_penalty=0.0, **sampling)
         return answered
 
     plain = answer()
