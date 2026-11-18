@@ -332,7 +332,7 @@ wheels = [
 
 [[package]]
 name = "krea-2"
-version = "0.10.0"
+version = "0.11.0"
 source = { editable = "." }
 dependencies = [
     { name = "cozy-runtime", extra = ["adapters", "media"] },
@@ -347,7 +347,7 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
-    { name = "cozy-runtime", extras = ["adapters", "media"], specifier = ">=0.47.0.dev0,<0.48" },
+    { name = "cozy-runtime", extras = ["adapters", "media"], specifier = ">=0.47.0,<0.48" },
     { name = "diffusers", specifier = ">=0.39" },
     { name = "msgspec", specifier = ">=0.19" },
     { name = "numpy", specifier = ">=1.26" },

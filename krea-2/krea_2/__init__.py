@@ -183,13 +183,19 @@ _POSE = "thedeoxen/pose-control@0.1.0"
 _LINEART = "cierpliwy/lineart-edit@0.1.0"
 _INPAINT = "cierpliwy/inpaint-edit@0.1.0"
 _LORA = ("transformer",)
+#: Which requests need each adapter (cl-1103, `_generate`): the edit one with a picture in the prompt, a control kind's
+#: with a map of that kind at a strength above 0. Over-fetched: a kind's adapter when an earlier map is the one read.
+_PICTURE = '.references.exists(r, r.type == "image")'
+_MAP = "request.control.exists(c, c.strength > 0 && c.kind == "
+_NEEDS = {"edit": f"request.prompt{_PICTURE}", "depth": f'{_MAP}"depth")', "pose": f'{_MAP}"pose")',
+          "lineart": f'{_MAP}"lineart")', "inpaint": f'{_MAP}"inpaint")'}
 
 
 @app.entrypoint(defaults={"model": _RAW_MODEL, "text_encoder": _RAW_MODEL, "vae": _RAW_MODEL, "edit": _EDIT,
                           "depth": _DEPTH, "pose": _POSE, "lineart": _LINEART, "inpaint": _INPAINT},
                 components={"model": _KREA, "text_encoder": _TEXT, "vae": _VAE, "edit": _LORA, "depth": _LORA,
                             "pose": _LORA, "lineart": _LORA, "inpaint": _LORA},
-                on_demand=("edit", "depth", "pose", "lineart", "inpaint"), memoize=True)  # fmt: skip
+                needs=_NEEDS, memoize=True)  # fmt: skip
 def generate(ctx: Context, payload: GenerateInput, model: Krea2DiT, text_encoder: Krea2TextEncoder, vae: Krea2VAE,
              edit: Adapter, depth: Adapter, pose: Adapter, lineart: Adapter, inpaint: Adapter,
              tel: Telemetry, adj: Adjustments) -> ImageResult:
@@ -202,7 +208,7 @@ def generate(ctx: Context, payload: GenerateInput, model: Krea2DiT, text_encoder
                           "depth": _DEPTH, "pose": _POSE, "lineart": _LINEART, "inpaint": _INPAINT},
                 components={"model": _KREA, "text_encoder": _TEXT, "vae": _VAE, "edit": _LORA, "depth": _LORA,
                             "pose": _LORA, "lineart": _LORA, "inpaint": _LORA},
-                on_demand=("edit", "depth", "pose", "lineart", "inpaint"), memoize=True)  # fmt: skip
+                needs=_NEEDS, memoize=True)  # fmt: skip
 def generate_turbo(ctx: Context, payload: TurboInput, model: Krea2DiT, text_encoder: Krea2TextEncoder, vae: Krea2VAE,
                    edit: Adapter, depth: Adapter, pose: Adapter, lineart: Adapter, inpaint: Adapter,
                    tel: Telemetry, adj: Adjustments) -> ImageResult:
@@ -225,14 +231,18 @@ class ImageBox(msgspec.Struct, kw_only=True):
     seed: Seed | None = None
 
 
-# Each checkpoint is built, and its weights fetched, only when a box asks for it; the edit adapter only for a box
-# with pictures.
+# Each checkpoint is fetched only for a box that uses it: Turbo (`model`) with `turbo`, else Raw (`full`); the edit
+# adapter only for a box with pictures. A box sends no control map, so it never reads a control adapter.
+_BOX_NEEDS = {"full": "!request.turbo", "model": "request.turbo", "edit": f"request.instructions{_PICTURE}",
+              "depth": "false", "pose": "false", "lineart": "false", "inpaint": "false"}
+
+
 @app.tool(label="Image", named="image",
           defaults={"full": _RAW_MODEL, "model": _TURBO_MODEL, "text_encoder": _TURBO_MODEL, "vae": _TURBO_MODEL,
                     "edit": _EDIT, "depth": _DEPTH, "pose": _POSE, "lineart": _LINEART, "inpaint": _INPAINT},
           components={"full": _KREA, "model": _KREA, "text_encoder": _TEXT, "vae": _VAE, "edit": _LORA,
                       "depth": _LORA, "pose": _LORA, "lineart": _LORA, "inpaint": _LORA},
-          on_demand=("full", "model", "edit", "depth", "pose", "lineart", "inpaint"), memoize=True)  # fmt: skip
+          needs=_BOX_NEEDS, memoize=True)  # fmt: skip
 def image(ctx: Context, payload: ImageBox, full: Krea2DiT, model: Krea2DiT, text_encoder: Krea2TextEncoder,
           vae: Krea2VAE, edit: Adapter, depth: Adapter, pose: Adapter, lineart: Adapter, inpaint: Adapter,
           tel: Telemetry, adj: Adjustments) -> ImageResult:
