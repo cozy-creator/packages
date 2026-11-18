@@ -72,14 +72,14 @@ def generate(ctx: Context, payload: ImageBox, model: H3Image, vae_encoder: H3Ima
     prompt, ratio = text, request.aspect_ratio
     if payload.prompt_upsampling and text.strip():
         with tel.stage("expanding prompt"):
-            found, answer = expander.expand(text, pictures, ratio, seed=seed)
+            found, answers = expander.expand(text, pictures, ratio, seed=seed)
         if found is None:
-            adj.warn("prompt_upsampling", "the prompt expander's answer didn't parse, so the prompt renders as written")
-            tel.log("expanded prompt", parsed=False, answer=answer[-2000:])
+            adj.warn("prompt_upsampling", "the prompt expander gave no caption twice, so the prompt renders as written")
+            tel.log("expanded prompt", parsed=False, answer=answers[-1][-2000:], attempts=len(answers))
         else:
             prompt = found.caption
             ratio = ratio or found.ratio
-            tel.log("expanded prompt", prompt=prompt[:4000], aspect_ratio=found.ratio or "")
+            tel.log("expanded prompt", prompt=prompt[:4000], aspect_ratio=found.ratio or "", attempts=len(answers))
     ctx.raise_if_cancelled()
     shape = ratio_of(ratio) if ratio else pictures[0].size if pictures else (1, 1)
     pixels = (payload.megapixels or DEFAULT_MEGAPIXELS) * MEGAPIXEL
