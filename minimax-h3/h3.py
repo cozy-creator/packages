@@ -1169,6 +1169,14 @@ def held_frames(plan: ContinuationPlan, videos: Sequence[VideoUse] = ()) -> int:
     return plan.sample_frames * (1 + anchored) + plan.carried.frames
 
 
+class ShotDecode(msgspec.Struct, frozen=True):
+    """Where a shot's one decode stands after a segment (cl-1210): the shot's latents so far, and the first of its VAE
+    windows still to hand out, the windows before it handed out as they would be whatever follows."""
+
+    tokens: int = 0
+    window: int = 0
+
+
 class Ref2VAInput(msgspec.Struct):
     prompt: str
     seed: int
@@ -1228,14 +1236,6 @@ class SegmentOutput(msgspec.Struct):
     #: totals and this segment's sound, which the shot's join plays under its pictures. Alone: empty.
     decoded: ShotDecode
     decode: LatentFile
-
-
-class ShotDecode(msgspec.Struct, frozen=True):
-    """Where a shot's one decode stands after a segment (cl-1210): the shot's latents so far, and the first of its VAE
-    windows still to hand out, the windows before it handed out as they would be whatever follows."""
-
-    tokens: int = 0
-    window: int = 0
 
 
 @dataclass
