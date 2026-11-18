@@ -307,13 +307,17 @@ _BOX_NEEDS = {"expander_i2i": f"request.prompt_upsampling && request.instruction
               "turbo_lora": "request.turbo"}  # fmt: skip
 
 
-#: What a box's picture costs (cl-1286): its megapixels and its steps, Turbo's 4 else 40. Its time is `generate`'s row of its
-#: card (`benchmarks.json`: 40 steps at 4 MP) by megapixels^0.52 (an RTX 4090's warm 40-step runs: 18.8 s at 1 MP, 38.5 s at
-#: 4 MP) and 0.27 + 0.73 of its share of 40 steps (an RTX A6000's 1 MP: 6.0 s at 4 steps, 17.4 s at 40). The prompt
-#: enhancer's rewrite (`prompt_upsampling`) is not in it.
+#: What a box's picture costs (cl-1286): its megapixels and its steps, Turbo's 4 else 40, by `generate`'s row of its card
+#: (`benchmarks.json`: 40 steps at 4 MP, no rewrite): 0.966 of it denoising, by megapixels^1.19 and in proportion to steps, and 0.034
+#: fixed (an RTX 4090's warm 40-step runs: generating image 7.2 s at 1 MP, 37.5 s at 4 MP, 38.8 s in all); and the enhancer's
+#: rewrite, on by default (`prompt_upsampling`). No function runs the enhancer alone, so no row measures it yet: its term reads
+#: `prompt_upsampling`'s row once one exists, until then 0.29 of the card's `generate` row (an RTX 4090's "upsampling prompt"
+#: stage, warm: 9.4 to 14.1 s, 12.3 s at the median).
+_GENERATE = 'measured(machine, "generate").warm_ms'
 _BOX_ESTIMATE = {
     "size": {"megapixels": "double(request.megapixels)", "steps": "request.turbo ? 4.0 : 40.0"},
-    "ms": 'measured(machine, "generate").warm_ms * pow(size.megapixels / 4.0, 0.52) * (0.27 + 0.73 * size.steps / 40.0)',
+    "ms": f"{_GENERATE} * (0.966 * pow(size.megapixels / 4.0, 1.19) * size.steps / 40.0 + 0.034)"
+          f' + (request.prompt_upsampling ? measured(machine, "prompt_upsampling", {{"warm_ms": 0.29 * {_GENERATE}}}).warm_ms : 0.0)',
 }  # fmt: skip
 
 
