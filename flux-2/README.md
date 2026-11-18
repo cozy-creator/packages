@@ -70,9 +70,13 @@ BFL's empty negative prompt. Turbo runs fal's card as written: its sigmas
 `1, 0.6509, … 0.00031` through Diffusers' `Flux2Pipeline`, which shifts them by mu as well, at guidance
 2.5. The modules are Diffusers' (main 7ecb1e1b). The steps are a plain loop.
 
-`prompt_upsampling` is BFL's local upsampler: [dev]'s Mistral-Small-3.2 as the full vision-language model,
-with BFL's system prompts, used for [klein] too. It decodes greedily (BFL samples at temperature 0.15).
-Its first use fetches [dev]'s text encoder.
+`prompt_upsampling` is BFL's local upsampler: a Mistral-Small-3.2 as the full vision-language model, with BFL's
+system prompts, used for [klein] too. It decodes greedily (BFL samples at temperature 0.15), and its first use
+fetches it. [dev]'s text encoder is stock Mistral-Small-3.2-24B-Instruct-2506, so the upsampler is abliterated by
+default (Paul, 11-17: "use abliterated models wherever possible"):
+[llmfan46's Heretic](https://huggingface.co/llmfan46/Mistral-Small-3.2-24B-Instruct-2506-ultra-uncensored-heretic)
+(`llmfan46/mistral-small-3.2-24b-instruct-2506-ultra-uncensored-heretic`, 2/100 refusals against 98/100, KL 0.037),
+composed on [dev] as its `text_encoder`. BFL's own is `--model upsampler=black-forest-labs/flux-2-dev@0.1.0`.
 
 ## Prepare the models
 
