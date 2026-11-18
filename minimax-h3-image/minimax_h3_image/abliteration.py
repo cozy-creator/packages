@@ -148,6 +148,8 @@ class Study(msgspec.Struct, frozen=True, kw_only=True):
     #: Each nat per token of KL over the budget costs this much of the faithfulness shift.
     kl_penalty: float = 20.0
     candidates: list[Arm] | None = None
+    #: Ablations measured first, as the search's opening trials (a sweep around a known one).
+    seeds: list[Ablation] | None = None
     #: Tokens per teacher-forced batch (rows times the longest row after the shared prefix).
     token_budget: int = 16384
 
@@ -231,8 +233,8 @@ def bake(directions: Directions, ablation: Ablation) -> Bake:
 
 
 class _Ablator:
-    """Forward hooks for forced (eager) passes: every residual writer's output `y` becomes `y - w (y · d) d`, `w` and
-    `d` set in place per trial."""
+    """Forward hooks: every residual writer's output `y` becomes `y - w (y · d) d`, `w` and `d` set in place per trial.
+    (Weights edited in place don't hold: Runtime's weight plane refills them from the store as it pages.)"""
 
     def __init__(self, layers: Sequence[nn.Module], hidden: int, device: torch.device) -> None:
         self.weights = torch.zeros(len(layers), 2, device=device)
@@ -262,45 +264,6 @@ class _Ablator:
     def remove(self) -> None:
         for handle in self.handles:
             handle.remove()
-
-
-class _Baked:
-    """An ablation baked into the writers' bf16 weights in place, as `abliteration` writes it (float32, rounded once),
-    then taken out again: an arm decodes through Runtime's captured graphs, which refuse forward hooks."""
-
-    def __init__(self, layers: Sequence[nn.Module], directions: Directions, ablation: Ablation) -> None:
-        d, w = directions.per_layer(ablation), weights(ablation, len(layers))
-        self.saved: list[tuple[nn.Parameter, torch.Tensor]] = []
-        self.probe: tuple[nn.Parameter, float] | None = None
-        try:
-            for i, layer in enumerate(layers):
-                for c, writer in enumerate(_writers(layer)):
-                    weight = float(w[i, c])
-                    if not weight:
-                        continue
-                    param = writer.weight
-                    if param.dtype != torch.bfloat16 or param.device.type != "cuda":
-                        raise UnsupportedInput(f"an ablated arm answers on a `bf16` lane on a GPU, not {param.dtype} on "
-                                               f"{param.device}", code="study_lane")  # fmt: skip
-                    self.saved.append((param, param.detach().to("cpu", copy=True)))
-                    vec = d[i].to(param.device)
-                    value = param.detach().float()
-                    value -= weight * vec[:, None] * (vec @ value)[None, :]
-                    param.data.copy_(value.to(torch.bfloat16))
-                    del value
-                    self.probe = (param, float(param.detach().float().sum()))
-        except BaseException:
-            self.restore()
-            raise
-
-    def held(self) -> bool:
-        """Whether the baked weights are still in place (a paged-out weight comes back as stored)."""
-        return self.probe is None or float(self.probe[0].detach().float().sum()) == self.probe[1]
-
-    def restore(self) -> None:
-        for param, original in self.saved:
-            param.data.copy_(original.to(param.device))
-        self.saved.clear()
 
 
 class _Seq:
@@ -645,7 +608,9 @@ def _search(ctx: Context, payload: Study, data: _Data, teacher: _Teacher, layers
         with tel.stage("search"):
             for t in range(payload.trials):
                 ctx.raise_if_cancelled()
-                if t < payload.startup or rng.random() < 0.15 or not measured:
+                if t < len(payload.seeds or []):
+                    ablation = (payload.seeds or [])[t]
+                elif t < payload.startup or rng.random() < 0.15 or not measured:
                     ablation = _space(rng, sources, last)
                 else:
                     best = sorted(measured, key=lambda m: -m[2])[:5]
@@ -735,21 +700,24 @@ def abliteration_study(ctx: Context, payload: Study, expander: StudyPE, out: Out
                 for arm in arms:
                     if arm.ablation is not None and directions is None:
                         raise UnsupportedInput("an ablated arm needs `evidence` for its directions", code="study_evidence")
-                    baked = _Baked(layers, directions, arm.ablation) if arm.ablation is not None and directions else None
+                    # Hooks make Runtime decode eagerly (it captures no graph over them), and only an ablated arm has them.
+                    ablator = None
+                    if arm.ablation is not None and directions is not None:
+                        ablator = _Ablator(layers, layers[0].hidden_size, next(model.lm_head.parameters()).device)
+                        ablator.set(directions, arm.ablation)
                     began = time.monotonic()
                     try:
                         answers = _answer(expander, t2i, payload.requests, shown, payload, ctx) if payload.requests else []
-                        held = baked is None or baked.held()
                     finally:
-                        if baked is not None:
-                            baked.restore()
+                        if ablator is not None:
+                            ablator.remove()
                     row: dict[str, object] = {"name": arm.name, "seconds": round(time.monotonic() - began, 1),
-                                              "held": held, "answers": answers}  # fmt: skip
+                                              "answers": answers}  # fmt: skip
                     if arm.ablation is not None and directions is not None:
                         row["ablation"] = msgspec.to_builtins(arm.ablation)
                         row["bake"] = msgspec.to_builtins(bake(directions, arm.ablation))
                     answered.append(row)
-                    tel.log("arm", name=arm.name, seconds=row["seconds"], held=held)
+                    tel.log("arm", name=arm.name, seconds=row["seconds"])
             report["arms"] = answered
 
     expander.holding(run)
