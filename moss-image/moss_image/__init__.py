@@ -146,7 +146,19 @@ def reference(picture: PILImage.Image) -> PILImage.Image:
     return picture if size == picture.size else picture.resize(size, PILImage.Resampling.LANCZOS)
 
 
-@app.entrypoint
+#: Which function a request calls (cl-1103, `generate`), so a machine fetches that one's models before it starts: a
+#: control map of one of `Kinds` at a strength above 0 steers it (`control`), else a picture in the prompt makes it an
+#: edit (`edit`), else `text_to_image`. A map of another kind is dropped, so it counts for none. Exact.
+_STEERS = 'request.control.exists(c, c.strength > 0 && c.kind in ["pose", "depth", "canny", "lineart", "sketch"])'
+_PICTURE = '.references.exists(r, r.type == "image")'
+_NO_PICTURE = '.references.all(r, r.type != "image")'
+_NEEDS = {"control": _STEERS, "edit": f"!({_STEERS}) && request.prompt{_PICTURE}",
+          "text_to_image": f"!({_STEERS}) && request.prompt{_NO_PICTURE}"}
+_BOX_NEEDS = {"control": _STEERS, "edit": f"!({_STEERS}) && request.instructions{_PICTURE}",
+              "text_to_image": f"!({_STEERS}) && request.instructions{_NO_PICTURE}"}
+
+
+@app.entrypoint(needs=_NEEDS)
 async def generate(ctx: Context, payload: GenerateInput) -> ImageResult:
     """MOSS-Image from the text (`text_to_image`); with a control map, `control` under its kind's adapter
     (`CONTROL_LORAS`, at its strength); else with pictures mentioned, `edit` under Moss-Image-Edit (`EDIT_LORA`).
@@ -284,7 +296,7 @@ class ImageBox(msgspec.Struct, kw_only=True):
     control: list[Control[Literal["pose", "depth", "canny", "lineart", "sketch"]]] = msgspec.field(default_factory=list)
 
 
-@app.tool(label="Image", named="image")
+@app.tool(label="Image", named="image", needs=_BOX_NEEDS)
 async def image(ctx: Context, payload: ImageBox) -> ImageResult:
     """MOSS-Image on a canvas: `generate` from the box, steered by its first control map when it has one, else an
     edit of its pictures when it mentions any."""
