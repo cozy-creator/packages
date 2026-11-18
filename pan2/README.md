@@ -1,28 +1,30 @@
 # PAN2
 
-PAN2 turns a scene and a timeline of actions into silent video, with an optional first frame.
+PAN2 turns a scene and a timeline of actions into silent video. Its `instructions` take a picture as a mention
+(`<opening>`), as every canvas box does, and the first picture mentioned is the first frame the scene opens on.
 `generate` is also the **PAN2** video tool in the web UI. The default is 10 seconds at 24 fps,
 at the model's native 1248x704 size. The maximum is 20 seconds (481 frames).
 
 ```yaml
-prompt: A red ceramic cup stands on a wooden table. A hand lifts it, pours water into a clear glass, then puts the cup down. One continuous close shot in natural window light.
-duration_s: 20
+instructions: A red ceramic cup stands on a wooden table. A hand lifts it, pours water into a clear glass, then puts the cup down. One continuous close shot in natural window light.
+duration: 20
 seed: 20261115
 ```
 
 ```sh
 cozy run pan2/generate --input request.yaml
-cozy run pan2/generate --input request.yaml --file first_frame=opening.webp
+cozy run pan2/generate instructions='<opening> A hand lifts the cup.' \
+  'references:=[{"name": "opening", "image": "opening.webp"}]'
 ```
 
 The prompt rewriter uses Qwen3.5-9B to write PAN2's structured, timed caption: huihui-ai's abliterated one
 (`huihui-ai/huihui-qwen3.5-9b-abliterated`, refusals removed) by default, or Qwen's own with
-`--model reasoner=qwen/qwen3.5-9b@0.2.0`. It sees the first frame when one is supplied. `prompt_upsampling: false`
-takes an already structured caption JSON in `prompt`; it must fit 1480 PAN2-encoder tokens. The returned `prompt` is the actual caption used.
+`--model reasoner=qwen/qwen3.5-9b@0.2.0`. It sees the first frame when one is mentioned. `prompt_upsampling: false`
+takes an already structured caption JSON in `instructions`; it must fit 1480 PAN2-encoder tokens. The returned `prompt` is the actual caption used.
 
 Advanced controls are `steps` (50 by default), `guidance` (2.5), `negative_prompt`, and the seed.
 The model's own negative caption is used by default. Output sides snap to 32 pixels at approximately
-the native pixel count; `aspect_ratio` overrides the first frame's ratio. Frames snap up to `4k+1`.
+the native pixel count; `aspect_ratio` overrides the first frame's ratio. `duration` takes 1-20 whole seconds, as H3's beats do; frames snap up to `4k+1`.
 The result reports actual width, height, frame count, fps and seed with its MP4.
 
 The checkpoint includes its Qwen text encoder, Wan2.2 VAE, configs and tokenizer. Runtime owns
