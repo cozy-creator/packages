@@ -1615,6 +1615,39 @@ async def vae_encode_picture(
     )
 
 
+class LatentUpscale(msgspec.Struct, kw_only=True):
+    """`latent_upscale`: a `vae_round_trip`'s or a take's normalized `(1, 24, T, h, w)` latents."""
+
+    latents: LatentFile
+    resolution: RegenerateResolution = Resolution.QHD
+
+
+class LatentUpscaleOutput(msgspec.Struct):
+    #: The upscaled normalized `(1, 24, T, H, W)` latents, float32 safetensors (`latents`).
+    latents: LatentFile
+
+
+@app.entrypoint(defaults={"latent_upscaler": _LATENT_UPSCALER}, components={"latent_upscaler": ("upscaler",)})
+async def latent_upscale(
+    ctx: Context, *, payload: LatentUpscale, latent_upscaler: H3LatentUpscaler, out: Outputs, tel: Telemetry
+) -> LatentUpscaleOutput:
+    """The latent upscaler alone, as `upscale` runs it before its refine (`upscale_latent`): its benchmark and
+    release-gate cell (cr-327)."""
+    latents = load_tensors(payload.latents.read_bytes())["latents"]
+    if latents.ndim != 5 or latents.shape[:2] != (1, 24):
+        raise InvalidRequest("latents are batch-one, 24-channel H3 video latents", fields=["latents"])
+    draft = (int(latents.shape[-2]) * VAE_SPATIAL_RATIO, int(latents.shape[-1]) * VAE_SPATIAL_RATIO)
+    with tel.stage("upscale_latent"):
+        for height, width in refine_math.upscale_passes(payload.resolution.value, draft):
+            latents = latent_upscaler.upscale(latents, height=height, width=width)
+        latents = latents.cpu()
+    ctx.release_gpus()
+    tel.log("h3 latent upscale", latent="x".join(str(int(v)) for v in latents.shape[2:]))
+    return LatentUpscaleOutput(
+        out.save_bytes(save_tensors({"latents": latents.float().contiguous()}), media_type="application/octet-stream")
+    )
+
+
 # --- the three tools ---------------------------------------------------------------------
 # A tool is a CPU parent on the machine its render landed on. A shot renders in segments of at most 15 s, each going on
 # from the last from its carried latents, never decoded; a segment is an ordinary serving child memoized on its full
