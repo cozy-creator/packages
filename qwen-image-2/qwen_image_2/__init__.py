@@ -329,6 +329,29 @@ def image(
                      turbo_lora if payload.turbo else None, matte)  # fmt: skip
 
 
+class RoundTripInput(msgspec.Struct, kw_only=True):
+    #: A picture at a canvas size (each side a multiple of 32), as an edit's output is.
+    image: Annotated[ImageFile, FileBound(max_decoded_bytes=256 << 20)]
+
+
+_VAE_ONLY = {"vae": "qwen/qwen-image-2.1@0.1.0"}
+
+
+@app.entrypoint(defaults=_VAE_ONLY, components={"vae": ("vae",)}, memoize=True)  # fmt: skip
+def vae_roundtrip(ctx: Context, payload: RoundTripInput, vae: QwenImage21VAE, tel: Telemetry) -> ImageResult:
+    """Proof only (se-153): the picture through the VAE alone, encoded at its own size and decoded, no denoising. What an
+    edit chain's VAE round trip does to a picture by itself."""
+    picture = payload.image.read(mode="RGBA")
+    vae.hold(tel)
+    with tel.stage("encoding reference images"):
+        latents = vae.encode_canvas(picture)
+    with tel.stage("decoding image"):
+        image = decoded_image(vae.decode(latents, width=picture.width, height=picture.height), alpha=False)
+    with tel.stage("saving image"):
+        asset = ImageFile.from_image(image)
+    return ImageResult(asset, picture.width, picture.height, 0, "")
+
+
 #: What Qwen Image 2.1 is asked of a picture it upscales: a restoration, after ausboss's Qwen-Image-2.1 Restore LoRA card (se-147).
 #: `{}` is the picture: `the picture`, or `<image1>` when a prompt's pictures follow it.
 UPSCALE_PROMPT = ("Restore {} at a higher resolution: remove the blur, noise and JPEG compression artifacts and "
