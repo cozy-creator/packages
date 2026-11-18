@@ -78,12 +78,12 @@ class Kernel(msgspec.Struct, frozen=True, kw_only=True):
 
 class Ablation(msgspec.Struct, frozen=True, kw_only=True):
     source: Source
-    #: Each direction off the neutral mean first (Heretic's projected abliteration).
-    projected: bool
-    #: One direction for every layer, interpolated at this layer output; None: each layer its own.
-    index: float | None
     attention: Kernel
     mlp: Kernel
+    #: Each direction off the neutral mean first (Heretic's projected abliteration).
+    projected: bool = False
+    #: One direction for every layer, interpolated at this layer output; None: each layer its own.
+    index: float | None = None
 
 
 class Pair(msgspec.Struct, frozen=True):
