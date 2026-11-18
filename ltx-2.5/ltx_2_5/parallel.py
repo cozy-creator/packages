@@ -22,9 +22,9 @@ def plan(rope_type: str) -> ContextParallelModelPlan:
     return {
         "": {
             **{name: ContextParallelInput(split_dim=1, expected_dims=3, split_output=False)
-               for name in ("hidden_states", "audio_hidden_states")},
+               for name in ("hidden_states", "audio_hidden_states", "video_keyframes_mask")},
             **{name: ContextParallelInput(split_dim=1, expected_dims=2, split_output=False)
-               for name in ("timestep",)},
+               for name in ("timestep", "audio_timestep")},
         },
         **{name: {index: ContextParallelInput(split_dim=rotary_dim, expected_dims=rotary_ndim, split_output=True)
                   for index in (0, 1)}
