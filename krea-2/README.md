@@ -65,19 +65,21 @@ ComfyUI's cfg 1.
 
 ## Text encoder
 
-`text_encoder` is its own slot: it reads the Qwen3-VL-4B of any Krea 2 checkpoint, the function's own by default
-(Raw's and Turbo's are byte-identical); `model` reads only the DiT, and `vae` the VAE. Each slot builds only what it
-reads, so a model of that part alone serves it: a transformer with its scheduler for `model`, a text encoder with its
-tokenizer for `text_encoder` (`cozy model upload <model>:transformer,scheduler`). Quiho's abliterated encoder
-([Krea2_NSFW_Uncensored_Complete](https://huggingface.co/Quiho/Krea2_NSFW_Uncensored_Complete),
-`quiho/qwen3-vl-4b-abliterated`) is Qwen3-VL-4B with its refusal direction removed:
+`text_encoder` is its own slot: it reads the Qwen3-VL-4B of any Krea 2 checkpoint; `model` reads only the DiT, and
+`vae` the VAE. Each slot builds only what it reads, so a model of that part alone serves it: a transformer with its
+scheduler for `model`, a text encoder with its tokenizer for `text_encoder` (`cozy model upload
+<model>:transformer,scheduler`).
+
+Krea's encoder is stock Qwen3-VL-4B-Instruct, so the default is abliterated (Paul, 11-17: "use abliterated models
+wherever possible"): [DreamFast's Heretic](https://huggingface.co/DreamFast/Qwen3-VL-4b-Heretic-ComfyUI)
+(`dreamfast/qwen3-vl-4b-heretic`, 0/400 HarmBench refusals, KL 0.028 from stock), the same weights FLUX.3 Klein and
+Fibo 2.0 read. Krea's own is either checkpoint's (Raw's and Turbo's are byte-identical):
 
 ```sh
-cozy run krea-2/generate_turbo prompt='...' model.text_encoder=quiho/qwen3-vl-4b-abliterated@0.1.0
+cozy run krea-2/generate_turbo prompt='...' model.text_encoder=krea/krea-2-turbo@0.1.0
 ```
 
-Quiho publishes it in fp8 only. Its `int8` lane is this package's recipe, written from those fp8 values, and serves
-wherever the card has int8 tensor cores; `fp8` serves the rest.
+Quiho's (`quiho/qwen3-vl-4b-abliterated`, the earlier option) is huihui-ai's abliteration cast to fp8 without scales.
 On an RTX 4090 it changed details but not what an explicit prompt renders, with or without an NSFW LoRA: what
 Turbo leaves out (a "topless" prompt drawn in a bikini) it leaves out with either encoder.
 
@@ -130,6 +132,10 @@ cozy model upload hf://Quiho/Krea2_NSFW_Uncensored_Complete@4ecd0d82d30daec24691
   quiho/qwen3-vl-4b-abliterated --lane fp8 --base krea/krea-2-turbo@sha256:<bf16 commit> \
   --mirror https://huggingface.co/Quiho/Krea2_NSFW_Uncensored_Complete --on <machine>
 cozy model quantize quiho/qwen3-vl-4b-abliterated@sha256:<fp8 commit> --lane int8 --package krea-2 --on <machine>
+cozy model upload hf://DreamFast/Qwen3-VL-4b-Heretic-ComfyUI@c5bd34e940564e4b5b64286694d72f47f429c126/qwen3-vl-4b-heretic.safetensors \
+  dreamfast/qwen3-vl-4b-heretic --lane bf16 --base krea/krea-2-turbo@sha256:<bf16 commit> \
+  --mirror https://huggingface.co/DreamFast/Qwen3-VL-4b-Heretic-ComfyUI --on <machine>
+cozy model quantize dreamfast/qwen3-vl-4b-heretic@sha256:<bf16 commit> --lane int8 --package krea-2 --on <machine>
 ```
 
 The upload reads the Diffusers folders (`raw.safetensors` and `turbo.safetensors`, the reference
