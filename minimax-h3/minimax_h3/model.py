@@ -23,6 +23,7 @@ from cozy_runtime.accel import fusion, stepcache
 from diffusers.models.transformers.transformer_minimax_h3 import MiniMaxH3Transformer3DModel
 from cozy_runtime.accel import concurrently, placeable, sequence_parallel
 from cozy_runtime.author import (
+    Config,
     Serving,
     DerivedCache,
     Loader,
@@ -34,6 +35,7 @@ from cozy_runtime.author import (
 from cozy_runtime.accel.kernels import Plan
 
 from . import glue, producer, regenerate, shot_latents
+from .conditioner import build_text_conditioner
 from .latent_upscaler import H3LatentUpscaler as H3LatentUpscaler
 from .official import (
     REGENERATE_COMPONENT,
@@ -130,10 +132,12 @@ VAE_ENCODER = fusion.CausalConvEncoder(
 )
 
 
-def condition_references(model: H3Model, task: Task, state: PipelineState, *, tel: Telemetry) -> None:
-    """`condition_text` and `condition_ref2va_media` of one `ref2va` request, overlapped where
-    the group keeps the text encoder on a follower (`accel.concurrently`): rank 0 encodes
-    the references while the follower runs the conditioner.
+def condition_references(
+    model: H3Model, encoder: H3TextEncoder, task: Task, state: PipelineState, *, tel: Telemetry
+) -> None:
+    """`encoder.condition` and `condition_ref2va_media` of one `ref2va` request, overlapped where
+    the text encoder lives on another GPU (`accel.concurrently`): one encodes the references
+    while the other runs the conditioner.
 
     Both read only the prompt and the references and write disjoint outputs. The text block
     reads a copy taken before the media block may append a continuation's layout, and its
@@ -143,7 +147,7 @@ def condition_references(model: H3Model, task: Task, state: PipelineState, *, te
     text = model.pipe.text_state(state)
     started = time.perf_counter()
     concurrently(
-        partial(model.condition_text, task, text),
+        partial(encoder.condition, model.pipe, task, text),
         partial(model.condition_ref2va_media, task, state, tel=tel),
     )
     model.pipe.adopt_text(task, state, text)
@@ -176,7 +180,36 @@ class FullRecipe:
 FULL_BALANCED = FullRecipe()
 
 
+class TextGraph:
+    """The `text_encoder` slot's construction: H3's 50-layer conditioner alone."""
+
+    def __init__(self, config: Config) -> None:
+        self.components: dict[str, nn.Module] = {"text_encoder": build_text_conditioner(config.section("text_encoder").mapping())}
+
+
 @placeable("text_encoder")
+@sequence_parallel(degrees=(2, 4, 7, 8))
+class H3TextEncoder(Model[TextGraph]):
+    """H3's text conditioner, its own slot (`text_encoder`): any H3 checkpoint's, by default an abliterated one. It runs
+    in the base model's text block (`condition`), which reads its tokenizer and processor, so for the base's own encoder
+    the result is the base's. The conditioner keeps exact attention. In a group (`H3Model`'s degrees) the 51.5 GB
+    conditioner is entered only through module calls, so a group whose leader cannot hold it beside the DiT keeps it
+    resident on a follower instead (`placeable`)."""
+
+    graph: TextGraph
+
+    def load(self, loader: Loader) -> None:
+        self.graph = loader.construct(TextGraph)
+
+    def unload(self, loader: Loader) -> None:
+        return None
+
+    @uses_components("text_encoder")
+    def condition(self, pipe: OfficialH3Pipeline, task: Task, state: PipelineState) -> None:
+        """The prompt's embeddings and tags into `state`: `pipe`'s text block for `task`, on this conditioner."""
+        pipe.condition_text(task, state, self.device, self.graph.components["text_encoder"])
+
+
 @sequence_parallel(degrees=(2, 4, 7, 8))
 class H3Model(Model[OfficialH3Pipeline]):
     """H3 is head-shardable at every divisor of its 56 attention heads up to eight GPUs.
@@ -187,8 +220,7 @@ class H3Model(Model[OfficialH3Pipeline]):
     rowwise `_scaled_mm` scales, so a row's numbers do not depend on which rank holds it; a
     per-tensor activation scale would be derived from the local shard and is refused by the
     runtime rather than served. Sampling and both VAEs stay on the leader. The 51.5 GB text
-    conditioner is entered only through module calls, so a group whose leader cannot hold
-    it beside the DiT keeps it resident on a follower instead (`placeable`).
+    conditioner is the `text_encoder` slot's own model (`H3TextEncoder`), placed by the Runtime.
 
     Degrees 2 and 4 reproduce the degree-1 video and audio velocities to 1.2e-7 and 2.4e-7
     max absolute error on this pipeline's own AdaLN-pruned DiT (2026-09-08), which is
@@ -233,10 +265,6 @@ class H3Model(Model[OfficialH3Pipeline]):
         )
         return "+".join(identity for identity in plans if identity)
 
-    @uses_components("text_encoder")
-    def condition_text(self, task: Task, state: PipelineState) -> None:
-        self.pipe.condition_text(task, state, self.device)
-
     # Repeated BigVGAN decodes of one input differ under cuDNN's nondeterministic algorithms.
     @uses_components("audio_vae", deterministic=True)
     def decode_audio(self, task: Task, state: PipelineState) -> tuple[torch.Tensor, int]:
@@ -265,17 +293,16 @@ class H3Model(Model[OfficialH3Pipeline]):
         reused, encoded = self.pipe.condition_media(task, state, memo=memo)
         tel.log("h3 reference latents", reused=reused, encoded=encoded)
 
-    @uses_components("text_encoder")
-    def encode_prompt(self, prompt: str, frames: int) -> tuple[torch.Tensor, torch.Tensor]:
+    def encode_prompt(self, encoder: H3TextEncoder, prompt: str, frames: int) -> tuple[torch.Tensor, torch.Tensor]:
         """A text-only (T2VA) prompt's `(prompt_embeds, text_token_tags)`: the official FL2VA
-        text block without keyframes."""
+        text block without keyframes, on `encoder`."""
         plan = self.pipe.plans["fl2va"]
         state = self.pipe.start_fl2va(
             prompt=prompt, first_frame=None, last_frame=None,
             generator=rng.generator(0), steps=plan.steps[0], frames=frames,
             task="fl2va", plan=plan,
         )  # fmt: skip
-        self.pipe.condition_text("fl2va", state, self.device)
+        encoder.condition(self.pipe, "fl2va", state)
         return state.prompt_embeds, state.text_token_tags
 
     def latent_space(self) -> str:
