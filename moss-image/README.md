@@ -50,9 +50,10 @@ Upstream ships no distilled checkpoint, so there is no `generate_turbo`. MOSS-Im
 training base, runs with the same function: `model.model=moss-image-base@<release>`.
 
 **Text encoder.** MOSS-Image's encoder is stock Qwen3.5-9B, so it is its own slot, `text_encoder`, and `model` reads the
-DiT and the VAE. By default it is MOSS-Image's own. pottokao's Heretic abliteration of it, made for MOSS-Image
-(`pottokao/moss-image-text-encoder-heretic`: 32 of its tensors changed, 2/100 refusals against 100/100, KL 0.050), is
-`model.text_encoder=pottokao/moss-image-text-encoder-heretic@0.1.0`; it drew a poster's small lettering worse (se-160).
+DiT and the VAE. By default it is pottokao's Heretic abliteration of it, made for MOSS-Image
+(`pottokao/moss-image-text-encoder-heretic`: 32 of its tensors changed, 2/100 refusals against 100/100, KL 0.050); on four
+lettering seeds it drew text as well as stock on three and worse on one poster (se-160). Qwen's own is any MOSS-Image
+checkpoint: `model.text_encoder=openmoss-team/moss-image@0.1.1`.
 
 Write the request in a file, `request.yaml`:
 
