@@ -1760,7 +1760,7 @@ class OfficialH3Pipeline:
                     row.append(float(length - int(bad[0, 0])) if bad.numel() else 0.0)
                 row.append(float(diff.max()))
                 found.append(row)
-        return torch.tensor(found, dtype=torch.float64).reshape(-1, 6)
+        return torch.tensor(found, dtype=torch.float64).reshape(-1, 5)
 
     def decode_video(self, task: Task, state: PipelineState) -> torch.Tensor:
         if state.get("continuation_delivery") is not None:
