@@ -63,9 +63,9 @@ runs on to it, and the last segment samples H3's grid past the end, guided by th
 tail is never decoded. With no picture in the first segment, the plate's own first frame is the picture. The summary and
 beats are a shot's (**Beats**, **Segments**). The plate sets the shape, and joins carry 22 frames. `audio` (Paul, 11-17):
 `regenerate` (the default) is H3's sound, made hearing the plate's on its own clock (MiniMax's `audio reference`, as
-Alissonerdx's character swap runs with the video's audio), so mouths follow its speech; `keep` is the plate's own
-soundtrack, its packets copied under the video (H3 hears it the same way, and its own sound isn't decoded); `new` is
-H3's from the text alone. A plate with no sound is `new`, with a note.
+Alissonerdx's character swap runs with the video's audio), so mouths follow its speech; `keep` is that same picture
+over the plate's own soundtrack, its packets copied under the video (H3's sound isn't decoded); `new` is H3's from the
+text alone. A plate with no sound is `new`, with a note.
 
 The result is `video` (768p mp4), `latents` (its own, which a pickup resumes and `upscale` starts from), `seams` (the
 frames where each segment after the first starts, a pickup's kept ones included, also kept in the latents) and `warnings`.

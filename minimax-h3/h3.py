@@ -184,7 +184,6 @@ from story import (
     IMAGE_READ_BYTES,
     REFERENCE_AUDIO,
     VIDEO_READ_BYTES,
-    PlateSound,
     SegmentCall,
     StoryReference,
     encoder_prompt,
@@ -1818,7 +1817,7 @@ async def _render(ctx: Context, shot: Shot, out: Outputs, tel: Telemetry, *, pla
         # guide 3), so a redo from a seam reads as that segment did. An edit's later segments keep their tags.
         role = {"keyframes": bool(index == 0 and opening or index + 1 == count and ending),
                 "continues": carried if index == 0 else plate is None}
-        heard = PLATE_SOUND[sound] if plate is not None else ""
+        heard = plate is not None and sound != "new"
         segment = segment_call(text, refs, soundscape=script.soundscape, music=script.music, index=index,
                                retained=retained, added=added, forced=forced, sound=heard, **role)  # fmt: skip
         if index == 0 and (plate is not None or carried) and not any(FILE[ref.kind] == "image" for ref in segment.references):
@@ -2003,8 +2002,6 @@ EDITS: dict[str, EditLoRA] = {
 }
 ShotFootage = Annotated[VideoFile, FileBound(max_decoded_bytes=VIDEO_READ_BYTES)]
 EditAudio = Literal["keep", "regenerate", "new"]
-#: What the plate's soundtrack is to an edit's text (`segment_call`), by its `audio`.
-PLATE_SOUND: dict[EditAudio, PlateSound] = {"keep": "fully_copy", "regenerate": "reference", "new": ""}
 
 
 class Edit(msgspec.Struct, kw_only=True):
