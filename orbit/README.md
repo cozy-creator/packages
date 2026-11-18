@@ -1,15 +1,17 @@
 # Orbit
 
 A picture's subject seen from all the way round: one clockwise camera turn around it, frozen in time, as a video that
-loops. **Orbit** is a video tool: on a canvas it goes on a video node and makes that node's video; the picture goes in
-its `picture` field.
+loops. **Orbit** is a video tool: on a canvas it goes on a video node and makes that node's video. It takes its pictures
+as qwen-image-2's Image does, by mention in its main text.
 
 `orbit` takes:
 
-- `picture`: the view the turn starts and ends on.
-- `subject`: what it shows, in a word or two; the caption names it.
-- `duration`: one turn's length, 5 to 15 s (15 s by default; the clip is H3's `17n + 5` frames for those seconds).
+- `instructions`: the pictures it mentions and what's said of them. The first picture mentioned (`<swordswoman>`) is the
+  view the turn starts and ends on; every other one is a reference H3 reads by its mention (a face up close, a back
+  view), up to H3's nine. Words beside the mentions go into the shot's description.
 - `seed`: unset, a new one each render.
+
+A turn has no length to choose: it is 15 s (`DURATION`), H3's longest shot, which turns smoothest (Measured).
 
 It returns `video`: one turn, no sound, frame 0 at 0 degrees, its file marked an orbit. Frame `n` would be frame 0 again, so it isn't kept.
 
@@ -18,7 +20,7 @@ It returns `video`: one turn, no sound, frame 0 at 0 degrees, its file marked an
 MiniMax H3 renders the turn on Ref2VA with MATLOWAI's ORB360 LoRA (`matlowai/orb360@0.1.1`, a mirror of
 [MiniMax-H3-ORB360-CardSpin](https://huggingface.co/MATLOWAI/MiniMax-H3-ORB360-CardSpin)'s step 1500), Turbo, through
 `minimax-h3/render_shot`. ORB360 turns only clockwise, and only from the caption it was trained on, which
-`caption()` writes: the subject, its picture, and the angle every third of the turn at its frame. Plain words make a
+`caption()` writes: the first picture by its mention, and the angle every third of the turn at its frame. Plain words make a
 half turn, and without the LoRA the camera makes a quarter turn. A picture whose edges are one even color (a character
 drawn on white) gets the caption's plain-backdrop wording; a real scene's wording grows snow and ground there.
 
