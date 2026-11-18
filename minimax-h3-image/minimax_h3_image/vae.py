@@ -114,9 +114,19 @@ VAE_ENCODER = fusion.CausalConvEncoder(
 )
 
 
-#: The encoder's device peak beside its moments, in tiles of them (`split`'s `holds`), before a pass is measured: a
-#: 256 px tile's 128-channel float16 activations, about four held at once (64 MiB), over its 48x16x16 moments (24 KiB).
-ENCODE_HOLDS = 2700
+#: A tile's activations at the encoder's widest level held at once, before a pass is measured: the eager causal conv
+#: holds its input, the SiLU of its norm, the reflected copy, the causally padded one (three frames of one) and its
+#: output, about 7 with cuDNN's workspace; the fused one about 4 (cr-323).
+ENCODE_ACTIVATIONS = 8
+
+
+def encode_holds(config: Mapping[str, object]) -> int:
+    """`split`'s `holds` for the encoder over a batch of tiles, in windows of its input: `Cut(0)` keeps the tile count,
+    so the Runtime reckons a window's output at the window's own bytes. The widest level is `block_out_channels[0]`
+    channels at the tile's size, in the input's dtype (var-030 13: 2700 windows of moments read as input windows asked
+    6.6 GiB of four 8192x1024 pictures)."""
+    widest = int(cast(Sequence[int], config["block_out_channels"])[0])
+    return -(-ENCODE_ACTIVATIONS * widest // int(cast(int, config.get("in_channels", 3))))
 
 
 class ImageEncoder(nn.Module):
@@ -135,6 +145,7 @@ class ImageEncoder(nn.Module):
             spatial_padding_mode=config["spatial_padding_mode"],  # type: ignore[arg-type]
         )  # fmt: skip
         self.quant_conv = nn.Conv3d(2 * latent, 2 * latent, kernel_size=1)
+        self.holds = encode_holds(config)
 
     def _clip(self, x: torch.Tensor) -> torch.Tensor:
         return self.quant_conv(self.encoder(x[:, :, None]))[:, :, -1]
@@ -150,7 +161,7 @@ class ImageEncoder(nn.Module):
         tiles = [pixels[..., y : y + h, x : x + w] for y, h in zip(ys, y_lengths, strict=True)
                  for x, w in zip(xs, x_lengths, strict=True)]  # fmt: skip
         batch = tiles[0] if len(tiles) == 1 else torch.cat(tiles, dim=0)
-        moments = split(self._clip, batch, Cut(0), holds=ENCODE_HOLDS).split(pixels.shape[0], dim=0)
+        moments = split(self._clip, batch, Cut(0), holds=self.holds).split(pixels.shape[0], dim=0)
         rows = [list(moments[row * len(xs) : (row + 1) * len(xs)]) for row in range(len(ys))]
         return stitch(rows, [o // self.ratio for o in y_overlaps], [o // self.ratio for o in x_overlaps])
 
