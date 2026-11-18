@@ -1418,8 +1418,9 @@ class OfficialH3Pipeline:
         for output in block.intermediate_outputs:
             state.set(output.name, text.get(output.name), output.kwargs_type)
 
-    def condition_text(self, task: Task, state: PipelineState, device: Device) -> None:
-        conditioner = FinalHiddenState(self.components["text_encoder"], torch.device(str(device)))
+    def condition_text(self, task: Task, state: PipelineState, device: Device, encoder: torch.nn.Module) -> None:
+        """The workflow's text block, its conditioner `encoder` (the `text_encoder` slot's, `H3TextEncoder`) on `device`."""
+        conditioner = FinalHiddenState(cast("Qwen3VLForConditionalGeneration", encoder), torch.device(str(device)))
         view = _ScopedPipeline(
             self._pipes[self._workflow(task, state)],
             conditioner,
