@@ -10,7 +10,7 @@ from collections.abc import Callable, Collection, Iterable, Iterator, Mapping, S
 from contextlib import AbstractContextManager
 from fractions import Fraction
 from itertools import accumulate, pairwise
-from typing import Annotated, Any, Literal, NamedTuple, Protocol
+from typing import Annotated, Literal, NamedTuple, Protocol
 
 import msgspec
 import numpy as np
@@ -691,7 +691,7 @@ class SoFar:
             self._sound.append(sound)
         return self._join.append(piece, lambda frames: self._stretch(frames, last), last=last)
 
-    def _joined(self, tensors: dict[str, Any], today: npt.NDArray[np.float32], rate: int) -> None:
+    def _joined(self, tensors: dict[str, torch.Tensor], today: npt.NDArray[np.float32], rate: int) -> None:
         """Probe (cl-1210): the next segment's sound, decoded on from this one's real tail, switched in at `_SWITCH_TICKS`
         before this one's end, where both renderings are interior; and what that join measures beside today's butt."""
         joined = tensors["join_sound"].numpy().astype(np.float32)
