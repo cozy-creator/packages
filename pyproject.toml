@@ -91,6 +91,8 @@ module = [
     "torchvision", "torchvision.*", "triton", "triton.*", "hidiffusion", "hidiffusion.*",
     "rotary_embedding_torch", "rotary_embedding_torch.*", "accelerate", "accelerate.*",
     "tfsbench", "cozy_eval", "cozy_eval.*",
+    # The machine's PyTorch layer and OpenCV, which the type check's environment doesn't install.
+    "torchaudio", "torchaudio.*", "cv2", "cv2.*",
     # BFL's reference code, fetched by its model proof at run time.
     "flux3", "flux3.*",
 ]

@@ -1,6 +1,8 @@
 # LTX-2.5
 
-`generate` makes synchronized video and stereo sound from text and an optional first frame.
+`generate` makes synchronized video and stereo sound from text, and optional first and last frames. A picture the
+prompt mentions is a reference (a character, prop or place the video keeps), a sound it mentions is the soundtrack,
+and Pick up from here continues a take. `sound` makes sound alone, and `retake` makes part of a take again.
 It is the **LTX-2.5** video tool in the web UI. This package uses the LTX-2.5 22B Distilled model,
 with its 8-step first stage and 3-step spatial refinement, at 24 fps.
 
@@ -14,13 +16,50 @@ seed: 20261115
 ```sh
 cozy run ltx-2.5/generate --input request.yaml
 cozy run ltx-2.5/generate --input request.yaml --file first_frame=opening.webp
+cozy run ltx-2.5/generate --input request.yaml --file first_frame=opening.webp --file last_frame=closing.webp
 ```
+
+A first frame replaces the video's first latent; a last frame guides its very last frame, as upstream's
+`--image PATH FRAME_IDX 1.0` does (`ImageGuide`). Both are re-encoded at each stage's size, at the model's CRF 18.
+
+## Prompts
+
+Write what happens in your own words, as one flowing paragraph: the shot, the scene, the action, the people, the
+camera and the sound, dialogue in quotes (Lightricks' [prompting guide](https://docs.ltx.io/open-source-model/usage-guides/prompting-guide)).
+`prompt_upsampling` (on by default, as Lightricks' templates have it) first rewrites it with Lightricks' enhancer,
+Gemma 4 E2B (`google/gemma-4-e2b-it`, fetched the first time it is used), and their own text-to-video and
+image-to-video system prompts, into the caption style LTX-2.5 was trained on. The result's `prompt` is the text the
+model read.
+
+## References, soundtrack and pickup
+
+- **Mentioned pictures** (`<amy>`, `<teapot>`) are subjects the video keeps: Licon MSR V2
+  (`liconstudio/multiple-subject-reference`, Apache-2.0) takes up to five, each its own reference on both stages, and
+  its prompt names them by slot: `Image 1: amy.`, then your text with `<amy>` as Image 1. `references: sheet` puts them
+  instead on Lightricks' Ingredients reference sheet (`lightricks/ingredients`), in the order first mentioned, read in
+  the first stage with its two-part prompt: `Reference sheet: Left: amy. Right: teapot.` then `Generated video: <your
+  text>`.
+- **A mentioned video** sets the structure or the motion: Lightricks' Union Control IC-LoRA (`lightricks/union-control`,
+  the LTX-2.3 adapter their LTX-2.5 workflow runs) follows its control maps in the first stage, at half the stage's
+  size, as the adapter was trained. `control` picks the map, made as Lightricks' workflow makes it: `depth` (default,
+  Video-Depth-Anything Small), `pose` ("Motion transfer": DWPose's body, hands and face, so the subject moves like the
+  people in the clip), `edges` (Canny), or `map` (the clip is already a control map). Say what to do with the clip in
+  the prompt ("<amy> dances the way <clip> does"), with the subject as the first frame or a mention.
+  Pictures and a video can't be references together: their adapters take references at different sizes.
+- **Keyframes** (`keyframes`: a picture and a time) each land on their exact frame, as upstream's `ImageGuide` does.
+- **A sound mentioned after a picture** is that character's voice (`<amy> says, in <amyvoice>: "Hello."`): MSR gives
+  two pictures a voice each, at most 5 seconds, named `Audio 1: amyvoice, belongs only to Image 1.`
+- **A sound mentioned with no picture** is the soundtrack: held as it is while the video is made to it (upstream's
+  audio-to-video), and returned unchanged. A clip longer than the sound is shortened to it.
+- **Pick up from here** keeps the take up to its frame and carries its last 25 frames and their sound into the
+  new part, as upstream's long-video windows carry, so the new part continues the take.
+- **LoRAs** (`--lora`, the page's LoRAs) apply to both stages, as upstream's distilled pipeline applies them.
 
 Describe sounds and any spoken dialogue in the prompt. `audio: false` returns a silent MP4.
 The output carries the actual width, height, fps, frame count, seed and prompt.
 
 `resolution` is `1080p` (1920x1088) or `720p` (1280x704), on the model's native two-stage grid.
-An explicit `aspect_ratio` overrides the first frame's ratio; without a frame it defaults to
+An explicit `aspect_ratio` overrides the first (else last) frame's ratio; without a frame it defaults to
 the listed landscape size. Other ratios keep approximately the same pixel count. `duration_s`
 accepts 1-20 seconds, snapped up to the causal `8k+1` frame grid.
 
@@ -51,6 +90,21 @@ for exact cohorts and the separate publication/installed-package gates.
 The [CPU importer](../examples/client-scripts/ingest-ltx25.py) reproduces the pinned Distilled
 checkpoint with BF16 transformer/video and F32 audio VAE/vocoder. It runs before serving;
 `HF_TOKEN` supplies gated source access, or `--token-stdin` reads it from standard input.
+
+## Sound and Retake
+
+- **`sound`** (LTX-2.5 Sound) makes sound alone from text: speech, music, a soundscape. It runs only the model's
+  audio branch, as Lightricks' text-to-audio template does (`LTXVAudioOnlyModel`), and returns 48 kHz stereo FLAC.
+  Quote what is said: `A woman saying: "Oh, what a lovely day we are having!"`.
+- **`retake`** (LTX-2.5 Retake) makes part of a take again from text and keeps the rest, as upstream's
+  `RetakePipeline` does: `start_s` to `end_s` is redone, its picture and sound, the picture only, or the sound
+  only (`redo`). It runs one distilled stage at the take's size (sides on 32, at most 1080p's area), on at most
+  20 s around the window; the rest of a longer take is kept as it was.
+
+```sh
+cozy run ltx-2.5/sound prompt='Rain on a tin roof, distant thunder.' duration_s=8
+cozy run ltx-2.5/retake --file video=take.mp4 start_s=2 end_s=3.5 prompt='She laughs and claps her hands.'
+```
 
 ## Several GPUs
 
