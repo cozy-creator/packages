@@ -17,7 +17,7 @@ from .application import app as app
 from .model import CANVAS_MIN_PIXELS, GRID, IMAGE_COMPONENTS, MAX_PICTURES, PICTURE_PIXELS, SIGMAS, STEPS, PH3Image, resized, size_in_range
 from .upsampler import UPSAMPLER_COMPONENTS, PH3Upsampler, aspect_label
 
-MODEL = "prunaai/p-h3-image@0.2.0"
+MODEL = "prunaai/p-h3-image@0.2.1"
 #: The card's 1-16 MP ladder on a 32 px grid, 8 MP by default (its presets: 1:1 is 2912x2912, 16:9 3872x2176).
 SIZES = Sizes((1.0, 16.0), (256, 8192), GRID, "P-H3-Image's sizes", widest=4)
 DEFAULT_MEGAPIXELS = 8.0

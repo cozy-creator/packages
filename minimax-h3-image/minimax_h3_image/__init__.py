@@ -17,7 +17,7 @@ from .application import app as app
 from .expander import H3ImagePE
 from .model import GRID, LATENT_CHANNELS, MAX_PICTURES, STEPS, H3Image, H3ImageEncoder, H3TextEncoder, latent_grid, upright
 
-MODEL = "minimaxai/minimax-h3-image@0.1.0"
+MODEL = "minimaxai/minimax-h3-image@0.1.1"
 #: MiniMax-H3's text encoder, unchanged: MiniMax-H3-Image loads it from MiniMax-H3's release.
 TEXT_ENCODER = "minimaxai/minimax-h3@1.0.0-rc.8"
 EXPANDER = "minimaxai/minimax-h3-image-pe@0.1.0"
