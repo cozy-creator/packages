@@ -8,7 +8,6 @@ from typing import Annotated, Literal
 
 import msgspec
 import torch
-from birefnet.model import BackgroundRemovalModel
 from cozy_runtime.author import Adjustments, App, Context, OutputError, Seed, Telemetry
 from cozy_runtime.fields import Advanced, AspectRatio, FileBound, Image, MENTION, Prompt, Ratios, When
 from cozy_runtime.image import MEGAPIXEL, ImageRequest, ImageResult, Sizes, ratio_of
@@ -16,9 +15,8 @@ from cozy_runtime.media import ImageFile
 from PIL import Image as PILImage
 
 from . import quantize as quantize  # its recipes
-from .cutout import cut
 from .model import QwenImage21DiT, QwenImage21TextEncoder, QwenImage21VAE, reference_grids
-from .rewriter import Creativity, Enhancer, backdrop, cutout, rewrite
+from .rewriter import Creativity, Enhancer, keeps_transparency, rewrite, transparent
 from .turbo import FunAccLoRA
 
 app = App()
@@ -61,8 +59,8 @@ def label(n: int, key: str, count: int) -> str:
 _ALPHA_NOISE = 4
 
 
-def decoded_image(decoded: torch.Tensor, alpha: bool = True) -> PILImage.Image:
-    """The decoder's pixels: RGBA when `alpha` and its alpha has any transparency, else RGB. Quantized on the
+def decoded_image(decoded: torch.Tensor) -> PILImage.Image:
+    """The decoder's pixels: RGBA when its alpha has any transparency, else RGB. Quantized on the
     decoder's device, NumPy's arithmetic in Torch: a 4 MP canvas sends 16 MB of bytes to the host,
     not 67 MB of floats for six host passes."""
     # The model returns B,C,H,W in [-1,1], just as upstream VaeImageProcessor consumes.
@@ -74,14 +72,13 @@ def decoded_image(decoded: torch.Tensor, alpha: bool = True) -> PILImage.Image:
             code="output_integrity",
         )
     pixels = ((pixels / 2 + 0.5).clamp(0, 1) * 255).round().to(torch.uint8).permute(1, 2, 0)
-    if pixels.shape[-1] == 4 and alpha:
-        kept = pixels[..., 3]
-        kept[kept <= _ALPHA_NOISE] = 0
-        kept[kept >= 255 - _ALPHA_NOISE] = 255
-        if int(kept.min()) == 255:
+    if pixels.shape[-1] == 4:
+        alpha = pixels[..., 3]
+        alpha[alpha <= _ALPHA_NOISE] = 0
+        alpha[alpha >= 255 - _ALPHA_NOISE] = 255
+        if int(alpha.min()) == 255:
             pixels = pixels[..., :3]
-    return PILImage.fromarray(pixels[..., :4 if alpha else 3].contiguous().cpu().numpy())
-
+    return PILImage.fromarray(pixels.contiguous().cpu().numpy())
 
 
 def _said(prompt: Prompt[Image], adj: Adjustments, before: int = 0) -> tuple[str, list[Image]]:
@@ -109,16 +106,19 @@ def _upsampled(
     progress: Callable[[int, int], None],
     tel: Telemetry,
     adj: Adjustments,
-    cutting: bool,
 ) -> tuple[GenerateInput, str]:
     """The request as Qwen's enhancer rewrites it, sampled from the render's `seed`, and the canvas it chose
-    when the request names none (upstream passes `wh_ratio` and `ratio_follow` to the renderer). `cutting`: a
-    cutout's, the subject on a plain backdrop."""
+    when the request names none (upstream passes `wh_ratio` and `ratio_follow` to the renderer)."""
     with tel.stage("upsampling prompt"):
-        found, answer, thought, said = rewrite(enhancer, prompt, images, payload.creativity, seed, progress, cutting)
+        found, answer, thought, said = rewrite(enhancer, prompt, images, payload.creativity, seed, progress)
     if found is None:
         adj.warn("prompt_upsampling", "Qwen's prompt enhancer gave no rewrite, so the prompt goes as written")
         tel.log("upsampled prompt", parsed=False, answer=answer[:2000], thought_tokens=thought, answer_tokens=said)
+        return payload, prompt
+    if transparent(prompt) and not keeps_transparency(prompt, found.prompt):
+        adj.warn("prompt_upsampling", "Qwen's prompt enhancer dropped the transparent background, so the prompt goes as written")
+        tel.log("upsampled prompt", kept=False, lost="transparency", rewrite=found.prompt[:2000], seed=seed,
+                thought_tokens=thought, answer_tokens=said)
         return payload, prompt
     ratio = found.ratio
     if found.follow is not None:
@@ -142,15 +142,10 @@ def _generate(
     tel: Telemetry,
     adj: Adjustments,
     turbo: FunAccLoRA | None,
-    matte: BackgroundRemovalModel,
 ) -> ImageResult:
     """Every function's body: with `turbo`, its overlay on the base model and its 4-step grid, else the
-    base model's 40 steps of uniform spacing. A request for a cutout (`cutout`: the background removed, or a
-    transparent one) is rendered on a plain backdrop that `matte` cuts away (`cutout.py`)."""
+    base model's 40 steps of uniform spacing."""
     prompt, pictures = _said(payload.prompt, adj)
-    cutting = cutout(payload.prompt.text)
-    if cutting:
-        ctx.need("matte")
     steps = turbo.steps if turbo else _STEPS
     tel.log("sampling", regime="turbo (Fun Acc)" if turbo else "base", steps=steps,
             schedule="PDD grid, a head per step" if turbo else "uniform, dynamic shift")
@@ -159,9 +154,7 @@ def _generate(
     reference_images = [picture.file.read(mode="RGBA") for picture in pictures] or None
     if payload.prompt_upsampling:
         enhancer = expander_i2i if reference_images else expander_t2i
-        payload, prompt = _upsampled(payload, prompt, reference_images or [], seed, enhancer, ctx.progress, tel, adj, cutting)
-    if cutting:
-        prompt = backdrop(prompt)
+        payload, prompt = _upsampled(payload, prompt, reference_images or [], seed, enhancer, ctx.progress, tel, adj)
     vae.hold(tel)
     ctx.raise_if_cancelled()
     reference_latents, image_pad_mask = None, None
@@ -200,12 +193,7 @@ def _generate(
     ctx.raise_if_cancelled()
     with tel.stage("decoding image"):
         decoded = vae.decode(latents, width=width, height=height)
-        # A picture is RGBA only as a cutout, its alpha the matte's: the decoder's strays to 215-250 at a few dozen pixels
-        # of an opaque edit (se-153), and a stray RGBA picture is the next edit's reference.
-        image = decoded_image(decoded, alpha=False)
-    if cutting:
-        with tel.stage("cutting out"):
-            image = cut(image, matte, adj, tel)
+        image = decoded_image(decoded)
     with tel.stage("saving image"):
         asset = ImageFile.from_image(image)
     return ImageResult(asset, width, height, seed, prompt)
@@ -218,31 +206,28 @@ def _generate(
 #: Alibaba PAI's Fun Acc over it (`turbo_lora`). `vae` encodes the pictures and decodes the image: the base model's
 #: own by default, or another Qwen-Image-2.1 VAE (`model.vae=madebyollin/texture-fix-vae`).
 _FULL = {"expander_i2i": "darrellbest/qwen-image-2.1-pe-i2i-abliterated@0.1.0",
-         "expander_t2i": "pottokao/qwen-image-2.1-pe-t2i-abliterated@0.1.0", "matte": "zhengpeng7/birefnet@0.1.0",
-         "model": "qwen/qwen-image-2.1@0.1.0", "text_encoder": "atomicchat/qwen-image-2.1-text-encoder-abliterated@0.1.0",
-         "vae": "qwen/qwen-image-2.1@0.1.0"}
+         "expander_t2i": "pottokao/qwen-image-2.1-pe-t2i-abliterated@0.1.0", "model": "qwen/qwen-image-2.1@0.1.0",
+         "text_encoder": "atomicchat/qwen-image-2.1-text-encoder-abliterated@0.1.0", "vae": "qwen/qwen-image-2.1@0.1.0"}
 _TURBO = {"expander_i2i": "darrellbest/qwen-image-2.1-pe-i2i-abliterated@0.1.0",
-          "expander_t2i": "pottokao/qwen-image-2.1-pe-t2i-abliterated@0.1.0", "matte": "zhengpeng7/birefnet@0.1.0",
-          "model": "qwen/qwen-image-2.1@0.1.0", "text_encoder": "atomicchat/qwen-image-2.1-text-encoder-abliterated@0.1.0",
+          "expander_t2i": "pottokao/qwen-image-2.1-pe-t2i-abliterated@0.1.0", "model": "qwen/qwen-image-2.1@0.1.0",
+          "text_encoder": "atomicchat/qwen-image-2.1-text-encoder-abliterated@0.1.0",
           "turbo_lora": "alibaba-pai/qwen-image-2.1-fun-acc@0.1.1", "vae": "qwen/qwen-image-2.1@0.1.0"}
 _COMPONENTS = {"model": ("transformer",), "text_encoder": ("text_encoder",), "vae": ("vae",)}
 #: Which requests need each enhancer (cl-1103): one with pictures the edit's, one without the other, and
 #: `prompt_upsampling=False` neither. A machine fetches the one its request needs before it starts, never the other.
-#: A picture is a reference of type `image`: Runtime leaves any other kind out of a `Prompt[Image]`. BiRefNet (`matte`)
-#: only for a cutout, which only the words say (`cutout`, no rule reads them): `ctx.need` fetches it as the run starts.
+#: A picture is a reference of type `image`: Runtime leaves any other kind out of a `Prompt[Image]`.
 _PICTURES = '.references.exists(r, r.type == "image")'
 _NO_PICTURES = '.references.all(r, r.type != "image")'
 _NEEDS = {"expander_i2i": f"request.prompt_upsampling && request.prompt{_PICTURES}",
           "expander_t2i": f"request.prompt_upsampling && request.prompt{_NO_PICTURES}"}  # fmt: skip
 
 
-@app.entrypoint(defaults=_FULL, components=_COMPONENTS, needs=_NEEDS, on_demand=("matte",), memoize=True)  # fmt: skip
+@app.entrypoint(defaults=_FULL, components=_COMPONENTS, needs=_NEEDS, memoize=True)  # fmt: skip
 def generate(
     ctx: Context,
     payload: GenerateInput,
     expander_i2i: Enhancer,
     expander_t2i: Enhancer,
-    matte: BackgroundRemovalModel,
     model: QwenImage21DiT,
     text_encoder: QwenImage21TextEncoder,
     vae: QwenImage21VAE,
@@ -250,16 +235,15 @@ def generate(
     adj: Adjustments,
 ) -> ImageResult:
     """Qwen-Image-2.1, the 40-step base model."""
-    return _generate(ctx, payload, expander_i2i, expander_t2i, model, text_encoder, vae, tel, adj, None, matte)
+    return _generate(ctx, payload, expander_i2i, expander_t2i, model, text_encoder, vae, tel, adj, None)
 
 
-@app.entrypoint(defaults=_TURBO, components=_COMPONENTS, needs=_NEEDS, on_demand=("matte",), memoize=True)  # fmt: skip
+@app.entrypoint(defaults=_TURBO, components=_COMPONENTS, needs=_NEEDS, memoize=True)  # fmt: skip
 def generate_turbo(
     ctx: Context,
     payload: GenerateInput,
     expander_i2i: Enhancer,
     expander_t2i: Enhancer,
-    matte: BackgroundRemovalModel,
     model: QwenImage21DiT,
     text_encoder: QwenImage21TextEncoder,
     turbo_lora: FunAccLoRA,
@@ -268,7 +252,7 @@ def generate_turbo(
     adj: Adjustments,
 ) -> ImageResult:
     """Qwen-Image-2.1 with Alibaba PAI's Fun Acc: the same inputs, in 4 steps."""
-    return _generate(ctx, payload, expander_i2i, expander_t2i, model, text_encoder, vae, tel, adj, turbo_lora, matte)
+    return _generate(ctx, payload, expander_i2i, expander_t2i, model, text_encoder, vae, tel, adj, turbo_lora)
 
 
 class ImageBox(msgspec.Struct, kw_only=True):
@@ -294,14 +278,12 @@ _BOX_NEEDS = {"expander_i2i": f"request.prompt_upsampling && request.instruction
               "turbo_lora": "request.turbo"}  # fmt: skip
 
 
-@app.tool(label="Image", named="image", defaults=_TURBO, components=_COMPONENTS, needs=_BOX_NEEDS, on_demand=("matte",),
-          memoize=True)  # fmt: skip
+@app.tool(label="Image", named="image", defaults=_TURBO, components=_COMPONENTS, needs=_BOX_NEEDS, memoize=True)  # fmt: skip
 def image(
     ctx: Context,
     payload: ImageBox,
     expander_i2i: Enhancer,
     expander_t2i: Enhancer,
-    matte: BackgroundRemovalModel,
     model: QwenImage21DiT,
     text_encoder: QwenImage21TextEncoder,
     turbo_lora: FunAccLoRA,
@@ -314,7 +296,7 @@ def image(
                             megapixels=payload.megapixels, seed=payload.seed,
                             prompt_upsampling=payload.prompt_upsampling, creativity=payload.creativity)  # fmt: skip
     return _generate(ctx, request, expander_i2i, expander_t2i, model, text_encoder, vae, tel, adj,
-                     turbo_lora if payload.turbo else None, matte)  # fmt: skip
+                     turbo_lora if payload.turbo else None)  # fmt: skip
 
 
 #: What Qwen Image 2.1 is asked of a picture it upscales: a restoration, after ausboss's Qwen-Image-2.1 Restore LoRA card (se-147).

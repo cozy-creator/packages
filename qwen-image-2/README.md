@@ -10,8 +10,9 @@ Runtime owns construction, memory residency and component execution.
 
 Each picture's `description` follows the prompt as `<name>: description`, in the words tuned on this model: a mention reads as `<image3>` alone, and with no words for it a third picture was dropped. In a `cozy project`, each `<name>` the text mentions is that box's picture and description, and a text box goes in as its words.
 
-`prompt`, then those words, goes to Qwen's prompt enhancer first (below), and its rewrite reaches the model. The image is
-RGB, or RGBA for a cutout ([below](#cutouts)): the decoder's own alpha is dropped. `seed` is optional and the chosen seed is
+`prompt`, then those words, goes to Qwen's prompt enhancer first (below), and its rewrite reaches the model. The image keeps the decoder's alpha when anything in it is
+transparent, and is RGB otherwise; alpha within 4 levels of 0 or 255 (the decoder's noise) snaps
+to it. `seed` is optional and the chosen seed is
 returned. Seeds range from 0 through 9007199254740991 (the interoperable 53-bit
 integer range); omitting one chooses a random seed in that range. Inputs: `prompt` (its text and the pictures it mentions), `aspect_ratio` (any W:H), `megapixels` (any size, 1024² pixels each), `seed`, `prompt_upsampling` and `creativity`. The full model runs 40 steps, Turbo 4 on Fun Acc's
 grid, with its own output head each step and an F32 state (`qwenimage21_pdd.py`). Qwen runs no CFG, so it has no `guidance` or `negative_prompt`. Unknown fields are ignored with a warning. The result is `image`, `width`, `height`, `seed` and `prompt`, the prompt the image was made from.
@@ -51,8 +52,11 @@ where upstream's full thought held them 6 of 6. With no thought at all, the enha
 gives one. With no `aspect_ratio`, the enhancer's canvas is used, as upstream passes it to the renderer: its
 `wh_ratio`, or the shape of the picture its `ratio_follow` names.
 
-For a cutout ([below](#cutouts)) the enhancer is asked, after the request, for the subject on a plain backdrop and
-never for transparency.
+A request for transparency (an RGBA image, an alpha channel, a transparent background) stays one. Qwen's enhancer
+rewrites "transparent background" into a backdrop, a gray-and-white checkerboard, so each enhancer's system prompt
+gains a rule: keep the request's transparency words, frame the rewrite in the model card's wording below, and describe
+no background. A rewrite that still loses them (or paints a checkerboard) is not used: the prompt goes as written,
+with a warning.
 
 `creativity` steers how far the rewrite goes beyond the words: `balanced` (the default) is Qwen's own rewrite;
 `faithful` and `creative` add one sentence after the request, where the enhancer reads intent: change only what was
@@ -91,24 +95,29 @@ The size is upstream's `calculate_dimensions` at `megapixels` (held to 1–4 MP)
 text-to-image defaults to `1:1` at 2 MP; 4 MP is the model's native 2048×2048. A ratio past the model's rotary
 range (a 32768 px side) is served at the nearest size it admits, reported as a `clamp` adjustment.
 
-## Cutouts
+## Transparent images
 
-Ask for the background removed or transparent, in any words: "remove the background", "no background", "on a
-transparent background", an alpha channel, RGBA. The image is RGBA: the subject, and the background cleared.
+Qwen-Image-2.1 generates RGBA natively when the prompt asks for it in the wording its model card
+recommends; "on a transparent background" alone draws a white one:
 
-Qwen-Image-2.1 draws transparency itself only in its model card's words ("This is an RGBA image with transparency. … The
-image has alpha channel and the background is transparent."). In other words, on Turbo's 4 steps, it paints a checkerboard
-over a background left opaque (se-154: Paul's run PRO6-29), and its enhancer, asked to remove a background, writes a white
-backdrop, loose transparency words or the card's, by seed. So a cutout is drawn on a plain, evenly lit, pure white studio
-backdrop and BiRefNet (`matte`, `zhengpeng7/birefnet@0.1.0`, fetched only for a cutout) cuts it away, whatever the
-wording. Its matte is the alpha, and each edge pixel's colour is unmixed from the backdrop behind it, so the
-white leaves no fringe. The prompt Qwen reads, the result's `prompt`, has no transparency words and ends with the
-backdrop. A request that names another background ("replace it with a beach", "change the background to blue", "put her
-on a beach") is an edit, not a cutout. A backdrop that comes out busy gets a warning; a matte that finds no subject leaves
-the picture as drawn, with a warning.
+Write the request in a file, `request.yaml`:
+
+```yaml
+prompt: >-
+  This is an RGBA image with transparency. A cute cartoon dragon sticker.
+  The image has alpha channel and the background is transparent.
+seed: 42
+```
 
 ```sh
-cozy run qwen-image-2/generate_turbo seed=42 prompt='A cute cartoon dragon sticker on a transparent background.'
+cozy run qwen-image-2/generate --input request.yaml
+```
+
+Inline inputs work too, and override the file's:
+
+```sh
+cozy run qwen-image-2/generate seed=42 \
+  prompt='This is an RGBA image with transparency. A cute cartoon dragon sticker. The image has alpha channel and the background is transparent.'
 ```
 
 ## Image editing and references
