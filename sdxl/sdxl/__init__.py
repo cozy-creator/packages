@@ -115,6 +115,8 @@ _NATIVE = 1.5
 Kind = Literal["depth", "pose", "lineart", "sketch", "canny", "inpaint"]
 #: The pictures the IP-Adapter takes at once (InvokeAI's cap, Anima's): past them the last mentioned go, with a warning.
 MAX_PICTURES = 4
+#: `GenerateInput.reference_strength`'s default.
+REFERENCE_STRENGTH = 0.5
 
 
 class GenerateInput(ImageRequest):
@@ -127,8 +129,10 @@ class GenerateInput(ImageRequest):
     #: Control maps, each through its mode of the union ControlNet; `inpaint`'s is the picture with the area to redraw
     #: transparent.
     control: list[Control[Kind]] = msgspec.field(default_factory=list)
-    #: How strongly the mentioned pictures steer, the IP-Adapter's scale.
-    reference_strength: Annotated[float, msgspec.Meta(ge=0.0, le=2.0), Advanced()] = 1.0
+    #: How strongly the mentioned pictures steer, the IP-Adapter's scale. 0.5 is tencent-ailab's "Best Practice" for a
+    #: picture with words: at 0.6 and above IP-Adapter Plus redraws the picture, its backdrop too, past the words; at
+    #: 0.4 the words win the setting (se-175, SE175-41..56).
+    reference_strength: Annotated[float, msgspec.Meta(ge=0.0, le=2.0), Advanced()] = REFERENCE_STRENGTH
     steps: Steps = None
     guidance: Guidance = None
     #: `_negative_prompt`, with HiDiffusion's recipe after it.
@@ -805,7 +809,7 @@ class ImageBox(msgspec.Struct, kw_only=True):
     #: `generate`: control maps, each through its mode of the union ControlNet.
     control: list[Control[Kind]] = msgspec.field(default_factory=list)
     #: `generate`: how strongly the mentioned pictures steer.
-    reference_strength: Annotated[float, msgspec.Meta(ge=0.0, le=2.0), Advanced()] = 1.0
+    reference_strength: Annotated[float, msgspec.Meta(ge=0.0, le=2.0), Advanced()] = REFERENCE_STRENGTH
     #: `resolve_generate`, held to SDXL's 1:4 through 4:1 buckets.
     aspect_ratio: Annotated[AspectRatio, Ratios(min=1 / 4, max=4)] | None = None
     #: `resolve_generate`: base SDXL's 1 MP, HiDiffusion's 2048² and 8 MP classes, and its 4096² flagship at 1:1 only
