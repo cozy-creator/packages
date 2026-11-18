@@ -1736,7 +1736,7 @@ class OfficialH3Pipeline:
         return videos
 
     def decode_video_chunks(
-        self, task: Task, state: PipelineState, on_chunk: Callable[[torch.Tensor], None]
+        self, task: Task, state: PipelineState, on_chunk: Callable[[torch.Tensor], None], upto: int | None = None
     ) -> int:
         """`decode.video` with the VAE's temporal chunks handed out as they finish (h3a-017).
 
@@ -1753,14 +1753,16 @@ class OfficialH3Pipeline:
         vae = cast(TileBatchedVideoVAE, components.vae)  # `_apply_video_vae_dtype` built it
         return decode_chunks(
             vae, components._execution_device, state.latents,
-            (tuple(components.pixel_mean), tuple(components.pixel_std)), on_chunk, delivery,
+            (tuple(components.pixel_mean), tuple(components.pixel_std)), on_chunk, delivery, upto,
         )  # fmt: skip
 
-    def decode_latents(self, latents: torch.Tensor, on_chunk: Callable[[torch.Tensor], None]) -> int:
-        """`decode_video_chunks` of normalized `(1, 24, T, H, W)` latents at any canvas."""
+    def decode_latents(
+        self, latents: torch.Tensor, on_chunk: Callable[[torch.Tensor], None], upto: int | None = None
+    ) -> int:
+        """`decode_video_chunks` of normalized `(1, 24, T, H, W)` latents at any canvas, their first `upto` frames."""
         state = PipelineState()
         state.set("latents", latents)
-        return self.decode_video_chunks("fl2va", state, on_chunk)
+        return self.decode_video_chunks("fl2va", state, on_chunk, upto)
 
     def encode_clip(self, pixels: torch.Tensor, seed: int) -> torch.Tensor:
         """A `(T, H, W, 3)` uint8 clip's normalized `(1, 24, T', H/16, W/16)` latents: the
@@ -2160,10 +2162,13 @@ def decode_chunks(
     pixel: tuple[Sequence[float], Sequence[float]],
     on_chunk: Callable[[torch.Tensor], None],
     delivery: ContinuationPlan | None = None,
+    upto: int | None = None,
 ) -> int:
     """Upstream's `MiniMaxH3VideoDecodeStep` per temporal chunk (`OfficialH3Pipeline.decode_video_chunks`):
     `latents` denormalized, decoded under float16 autocast, the ImageNet normalization reverted, each
-    `(t, 3, H, W)` float32 piece handed to `on_chunk` before clipping. Returns the frame count."""
+    `(t, 3, H, W)` float32 piece handed to `on_chunk` before clipping. Only `delivery`'s delivered frames, or the first
+    `upto`, are handed on, and the decode stops once they are: what runs past them (an edit's frames past its plate) is
+    never handed on, nor decoded where the VAE's chunks allow. Returns the frame count."""
     latents_mean = torch.tensor(vae.config["latents_mean"], device=device).view(1, -1, 1, 1, 1)
     latents_std = torch.tensor(vae.config["latents_std"], device=device).view(1, -1, 1, 1, 1)
     pixel_mean = torch.tensor(pixel[0], device=device).view(1, -1, 1, 1, 1)
@@ -2179,12 +2184,18 @@ def decode_chunks(
             if chunk is None:
                 return frames if tail is None else tail.finish()
             video = chunk.float() * pixel_std + pixel_mean
-            frames += int(video.shape[2])
             selected = equalize(video[0].permute(1, 0, 2, 3))
+            if upto is not None:
+                selected = selected[: max(0, upto - frames)]
+            frames += int(video.shape[2]) if upto is None else int(selected.shape[0])
             if tail is not None:
                 selected = tail.push(selected)
             if selected.shape[0]:
                 on_chunk(selected)
+            if tail is not None and tail.done:
+                return tail.finish()
+            if upto is not None and frames >= upto:
+                return frames
 
 
 @dataclass(frozen=True)
@@ -2196,9 +2207,11 @@ class OfficialH3VideoVAE:
     def encode_clip(self, pixels: torch.Tensor, seed: int) -> torch.Tensor:
         return encode_clip(self.components["vae"], pixels, PIXEL_STATS, seed)
 
-    def decode_latents(self, latents: torch.Tensor, on_chunk: Callable[[torch.Tensor], None]) -> int:
+    def decode_latents(
+        self, latents: torch.Tensor, on_chunk: Callable[[torch.Tensor], None], upto: int | None = None
+    ) -> int:
         device = torch.device(str(placed_device()))
-        return decode_chunks(self.components["vae"], device, latents, PIXEL_STATS, on_chunk)
+        return decode_chunks(self.components["vae"], device, latents, PIXEL_STATS, on_chunk, upto=upto)
 
 
 def build_h3_video_vae(config: Config) -> OfficialH3VideoVAE:
@@ -2416,9 +2429,9 @@ def read_reference_video(
 
     Each frame shows until the next starts (the last for its own duration) and lands on the
     whole-frame 24-fps clock, resized once (antialiased bicubic) as it arrives to its
-    `clip_size`. Only the call's first `frames` are kept
+    `clip_size`. Only the call's first `frames` are kept, a `guide`'s last held to fill them,
     and no source-resolution frame outlives its event. With `audio`, the soundtrack is kept on
-    the video's origin, to the nearest sample of its own clock.
+    the video's origin, to the nearest sample of its own clock, as long as the clip is.
     """
     out: npt.NDArray[np.uint8] | None = None
     kept = 0
@@ -2478,8 +2491,17 @@ def read_reference_video(
         raise InvalidRequest("reference video has no frames", code="reference_policy")
     end = min(end, origin + Fraction(frames, FPS))
     place(held[1], end)
+    if kept == 0 and held[1] is not None:
+        # A clip shorter than half a slot still shows its first frame.
+        out[0], kept = held[1], 1
     if kept == 0:
         raise InvalidRequest("reference video has no frame on the 24-fps clock", code="reference_policy")
+    if guide and kept < frames:
+        # A guide holds its last frame to the call's end, so no frame of the render goes unguided (Paul, 11-17: an
+        # edit's tail past its plate fell back to the character's picture); the edit is cut at the plate's end. Its last
+        # frame: one the 24-fps clock rounded away (shown under half a slot) still ends the clip.
+        out[kept:] = held[1] if held[1] is not None else out[kept - 1]
+        kept = frames
     soundtrack = None
     if audio_start is not None:
         waveform = torch.from_numpy(np.stack([np.frombuffer(b"".join(c), dtype="<f4") for c in pcm]))

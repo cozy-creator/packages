@@ -4,10 +4,11 @@ the references each segment reads, its segments, and the joins and carry between
 from __future__ import annotations
 
 import hashlib
+import io
 import math
 import re
 from collections.abc import Collection, Iterable, Iterator, Mapping, Sequence
-from contextlib import AbstractContextManager
+from contextlib import AbstractContextManager, ExitStack
 from fractions import Fraction
 from itertools import accumulate, pairwise
 from typing import Annotated, Literal, NamedTuple
@@ -47,6 +48,10 @@ from cozy_runtime.media import (
     Latents,
     VideoFile,
 )
+from av import AudioFrame, AudioResampler, AudioStream, Packet, VideoStream
+from av import open as open_media
+from av.container import InputContainer, OutputContainer
+from av.rational import AVRational
 from PIL import Image as PILImage
 from safetensors.torch import load as load_tensors
 
@@ -352,7 +357,8 @@ def plan_segments(duration_s: float, marks: Iterable[float], carried: bool = Fal
                             "What follows comes straight after it, so the video is shorter than its beats.")  # fmt: skip
         elif index == len(groups) - 1:
             length = next((n for n in lengths if _delivered(n, first, carry) >= wanted), most)
-            if _delivered(length, first, carry) - wanted > FPS:
+            # An edit's last segment is cut at its plate's end (`segment_plans`), so only a shot runs longer.
+            if not split and _delivered(length, first, carry) - wanted > FPS:
                 warnings.append(f"a segment renders at least {MIN_DURATION_S} s, so this runs "
                                 f"{(_delivered(length, first, carry) - wanted) / FPS:.1f} s longer than asked.")  # fmt: skip
         else:
@@ -363,6 +369,21 @@ def plan_segments(duration_s: float, marks: Iterable[float], carried: bool = Fal
                                 f"{past / FPS:.1f} s late: update its timing.")  # fmt: skip
         seconds.append(length)
     return ShotPlan(seconds, [start for start, _ in groups], warnings)
+
+
+def segment_plans(seconds: Sequence[int], carry: Carry, *, carried: bool = False, plate: int | None = None
+                  ) -> list[ContinuationPlan]:  # fmt: skip
+    """Each segment's clocks. Every one carries into a successor, its last too (the video's latents keep that carry,
+    which a pickup resumes), and each after the first carries in, the first too when it goes on from a take (`carried`).
+    With a plate of `plate` frames, the segments are its frames (Paul, 11-17): a last segment the one before already runs
+    past the plate's end isn't made, and the last's `cut` is what it samples past it, never delivered."""
+    plans = [ContinuationPlan(length, carry if index or carried else Carry(), carry) for index, length in enumerate(seconds)]
+    if plate is not None:
+        while len(plans) > 1 and sum(plan.delivered_frames for plan in plans[:-1]) >= plate:
+            plans.pop()
+        last = plans[-1]
+        plans[-1] = ContinuationPlan(last.seconds, last.carried, last.successor, sum(p.delivered_frames for p in plans) - plate)
+    return plans
 
 
 def prompt_parts(prompt: str) -> tuple[str, str, str]:
@@ -445,27 +466,32 @@ def segment_texts(prompt: str, starts: Sequence[float], *, continued: bool = Fal
 ClipWindow = tuple[int, int]
 
 
+def footage_frames(video: VideoFile) -> int:
+    """A clip's frames on the 24-fps clock: at least its first."""
+    return max(1, math.floor(video.probe().duration * FPS + Fraction(1, 2)))
+
+
 def shot_windows(clips: Sequence[tuple[StoryReference, float, float]], spans: Sequence[tuple[int, int]]
                  ) -> tuple[list[dict[str, ClipWindow]], list[str]]:  # fmt: skip
     """Where each segment's window of each clip starts and stops, and the warnings. A clip lines up with the video's
     clock from its own start (`clips`: each clip, and the seconds its text starts and ends at), second for second, and
     is cut at its text's end. A segment reads the video frames it samples, its carried head included (`spans`: first
     frame, count), from the clip's frame there, so a plate stays frame-aligned across an edge. A segment left with less
-    than `MIN_CLIP_SECONDS` of a clip goes without it."""
-    least = MIN_CLIP_SECONDS * FPS
+    than `MIN_CLIP_SECONDS` of a clip goes without it; a plate guides any frame it has."""
     windows: list[dict[str, ClipWindow]] = [{} for _ in spans]
     total = spans[-1][0] + spans[-1][1]
     warnings = []
     for ref, start_s, end_s in clips:
         assert ref.video is not None
         probe = ref.video.probe()
-        length = math.floor(probe.duration * FPS + Fraction(1, 2))
+        length = footage_frames(ref.video)
         offset = round(start_s * FPS)
         stop = length if math.isinf(end_s) else min(length, round(end_s * FPS) - offset)
         if abs(probe.pixel_aspect_ratio - 1) > Fraction(1, 50):
             warnings.append(f"<{ref.name}> has {probe.pixel_aspect_ratio} pixels; it's read at its display shape")
         if within_ratio(shown := shown_width(probe.width, probe.pixel_aspect_ratio), probe.height) != (shown, probe.height):
             warnings.append(f"<{ref.name}> is past 4:1; its middle is used")
+        least = 1 if ref.kind == "anchor_video" else MIN_CLIP_SECONDS * FPS
         for window, (start, frames) in zip(windows, spans, strict=True):
             if min(start + frames, offset + stop) - max(start, offset) >= least:
                 window[ref.name] = (max(0, start - offset), stop)
@@ -727,3 +753,95 @@ def join_kept(out: Outputs, take: VideoFile, frames: int, new: VideoFile) -> tup
     join.append(start, lambda _: chunk(before, 0))
     join.append(new, lambda _: chunk(after, samples), last=True)
     return join.finish().video, warnings
+
+
+#: Sound codecs an MP4 holds as they are: a plate's is copied packet for packet, any other encoded as AAC.
+_MP4_SOUND = frozenset({"aac", "mp3", "alac", "flac", "opus", "ac3", "eac3"})
+
+
+def plate_sound(out: Outputs, video: VideoFile, plate: VideoFile) -> tuple[VideoFile, list[str]]:
+    """An edit that keeps its plate's sound (Paul, 11-17): `video`'s pictures, copied packet for packet, under the plate's
+    own soundtrack from its first frame, which the edit's first follows, to `video`'s end. Its packets are copied as they
+    are, so it decodes bit for bit; a codec an MP4 can't hold is encoded as AAC, with a note."""
+    warnings: list[str] = []
+    with ExitStack() as stack:
+        made, source = open_media(io.BytesIO(video.read_bytes()), "r"), open_media(io.BytesIO(plate.read_bytes()), "r")
+        stack.callback(made.close)
+        stack.callback(source.close)
+        picture, heard, first = made.streams.video[0], source.streams.audio[0], source.streams.video[0]
+        pictures = [packet for packet in made.demux(picture) if packet.size and packet.pts is not None]
+        end = Fraction(len(pictures), FPS)  # an H3 video's frames, on its 24-fps clock from 0
+        # The plate's clock starts at its first frame, as `read_reference_video` reads it.
+        origin = (first.start_time or 0) * _ratio(first.time_base)
+        path = out.temporary_file(".mp4")
+        joined = open_media(str(path), "w", format="mp4",
+                            options={"fflags": "+bitexact", "movflags": "+faststart", "use_editlist": "1"})  # fmt: skip
+        stack.callback(joined.close)
+        shown = joined.add_stream_from_template(picture)
+        for packet in pictures:
+            packet.stream = shown
+        if heard.codec_context.name in _MP4_SOUND:
+            sound = joined.add_stream_from_template(heard)
+            sounds = _copied([packet for packet in source.demux(heard) if packet.size], heard, sound, origin, end)
+        else:
+            warnings.append(f"the plate's sound is {heard.codec_context.name}, which an MP4 can't hold as it is, so it's "
+                            "encoded as AAC")  # fmt: skip
+            sounds = _encoded(source, heard, joined, origin, end)
+        ordered: list[Packet[VideoStream] | Packet[AudioStream]] = [*pictures, *sounds]
+        for muxed in sorted(ordered, key=_at):
+            joined.mux(muxed)
+    return out.save_file(path, media_type="video/mp4"), warnings
+
+
+def _ratio(base: AVRational) -> Fraction:
+    return Fraction(base.numerator, base.denominator)
+
+
+def _at(packet: Packet[VideoStream] | Packet[AudioStream]) -> Fraction:
+    """When a packet is muxed: its decode time."""
+    return (packet.dts if packet.dts is not None else packet.pts or 0) * _ratio(packet.time_base)
+
+
+def _copied(packets: Sequence[Packet[AudioStream]], heard: AudioStream, sound: AudioStream, origin: Fraction,
+            end: Fraction) -> list[Packet[AudioStream]]:  # fmt: skip
+    """`heard`'s `packets` up to `end` on `sound`, moved so `origin` is 0. Every one from the stream's first: the decoder
+    then runs as it does on the plate (Opus converges only over its pre-roll; one packet before `origin` gave run
+    44209703781's long-keep a different PCM), and the MP4's edit list skips what lies before 0."""
+    tick = _ratio(heard.time_base)
+    shift = round(origin / tick)
+    kept: list[Packet[AudioStream]] = []
+    for packet in packets:
+        if packet.pts is None:
+            continue
+        if (packet.pts - shift) * tick >= end:
+            break
+        packet.pts -= shift
+        packet.dts = packet.pts if packet.dts is None else packet.dts - shift
+        packet.stream = sound
+        kept.append(packet)
+    return kept
+
+
+def _encoded(source: InputContainer, heard: AudioStream, joined: OutputContainer, origin: Fraction,
+             end: Fraction) -> list[Packet[AudioStream]]:  # fmt: skip
+    """`heard` decoded from `origin` to `end`, sample for sample, and encoded as AAC on a new stream of `joined`."""
+    rate = heard.codec_context.sample_rate
+    layout = "mono" if heard.codec_context.channels == 1 else "stereo"
+    sound = joined.add_stream("aac", rate=rate)
+    sound.codec_context.layout = layout
+    planar = AudioResampler(format="fltp", layout=layout, rate=rate)
+    stop, done = round(end * rate), 0
+    packets: list[Packet[AudioStream]] = []
+    for decoded in source.decode(heard):
+        if decoded.pts is None or done >= stop:
+            continue
+        at = round((decoded.pts * _ratio(decoded.time_base) - origin) * rate)
+        for part in planar.resample(decoded):
+            samples = part.to_ndarray()[:, max(0, done - at) : max(0, stop - at)]
+            at += part.samples
+            if samples.shape[1]:
+                cut = AudioFrame.from_ndarray(np.ascontiguousarray(samples, dtype=np.float32), format="fltp", layout=layout)
+                cut.sample_rate, cut.pts, cut.time_base = rate, done, Fraction(1, rate)
+                done += int(samples.shape[1])
+                packets += sound.encode(cut)
+    return packets + sound.encode(None)

@@ -36,6 +36,7 @@ turbo: true
 # edit.yaml — cozy run minimax-h3/edit --input edit.yaml
 plate: <take3@48-336>                         # frames 48 to 336 of take3: the edit's timeline
 edit: character_swap                          # its trigger (`body_swap:`) opens each beat, at the LoRA's strength
+audio: keep                                   # the plate's own sound; regenerate (default) or new is H3's
 summary: <kyogre> walks the man's route through the market at dusk.
 beats: [{duration: 5, description: <kyogre> in place of the man.}, {duration: 7, description: <kyogre> stops at the stall.}]
 ```
@@ -57,9 +58,14 @@ cut's time on the box's own take and 0 on another's. With the take's latents it 
 decodes as one; without them a new video opens on the cut frame and is joined after the kept start. A `last_frame`
 ends the final segment; a `first_frame` is ignored. `kept_s` in the result says where the new part starts.
 
-**Edit.** The plate's length is the edit's: the last beat is cut at its end or runs on to it. With no picture in the
-first segment, the plate's own first frame is the picture. The summary and beats are a shot's (**Beats**, **Segments**).
-The plate sets the shape; there is no soundscape or music, and joins carry 22 frames.
+**Edit.** The video is the plate's frames on the 24-fps clock, one for one: the last beat is cut at the plate's end or
+runs on to it, and the last segment samples H3's grid past the end, guided by the plate's last frame held, and that
+tail is never decoded. With no picture in the first segment, the plate's own first frame is the picture. The summary and
+beats are a shot's (**Beats**, **Segments**). The plate sets the shape, and joins carry 22 frames. `audio` (Paul, 11-17):
+`regenerate` (the default) is H3's sound, made hearing the plate's on its own clock (MiniMax's `audio reference`, as
+Alissonerdx's character swap runs with the video's audio), so mouths follow its speech; `keep` is that same picture
+over the plate's own soundtrack, its packets copied under the video (H3's sound isn't decoded); `new` is H3's from the
+text alone. A plate with no sound is `new`, with a note.
 
 The result is `video` (768p mp4), `latents` (its own, which a pickup resumes and `upscale` starts from), `seams` (the
 frames where each segment after the first starts, a pickup's kept ones included, also kept in the latents) and `warnings`.
