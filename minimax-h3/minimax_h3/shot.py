@@ -16,7 +16,7 @@ import msgspec
 import numpy as np
 import numpy.typing as npt
 import torch
-from cozy_runtime.author import InvalidRequest, OutputError, Outputs, Seed, Telemetry
+from cozy_runtime.author import InvalidRequest, OutputError, Outputs, SavedVideo, Seed, VideoJoin
 from cozy_runtime.fields import (
     Advanced,
     AspectRatio,
@@ -642,50 +642,61 @@ def _frame_event(rgb: bytes, index: int, size: tuple[int, int]) -> DecodedVideoF
 
 
 class SoFar:
-    """A shot's segments made so far as one video, joined by packet copy under their own sound (`Outputs.join_video`), so its
-    box plays them while the next renders. The last segment's decode of the whole shot as one replaces it. Segments that can't be
-    joined show alone, with a warning, and the shot goes on."""
+    """A shot's video as it arrives (cl-1210): each segment's part of the shot's one decode, joined by packet copy
+    (`Outputs.join_video`) under the shot's soundtrack, encoded once from the segments' own sound (a pickup's kept sound
+    first), so its box plays all made so far while the next renders. Its last revision is the take."""
 
-    def __init__(self, out: Outputs, tel: Telemetry, first: VideoFile) -> None:
-        self._tel, self._frames, self._samples, self._refused = tel, 0, 0, False
-        self._sound: DecodedAudioFormat | None = None
-        try:
-            if (sound := first.probe().soundtrack) is not None:
-                layout, names = AUDIO_LAYOUTS[sound.channels]
-                self._sound = DecodedAudioFormat(channels=sound.channels, sample_rate=sound.sample_rate, channel_layout=layout,
-                                                 channel_names=names, time_base=Fraction(1, sound.sample_rate))  # fmt: skip
-            self._join = out.join_video(self._sound)
-        except OutputError as error:
-            self._refuse(error)
+    def __init__(self, out: Outputs, kept: npt.NDArray[np.float32] | None = None) -> None:
+        self._out = out
+        self._sound = [kept] if kept is not None and kept.size else []
+        self._join: VideoJoin | None = None
+        self._format: DecodedAudioFormat | None = None
+        self._frames, self._samples = 0, 0
 
-    def add(self, video: VideoFile) -> VideoFile:
-        """`video` after the others: the joined video so far."""
-        if self._refused:
-            return video
-        try:
-            return self._join.append(video, lambda frames: self._soundtrack(video, frames))
-        except OutputError as error:
-            self._refuse(error)
-            return video
+    def add(self, piece: VideoFile, decode: File, *, last: bool) -> VideoFile:
+        """`piece` after the others, under its stretch of the shot's sound, the segment's in its `decode` file: the
+        video so far. `last` ends the soundtrack."""
+        tensors = load_tensors(decode.read_bytes())
+        sound, rate = tensors["sound"].numpy(), int(tensors["sample_rate"])
+        if self._join is None:
+            layout, names = AUDIO_LAYOUTS[int(sound.shape[0])]
+            self._format = DecodedAudioFormat(channels=int(sound.shape[0]), sample_rate=rate, channel_layout=layout,
+                                              channel_names=names, time_base=Fraction(1, rate))  # fmt: skip
+            self._join = self._out.join_video(self._format)
+        self._sound.append(sound)
+        return self._join.append(piece, lambda frames: self._stretch(frames, last), last=last)
 
-    def _refuse(self, error: OutputError) -> None:
-        self._refused = True
-        self._tel.log("h3 segments shown alone", level="warn", reason=str(error))
+    def finish(self) -> SavedVideo:
+        """The take: the last revision."""
+        assert self._join is not None, "a shot's video has a segment"
+        return self._join.finish()
 
-    def _soundtrack(self, video: VideoFile, frames: int) -> Iterator[DecodedAudioChunk]:
-        """`video`'s sound, cut or padded to its `frames` on the joined clock."""
+    def _stretch(self, frames: int, last: bool) -> Iterator[DecodedAudioChunk]:
+        """The shot's sound under the next `frames` on the joined clock; after the last, all the rest."""
+        sound = self._format
+        assert sound is not None
         self._frames += frames
-        if (sound := self._sound) is None:
-            return
-        wanted = self._frames * sound.sample_rate // FPS - self._samples
-        parts = sound_chunks(video.stream(pictures=False))
-        wave = np.concatenate(parts, axis=1)[:, :wanted] if parts else np.zeros((sound.channels, 0), dtype=np.float32)
-        wave = np.pad(wave, ((0, 0), (0, wanted - wave.shape[1]))).astype(np.float32)
-        yield DecodedAudioChunk(channels=sound.channels, sample_count=wanted, sample_rate=sound.sample_rate,
-                                channel_layout=sound.channel_layout, channel_names=sound.channel_names,
-                                pcm_f32le=tuple(np.ascontiguousarray(channel).tobytes() for channel in wave),
-                                pts=self._samples, time_base=sound.time_base)  # fmt: skip
-        self._samples += wanted
+        wave = self._sound[0] if len(self._sound) == 1 else np.concatenate(self._sound, axis=1)
+        self._sound = [wave]
+        end = int(wave.shape[1]) if last else min(int(wave.shape[1]), self._frames * sound.sample_rate // FPS)
+        if end > self._samples:
+            stretch = wave[:, self._samples : end].astype(np.float32)
+            yield DecodedAudioChunk(channels=sound.channels, sample_count=end - self._samples, sample_rate=sound.sample_rate,
+                                    channel_layout=sound.channel_layout, channel_names=sound.channel_names,
+                                    pcm_f32le=tuple(np.ascontiguousarray(channel).tobytes() for channel in stretch),
+                                    pts=self._samples, time_base=sound.time_base)  # fmt: skip
+            self._samples = end
+
+
+def kept_sound(latents: File, take: VideoFile | None) -> tuple[int, npt.NDArray[np.float32]]:
+    """A pickup's kept latents' length in tokens, and its kept sound: in its latents when cut, else its take's own."""
+    tensors = load_tensors(latents.read_bytes())
+    if "sound" in tensors:
+        sound = tensors["sound"].numpy().astype(np.float32)
+    else:
+        parts = sound_chunks(take.stream(pictures=False)) if take is not None else []
+        sound = np.concatenate(parts, axis=1) if parts else np.zeros((2, 0), dtype=np.float32)
+    return int(tensors["latents"].shape[2]), sound
 
 
 def join_kept(out: Outputs, take: VideoFile, frames: int, new: VideoFile) -> tuple[VideoFile, list[str]]:
