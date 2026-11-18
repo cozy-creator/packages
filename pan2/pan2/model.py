@@ -31,7 +31,6 @@ from transformers import AddedToken, Qwen2Tokenizer, Qwen3_5TextConfig, Qwen3_5T
 FPS = 24
 MAX_FRAMES = 481
 DEFAULT_STEPS = 50
-COMPONENTS = ("transformer", "text_encoder", "vae")
 VideoPixels = np.ndarray[tuple[int, int, int, int], np.dtype[np.uint8]]
 
 
