@@ -86,6 +86,8 @@ class Ablation(msgspec.Struct, frozen=True, kw_only=True):
     projected: bool = False
     #: One direction for every layer, interpolated at this layer output; None: each layer its own.
     index: float | None = None
+    #: More directions ablated with this one, each with its own source and kernels, taken off the ones before it.
+    also: list[Ablation] | None = None
 
 
 class Pair(msgspec.Struct, frozen=True):
@@ -170,7 +172,8 @@ class Bake(msgspec.Struct, frozen=True, kw_only=True):
 
     #: Unit directions, each base64 of `hidden` little-endian float32 values.
     vectors: list[str]
-    #: (layer, its vector, its attention writer's weight, its MLP writer's weight); layers not here keep their bytes.
+    #: (layer, its vector, its attention writer's weight, its MLP writer's weight), a row per direction (a layer's
+    #: vectors orthonormal); layers not here keep their bytes.
     rows: list[tuple[int, int, float, float]]
 
 
@@ -218,22 +221,40 @@ class Directions:
         return out
 
 
+#: Directions one ablation may combine (`Ablation.also`), as the hooks hold them.
+MAX_PARTS = 2
+
+
+def parts(directions: Directions, ablation: Ablation) -> list[tuple[torch.Tensor, torch.Tensor]]:
+    """Each of `ablation`'s directions `(layers, hidden)`, orthonormal per layer (each off the ones before it), and its
+    writers' weights `(layers, 2)`."""
+    out: list[tuple[torch.Tensor, torch.Tensor]] = []
+    for part in [ablation, *(ablation.also or [])][:MAX_PARTS]:
+        d = directions.per_layer(part).clone()
+        for before, _ in out:
+            d = F.normalize(d - (d * before).sum(-1, keepdim=True) * before, dim=-1)
+        out.append((d, weights(part, d.shape[0])))
+    return out
+
+
 def weights(ablation: Ablation, layers: int) -> torch.Tensor:
     """`(layers, 2)`: each layer's attention and MLP writer weight."""
     return torch.tensor([[ablation.attention.weight(i), ablation.mlp.weight(i)] for i in range(layers)])
 
 
 def bake(directions: Directions, ablation: Ablation) -> Bake:
-    d, w = directions.per_layer(ablation), weights(ablation, directions.raw[ablation.source].shape[0])
     vectors: list[str] = []
     rows: list[tuple[int, int, float, float]] = []
-    for layer in range(d.shape[0]):
-        if not (w[layer] != 0).any():
-            continue
-        packed = base64.b64encode(d[layer].float().contiguous().numpy().astype("<f4").tobytes()).decode()
-        if not vectors or vectors[-1] != packed:
-            vectors.append(packed)
-        rows.append((layer, len(vectors) - 1, float(w[layer, 0]), float(w[layer, 1])))
+    for d, w in parts(directions, ablation):
+        last = ""
+        for layer in range(d.shape[0]):
+            if not (w[layer] != 0).any():
+                continue
+            packed = base64.b64encode(d[layer].float().contiguous().numpy().astype("<f4").tobytes()).decode()
+            if packed != last:
+                vectors.append(packed)
+                last = packed
+            rows.append((layer, len(vectors) - 1, float(w[layer, 0]), float(w[layer, 1])))
     return Bake(vectors=vectors, rows=rows)
 
 
@@ -242,8 +263,8 @@ class _Ablator:
     (Weights edited in place don't hold: Runtime's weight plane refills them from the store as it pages.)"""
 
     def __init__(self, layers: Sequence[nn.Module], hidden: int, device: torch.device) -> None:
-        self.weights = torch.zeros(len(layers), 2, device=device)
-        self.directions = torch.zeros(len(layers), 2, hidden, device=device)
+        self.weights = torch.zeros(len(layers), 2, MAX_PARTS, device=device)
+        self.directions = torch.zeros(len(layers), 2, MAX_PARTS, hidden, device=device)
         self.handles = [
             writer.register_forward_hook(self._hook(i, c))
             for i, layer in enumerate(layers)
@@ -254,17 +275,18 @@ class _Ablator:
         w, d = self.weights[i, c], self.directions[i, c]
 
         def hook(_module: nn.Module, _args: object, output: torch.Tensor) -> torch.Tensor:
-            return output - (output @ d.to(output.dtype)).unsqueeze(-1) * (w * d).to(output.dtype)
+            dd = d.to(output.dtype)
+            return output - ((output @ dd.T) * w.to(output.dtype)) @ dd
 
         return hook
 
     def set(self, directions: Directions | None, ablation: Ablation | None) -> None:
+        self.weights.zero_()
         if directions is None or ablation is None:
-            self.weights.zero_()
             return
-        d = directions.per_layer(ablation).to(self.directions.device)
-        self.directions.copy_(d[:, None, :].expand(-1, 2, -1))
-        self.weights.copy_(weights(ablation, d.shape[0]))
+        for k, (d, w) in enumerate(parts(directions, ablation)):
+            self.directions[:, :, k].copy_(d.to(self.directions.device)[:, None, :].expand(-1, 2, -1))
+            self.weights[:, :, k].copy_(w)
 
     def remove(self) -> None:
         for handle in self.handles:
@@ -615,10 +637,11 @@ def _mutated(rng: random.Random, parent: Ablation, sources: list[str], last: int
         index = None if index is not None else rng.uniform(0.3 * last, 0.9 * last)
     elif index is not None:
         index = jitter(index, 0.0, last)
-    source = rng.choice(sources) if rng.random() < 0.15 else parent.source
+    source = rng.choice(sources) if rng.random() < 0.15 and not parent.also else parent.source
     projected = (not parent.projected) if rng.random() < 0.15 else parent.projected
+    also = [msgspec.structs.replace(a, attention=kernel(a.attention), mlp=kernel(a.mlp)) for a in parent.also or []]
     return Ablation(source=source, projected=projected, index=index, attention=kernel(parent.attention),  # type: ignore[arg-type]  # one of `sources`
-                    mlp=kernel(parent.mlp))  # fmt: skip
+                    mlp=kernel(parent.mlp), also=also or None)  # fmt: skip
 
 
 def _search(ctx: Context, payload: Study, data: _Data, teacher: _Teacher, layers: Sequence[nn.Module],
@@ -804,7 +827,7 @@ async def abliteration(ctx: Context, payload: Bake, *, source: Weights, tel: Tel
     for packed in payload.vectors:
         d = torch.frombuffer(bytearray(base64.b64decode(packed)), dtype=torch.float32)
         vectors.append(d / d.norm())
-    writes: list[tuple[str, float, torch.Tensor]] = []
+    writes: dict[str, list[tuple[float, torch.Tensor]]] = {}
     for layer, vector, attention, mlp in payload.rows:
         linear = _writer_keys(layer, True)[0] in tensors
         attention_key, mlp_key = _writer_keys(layer, linear)
@@ -812,22 +835,24 @@ async def abliteration(ctx: Context, payload: Bake, *, source: Weights, tel: Tel
             if key not in tensors:
                 raise UnsupportedInput(f"this checkpoint has no {key}", code="expander_source")
             if weight:
-                writes.append((key, weight, vectors[vector]))
+                writes.setdefault(key, []).append((weight, vectors[vector]))
     with ctx.output("bf16", Derivation(base=src, order=[(COMPONENT, k) for k in tensors])) as out:
         with tel.stage("orthogonalizing"):
-            for done, (key, weight, d) in enumerate(writes, 1):
+            for done, (key, items) in enumerate(writes.items(), 1):
                 ctx.raise_if_cancelled()
                 if out.has(COMPONENT, key):
                     continue
                 value = _plain(src, COMPONENT, key).float()
-                if value.shape[0] != d.shape[0]:
-                    raise UnsupportedInput(f"{key} writes {value.shape[0]} values, not {d.shape[0]}", code="expander_source")
-                value -= weight * d[:, None] * (d @ value)[None, :]
+                for weight, d in items:  # a layer's directions are orthonormal: one after another is all at once
+                    if value.shape[0] != d.shape[0]:
+                        raise UnsupportedInput(f"{key} writes {value.shape[0]} values, not {d.shape[0]}",
+                                               code="expander_source")  # fmt: skip
+                    value -= weight * d[:, None] * (d @ value)[None, :]
                 _put(out, COMPONENT, key, value.to(torch.bfloat16))
                 del value
                 ctx.progress(done - 1, len(writes))
         artifact = ctx.adopt_model(out)
-    tel.log("abliterated", writers=len(writes), vectors=len(vectors))
+    tel.log("abliterated", writers=len(writes), vectors=len(vectors), rows=len(payload.rows))
     return artifact
 
 
