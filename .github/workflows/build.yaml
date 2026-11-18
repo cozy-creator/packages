@@ -98,7 +98,7 @@ jobs:
         run: uvx ruff@0.16.4 check --select E9,F63,F7,F82 --output-format github .
       - if: steps.scope.outputs.run == 'true'
         run: python3 -m compileall -q -x '/\.venv/' .
-      # Advisories in the locked dependencies (xs-196): one not in pip-audit-known.txt fails.
+      # Advisories in the locked dependencies (xs-196): one not in advisories-known.txt fails.
       - if: steps.scope.outputs.run == 'true'
         run: scripts/audit.sh
       # The type check (mypy --strict): new errors fail, .mypy-baseline.txt holds the known ones.
