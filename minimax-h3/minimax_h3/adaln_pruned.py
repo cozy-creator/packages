@@ -356,6 +356,7 @@ class H3Transformer(MiniMaxH3Transformer3DModel):
                 for part in indices.split(_CHUNK):
                     normed = self.norm_out(rows.index_select(1, part), temb, timestep_indices[part])
                     parts.append(proj(normed.to(dtype)))
+                    del normed  # not held through the next part's gather and norm
                 return parts[0] if len(parts) == 1 else torch.cat(parts, dim=1)
 
             video_output = head(self.proj_out, video_indices)

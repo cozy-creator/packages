@@ -60,6 +60,7 @@ class CellEqualizer:
             high = frame - _blur(frame, kernel)
             local = _local(((high * luma).sum(0)).abs(), self._period)
             frame += high.mul_(gain - 1) - local.square_().mul_(tile)
+            del high, local  # not held while the next frame's blur allocates
         return frames
 
     def _measure(self, high: torch.Tensor) -> None:
