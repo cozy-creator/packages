@@ -360,9 +360,9 @@ class MossGraph:
         with no_init_weights():
             self.components: Components = {
                 "transformer": MossTransformer(**config.section("transformer").mapping()).to(DTYPE).eval(),
-                "text_encoder": Qwen3_5Model._from_config(  # type: ignore[no-untyped-call]  # Transformers' _from_config is unannotated
+                "text_encoder": _stored(Qwen3_5Model._from_config(  # type: ignore[no-untyped-call]  # Transformers' _from_config is unannotated
                     Qwen3_5Config(**config.section("text_encoder").mapping()), dtype=DTYPE
-                ).eval(),
+                ), "text_encoder", config).eval(),
                 "vae": _to(construct(AutoencoderKLFlux2, config.section("vae").mapping()), torch.float32).eval(),
             }
         self.scheduler_config: dict[str, object] = config.section("scheduler").mapping()
@@ -379,6 +379,16 @@ class Components(TypedDict):
 def construct[M: ConfigMixin](cls: type[M], config: dict[str, object]) -> M:
     """`cls.from_config(config)`, typed: it returns a tuple only with `return_unused_kwargs=True`."""
     return cast(M, cls.from_config(config))
+
+
+def _stored[M: torch.nn.Module](module: M, component: str, config: Config) -> M:
+    """`module` with each parameter its checkpoint stores in float32 constructed in float32, as pan2 builds the same encoder:
+    Qwen's own Qwen3.5 (and its abliterations) keeps the linear attention's `A_log` and gated norm in float32, which
+    MOSS-Image's checkpoint casts to bf16. Every other parameter stays bf16."""
+    for name, parameter in module.named_parameters():
+        if config.tensor_dtype(f"{component}.{name}", default="bf16") == "f32":
+            parameter.data = parameter.data.to(torch.float32)
+    return module
 
 
 def _to[M: torch.nn.Module](module: M, dtype: torch.dtype) -> M:
