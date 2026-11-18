@@ -60,10 +60,11 @@ from cozy_runtime.author import (
     preview,
     uses_components,
 )
-from cozy_runtime.fields import Advanced, AspectRatio, FileBound, Preflight, Ratios
+from cozy_runtime.fields import MENTION, Advanced, AspectRatio, FileBound, Image, Preflight, Prompt, Ratios
 from cozy_runtime.media import ImageFile
 from PIL import Image as PILImage
 from cozy_runtime.image import (
+    Control,
     Guidance,
     ImageRequest,
     ImageResult,
@@ -87,6 +88,7 @@ from transformers import (
 from transformers import initialization as transformer_init
 
 from ._numerics import decode_latents, encode_tokens, guided, hold_decode_dtype
+from .adapters import MODES, ControlNet, Controls, ImageEncoder, IPAdapter, References
 
 if TYPE_CHECKING:
     from diffusers.configuration_utils import ConfigMixin
@@ -109,7 +111,24 @@ _SQUARE = dataclasses.replace(_SIZES, megapixels=(1.0, 16.0))
 _NATIVE = 1.5
 
 
+#: The control maps xinsir's union ControlNet has a mode for (`adapters.MODES`); `inpaint` needs ProMax's repaint mode.
+Kind = Literal["depth", "pose", "lineart", "sketch", "canny", "inpaint"]
+#: The pictures the IP-Adapter takes at once (InvokeAI's cap, Anima's): past them the last mentioned go, with a warning.
+MAX_PICTURES = 4
+
+
 class GenerateInput(ImageRequest):
+    #: Its words, and the pictures it mentions: each a reference for the IP-Adapter (`_said`).
+    prompt: Prompt[Image] = Prompt()  # type: ignore[assignment]  # a prompt with pictures, in place of the base's text
+    #: Image to image: start from this picture, `strength` of the schedule redrawing it.
+    image: Annotated[ImageFile, FileBound(max_decoded_bytes=256 << 20)] | None = None
+    #: How much of the picture is redrawn: 1 is from noise.
+    strength: Annotated[float, msgspec.Meta(gt=0.0, le=1.0), Advanced()] = 0.9
+    #: Control maps, each through its mode of the union ControlNet; `inpaint`'s is the picture with the area to redraw
+    #: transparent.
+    control: list[Control[Kind]] = msgspec.field(default_factory=list)
+    #: How strongly the mentioned pictures steer, the IP-Adapter's scale.
+    reference_strength: Annotated[float, msgspec.Meta(ge=0.0, le=2.0), Advanced()] = 1.0
     steps: Steps = None
     guidance: Guidance = None
     #: `_negative_prompt`, with HiDiffusion's recipe after it.
@@ -376,14 +395,19 @@ class SdxlModel(Model[SdxlPipeline]):
         progress: Callable[[int, int], None],
         start: torch.Tensor | None = None,
         strength: float = 1.0,
+        mask: torch.Tensor | None = None,
+        controls: Controls | None = None,
+        references: References | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """Text encoding, every step and the decode: DPM++ 2M Karras (Diffusers'
         `DPMSolverMultistepScheduler`), or with HiDiffusion its recipe's `DDIMScheduler` at eta 1. HiDiffusion's blocks choose by step
         (RAU-Net's switch, each window's shift). Returns the image, conditioning and latents. With `start` (pixels
         [1, 3, H, W] in -1..1), Diffusers' img2img: its latents noised to the last `strength` of the steps, which run.
-        Guidance above 1 runs CFG against `negative_tokens`, or without them against zeros: SDXL's unconditional, which
-        its training dropped the text to (generative-models' `force_uc_zero_embeddings`, Diffusers'
-        `force_zeros_for_empty_prompt`)."""
+        With `mask` too ([1, 1, H, W], 1 redraws), Diffusers' inpaint for a 4-channel UNet: after each step the
+        picture's latents, noised to the next step, are put back outside it. `controls` and `references` steer every
+        step (`guided`). Guidance above 1 runs CFG against `negative_tokens`, or without them against zeros: SDXL's
+        unconditional, which its training dropped the text to (generative-models' `force_uc_zero_embeddings`,
+        Diffusers' `force_zeros_for_empty_prompt`)."""
         components = self.pipe.components
         first, second = components["text_encoder"], components["text_encoder_2"]
         unet, vae = components["unet"], components["vae"]
@@ -405,6 +429,7 @@ class SdxlModel(Model[SdxlPipeline]):
         dtype, scale = next(vae.parameters()).dtype, self.pipe.vae_scale
         latents = rng.noise((1, 4, height // 8, width // 8), generator, dtype=torch.float16, device=device)
         first_step = 0
+        kept: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None
         if start is None:
             latents = latents * scheduler.init_noise_sigma
         else:
@@ -415,6 +440,9 @@ class SdxlModel(Model[SdxlPipeline]):
                 clean = vae.encode(start.to(device=device, dtype=next(vae.parameters()).dtype)).latent_dist.mode()
             clean = (clean.float() * self.pipe.vae_scale).to(torch.float16)
             start_time = cast(torch.IntTensor, scheduler.timesteps[first_step : first_step + 1])  # Diffusers types it so
+            if mask is not None:
+                area = F.interpolate(mask.to(device, torch.float32), size=clean.shape[-2:], mode="area").to(torch.float16)
+                kept = clean, latents, area
             latents = scheduler.add_noise(clean, latents, start_time)
         # SDXL's micro-conditioning: (original_h, original_w, crop_top, crop_left, target_h,
         # target_w). The bucket IS the original size — these fine-tunes were trained on it.
@@ -437,9 +465,15 @@ class SdxlModel(Model[SdxlPipeline]):
                 if hidiffusion:  # its hooks read the step; the plain UNet reads nothing of it
                     unet.cozy_step = i
                 noise = guided(unet, scheduler.scale_model_input(latents, t), scheduler.timesteps[i], prompt,
-                               pooled, time_ids, guidance)
+                               pooled, time_ids, guidance, controls=controls, references=references)
                 preview(lambda: (latents - (1 - scheduler.alphas_cumprod[t]) ** 0.5 * noise) / scheduler.alphas_cumprod[t] ** 0.5, "sdxl")
                 latents = advance(noise, t, latents)[0]
+                if kept is not None:
+                    clean, drawn, area = kept
+                    if i + 1 < steps:
+                        upcoming = cast(torch.IntTensor, scheduler.timesteps[i + 1 : i + 2])
+                        clean = scheduler.add_noise(clean, drawn, upcoming)
+                    latents = (1 - area) * clean + area * latents
                 progress(i - first_step, steps - first_step)
             image = decode_latents(vae, latents.to(dtype=dtype), scale)
         return image, prompt, pooled, latents
@@ -526,33 +560,6 @@ def _negative_prompt(requested: str, hidiffusion: bool) -> str:
     return f"{requested}, {_HIDIFFUSION_NEGATIVE}" if requested else _HIDIFFUSION_NEGATIVE
 
 
-def _sample(
-    model: SdxlModel,
-    tokens: tuple[torch.Tensor, torch.Tensor],
-    negative_tokens: tuple[torch.Tensor, torch.Tensor] | None,
-    *,
-    width: int,
-    height: int,
-    steps: int,
-    guidance: float,
-    hidiffusion_applied: bool,
-    seed: int,
-    tel: Telemetry,
-    progress: Callable[[int, int], None],
-) -> torch.Tensor:
-    """Encode, denoise and decode: DPM++ 2M Karras, or HiDiffusion's DDIM."""
-    with tel.stage("generate"):
-        image, prompt, pooled, latents = model.generate(
-            tokens, negative_tokens,
-            width=width, height=height, steps=steps, guidance=guidance,
-            hidiffusion=hidiffusion_applied, seed=seed, progress=progress,
-        )
-    tel.metric("prompt_absmax", _finite(prompt))
-    tel.metric("pooled_absmax", _finite(pooled))
-    tel.metric("latent_absmax", _finite(latents))
-    return image
-
-
 class GenerateFacts(msgspec.Struct, frozen=True):
     width: int
     height: int
@@ -563,14 +570,21 @@ class GenerateFacts(msgspec.Struct, frozen=True):
     adjustments: tuple[AdjustmentRow, ...]
 
 
-def resolve_generate(payload: GenerateInput) -> GenerateFacts:
-    """Resolve the request's size, steps, guidance and HiDiffusion choice."""
+def _resolve(payload: GenerateInput, first: tuple[int, int] | None) -> GenerateFacts:
+    """The request's size (a missing aspect ratio or size is `first`'s, the picture it starts from or follows), steps,
+    guidance and HiDiffusion choice. Control maps run base SDXL: HiDiffusion's RAU-Net reshapes the UNet's down path,
+    which the ControlNet's residuals add into."""
     adj = AdjustmentRows()
-    target = payload.target(None, megapixels=1.0)
+    target = payload.target(first, megapixels=1.0)
     sizes = _SQUARE if target.ratio[0] == target.ratio[1] else _SIZES
     width, height = sizes.fit(adj, target.ratio, sizes.pixels(adj, target))
     above_native = width * height > _NATIVE * MEGAPIXEL
+    controlled = any(c.strength > 0 for c in payload.control)
     hidiffusion_applied = above_native if payload.hidiffusion is None else payload.hidiffusion
+    if controlled and hidiffusion_applied:
+        if payload.hidiffusion:
+            adj.warn("hidiffusion", "off with control maps: the ControlNet steers base SDXL")
+        hidiffusion_applied = False
     # DPM++ 2M Karras at 30 (se-121); HiDiffusion's recipe is 30 DDIM steps.
     default_steps, default_guidance = (30, 7.5) if hidiffusion_applied else (30, 7.0)
     steps = held(adj, "steps", payload.steps or default_steps, 1, 50)
@@ -585,23 +599,113 @@ def resolve_generate(payload: GenerateInput) -> GenerateFacts:
     )
 
 
+def resolve_generate(payload: GenerateInput) -> GenerateFacts:
+    """`_resolve` before any picture is read: the run resolves again from its first picture's size."""
+    return _resolve(payload, None)
+
+
+def _said(prompt: Prompt[Image], adj: Adjustments) -> tuple[str, list[Image]]:
+    """SDXL's words and the pictures for the IP-Adapter. A mention reads as its picture's description, else as
+    nothing: the IP-Adapter carries the picture, and upstream prompts never name it (Anima's `_said`)."""
+    keys = list(prompt.references)
+    if not keys:
+        return prompt.text, []
+    if len(keys) > MAX_PICTURES:
+        adj.warn("prompt", f"SDXL's IP-Adapter takes {MAX_PICTURES} pictures, so it goes without "
+                           f"{', '.join(f'<{key}>' for key in keys[MAX_PICTURES:])}")
+    words = MENTION.sub(lambda found: prompt.references[found[1]].description.strip()
+                        if found[1] in prompt.references else found[0], prompt.text)
+    return " ".join(words.split()), [prompt.references[key] for key in keys[:MAX_PICTURES]]
+
+
+def _pixels(picture: PILImage.Image) -> torch.Tensor:
+    """[1, C, H, W] in 0..1."""
+    pixels = torch.frombuffer(bytearray(picture.tobytes()), dtype=torch.uint8)
+    return pixels.view(picture.height, picture.width, -1).permute(2, 0, 1).unsqueeze(0).float() / 255
+
+
+def _maps(controls: list[Control[Kind]], width: int, height: int, modes: int,
+          adj: Adjustments) -> tuple[list[tuple[Control[Kind], torch.Tensor]], torch.Tensor | None]:
+    """Each control map at the output's size in 0..1, [1, 3, H, W], as the union pipeline's processor gives it
+    (bicubic); `inpaint`'s blacked out where it is transparent (Diffusers' ProMax example), and that area, [1, 1, H, W]
+    (1 redraws), the first inpaint map's."""
+    maps: list[tuple[Control[Kind], torch.Tensor]] = []
+    area = None
+    for control in controls:
+        if control.strength <= 0:
+            continue
+        if MODES[control.kind] >= modes:
+            adj.warn("control", f"this ControlNet has no {control.kind} mode: that map is ignored")
+            continue
+        if control.kind != "inpaint":
+            picture = control.image.read().resize((width, height), PILImage.Resampling.BICUBIC)
+            maps.append((control, _pixels(picture)))
+            continue
+        pixels = _pixels(control.image.read(mode="RGBA").resize((width, height), PILImage.Resampling.BICUBIC))
+        redraw = (pixels[:, 3:] < 0.5).float()
+        if area is None:
+            area = redraw
+        else:
+            adj.warn("control", "SDXL inpaints one area at a time: the first inpaint map's is redrawn")
+        maps.append((control, pixels[:, :3] * (1 - redraw)))
+    return maps, area
+
+
+#: An inpaint's edge, in pixels: the area grows this far, then fades out over about as far again, so the new picture
+#: meets the kept one in a ring around the area (Anima's `_feathered`: InvokeAI's gradient mask; A1111 blurs its mask,
+#: ComfyUI grows it). A hard edge left a bright ring where the kept latents met the new ones.
+_GROW, _FADE = 16, 8
+
+
+def _feathered(mask: torch.Tensor) -> torch.Tensor:
+    """`mask` [1, 1, H, W] (1 redraws) grown by `_GROW` px and faded by three box blurs of `_FADE` px."""
+    grown = F.max_pool2d(mask, (1, 2 * _GROW + 1), stride=1, padding=(0, _GROW))
+    soft = F.max_pool2d(grown, (2 * _GROW + 1, 1), stride=1, padding=(_GROW, 0))
+    for _ in range(3):
+        soft = F.avg_pool2d(soft, (1, 2 * _FADE + 1), stride=1, padding=(0, _FADE), count_include_pad=False)
+        soft = F.avg_pool2d(soft, (2 * _FADE + 1, 1), stride=1, padding=(_FADE, 0), count_include_pad=False)
+    return torch.maximum(mask, soft)
+
+
+def _start(payload: GenerateInput, width: int, height: int,
+           area: torch.Tensor | None) -> tuple[torch.Tensor | None, float]:
+    """The picture to start from in -1..1, [1, 3, H, W], and its strength: `image`, else an inpaint's own picture,
+    redrawn whole inside its area."""
+    picture = payload.image.read() if payload.image is not None else None
+    strength = payload.strength
+    if picture is None and area is not None:
+        picture = next(c.image.read() for c in payload.control if c.kind == "inpaint" and c.strength > 0)
+        strength = 1.0
+    if picture is None:
+        return None, strength
+    canvas = picture.resize((width, height), PILImage.Resampling.LANCZOS)
+    return _pixels(canvas) * 2 - 1, strength
+
+
+#: Which requests need each adapter (cl-1103, `_generate`): the ControlNet with a map at a strength above 0, the image
+#: encoder and IP-Adapter with a picture in the prompt at a reference_strength above 0.
+_MAPPED = "request.control.exists(c, c.strength > 0)"
+_STEERED = 'request.reference_strength > 0 && request.prompt.references.exists(r, r.type == "image")'
+_BOX_STEERED = 'request.reference_strength > 0 && request.instructions.references.exists(r, r.type == "image")'
+_NEEDS = {"controlnet": _MAPPED, "image_encoder": _STEERED, "ip_adapter": _STEERED}
+_BOX_NEEDS = {"controlnet": _MAPPED, "image_encoder": _BOX_STEERED, "ip_adapter": _BOX_STEERED}
 _DEFAULTS = {"model": "stabilityai/sdxl@1.0.0"}
+#: The adapters, each its author's file as uploaded (se-175), fetched only when a request uses it.
+_ADAPTERS = {
+    "model": "stabilityai/sdxl@1.0.0",
+    "controlnet": "xinsir/controlnet-union-sdxl-promax@0.1.0",
+    "image_encoder": "laion/clip-vit-h-14-laion2b-s32b-b79k@0.1.0",
+    "ip_adapter": "h94/ip-adapter-plus-sdxl-vit-h@0.1.0",
+}
 
 
-@app.entrypoint(defaults=_DEFAULTS, memoize=True, preflight=resolve_generate)
-def generate(
-    ctx: Context,
-    payload: GenerateInput,
-    facts: Preflight[GenerateFacts],
-    model: SdxlModel,
-    tel: Telemetry,
-    adj: Adjustments,
-) -> ImageResult:
-    """SDXL 1.0 text to image, as a WebP.
-
-    Tokenize, encode, denoise, decode, encode the WebP."""
+def _generate(ctx: Context, payload: GenerateInput, facts: GenerateFacts, model: SdxlModel, controlnet: ControlNet,
+              image_encoder: ImageEncoder, ip_adapter: IPAdapter, tel: Telemetry, adj: Adjustments) -> ImageResult:
     hold_decode_dtype(model.pipe.components["vae"], tel)
-    prompt = payload.prompt
+    prompt, pictures = _said(payload.prompt, adj)
+    first = payload.image or next((c.image for c in payload.control if c.strength > 0), None)
+    if first is not None:
+        facts = _resolve(payload, first.read().size)
     adj.extend(facts.adjustments)
     seed = payload.drawn_seed()
     width, height = facts.width, facts.height
@@ -616,11 +720,45 @@ def generate(
         # No negative words: SDXL's zero unconditional (`SdxlModel.generate`), not CLIP's reading of "".
         negative = _tokenize(model.tokenizers, negative_prompt) if classifier_free and negative_prompt.strip() else None
 
-    image = _sample(
-        model, (ids, ids_2), negative,
-        width=width, height=height, steps=steps, guidance=guidance,
-        hidiffusion_applied=hidiffusion_applied, seed=seed, tel=tel, progress=ctx.progress,
-    )
+    controls = None
+    area = None
+    if any(c.strength > 0 for c in payload.control):
+        with tel.stage("reading pictures"):
+            maps, area = _maps(payload.control, width, height, controlnet.graph.modes, adj)
+        if maps:
+            controls = Controls(controlnet.graph, [m for _, m in maps], [MODES[c.kind] for c, _ in maps],
+                                [c.strength for c, _ in maps])  # fmt: skip
+            tel.log("control", kinds=", ".join(c.kind for c, _ in maps))
+    start, strength = _start(payload, width, height, area)
+    if area is not None:
+        area = _feathered(area)
+    references = None
+    if pictures and payload.reference_strength > 0:
+        with tel.stage("encoding references"):
+            embeds, empty = image_encoder.tokens([p.file.read() for p in pictures])
+            references = ip_adapter.tokens(embeds, empty, classifier_free)
+
+    def body() -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        return model.generate(
+            (ids, ids_2), negative, width=width, height=height, steps=steps, guidance=guidance,
+            hidiffusion=hidiffusion_applied, seed=seed, progress=ctx.progress, start=start, strength=strength,
+            mask=area, controls=controls, references=references,
+        )
+
+    run: Callable[[], tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]] = body
+    if controls is not None:
+        run = functools.partial(controlnet.armed, run)
+    if references is not None:
+        run = functools.partial(ip_adapter.armed, model.pipe.components["unet"], payload.reference_strength, run)
+    with tel.stage("generate"):
+        image, encoded, pooled, latents = run()
+    if area is not None and start is not None:
+        # Around an inpaint the picture's own pixels, faded into the new ones: no VAE round trip shows there.
+        kept = area.to(image.device, torch.float32)
+        image = kept * image.float() + (1 - kept) * start.to(image.device, torch.float32)
+    tel.metric("prompt_absmax", _finite(encoded))
+    tel.metric("pooled_absmax", _finite(pooled))
+    tel.metric("latent_absmax", _finite(latents))
     tel.metric("image_absmax", _finite(image))
     # F32 and rounded, as Diffusers' `VaeImageProcessor`: bf16 then truncation darkened every pixel.
     pixels = ((image[0].float() / 2 + 0.5).clamp(0, 1) * 255).round().to(torch.uint8)
@@ -633,13 +771,41 @@ def generate(
     with tel.stage("encode_webp"):
         asset = ImageFile.from_image(ImageFrame(decoded_w, decoded_h, rgb), format="webp")
     tel.log("sampled", sampler="ddim eta=1.0" if hidiffusion_applied else "dpmpp_2m_karras", steps=steps,
-            guidance=guidance, classifier_free=classifier_free, hidiffusion=hidiffusion_applied)
+            guidance=guidance, classifier_free=classifier_free, hidiffusion=hidiffusion_applied,
+            image_to_image=start is not None, references=len(pictures) if references is not None else 0)
     return ImageResult(asset, decoded_w, decoded_h, seed, prompt)
 
 
+@app.entrypoint(defaults=_ADAPTERS, needs=_NEEDS, memoize=True, preflight=resolve_generate)
+def generate(
+    ctx: Context,
+    payload: GenerateInput,
+    facts: Preflight[GenerateFacts],
+    model: SdxlModel,
+    controlnet: ControlNet,
+    image_encoder: ImageEncoder,
+    ip_adapter: IPAdapter,
+    tel: Telemetry,
+    adj: Adjustments,
+) -> ImageResult:
+    """SDXL 1.0 image, as a WebP: from words, steered by the pictures they mention and by control maps, or from a
+    start picture.
+
+    Tokenize, encode, denoise, decode, encode the WebP."""
+    return _generate(ctx, payload, facts, model, controlnet, image_encoder, ip_adapter, tel, adj)
+
+
 class ImageBox(msgspec.Struct, kw_only=True):
-    #: `generate`'s prompt, as words.
-    instructions: str = ""
+    #: `generate`'s prompt, and the pictures it mentions for the IP-Adapter (`_said`).
+    instructions: Prompt[Image] = Prompt()
+    #: `generate`: start from this picture (image to image).
+    image: Annotated[ImageFile, FileBound(max_decoded_bytes=256 << 20)] | None = None
+    #: `generate`: how much of the start picture is redrawn.
+    strength: Annotated[float, msgspec.Meta(gt=0.0, le=1.0), Advanced()] = 0.9
+    #: `generate`: control maps, each through its mode of the union ControlNet.
+    control: list[Control[Kind]] = msgspec.field(default_factory=list)
+    #: `generate`: how strongly the mentioned pictures steer.
+    reference_strength: Annotated[float, msgspec.Meta(ge=0.0, le=2.0), Advanced()] = 1.0
     #: `resolve_generate`, held to SDXL's 1:4 through 4:1 buckets.
     aspect_ratio: Annotated[AspectRatio, Ratios(min=1 / 4, max=4)] | None = None
     #: `resolve_generate`: base SDXL's 1 MP, HiDiffusion's 2048² and 8 MP classes, and its 4096² flagship at 1:1 only
@@ -653,18 +819,19 @@ class ImageBox(msgspec.Struct, kw_only=True):
 def _request(box: ImageBox) -> GenerateInput:
     """`generate`'s request, HiDiffusion as `resolve_generate` chooses it: above 1 MP."""
     return GenerateInput(prompt=box.instructions, aspect_ratio=box.aspect_ratio, megapixels=box.megapixels,
-                         seed=box.seed, negative_prompt=box.negative_prompt)
+                         seed=box.seed, negative_prompt=box.negative_prompt, image=box.image, strength=box.strength,
+                         control=box.control, reference_strength=box.reference_strength)  # fmt: skip
 
 
 def resolve_image(payload: ImageBox) -> GenerateFacts:
     return resolve_generate(_request(payload))
 
 
-@app.tool(label="Image", named="image", defaults=_DEFAULTS, memoize=True, preflight=resolve_image)
-def image(ctx: Context, payload: ImageBox, facts: Preflight[GenerateFacts], model: SdxlModel,
-          tel: Telemetry, adj: Adjustments) -> ImageResult:
-    """SDXL on a canvas: `generate` from the box."""
-    return generate(ctx, _request(payload), facts, model, tel, adj)
+@app.tool(label="Image", named="image", defaults=_ADAPTERS, needs=_BOX_NEEDS, memoize=True, preflight=resolve_image)
+def image(ctx: Context, payload: ImageBox, facts: Preflight[GenerateFacts], model: SdxlModel, controlnet: ControlNet,
+          image_encoder: ImageEncoder, ip_adapter: IPAdapter, tel: Telemetry, adj: Adjustments) -> ImageResult:
+    """SDXL on a canvas: `generate` from the box. Mentioned pictures steer it, a start picture makes it an edit."""
+    return _generate(ctx, _request(payload), facts, model, controlnet, image_encoder, ip_adapter, tel, adj)
 
 
 #: What SDXL is told of a picture it upscales, and kept from.

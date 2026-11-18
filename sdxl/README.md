@@ -3,6 +3,18 @@
 `generate` makes one image from a text prompt with Stable Diffusion XL 1.0 (VAE fix).
 
 `image` is the canvas tool, its prompt `instructions`: `aspect_ratio`, `megapixels`, `negative_prompt` and `seed`; HiDiffusion runs above 1 MP.
+It takes pictures as Anima's does:
+
+- `image` and `strength` (0.9): image to image, Diffusers' img2img over the picture's latents.
+- `control`, a list of `{image, kind, strength}`: `depth`, `pose`, `lineart`, `canny`, `sketch` and `inpaint`, all through
+  xinsir's [ControlNet Union ProMax](https://huggingface.co/xinsir/controlnet-union-sdxl-1.0) (one model, a mode per kind;
+  Diffusers' `ControlNetUnionModel`). `inpaint`'s map is the picture with the area to redraw transparent: that area
+  is redrawn, the rest put back each step. Control runs base SDXL, without HiDiffusion.
+- A picture mentioned in `instructions` steers subject and style through h94's
+  [IP-Adapter Plus](https://huggingface.co/h94/IP-Adapter) (`ip-adapter-plus_sdxl_vit-h`, LAION's ViT-H/14 encoder), at
+  `reference_strength` (1.0); up to 4 pictures. The mention reads as its description, else as nothing.
+
+Each adapter is a model slot (`controlnet`, `image_encoder`, `ip_adapter`), fetched only when a request uses it.
 
 `upscale` (the Upscale tool on a picture box) makes the box's picture larger, at 2, 4 or 8 MP: img2img over the picture
 Lanczos-upscaled to the canvas, the last `denoise` (0.2) of 30 DPM++ 2M Karras steps, no HiDiffusion. Downscaled back from
@@ -33,7 +45,8 @@ guidance 7 (HiDiffusion's 30 at 7.5 above 1 MP, where it runs unless `hidiffusio
 negative prompt (guidance then runs against SDXL's zero unconditional, as Diffusers and Stability's own sampler do), a
 random seed. Sizes snap to the 64 px stride and stay within 1–8 MP (16 MP at
 1:1), 1:4–4:1 and 4096 px sides; steps 1–50, guidance 0–20. Out of range clamps with a `clamp`
-adjustment. SDXL makes images from text only: its prompt is words, so a picture mentioned in it goes as its name ([references](../docs/references.md)). The
+adjustment. `generate` takes the same `image`, `strength`, `control` and `reference_strength`; with a picture and no
+`aspect_ratio` or `megapixels`, the size is the first picture's ([references](../docs/references.md)). The
 result is `image` (a WebP in `~/.cozy/outputs`), `width`, `height`, `seed` and `prompt`.
 
 GPU: any NVIDIA card with 8 GB. The default 8-bit lane is 3.8 GiB (`stabilityai/sdxl@1.0.0`);
