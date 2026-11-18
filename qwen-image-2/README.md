@@ -1,20 +1,19 @@
-# Qwen Image 2
+# Qwen Image 2.1
 
 `generate` creates or edits one lossless image using Qwen-Image-2.1, and `generate_turbo` does
 the same with Alibaba PAI's Fun Acc overlay on it (`alibaba-pai/qwen-image-2.1-fun-acc`, a 330 MiB
-4-step distillation). Both take the same inputs. On a canvas they're one tool, `image` (Qwen Image 2):
+4-step distillation). Both take the same inputs. On a canvas they're one tool, `image` (Qwen Image 2.1; Qwen Image 1 is `qwen-image`):
 its `instructions`, a Turbo toggle (the overlay loads only when asked for), `aspect_ratio`, `megapixels`, `seed` and,
-under Advanced, `prompt_upsampling` and `creativity`. The model checkpoint is selected
+under Advanced, `prompt_upsampling` and `keep_unchanged`. The model checkpoint is selected
 independently from the package. TensorFS owns model downloads and bytes;
 Runtime owns construction, memory residency and component execution.
 
 Each picture's `description` follows the prompt as `<name>: description`, in the words tuned on this model: a mention reads as `<image3>` alone, and with no words for it a third picture was dropped. In a `cozy project`, each `<name>` the text mentions is that box's picture and description, and a text box goes in as its words.
 
-`prompt`, then those words, goes to Qwen's prompt enhancer first (below), and its rewrite reaches the model. The image keeps the decoder's alpha when anything in it is
-transparent, and is RGB otherwise; alpha within 4 levels of 0 or 255 (the decoder's noise) snaps
-to it. `seed` is optional and the chosen seed is
+`prompt`, then those words, goes to Qwen's prompt enhancer first (below), and its rewrite reaches the model. The image is
+RGBA when the decoder's alpha is transparent ([below](#transparent-images)), else RGB. `seed` is optional and the chosen seed is
 returned. Seeds range from 0 through 9007199254740991 (the interoperable 53-bit
-integer range); omitting one chooses a random seed in that range. Inputs: `prompt` (its text and the pictures it mentions), `aspect_ratio` (any W:H), `megapixels` (any size, 1024² pixels each), `seed`, `prompt_upsampling` and `creativity`. The full model runs 40 steps, Turbo 4 on Fun Acc's
+integer range); omitting one chooses a random seed in that range. Inputs: `prompt` (its text and the pictures it mentions), `aspect_ratio` (any W:H), `megapixels` (any size, 1024² pixels each), `seed` and `prompt_upsampling`. The full model runs 40 steps, Turbo 4 on Fun Acc's
 grid, with its own output head each step and an F32 state (`qwenimage21_pdd.py`). Qwen runs no CFG, so it has no `guidance` or `negative_prompt`. Unknown fields are ignored with a warning. The result is `image`, `width`, `height`, `seed` and `prompt`, the prompt the image was made from.
 
 `upscale` (the Upscale tool on a picture box) restores the box's picture at 2 or 4 MP: the base model, 20 steps, edits it from
@@ -22,7 +21,13 @@ noise with a restoration request, the picture its reference at the canvas's size
 output (`output_resolution`), so the edit keeps to it. On 225 px JPEGs of clean pictures (cozy-creator
 `release-gate/sessions/fixtures/upscale-bench`, se-147) its DISTS to the clean original is 0.13 against the Lanczos
 blow-up's 0.34; a start from the blow-up keeps its blur and JPEG blocks at any strength, and Fun Acc's 4 steps zoom and
-redraw it. 29 s on an RTX 4090 at 4 MP. `megapixels` and `seed`.
+redraw it. 29 s on an RTX 4090 at 4 MP. `megapixels`, `seed` and an optional `prompt`.
+
+`prompt` steers it ("the sign says OPEN", "her eyes are green"): its words follow the restoration request, which they
+never replace, and empty it runs exactly as without. Each picture it mentions (a face, the correct text) follows the
+picture as a reference at its own 1 MP, as `generate` takes them: the picture is `<image1>` (the request then says
+"Restore <image1>"), the mentioned ones `<image2>` on in order of first mention, with their descriptions, up to 10
+pictures in all.
 
 ## Prompt upsampling
 
@@ -32,29 +37,15 @@ one that names what changes, pushes it to full strength and holds the rest; `Qwe
 request from words into a long description of the finished picture. `prompt_upsampling` (on by default) runs the
 one that fits before generating; off, the prompt goes as written and neither enhancer is fetched.
 
-Each runs as upstream's `pe_core.py`: its own `system_prompt.txt`, thinking first, then a JSON answer; temperature
-1.0, top-p 0.95, presence penalty 0 for edits and 1.5 for words; each picture over white at most 1 MP. Runtime's
-sampler has no top-k, so upstream's top-k 20 is not applied. The rewrite is sampled from the render's `seed`: a new
-render rewrites anew, and a given seed repeats its rewrite. The rewrite is the result's `prompt`, and the run's log has it with its
-seed, canvas and token counts.
-
-Upstream lets the enhancer think for up to 24,000 tokens, which on a 4090 added about 69 s to a 5 s edit. Here its
-thought stops at 128 tokens and it answers, closed as Qwen3 closes a thinking budget, and an edit's rewrite is asked
-to stay within 80 words. That adds about 9 s to an edit and keeps the rewriter's gains: a designed scene for a new
-shot, and no props the new picture has no use for. It holds the person's clothes as often as Turbo alone does (3 of 6),
-where upstream's full thought held them 6 of 6. With no thought at all, the enhancer reasons in its answer and never
-gives one. With no `aspect_ratio`, the enhancer's canvas is used, as upstream passes it to the renderer: its
-`wh_ratio`, or the shape of the picture its `ratio_follow` names.
-
-A request for transparency (an RGBA image, an alpha channel, a transparent background) stays one. Qwen's enhancer
-rewrites "transparent background" into a backdrop, a gray-and-white checkerboard, so each enhancer's system prompt
-gains a rule: keep the request's transparency words, frame the rewrite in the model card's wording below, and describe
-no background. A rewrite that still loses them (or paints a checkerboard) is not used: the prompt goes as written,
-with a warning.
-
-`creativity` steers how far the rewrite goes beyond the words: `balanced` (the default) is Qwen's own rewrite;
-`faithful` and `creative` add one sentence after the request, where the enhancer reads intent: change only what was
-asked, or make a striking new picture, bold with expression, pose, styling, setting, light and camera.
+Each runs as upstream's `pe_core.py` and `run_vllm.py` run it, with nothing of ours added: the request under its own
+`system_prompt.txt`, thinking first, then a JSON answer, in one generation of at most 24,000 tokens for an edit and
+16,256 for words; temperature 1.0, top-p 0.95, top-k 20, presence penalty 0 for edits and 1.5 for words; each picture
+RGB (its alpha dropped) at most 1 MP. Upstream applies the presence penalty before top-k; Runtime's sampler applies it
+after, so words (penalty 1.5) sample slightly differently until Runtime matches. The thought takes most of the time:
+upstream's took 25-143 s of a 4090 for an edit. The rewrite is sampled from the render's `seed`: a new render rewrites
+anew, and a given seed repeats its rewrite. The rewrite is the result's `prompt`, and the run's log has it with its
+seed, canvas and token count. With no `aspect_ratio`, the enhancer's canvas is used, as upstream passes it to the
+renderer: its `wh_ratio`, or the shape of the picture its `ratio_follow` names.
 
 ## Abliterated by default
 
@@ -75,9 +66,10 @@ Each slot builds only what it reads, so a model of that part alone serves it: a 
 other parts come from the other slots' models.
 
 `vae` is its own slot too, one for every function: it reads a checkpoint's `vae`, which encodes the pictures and decodes
-the image. It is the base model's own by default; `model.vae=madebyollin/texture-fix-vae` takes madebyollin's
-[fine-tune of it](https://huggingface.co/madebyollin/texture-fix-vae-for-qwen-image-2.1) (cleaner textures, no
-checkerboard).
+the image. By default it is madebyollin's [texture-fix fine-tune](https://huggingface.co/madebyollin/texture-fix-vae-for-qwen-image-2.1)
+of the base model's (`madebyollin/texture-fix-vae@0.3.0`); `model.vae=qwen/qwen-image-2.1@0.1.0` takes Qwen's own. Qwen's
+decoder, in Diffusers as here, prints a fixed 2-px pattern: one pixel of every 2x2 sits a level or two darker, a dot grid
+at 200%. The fine-tune cuts it about tenfold and leaves the picture otherwise as it was (se-155).
 
 Outputs use lossless WebP to preserve the same decoded pixels and alpha while reducing the
 bytes returned to the client. A canvas with either side at least 16384 pixels uses PNG,
@@ -91,26 +83,18 @@ range (a 32768 px side) is served at the nearest size it admits, reported as a `
 
 ## Transparent images
 
-Qwen-Image-2.1 generates RGBA natively when the prompt asks for it in the wording its model card
-recommends; "on a transparent background" alone draws a white one:
+Qwen-Image-2.1 draws transparency itself: its VAE is RGBA, and the decoder's alpha is the picture's. The image is RGBA
+when more than 0.1% of it is under half opaque, its alpha's noise (0-4 and 251-255) snapped to exact; else RGB, so the
+few dozen pixels the decoder leaves at 215-250 on an opaque picture make no RGBA picture. Qwen's model card gives the
+wording it draws transparency for:
 
-Write the request in a file, `request.yaml`:
+> `This is an RGBA image with transparency. <your description>. The image has alpha channel and the background is transparent.`
 
-```yaml
-prompt: >-
-  This is an RGBA image with transparency. A cute cartoon dragon sticker.
-  The image has alpha channel and the background is transparent.
-seed: 42
-```
+With `prompt_upsampling` on, the enhancer rewrites the request as Qwen trained it to, and nothing asks it for that
+wording; off, the words go to the model as written. Edits take the same wording (the card gives none of their own).
 
 ```sh
-cozy run qwen-image-2/generate --input request.yaml
-```
-
-Inline inputs work too, and override the file's:
-
-```sh
-cozy run qwen-image-2/generate seed=42 \
+cozy run qwen-image-2/generate_turbo seed=42 prompt_upsampling=false \
   prompt='This is an RGBA image with transparency. A cute cartoon dragon sticker. The image has alpha channel and the background is transparent.'
 ```
 
@@ -134,7 +118,28 @@ cozy run qwen-image-2/generate seed=42 prompt='Place <person> in <room>.'
 References are ordered. Each is any image Runtime decodes, up to 32 MiB encoded, read upright
 (EXIF orientation) with its alpha and scaled down to 4 MP when larger. As upstream, the VAE reads
 the alpha and the vision encoder a copy composited over white. Each reference is resized to the
-upstream 1 MP conditioning area independently of the output's `megapixels`.
+upstream 1 MP conditioning area independently of the output's `megapixels` (Diffusers' `output_resolution`
+default). At the canvas's area it measured 4-10% closer to the photo and doubled Turbo's time at 4 MP (se-153), so it
+stays at 1 MP.
+
+What softens an edit is Turbo (se-153, public photos as 1080x1350 JPEGs, an RTX 4090): the full model's kept regions
+are 9% (2 MP) and 24% (4 MP) closer to the photo by DISTS, at 17 and 41 s against Turbo's 2 and 4 s, and Fun Acc's 4
+steps shift the framing at 4 MP (a 5% zoom on average). bf16 against int8 (the DiT, the text encoder, or both) and
+SDPA against 8-bit attention measure alike.
+
+### Keeping what an edit leaves alone
+
+Every edit redraws the whole canvas, so what it leaves alone still comes back redrawn: chained edits (a box editing a
+take) lose detail and drift in colour and, under Turbo, sharpen into an inked look by the third to fifth edit. With
+`keep_unchanged` (on by default) the first picture's own pixels go back wherever the edit left it unchanged
+(`keep.py`): the output is aligned to the picture (scale per axis and shift, from edge correlation), a change mask is
+drawn from their blurred Lab difference (over 10 ΔE, after the colour drift is taken out), grown and feathered, and the
+picture fills the rest. Over five chained edits the untouched eyes stay within DISTS 0.03 of the first picture, where
+the model alone drifts to 0.19. It does nothing when the framing changes (another ratio), when the canvas is over 1.25x
+the picture's size (from a small picture the model's redraw is closer to the photo than its upscale), when the picture
+or the edit's output is transparent, or when the edit is global: under 8% of the picture still (a relight, a style, black and white, a
+night scene left 0-3%; a new background 11-47%) or a colour shift over 8 ΔE. The run's log says what it kept, or why
+not. An edit of fine texture alone (a retouch, a restoration) is under its threshold: turn it off for those.
 
 With references, what is not given is the FIRST reference's (the image being edited): an omitted
 `aspect_ratio` takes its exact ratio and an omitted `megapixels` its pixel count, held inside 1–4 MP
