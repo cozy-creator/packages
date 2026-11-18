@@ -70,7 +70,7 @@ OVERLAP = 7
 _MOST_ROWS = 107 * 3600
 #: The refine's windows: None, as few as the card's room holds (`_ROW_BYTES` a row); a row count,
 #: windows of at most that many rows from the shape alone, the same on every card (`_MOST_ROWS`).
-WINDOW_ROWS: int | None = None
+WINDOW_ROWS: int | None = _MOST_ROWS  # se-170 proof arm: one window up to 1440p 15 s
 #: What a refine holds per packed row at a block's peak: 5.5 bf16 rows of hidden 5376 (its input,
 #: residual, norm and attention output are whole; the Runtime cuts the attention and FFN working
 #: sets). 2160p 15 s whole needs more than 48 GB (run 20468) and runs in three windows on 24 GB.
