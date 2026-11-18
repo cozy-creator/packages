@@ -21,5 +21,22 @@
       "runtime": "0.48.0.dev2346+g051d106f"
     },
     "note": "pod-session 44407668658 cap-sweep/small-a: cold PRO-9, warm PRO-10; small: one 1 MP picture"
+  },
+  {
+    "function": "remove_background",
+    "gpus": 0,
+    "cpu": "AMD EPYC 9V74 80-Core Processor",
+    "cores": 2,
+    "threads": 2,
+    "request": {},
+    "lane": "fp16",
+    "warm_ms": 28431,
+    "cold_ms": 35386,
+    "peak_host_bytes": 4447531008,
+    "ran_on": {
+      "cozy": "0.27.0-dev+g77813684",
+      "runtime": "0.48.0.dev2346+g051d106f"
+    },
+    "note": "pod-session 44395118740 (cl-1279): GitHub ubuntu-24.04 runner, 4 threads; warm again 28576 ms"
   }
 ]
