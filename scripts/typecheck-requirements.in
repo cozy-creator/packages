@@ -12,6 +12,7 @@ transformers
 tokenizers
 safetensors
 numpy
+json-repair
 msgspec
 pillow
 einops

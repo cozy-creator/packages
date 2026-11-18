@@ -43,9 +43,12 @@ Each runs as upstream's `pe_core.py` and `run_vllm.py` run it, with nothing of o
 RGB (its alpha dropped) at most 1 MP. Upstream applies the presence penalty before top-k; Runtime's sampler applies it
 after, so words (penalty 1.5) sample slightly differently until Runtime matches. The thought takes most of the time:
 upstream's took 25-143 s of a 4090 for an edit. The rewrite is sampled from the render's `seed`: a new render rewrites
-anew, and a given seed repeats its rewrite. The rewrite is the result's `prompt`, and the run's log has it with its
-seed, canvas and token count. With no `aspect_ratio`, the enhancer's canvas is used, as upstream passes it to the
-renderer: its `wh_ratio`, or the shape of the picture its `ratio_follow` names.
+anew, and a given seed repeats its rewrite. The request is the prompt's text, each mention as `<imageN>` (or a lone
+picture's name), without the pictures' descriptions, which go to the model only with upsampling off. Its answer's last
+JSON object is read as upstream reads it (strict JSON, then `json_repair`); an answer with none goes to the model as it
+stands, with a warning, as upstream's `parse_answer` falls back. The rewrite is the result's `prompt`, and the run's log
+has it with its seed, canvas and token count. With no `aspect_ratio`, the enhancer's canvas is used, as upstream passes
+it to the renderer: its `wh_ratio`, or the shape of the picture its `ratio_follow` names.
 
 ## Abliterated by default
 

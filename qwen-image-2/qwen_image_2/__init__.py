@@ -83,10 +83,11 @@ def decoded_image(decoded: torch.Tensor) -> PILImage.Image:
 
 
 
-def _said(prompt: Prompt[Image], adj: Adjustments, before: int = 0) -> tuple[str, list[Image]]:
-    """Its text, and what each picture it mentions is, each mention in the model's words (`label`), and the pictures:
-    a mention reads as `<image3>` alone, and with no words for it a third picture was dropped in 3 of 3 seeds (runs
-    27130, 27161, 27174), kept with them (27190, 27200). `before`: the pictures ahead of these (an upscale's own)."""
+def _said(prompt: Prompt[Image], adj: Adjustments, before: int = 0) -> tuple[str, str, list[Image]]:
+    """Its text, each mention in the model's words (`label`); that and what each picture it mentions is, for the model
+    itself; and the pictures. The model reads a mention as `<image3>` alone, and with no words for it a third picture
+    was dropped in 3 of 3 seeds (runs 27130, 27161, 27174), kept with them (27190, 27200). Qwen's enhancer reads the text
+    alone, as upstream's requests are. `before`: the pictures ahead of these (an upscale's own)."""
     keys = list(prompt.references)
     room = MAX_PICTURES - before
     if len(keys) > room:
@@ -96,7 +97,11 @@ def _said(prompt: Prompt[Image], adj: Adjustments, before: int = 0) -> tuple[str
     said = "\n\n".join(filter(None, (prompt.text.strip(), words)))
     # One pass: a label never reads as another key (a box named `image1`).
     labels = {key: label(before + n, key, before + len(keys)) for n, key in enumerate(keys, 1)}
-    return MENTION.sub(lambda found: labels.get(found[1], found[0]), said), [prompt.references[key] for key in keys]
+
+    def labelled(text: str) -> str:
+        return MENTION.sub(lambda found: labels.get(found[1], found[0]), text)
+
+    return labelled(prompt.text.strip()), labelled(said), [prompt.references[key] for key in keys]
 
 
 def _upsampled(
@@ -113,10 +118,11 @@ def _upsampled(
     when the request names none (upstream passes `wh_ratio` and `ratio_follow` to the renderer)."""
     with tel.stage("upsampling prompt"):
         found, answer, tokens = rewrite(enhancer, prompt, images, seed, progress)
-    if found is None:
-        adj.warn("prompt_upsampling", "Qwen's prompt enhancer gave no rewrite, so the prompt goes as written")
+    if not found.parsed:
+        adj.warn("prompt_upsampling", "Qwen's prompt enhancer answered with no JSON rewrite, so its answer goes as the prompt, "
+                 "as upstream's parse_answer does")
         tel.log("upsampled prompt", parsed=False, answer=answer[:2000], tokens=tokens)
-        return payload, prompt
+        return payload, found.prompt
     ratio = found.ratio
     if found.follow is not None:
         ratio = "{}:{}".format(*images[found.follow - 1].size)
@@ -141,7 +147,7 @@ def _generate(
 ) -> ImageResult:
     """Every function's body: with `turbo`, its overlay on the base model and its 4-step grid, else the
     base model's 40 steps of uniform spacing."""
-    prompt, pictures = _said(payload.prompt, adj)
+    asked, prompt, pictures = _said(payload.prompt, adj)
     steps = turbo.steps if turbo else _STEPS
     tel.log("sampling", regime="turbo (Fun Acc)" if turbo else "base", steps=steps,
             schedule="PDD grid, a head per step" if turbo else "uniform, dynamic shift")
@@ -150,7 +156,7 @@ def _generate(
     reference_images = [picture.file.read(mode="RGBA") for picture in pictures] or None
     if payload.prompt_upsampling:
         enhancer = expander_i2i if reference_images else expander_t2i
-        payload, prompt = _upsampled(payload, prompt, reference_images or [], seed, enhancer, ctx.progress, tel, adj)
+        payload, prompt = _upsampled(payload, asked, reference_images or [], seed, enhancer, ctx.progress, tel, adj)
     vae.hold(tel)
     ctx.raise_if_cancelled()
     reference_latents, image_pad_mask = None, None
@@ -337,7 +343,7 @@ def upscale(ctx: Context, payload: UpscaleInput, model: QwenImage21DiT, text_enc
     and the pictures it mentions follow the picture as references, each at its 1 MP as `generate` takes them."""
     with tel.stage("reading picture"):
         picture = payload.image.read(mode="RGBA")
-        said, pictures = _said(payload.prompt, adj, before=1)
+        _, said, pictures = _said(payload.prompt, adj, before=1)
         mentioned = [mention.file.read(mode="RGBA") for mention in pictures]
     width, height = SIZES.fit(adj, picture.size, payload.megapixels * MEGAPIXEL)
     seed = payload.seed if payload.seed is not None else ImageRequest(prompt="").drawn_seed()

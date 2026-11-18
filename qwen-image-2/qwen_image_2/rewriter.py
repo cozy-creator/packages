@@ -17,6 +17,7 @@ import re
 from collections.abc import Callable
 from dataclasses import dataclass
 
+import json_repair
 from cozy_runtime import lm
 from cozy_runtime.author import Loader, uses_components
 from cozy_runtime.vlm import COMPONENT, Question, VisionLM
@@ -41,6 +42,8 @@ class Rewrite:
     #: The canvas the enhancer chose: `W:H`, or the 1-based picture whose shape the output follows.
     ratio: str | None
     follow: int | None
+    #: Whether the answer held its JSON object; if not, `prompt` is the raw answer (`pe_core.parse_answer`).
+    parsed: bool = True
 
 
 def reference(image: Image.Image) -> Image.Image:
@@ -89,15 +92,25 @@ def _spans(answer: str) -> list[str]:
     return spans
 
 
-def parse(answer: str, pictures: int) -> Rewrite | None:
+def _object(candidate: str) -> dict[str, object] | None:
+    """Strict JSON first, then `json_repair` (`pe_core._as_obj`)."""
+    try:
+        found = json.loads(candidate)
+    except json.JSONDecodeError:
+        found = json_repair.repair_json(candidate, return_objects=True)
+        if isinstance(found, list):
+            found = found[0] if found else None
+    return found if isinstance(found, dict) else None
+
+
+def parse(answer: str, pictures: int) -> Rewrite:
     """The answer's last JSON object with a `rewritten_prompt` (upstream also reads its training's misspelt
-    `rewrited_prompt`), and its canvas: a valid `wh_ratio`, else a `ratio_follow` naming one of the pictures."""
+    `rewrited_prompt`), and its canvas: a valid `wh_ratio`, else a `ratio_follow` naming one of the pictures. With none,
+    the raw answer and no canvas, unparsed (`pe_core.parse_answer`)."""
+    answer = answer.strip()
     for span in reversed(_spans(answer)):
-        try:
-            found = json.loads(span)
-        except json.JSONDecodeError:
-            continue
-        if not isinstance(found, dict):
+        found = _object(span)
+        if found is None:
             continue
         prompt = found.get("rewritten_prompt") or found.get("rewrited_prompt")
         if not isinstance(prompt, str) or not prompt.strip():
@@ -107,7 +120,7 @@ def parse(answer: str, pictures: int) -> Rewrite | None:
         followed = int(follow[1]) if follow and 1 <= int(follow[1]) <= pictures else None
         valid = ratio is not None and float(ratio[1]) > 0 and float(ratio[2]) > 0
         return Rewrite(prompt.strip(), f"{ratio[1]}:{ratio[2]}" if valid else None, None if valid else followed)  # type: ignore[index]  # `valid`: matched
-    return None
+    return Rewrite(answer, None, None, parsed=False)
 
 
 class Enhancer(VisionLM):
@@ -147,7 +160,7 @@ class Enhancer(VisionLM):
 
 def rewrite(
     enhancer: Enhancer, prompt: str, images: list[Image.Image], seed: int, progress: Callable[[int, int], None],
-) -> tuple[Rewrite | None, str, int]:
+) -> tuple[Rewrite, str, int]:
     """The enhancer's rewrite of `prompt` (`<imageN>` for two or more pictures, as its system prompt asks), its answer
     and the tokens it decoded; `progress(step, total)` is told the tokens of its budget decoded."""
     task = "edit" if images else "t2i"
