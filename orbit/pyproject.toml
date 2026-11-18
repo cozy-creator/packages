@@ -1,10 +1,10 @@
 [project]
 name = "orbit"
-version = "0.4.0"
+version = "0.5.0rc1"
 description = "Orbit: a picture's subject seen from all the way round, one clockwise camera turn by MiniMax H3 and ORB360"
 requires-python = ">=3.12,<3.15"
 dependencies = [
-    "cozy-runtime[media]>=0.47.0.dev0,<0.48",
+    "cozy-runtime[media]>=0.47.0,<0.48",
     "minimax-h3>=0.15.0rc2",
     "msgspec>=0.19",
     "numpy>=1.26",
