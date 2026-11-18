@@ -50,6 +50,8 @@ class GenerateInput(ImageRequest):
     creativity: Annotated[Creativity, When("prompt_upsampling")] = "balanced"
     #: An edit keeps its first picture's own pixels wherever it left them unchanged (`keep.py`, se-153).
     keep_unchanged: bool = True
+    #: Proof only (se-153): the base model's step count, in place of its 40.
+    steps: int | None = None
 
 
 def label(n: int, key: str, count: int) -> str:
@@ -154,7 +156,7 @@ def _generate(
     cutting = cutout(payload.prompt.text)
     if cutting:
         ctx.need("matte")
-    steps = turbo.steps if turbo else _STEPS
+    steps = turbo.steps if turbo else payload.steps or _STEPS
     tel.log("sampling", regime="turbo (Fun Acc)" if turbo else "base", steps=steps,
             schedule="PDD grid, a head per step" if turbo else "uniform, dynamic shift")
     seed = payload.drawn_seed()
