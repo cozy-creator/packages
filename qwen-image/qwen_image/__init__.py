@@ -88,6 +88,7 @@ def _read(adj: Adjustments, field: str, model: QwenImage, text: str, pictures: l
 def _render(
     ctx: Context,
     model: QwenImage,
+    text_encoder: QwenImage,
     dit: QwenImage | QwenImageTransformer,
     lora: QwenImageLoRA | None,
     tel: Telemetry,
@@ -113,11 +114,11 @@ def _render(
     with tel.stage("encoding prompt"):
         if references is not None:
             rows = text_rows([(1, height // PATCH, width // PATCH), *references[1]])
-            prompt = _read(adj, "prompt", model, prompt, images, rows)
+            prompt = _read(adj, "prompt", text_encoder, prompt, images, rows)
             if guidance > 1:
-                negative = _read(adj, "negative_prompt", model, negative, images, rows)
-        embeds, mask = model.encode(prompt, images)
-        unconditional = model.encode(negative, images) if guidance > 1 else None
+                negative = _read(adj, "negative_prompt", text_encoder, negative, images, rows)
+        embeds, mask = text_encoder.encode(prompt, images)
+        unconditional = text_encoder.encode(negative, images) if guidance > 1 else None
     ctx.raise_if_cancelled()
     if images:
         # The edit DiT and its LoRA build on their first read: here, so step 1 holds only a step.
@@ -138,7 +139,7 @@ def _render(
 
 
 def _full(ctx: Context, payload: GenerateInput, edit_model: QwenImageTransformer, model: QwenImage,
-          tel: Telemetry, adj: Adjustments) -> ImageResult:
+          text_encoder: QwenImage, tel: Telemetry, adj: Adjustments) -> ImageResult:
     edit = bool(payload.prompt.references)
     steps = held(adj, "steps", payload.steps or (EDIT_STEPS if edit else TEXT_STEPS), 2, 100,
                  "at least 2 (the schedule stretches its last step to the terminal sigma), at most 100")
@@ -146,51 +147,56 @@ def _full(ctx: Context, payload: GenerateInput, edit_model: QwenImageTransformer
     negative = payload.negative_prompt
     if negative is None:
         negative = EDIT_NEGATIVE if edit else TEXT_NEGATIVE
-    return _render(ctx, model, edit_model if edit else model, None, tel, adj, payload,
+    return _render(ctx, model, text_encoder, edit_model if edit else model, None, tel, adj, payload,
                    steps=steps, guidance=guidance, negative=negative)
 
 
 def _turbo(ctx: Context, payload: TurboInput, edit_model: QwenImageTransformer, edit_turbo_lora: QwenImageLoRA,
-           model: QwenImage, turbo_lora: QwenImageLoRA, tel: Telemetry, adj: Adjustments) -> ImageResult:
+           model: QwenImage, text_encoder: QwenImage, turbo_lora: QwenImageLoRA, tel: Telemetry,
+           adj: Adjustments) -> ImageResult:
     steps = held(adj, "steps", payload.steps or TURBO_STEPS, 1, 100)
     edit = bool(payload.prompt.references)
     dit, lora = (edit_model, edit_turbo_lora) if edit else (model, turbo_lora)
-    return _render(ctx, model, dit, lora, tel, adj, payload, steps=steps, guidance=1.0, negative="")
+    return _render(ctx, model, text_encoder, dit, lora, tel, adj, payload, steps=steps, guidance=1.0, negative="")
 
 
 _BASE = "qwen/qwen-image-2512@0.1.1"
 _EDIT = "qwen/qwen-image-edit-2511@0.1.0"
-_TURBO_DEFAULTS = {"model": _BASE, "edit_model": _EDIT,
+#: The text encoder is its own slot: Qwen2.5-VL-7B-Instruct, stock in both Qwen checkpoints, so coder3101's Heretic
+#: abliteration of it is the default (Paul, 11-17: "use abliterated models wherever possible"). Qwen's own is any
+#: Qwen-Image checkpoint: `model.text_encoder=qwen/qwen-image-2512@0.1.1`.
+_TEXT_ENCODER = "coder3101/qwen2.5-vl-7b-instruct-heretic@0.1.0"
+_DEFAULTS = {"model": _BASE, "edit_model": _EDIT, "text_encoder": _TEXT_ENCODER}
+_TURBO_DEFAULTS = {"model": _BASE, "edit_model": _EDIT, "text_encoder": _TEXT_ENCODER,
                    "turbo_lora": "lightx2v/qwen-image-2512-lightning-lora@0.1.0",
                    "edit_turbo_lora": "lightx2v/qwen-image-edit-2511-lightning-lora@0.1.0"}
-_COMPONENTS = {"edit_model": ("transformer",)}
+_COMPONENTS = {"edit_model": ("transformer",), "model": ("transformer", "vae"), "text_encoder": ("text_encoder",)}
 #: Which requests need each DiT and LoRA (cl-1103, `_full`, `_turbo`): a prompt with a picture runs the edit DiT (and
-#: Turbo its LoRA), one without the base DiT (and Turbo its LoRA). `model` is never ruled: its text encoder and VAE
-#: serve every render.
+#: Turbo its LoRA), one without the base DiT (and Turbo its LoRA). `model` is never ruled: its VAE serves every render.
 _EDIT_RULE = '.references.exists(r, r.type == "image")'
 _TEXT_RULE = '.references.all(r, r.type != "image")'
 
 
 # The edit DiT is all `edit_model` binds: the text encoder, VAE and tokenizer are `model`'s. It, and
 # its LoRA, are fetched for a request with references.
-@app.entrypoint(defaults={"model": _BASE, "edit_model": _EDIT}, components=_COMPONENTS,
+@app.entrypoint(defaults=_DEFAULTS, components=_COMPONENTS,
                 needs={"edit_model": f"request.prompt{_EDIT_RULE}"}, memoize=True)
 def generate(ctx: Context, payload: GenerateInput, edit_model: QwenImageTransformer, model: QwenImage,
-             tel: Telemetry, adj: Adjustments) -> ImageResult:
+             text_encoder: QwenImage, tel: Telemetry, adj: Adjustments) -> ImageResult:
     """Qwen-Image-2512 from text (50 steps), or Qwen-Image-Edit-2511 with pictures (40 steps).
 
     Both with true CFG 4.0."""
-    return _full(ctx, payload, edit_model, model, tel, adj)
+    return _full(ctx, payload, edit_model, model, text_encoder, tel, adj)
 
 
 @app.entrypoint(defaults=_TURBO_DEFAULTS, components=_COMPONENTS,
                 needs={"edit_model": f"request.prompt{_EDIT_RULE}", "edit_turbo_lora": f"request.prompt{_EDIT_RULE}",
                        "turbo_lora": f"request.prompt{_TEXT_RULE}"}, memoize=True)  # fmt: skip
 def generate_turbo(ctx: Context, payload: TurboInput, edit_model: QwenImageTransformer, edit_turbo_lora: QwenImageLoRA,
-                   model: QwenImage, turbo_lora: QwenImageLoRA, tel: Telemetry,
+                   model: QwenImage, text_encoder: QwenImage, turbo_lora: QwenImageLoRA, tel: Telemetry,
                    adj: Adjustments) -> ImageResult:
     """Each DiT with lightx2v's 8-step Lightning LoRA for it: 8 steps, no CFG."""
-    return _turbo(ctx, payload, edit_model, edit_turbo_lora, model, turbo_lora, tel, adj)
+    return _turbo(ctx, payload, edit_model, edit_turbo_lora, model, text_encoder, turbo_lora, tel, adj)
 
 
 class ImageBox(msgspec.Struct, kw_only=True):
@@ -206,17 +212,18 @@ class ImageBox(msgspec.Struct, kw_only=True):
     seed: Seed | None = None
 
 
-# `model` holds the text encoder and VAE every render reads; each other DiT and LoRA is fetched only for a render
-# that uses it: a LoRA only with `turbo`.
+# `model` holds the VAE every render reads, `text_encoder` the encoder; each other DiT and LoRA is fetched only for a
+# render that uses it: a LoRA only with `turbo`.
 @app.tool(label="Image", named="image", defaults=_TURBO_DEFAULTS, components=_COMPONENTS,
           needs={"edit_model": f"request.instructions{_EDIT_RULE}",
                  "edit_turbo_lora": f"request.turbo && request.instructions{_EDIT_RULE}",
                  "turbo_lora": f"request.turbo && request.instructions{_TEXT_RULE}"}, memoize=True)  # fmt: skip
 def image(ctx: Context, payload: ImageBox, edit_model: QwenImageTransformer, edit_turbo_lora: QwenImageLoRA,
-          model: QwenImage, turbo_lora: QwenImageLoRA, tel: Telemetry, adj: Adjustments) -> ImageResult:
+          model: QwenImage, text_encoder: QwenImage, turbo_lora: QwenImageLoRA, tel: Telemetry,
+          adj: Adjustments) -> ImageResult:
     """Qwen Image 1 on a canvas: Lightning, or the full models."""
     request = GenerateInput(prompt=payload.instructions, aspect_ratio=payload.aspect_ratio,
                             megapixels=MEGAPIXELS[payload.megapixels], seed=payload.seed)  # fmt: skip
     if payload.turbo:
-        return _turbo(ctx, request, edit_model, edit_turbo_lora, model, turbo_lora, tel, adj)
-    return _full(ctx, request, edit_model, model, tel, adj)
+        return _turbo(ctx, request, edit_model, edit_turbo_lora, model, text_encoder, turbo_lora, tel, adj)
+    return _full(ctx, request, edit_model, model, text_encoder, tel, adj)
