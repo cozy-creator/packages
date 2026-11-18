@@ -167,8 +167,8 @@ wheels = [
 
 [[package]]
 name = "cozy-runtime"
-version = "0.48.0.dev2340+ga4ac226d"
-source = { url = "https://github.com/cozy-creator/cozy-runtime/releases/download/rc-0.27.0/cozy_runtime-0.48.0.dev2340+ga4ac226d-py3-none-any.whl" }
+version = "0.48.0.dev2341+g1783f133"
+source = { url = "https://github.com/cozy-creator/cozy-runtime/releases/download/rc-0.27.0/cozy_runtime-0.48.0.dev2341+g1783f133-py3-none-any.whl" }
 dependencies = [
     { name = "msgspec" },
     { name = "numpy" },
@@ -178,7 +178,7 @@ dependencies = [
     { name = "tensorfs", version = "0.27.0.dev3343+g123c40b8", source = { url = "https://github.com/cozy-creator/cozy-creator/releases/download/rc-0.27.0/tensorfs-0.27.0.dev3343+g123c40b8-cp311-abi3-manylinux_2_28_x86_64.whl" }, marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
 ]
 wheels = [
-    { url = "https://github.com/cozy-creator/cozy-runtime/releases/download/rc-0.27.0/cozy_runtime-0.48.0.dev2340+ga4ac226d-py3-none-any.whl", hash = "sha256:ab03e17bd188cfbb854b66e93568bba11655d492893aad855341f9079290ec35" },
+    { url = "https://github.com/cozy-creator/cozy-runtime/releases/download/rc-0.27.0/cozy_runtime-0.48.0.dev2341+g1783f133-py3-none-any.whl", hash = "sha256:17eeceb08c2d5e08558906c357841a2e2afacd6debada769163590174bbafee8" },
 ]
 
 [package.optional-dependencies]
@@ -370,7 +370,7 @@ wheels = [
 
 [[package]]
 name = "moss-image"
-version = "0.13.0rc2"
+version = "0.13.0rc3"
 source = { editable = "." }
 dependencies = [
     { name = "cozy-runtime", extra = ["adapters", "media"] },
@@ -386,7 +386,7 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
-    { name = "cozy-runtime", extras = ["adapters", "media"], url = "https://github.com/cozy-creator/cozy-runtime/releases/download/rc-0.27.0/cozy_runtime-0.48.0.dev2340+ga4ac226d-py3-none-any.whl" },
+    { name = "cozy-runtime", extras = ["adapters", "media"], url = "https://github.com/cozy-creator/cozy-runtime/releases/download/rc-0.27.0/cozy_runtime-0.48.0.dev2341+g1783f133-py3-none-any.whl" },
     { name = "diffusers", specifier = ">=0.40" },
     { name = "msgspec", specifier = ">=0.19" },
     { name = "numpy", specifier = ">=1.26" },
