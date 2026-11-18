@@ -98,6 +98,19 @@ Q4_K_M = Recipe(
 )
 
 
+#: Test only, on a proof branch, never merged (xs-213): llama.cpp's Q8_0 with the LM head kept bf16, timed beside `q8_0` to
+#: tell the head's bytes from the kernels' speed.
+Q8_0_HEAD16 = Recipe(
+    lane="q8_0_head16",
+    model=VisionLM,
+    plan=QuantizationPlan(
+        encoding="ggml.q8_0",
+        components=("model",),
+        include=tuple(p for p in _GGML if p != "model.lm_head.weight"),
+        output_precision="preserve",
+    ),
+)
+
 @app.entrypoint(defaults={"model": MODEL}, memoize=True)
 def ask(ctx: Context, payload: AskRequest, model: VisionLM, tel: Telemetry) -> AskResult:
     """Answer each prompt about its text, images and videos, all prompts in one pass."""
