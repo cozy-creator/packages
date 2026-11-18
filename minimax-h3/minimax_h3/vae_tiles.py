@@ -24,7 +24,7 @@ h3a-006 owns the lossy decode variants.
 from __future__ import annotations
 
 from collections.abc import Iterator, Mapping, Sequence
-from typing import Any
+from typing import Any, cast
 
 import torch
 from diffusers.models.autoencoders.autoencoder_kl_minimax_h3 import (
@@ -52,6 +52,14 @@ def encode_holds(config: Mapping[str, Any]) -> int:
     channels at the tile's size, in the input's dtype (var-030 13: 2700 windows of moments read as input windows asked
     13.6 GiB of a 16 MP picture)."""
     return -(-ENCODE_ACTIVATIONS * int(config["block_out_channels"][0]) // int(config["in_channels"]))
+
+
+def block_holds(dim: int, inner: int, residual: torch.dtype, compute: torch.dtype, rows: torch.dtype) -> int:
+    """`split`'s `holds` for a decoder block over a window of tile rows, in windows of its input (`rows`): the block's
+    peak is its feed-forward's, a token's `residual` beside its normed row, SwiGLU's two-half projection, the gate's
+    activation and their product (`compute`). The default 5 fell short at level 5 (release-gate 44412956639)."""
+    peak = residual.itemsize * dim + compute.itemsize * (dim + 4 * inner)
+    return -(-peak // (rows.itemsize * dim))
 
 
 class TileBatchedVideoVAE(AutoencoderKLMiniMaxH3):
@@ -310,9 +318,14 @@ class TileBatchedVideoVAE(AutoencoderKLMiniMaxH3):
         suffix = positions.new_zeros((1, decoder.num_register_tokens + 1, 3))
         rotary = decoder.rope(torch.cat([positions, suffix], dim=1))
         first, *rest = decoder.transformer_blocks
-        hidden = split(_BlockRows(first, rotary), hidden, Cut(0))
+        dim, compute = int(hidden.shape[-1]), hidden.dtype
+        inner = int(self.config["decoder_ffn_mult"]) * dim
+        stream = torch.promote_types(compute, cast(torch.Tensor, first.scale1).dtype)  # `hidden + branch * scale1`
+        first_holds = block_holds(dim, inner, stream, compute, compute)
+        hidden = split(_BlockRows(first, rotary), hidden, Cut(0), holds=first_holds)
+        holds = block_holds(dim, inner, hidden.dtype, compute, hidden.dtype)
         for block in rest:
-            split(_BlockRows(block, rotary), hidden, Cut(0), out=hidden)
+            split(_BlockRows(block, rotary), hidden, Cut(0), out=hidden, holds=holds)
         return hidden, _TileTail(decoder, patches, (frames, height, width))
 
     def encode_condition(
