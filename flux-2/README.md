@@ -77,6 +77,8 @@ default (Paul, 11-17: "use abliterated models wherever possible"):
 [llmfan46's Heretic](https://huggingface.co/llmfan46/Mistral-Small-3.2-24B-Instruct-2506-ultra-uncensored-heretic)
 (`llmfan46/mistral-small-3.2-24b-instruct-2506-ultra-uncensored-heretic`, 2/100 refusals against 98/100, KL 0.037),
 composed on [dev] as its `text_encoder`. BFL's own is `--model upsampler=black-forest-labs/flux-2-dev@0.1.0`.
+`--model model=` with the same release also encodes with it (26.8–29.6 dB from [dev]'s, the same pictures); [dev]'s
+stays the default encoder because `model` also takes the [klein] checkpoints, whose encoders are their own.
 
 ## Prepare the models
 
