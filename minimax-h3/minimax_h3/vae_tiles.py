@@ -23,7 +23,8 @@ h3a-006 owns the lossy decode variants.
 
 from __future__ import annotations
 
-from collections.abc import Iterator, Sequence
+from collections.abc import Iterator, Mapping, Sequence
+from typing import Any
 
 import torch
 from diffusers.models.autoencoders.autoencoder_kl_minimax_h3 import (
@@ -39,9 +40,18 @@ from cozy_runtime.author import Cut, split
 from cozy_runtime.author import device as placed_device
 
 
-#: The encoder's device peak beside its moments, in tiles of them (`split`'s `holds`), before a pass is measured: a
-#: 256 px tile's 128-channel float16 activations, about four held at once (64 MiB), over its 48x16x16 moments (24 KiB).
-ENCODE_HOLDS = 2700
+#: A tile's activations at the encoder's widest level held at once, before a pass is measured: the eager causal conv
+#: holds its input, the SiLU of its norm, the reflected copy, the causally padded one (three frames of one) and its
+#: output, about 7 with cuDNN's workspace; the fused one about 4 (cr-323).
+ENCODE_ACTIVATIONS = 8
+
+
+def encode_holds(config: Mapping[str, Any]) -> int:
+    """`split`'s `holds` for the encoder over a batch of tiles, in windows of its input: `Cut(0)` keeps the tile count,
+    so the Runtime reckons a window's output at the window's own bytes. The widest level is `block_out_channels[0]`
+    channels at the tile's size, in the input's dtype (var-030 13: 2700 windows of moments read as input windows asked
+    13.6 GiB of a 16 MP picture)."""
+    return -(-ENCODE_ACTIVATIONS * int(config["block_out_channels"][0]) // int(config["in_channels"]))
 
 
 class TileBatchedVideoVAE(AutoencoderKLMiniMaxH3):
@@ -193,7 +203,7 @@ class TileBatchedVideoVAE(AutoencoderKLMiniMaxH3):
             for left, w in zip(xs, widths, strict=True)
         ]
         batch = tiles[0] if len(tiles) == 1 else torch.cat(tiles, dim=0)
-        moments = split(self._encode_tiles, batch, Cut(0), holds=ENCODE_HOLDS).split(x.shape[0], dim=0)
+        moments = split(self._encode_tiles, batch, Cut(0), holds=encode_holds(self.config)).split(x.shape[0], dim=0)
         columns = len(xs)
         rows = [moments[row * columns : (row + 1) * columns] for row in range(len(ys))]
         ratio = self.spatial_compression_ratio
@@ -276,8 +286,10 @@ class TileBatchedVideoVAE(AutoencoderKLMiniMaxH3):
         RTX 4090 a chunk ran in 10 pieces at 3.2-3.5 s against 2.4 s with the weights resident
         (runs 11220, 11228); block by block it holds 2.36-2.46 s (11325, 11335). The tiles share
         one geometry, so one rotary table serves them all; every op is upstream's `forward`:
-        uncut, the two orders are bit-identical on the release weights. Returns the last block's
-        rows and the head that turns a window of them into pixels."""
+        uncut, the two orders are bit-identical on the release weights. The first block takes the
+        embedding's dtype to the residual stream's (float32 under the release's float32 layer scales);
+        every later block keeps it, so it writes its rows over its input: the rows are held once
+        (se-169). Returns the last block's rows and the head that turns a window of them into pixels."""
         decoder = self.decoder
         x = self.post_quant_conv(batch)
         tiles, channels, frames, height, width = x.shape
@@ -297,8 +309,10 @@ class TileBatchedVideoVAE(AutoencoderKLMiniMaxH3):
         positions = torch.stack(torch.meshgrid(*grids, indexing="ij"), dim=-1).flatten(0, 2)[None]
         suffix = positions.new_zeros((1, decoder.num_register_tokens + 1, 3))
         rotary = decoder.rope(torch.cat([positions, suffix], dim=1))
-        for block in decoder.transformer_blocks:
-            hidden = split(_BlockRows(block, rotary), hidden, Cut(0))
+        first, *rest = decoder.transformer_blocks
+        hidden = split(_BlockRows(first, rotary), hidden, Cut(0))
+        for block in rest:
+            split(_BlockRows(block, rotary), hidden, Cut(0), out=hidden)
         return hidden, _TileTail(decoder, patches, (frames, height, width))
 
     def encode_condition(
@@ -314,7 +328,7 @@ class TileBatchedVideoVAE(AutoencoderKLMiniMaxH3):
 
 
 class _BlockRows:
-    """One decoder block over a window of tile rows, with the tiles' shared rotary table."""
+    """One decoder block over a window of tile rows, with the tiles' shared rotary table; with `out`, written there."""
 
     __slots__ = ("block", "rotary")
 
@@ -322,9 +336,9 @@ class _BlockRows:
         self.block = block
         self.rotary = rotary
 
-    def __call__(self, hidden: torch.Tensor) -> torch.Tensor:
-        out: torch.Tensor = self.block(hidden, self.rotary)
-        return out
+    def __call__(self, hidden: torch.Tensor, out: torch.Tensor | None = None) -> torch.Tensor:
+        rows: torch.Tensor = self.block(hidden, self.rotary)
+        return rows if out is None else out.copy_(rows)
 
 
 class _TileTail:
