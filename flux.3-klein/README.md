@@ -84,7 +84,8 @@ editing, into the full caption Klein is trained on. It runs first, as its own me
 BFL's system prompts and decoding: greedy, presence penalty 1.5 for text-to-image and 0 for edits.
 Text-to-image also tells it the canvas (`TARGET CANVAS: 16:9`). Set `prompt_upsampling=false` to send
 the prompt as typed, which then should be a full scene caption. Its token loop declares
-`min_bits=4, phase="decode"`, so it serves the release's `nvfp4` lane where there is one.
+`phase="decode"` at the default 8-bit floor, so it serves the release's `int8` lane (Paul 11-16: prompt enhancers
+int8 ConvRot by default); `nvfp4` is a pin.
 
 The default upsampler is [AtomicChat's abliterated one](https://huggingface.co/AtomicChat/FLUX-3-Image-Klein-pup-Uncensored-GGUF)
 (`atomicchat/flux-3-klein-upsampler-abliterated`): BFL's weights with the refusal direction projected out of its

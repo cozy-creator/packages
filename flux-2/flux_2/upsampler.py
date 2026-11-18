@@ -40,7 +40,7 @@ class UpsamplerGraph:
 class Flux2Upsampler(Model[UpsamplerGraph]):
     """Rewrites a short request, and its references when editing, into a detailed FLUX.2 prompt."""
 
-    serving = Serving(min_bits=4, phase="decode")
+    serving = Serving(phase="decode")
 
     graph: UpsamplerGraph
     processor: PixtralProcessor

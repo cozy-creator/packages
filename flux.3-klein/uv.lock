@@ -238,7 +238,7 @@ wheels = [
 
 [[package]]
 name = "flux-3-klein"
-version = "0.11.0rc3"
+version = "0.11.0rc4"
 source = { editable = "." }
 dependencies = [
     { name = "cozy-runtime", extra = ["adapters", "media"] },

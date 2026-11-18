@@ -65,7 +65,7 @@ class CaptionerGraph:
 class Captioner(Model[CaptionerGraph]):
     """One of Bria's prompt-to-JSON VLMs."""
 
-    serving = Serving(min_bits=4, phase="decode")
+    serving = Serving(phase="decode")
 
     graph: CaptionerGraph
     processor: Qwen3VLProcessor
