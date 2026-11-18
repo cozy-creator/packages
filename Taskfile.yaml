@@ -69,7 +69,8 @@ tasks:
           done
           # The RC's Runtime, which its rentals run and its Triton sets compile with.
           base="https://github.com/cozy-creator/cozy-runtime/releases/download/rc-${branch#rc/}"
-          sums=$(curl -fsSL "$base/SHA256SUMS")
+          # SHA256SUMS.old while rc-dev swaps SHA256SUMS in by rename (cl-1128).
+          sums=$(curl -fsSL "$base/SHA256SUMS" || curl -fsSL "$base/SHA256SUMS.old")
           runtime=$(awk '/manylinux_2_28_x86_64\.whl$/ {print $2; exit}' <<< "$sums")
           [ -n "$runtime" ] || { echo "cozy-runtime has no rc-${branch#rc/} build yet (its rc-dev.yaml)" >&2; exit 1; }
           runtime="$base/$runtime"
