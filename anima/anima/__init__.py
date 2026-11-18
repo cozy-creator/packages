@@ -119,7 +119,16 @@ _DEFAULTS = {
     "sketch": "kohya-ss/lllite-any-test-like@0.1.0",
     "inpaint": "kohya-ss/lllite-inpainting@0.1.0",
 }
-_ON_DEMAND = ("image_encoder", "ip_adapter", "depth", "pose", "lineart", "sketch", "inpaint")
+#: Which requests need each adapter (cl-1103, `_generate`): the image encoder and IP-Adapter with a picture in the
+#: prompt at a reference_strength above 0; a control kind's adapter with a map of that kind at a strength above 0.
+_STEERED = 'request.reference_strength > 0 && request.prompt.references.exists(r, r.type == "image")'
+_BOX_STEERED = 'request.reference_strength > 0 && request.instructions.references.exists(r, r.type == "image")'
+_MAP = "request.control.exists(c, c.strength > 0 && c.kind == "
+_NEEDS = {"image_encoder": _STEERED, "ip_adapter": _STEERED, "depth": f'{_MAP}"depth")', "pose": f'{_MAP}"pose")',
+          "lineart": f'{_MAP}"lineart")', "sketch": f'{_MAP}"sketch")', "inpaint": f'{_MAP}"inpaint")'}
+_BOX_NEEDS = {"image_encoder": _BOX_STEERED, "ip_adapter": _BOX_STEERED, "depth": f'{_MAP}"depth")',
+              "pose": f'{_MAP}"pose")', "lineart": f'{_MAP}"lineart")', "sketch": f'{_MAP}"sketch")',
+              "inpaint": f'{_MAP}"inpaint")'}
 
 
 def _said(prompt: Prompt[Image], adj: Adjustments) -> tuple[str, list[Image]]:
@@ -276,7 +285,7 @@ def _generate(
     return ImageResult(asset, width, height, seed, prompt)
 
 
-@app.entrypoint(defaults=_DEFAULTS, on_demand=_ON_DEMAND, memoize=True)
+@app.entrypoint(defaults=_DEFAULTS, needs=_NEEDS, memoize=True)
 def generate(ctx: Context, payload: GenerateInput, model: AnimaModel, image_encoder: ImageEncoder,
              ip_adapter: IPAdapter, depth: LLLite, pose: PoseControl, lineart: LLLite, sketch: LLLite,
              inpaint: LLLite, tel: Telemetry, adj: Adjustments) -> ImageResult:  # fmt: skip
@@ -340,7 +349,7 @@ class ImageBox(msgspec.Struct, kw_only=True):
     seed: Seed | None = None
 
 
-@app.tool(label="Image", named="image", defaults=_DEFAULTS, on_demand=_ON_DEMAND, memoize=True)
+@app.tool(label="Image", named="image", defaults=_DEFAULTS, needs=_BOX_NEEDS, memoize=True)
 def image(ctx: Context, payload: ImageBox, model: AnimaModel, image_encoder: ImageEncoder, ip_adapter: IPAdapter,
           depth: LLLite, pose: PoseControl, lineart: LLLite, sketch: LLLite, inpaint: LLLite,
           tel: Telemetry, adj: Adjustments) -> ImageResult:  # fmt: skip
