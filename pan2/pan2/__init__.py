@@ -15,11 +15,15 @@ from cozy_runtime.fields import MENTION, Advanced, AspectRatio, FileBound, Image
 from cozy_runtime.media import VideoFile
 
 from . import quantize as quantize  # its recipe
-from .model import COMPONENTS, DEFAULT_STEPS, FPS, Pan2, Reasoner
+from .model import DEFAULT_STEPS, FPS, Pan2, Reasoner
 
 app = App()
 MODEL = "ifm/pan2@0.3.0"
 REASONER = "huihui-ai/huihui-qwen3.5-9b-abliterated@0.1.0"
+#: PAN2's text encoder is stock Qwen3.5-9B's language model, its own slot: pottokao's Heretic abliteration of it by default
+#: (Paul, 11-17: "use abliterated models wherever possible"), the weights moss-image encodes with. Stock is any PAN2
+#: checkpoint: `model.text_encoder=ifm/pan2@0.3.0`. `model` reads the DiT and the VAE.
+TEXT_ENCODER = "pottokao/moss-image-text-encoder-heretic-pan2@0.1.0"
 
 from . import lanes as lanes  # noqa: E402  # the `curve` lane function; it registers on `app`
 
@@ -86,9 +90,10 @@ def caption(text: str) -> str:
 # The reasoner only for a request that upsamples, which it rewrites into the event timeline (cl-1103). It is
 # huihui-ai's abliterated Qwen3.5-9B by default (Paul, 11-17: "use abliterated models wherever possible"); Qwen's own
 # is `model.reasoner=qwen/qwen3.5-9b@0.2.0`.
-@app.tool(label="PAN2", named="video", defaults={"model": MODEL, "reasoner": REASONER},
-          components={"model": COMPONENTS}, needs={"reasoner": "request.prompt_upsampling"}, memoize=True)
-def generate(ctx: Context, payload: Generate, model: Pan2, reasoner: Reasoner, out: Outputs,
+@app.tool(label="PAN2", named="video", defaults={"model": MODEL, "text_encoder": TEXT_ENCODER, "reasoner": REASONER},
+          components={"model": ("transformer", "vae"), "text_encoder": ("text_encoder",)},
+          needs={"reasoner": "request.prompt_upsampling"}, memoize=True)
+def generate(ctx: Context, payload: Generate, model: Pan2, text_encoder: Pan2, reasoner: Reasoner, out: Outputs,
              tel: Telemetry, adj: Adjustments) -> VideoResult:
     """PAN2's silent video, at 24 fps for up to 20 seconds. The first picture the instructions mention is the first
     frame, and the scene opens on it."""
@@ -118,7 +123,7 @@ def generate(ctx: Context, payload: Generate, model: Pan2, reasoner: Reasoner, o
     if seconds != payload.duration:
         adj.warn("duration", f"PAN2 renders 1-20 seconds, so this clip runs {(frames - 1) / FPS:g} seconds")
     with tel.stage("encoding caption"):
-        embeds = model.encode(prompt, frames, payload.guidance, payload.negative_prompt)
+        embeds = text_encoder.encode(prompt, frames, payload.guidance, payload.negative_prompt)
     image = None
     if picture is not None:
         with tel.stage("encoding first frame"):
