@@ -63,6 +63,7 @@ from .source import (
     put,
     read,
     rows,
+    text_source_only_keys,
     timestep_plan,
     write_config,
     write_curve_tables,
@@ -552,7 +553,8 @@ app.entrypoint(
 #: decoder-layer linears through the structural selection minus `TEXT_ENCODER_KEEP`. A recipe
 #: component the source still holds plain is encoded; one already carrying this scheme is
 #: inherited; one carrying another refuses. The lane normalisations (`NORMALISED_COMPONENTS`) apply
-#: too, so a lane written before one is cast now. Everything else carries over from the source. nvfp4
+#: too, so a lane written before one is cast now. Everything else carries over from the source, but the text
+#: encoder rows no lane keeps (`source_only`, an upstream encoder composed on a lane), which it drops. nvfp4
 #: takes the DiTs minus `NVFP4_DIT_KEEP` and its conditioner is int8.convrot (the nvfp4 leaf is
 #: W4A4 at prompt length, and the conditioner runs once a request); `NVFP4_DIT_INT8` serve int8.convrot.
 #: w4a8 (xs-062) takes nvfp4's kept keys with every other DiT linear in W4A8 (its per-token
@@ -589,13 +591,25 @@ QUANTIZER_RECIPES: Mapping[str, Mapping[str, _lanes.Treatment]] = {
 }
 
 
+def source_only(present: Rows) -> frozenset[tuple[str, str]]:
+    """The text encoder's rows no H3 lane carries (`text_source_only_keys`: layers 50-63, the final norm and the head),
+    which an encoder in its upstream layout brings when it is composed onto a lane (`cozy model upload --base`)."""
+    held = present.get("text_encoder", {})
+    return frozenset(("text_encoder", key) for key in text_source_only_keys() if key in held)
+
+
 def quantizer_selections(
     source: Checkpoint, encoding: _lanes.Encoding | None, *, pruned: bool = True
 ) -> list[Selection]:
     """The recipe's components this source still holds plain, resolved for `encoding`, and the
     lane normalisations; with no encoding, the normalisations of a plain lane (`pruned`: AdaLN-pruned,
-    else full) alone."""
+    else full) alone. The text encoder's `source_only` rows are left out, never encoded."""
     present = rows(source)
+    dropped = source_only(present)
+    present = {
+        component: {key: row for key, row in held.items() if (component, key) not in dropped}
+        for component, held in present.items()
+    }
     if set(present) != set(COMPONENTS):
         raise UnsupportedInput(
             f"this checkpoint has {sorted(present)}; H3 needs transformer, transformer_ref, text_encoder, vae and audio_vae; a DiT alone is composed first, with `cozy model upload --base`",
@@ -646,7 +660,7 @@ def quantizer_selections(
         )  # fmt: skip
         if selection.cast or selection.plan is not None:
             selections.append(selection)
-    if not selections:
+    if not selections and not dropped:
         raise UnsupportedInput(
             f"every component of H3's recipe already carries {encoding or 'nothing'}, normalised",
             code="h3_quantize_nothing",
@@ -666,9 +680,19 @@ def _quantize_lane(
     for task in DIT_COMPONENT:
         _production_plan(source, task)
     selections = quantizer_selections(source, encoding, pruned=lane != "bf16-full")
-    order = [(component, key) for component, keys in rows(source).items() for key in keys]
+    dropped = source_only(rows(source))
+    order = [(component, key) for component, keys in rows(source).items() for key in keys if (component, key) not in dropped]
     request = ArtifactQuantizationRequest(max_relative_frobenius=max_relative_frobenius)
-    with ctx.output(lane, Derivation(base=source, order=order)) as out:
+    # Rows the lane drops: written with no base, every other row copied (its stored parts referenced, no new bytes).
+    derivation = Derivation(base=None, sources=(source,), order=order) if dropped else Derivation(base=source, order=order)
+    with ctx.output(lane, derivation) as out:
+        if dropped:
+            out.inherit(source)
+            replaced = {(selection.component, key) for selection in selections for key in selection.replaced}
+            for done, row in enumerate(order, 1):
+                if row not in replaced and not out.has(*row):
+                    out.copy(*row, source)
+                ctx.progress(done - 1, len(order))
         for selection in selections:
             with tel.stage(f"{lane}-{selection.component}"):
                 stats = _treat(source, out, ctx, tel, request, selection)
@@ -677,6 +701,7 @@ def _quantize_lane(
             "h3 quantize",
             lane=lane,
             encoded=",".join(selection.component for selection in selections),
+            dropped=len(dropped),
             inherited=",".join(
                 sorted(set(QUANTIZER_RECIPES.get(encoding or "", {})) - {s.component for s in selections})
             ),
