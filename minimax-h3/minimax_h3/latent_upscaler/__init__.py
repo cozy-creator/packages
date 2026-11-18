@@ -2,7 +2,7 @@
 latent at once, from H3-normalized latents normalized again by the network's own statistics, as
 the ComfyUI node does to the already-normalized latents it receives.
 
-Its int8 lane (`INT8`, cr-327) stores the 512-channel convs as int8-convrot filters; Runtime runs
+Its int8 lane (`UPSCALER_INT8`, cr-327) stores the 512-channel convs as int8-convrot filters; Runtime runs
 them on the int8 tensor cores, each block's GroupNorm, modulation and SiLU folded into the pass that
 quantizes its activations (`BLOCKS`). Against f32, 63.65 dB where bf16 is 63.85 dB."""
 
@@ -121,7 +121,7 @@ class H3LatentUpscaler(Model[UpscalerGraph]):
 #: The int8 lane: every 512-channel conv in int8-convrot (the 48 3x3x3 convs and the 12 temporal
 #: blocks' 1x1x1 convs), its filter stored channels-last. The 24-channel first and last convs, the
 #: depthwise temporal convs, the norms and the scale embedding keep their bf16 bytes.
-INT8 = Recipe(
+UPSCALER_INT8 = Recipe(
     lane="int8",
     model=H3LatentUpscaler,
     plan=QuantizationPlan(
