@@ -18,8 +18,10 @@ from .expander import H3ImagePE
 from .model import GRID, LATENT_CHANNELS, MAX_PICTURES, STEPS, H3Image, H3ImageEncoder, H3TextEncoder, latent_grid, upright
 
 MODEL = "minimaxai/minimax-h3-image@0.1.0"
-#: MiniMax-H3's text encoder, unchanged: MiniMax-H3-Image loads it from MiniMax-H3's release.
-TEXT_ENCODER = "minimaxai/minimax-h3@1.0.0-rc.8"
+#: MiniMax-H3's text encoder, which MiniMax-H3-Image uses unchanged: by default llmfan46's Heretic abliteration of it
+#: (Paul, 11-17: "use abliterated models wherever possible"), the one minimax-h3 encodes with, so a machine holds one.
+#: MiniMax's own is `model.text_encoder=minimaxai/minimax-h3@1.0.0-rc.8`.
+TEXT_ENCODER = "llmfan46/qwen3-vl-32b-instruct-ultra-uncensored-heretic@0.1.0"
 EXPANDER = "minimaxai/minimax-h3-image-pe@0.1.0"
 #: 4-20 MP, 16 MP its own (`4096x4096`, 16:9 `5472x3072`, 21:9 `6272x2688`), 1:1 through 21:9 either way.
 SIZES = Sizes((4.0, 20.0), (512, 8192), GRID, "the 4-20 MP MiniMax-H3-Image makes", widest=21 / 9)
