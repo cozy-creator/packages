@@ -357,7 +357,8 @@ def plan_segments(duration_s: float, marks: Iterable[float], carried: bool = Fal
                             "What follows comes straight after it, so the video is shorter than its beats.")  # fmt: skip
         elif index == len(groups) - 1:
             length = next((n for n in lengths if _delivered(n, first, carry) >= wanted), most)
-            if _delivered(length, first, carry) - wanted > FPS:
+            # An edit's last segment is cut at its plate's end (`segment_plans`), so only a shot runs longer.
+            if not split and _delivered(length, first, carry) - wanted > FPS:
                 warnings.append(f"a segment renders at least {MIN_DURATION_S} s, so this runs "
                                 f"{(_delivered(length, first, carry) - wanted) / FPS:.1f} s longer than asked.")  # fmt: skip
         else:
