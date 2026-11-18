@@ -39,6 +39,12 @@ from cozy_runtime.author import Cut, split
 from cozy_runtime.author import device as placed_device
 
 
+#: The decoder's residual stream between its blocks. A block adds its two branches in float32, as upstream does (its
+#: layer scales are float32), and its sum is rounded to this once, over the block's input rows: a chunk's rows are one
+#: float16 whole, half of upstream's float32 (1.43 GiB at 1440p's 104 tiles). ComfyUI runs the whole decoder in
+#: float16. Measured against float32 (se-169): MEASUREMENT.
+RESIDUAL = torch.float16
+
 #: The encoder's device peak beside its moments, in tiles of them (`split`'s `holds`), before a pass is measured: a
 #: 256 px tile's 128-channel float16 activations, about four held at once (64 MiB), over its 48x16x16 moments (24 KiB).
 ENCODE_HOLDS = 2700
@@ -275,18 +281,18 @@ class TileBatchedVideoVAE(AutoencoderKLMiniMaxH3):
         Cutting the whole decoder instead re-read all 36 blocks once per piece: on a 24 GB
         RTX 4090 a chunk ran in 10 pieces at 3.2-3.5 s against 2.4 s with the weights resident
         (runs 11220, 11228); block by block it holds 2.36-2.46 s (11325, 11335). The tiles share
-        one geometry, so one rotary table serves them all; every op is upstream's `forward`:
-        uncut, the two orders are bit-identical on the release weights. Returns the last block's
-        rows and the head that turns a window of them into pixels."""
+        one geometry, so one rotary table serves them all; every op is upstream's `forward`, its
+        residual stream kept in `RESIDUAL` between blocks. Returns the last block's rows and the
+        head that turns a window of them into pixels."""
         decoder = self.decoder
         x = self.post_quant_conv(batch)
         tiles, channels, frames, height, width = x.shape
-        hidden: torch.Tensor = decoder.proj_in(
-            x.permute(0, 2, 3, 4, 1).reshape(tiles, frames * height * width, channels)
-        )
-        patches = hidden.shape[1]
-        registers = decoder.register_tokens.expand(tiles, -1, -1).to(hidden.dtype)
-        hidden = torch.cat([hidden, registers, torch.zeros_like(hidden[:, :1, :])], dim=1)
+        tokens = x.permute(0, 2, 3, 4, 1).reshape(tiles, frames * height * width, channels)
+        patches = tokens.shape[1]
+        dim = decoder.proj_in.out_features
+        # The rows, held once: `proj_in` and each block write theirs in place, a window of tiles at a time.
+        hidden = tokens.new_empty((tiles, patches + decoder.num_register_tokens + 1, dim), dtype=RESIDUAL)
+        split(_Embed(decoder, patches), tokens, Cut(0), out=hidden, holds=-(-dim // channels) + 1)
         grids = [
             self.time_grid(frames, hidden.device),
             *(
@@ -298,7 +304,7 @@ class TileBatchedVideoVAE(AutoencoderKLMiniMaxH3):
         suffix = positions.new_zeros((1, decoder.num_register_tokens + 1, 3))
         rotary = decoder.rope(torch.cat([positions, suffix], dim=1))
         for block in decoder.transformer_blocks:
-            hidden = split(_BlockRows(block, rotary), hidden, Cut(0))
+            split(_BlockRows(block, rotary), hidden, Cut(0), out=hidden)
         return hidden, _TileTail(decoder, patches, (frames, height, width))
 
     def encode_condition(
@@ -313,8 +319,25 @@ class TileBatchedVideoVAE(AutoencoderKLMiniMaxH3):
         return encode_condition(self, pixels, pixel_mean, pixel_std, seed)
 
 
+class _Embed:
+    """`proj_in` over a window of tiles' latent voxels, each tile's register tokens and zero token after them: upstream's
+    `forward` before its blocks, written into the window's rows."""
+
+    __slots__ = ("decoder", "patches")
+
+    def __init__(self, decoder: MiniMaxH3VideoViTDecoder3d, patches: int) -> None:
+        self.decoder = decoder
+        self.patches = patches
+
+    def __call__(self, tokens: torch.Tensor, out: torch.Tensor) -> None:
+        out[:, : self.patches] = self.decoder.proj_in(tokens)
+        out[:, self.patches : -1] = self.decoder.register_tokens
+        out[:, -1:] = 0
+
+
 class _BlockRows:
-    """One decoder block over a window of tile rows, with the tiles' shared rotary table."""
+    """One decoder block over a window of tile rows, with the tiles' shared rotary table, its result written over the
+    window in the residual stream's dtype (`RESIDUAL`)."""
 
     __slots__ = ("block", "rotary")
 
@@ -322,9 +345,8 @@ class _BlockRows:
         self.block = block
         self.rotary = rotary
 
-    def __call__(self, hidden: torch.Tensor) -> torch.Tensor:
-        out: torch.Tensor = self.block(hidden, self.rotary)
-        return out
+    def __call__(self, hidden: torch.Tensor, out: torch.Tensor) -> None:
+        out.copy_(self.block(hidden, self.rotary))
 
 
 class _TileTail:
