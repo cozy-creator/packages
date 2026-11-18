@@ -2500,8 +2500,11 @@ def read_reference_video(
         # A guide holds its last frame to the call's end, so no frame of the render goes unguided (Paul, 11-17: an
         # edit's tail past its plate fell back to the character's picture); the edit is cut at the plate's end. Its last
         # frame: one the 24-fps clock rounded away (shown under half a slot) still ends the clip.
-        out[kept:] = held[1] if held[1] is not None else out[kept - 1]
-        kept = frames
+        # Probe (se-163, #1005's A/B): held only to the next 17n + 5 at or above the plate, the frames a guide encodes.
+        up = min(frames, kept if (kept - LATENTS_PER_CHUNK) % FRAMES_PER_CHUNK == 0
+                 else ((kept - LATENTS_PER_CHUNK) // FRAMES_PER_CHUNK + 1) * FRAMES_PER_CHUNK + LATENTS_PER_CHUNK)
+        out[kept:up] = held[1] if held[1] is not None else out[kept - 1]
+        kept = up
     soundtrack = None
     if audio_start is not None:
         waveform = torch.from_numpy(np.stack([np.frombuffer(b"".join(c), dtype="<f4") for c in pcm]))
