@@ -107,6 +107,7 @@ def _said(prompt: Prompt[Image], adj: Adjustments, before: int = 0) -> tuple[str
 def _upsampled(
     payload: GenerateInput,
     prompt: str,
+    written: str,
     images: list[PILImage.Image],
     seed: int,
     enhancer: Enhancer,
@@ -115,9 +116,15 @@ def _upsampled(
     adj: Adjustments,
 ) -> tuple[GenerateInput, str]:
     """The request as Qwen's enhancer rewrites it, sampled from the render's `seed`, and the canvas it chose
-    when the request names none (upstream passes `wh_ratio` and `ratio_follow` to the renderer)."""
+    when the request names none (upstream passes `wh_ratio` and `ratio_follow` to the renderer). `written`: what the
+    model reads with upsampling off, which it reads instead when the enhancer's thought uses its whole budget and leaves
+    no answer (our one addition to upstream's enhancer: an empty prompt would lose the words)."""
     with tel.stage("upsampling prompt"):
         found, answer, tokens = rewrite(enhancer, prompt, images, seed, progress)
+    if not found.prompt:
+        adj.warn("prompt_upsampling", "Qwen's prompt enhancer thought for its whole budget and gave no answer, so the prompt goes as written")
+        tel.log("upsampled prompt", parsed=False, answer="", tokens=tokens)
+        return payload, written
     if not found.parsed:
         adj.warn("prompt_upsampling", "Qwen's prompt enhancer answered with no JSON rewrite, so its answer goes as the prompt, "
                  "as upstream's parse_answer does")
@@ -156,7 +163,7 @@ def _generate(
     reference_images = [picture.file.read(mode="RGBA") for picture in pictures] or None
     if payload.prompt_upsampling:
         enhancer = expander_i2i if reference_images else expander_t2i
-        payload, prompt = _upsampled(payload, asked, reference_images or [], seed, enhancer, ctx.progress, tel, adj)
+        payload, prompt = _upsampled(payload, asked, prompt, reference_images or [], seed, enhancer, ctx.progress, tel, adj)
     vae.hold(tel)
     ctx.raise_if_cancelled()
     reference_latents, image_pad_mask = None, None
