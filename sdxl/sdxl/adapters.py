@@ -36,6 +36,11 @@ T = TypeVar("T")
 COMPONENT = "model"
 
 
+def _to[M: nn.Module](module: M, dtype: torch.dtype) -> M:
+    """`module.to(dtype)`, typed: Diffusers' `to` is `functools.wraps`'d, which the checkers bind without `self`."""
+    return module.to(dtype)
+
+
 def _stored(config: Config, key: str) -> bool:
     """Whether the checkpoint stores `key`: the Runtime refuses a missing one (`config_tensor_missing`)."""
     try:
@@ -62,7 +67,7 @@ class ControlGraph:
         mapping["num_control_type"] = self.modes
         with transformer_init.no_init_weights():
             net = cast(ControlNetUnionModel, ControlNetUnionModel.from_config(mapping))
-        self.components: dict[str, nn.Module] = {COMPONENT: net.to(torch.float16).eval()}
+        self.components: dict[str, nn.Module] = {COMPONENT: _to(net, torch.float16).eval()}
 
 
 class ControlNet(Model[ControlGraph]):
@@ -190,11 +195,13 @@ class _Projection(nn.Module):
         self.heads = inner // 64
         self.latents = nn.Parameter(torch.empty(1, queries, width))
         self.proj_in = nn.Linear(embeds, width)
-        self.layers = nn.ModuleList(
-            nn.ModuleList([_Perceiver(width, inner), nn.Sequential(
-                nn.LayerNorm(width), nn.Linear(width, hidden, bias=False), nn.GELU(), nn.Linear(hidden, width, bias=False),
-            )]) for _ in range(depth)
-        )  # fmt: skip
+        self.attentions = [_Perceiver(width, inner) for _ in range(depth)]
+        self.feeds = [
+            nn.Sequential(nn.LayerNorm(width), nn.Linear(width, hidden, bias=False), nn.GELU(),
+                          nn.Linear(hidden, width, bias=False))
+            for _ in range(depth)
+        ]  # fmt: skip
+        self.layers = nn.ModuleList(nn.ModuleList(pair) for pair in zip(self.attentions, self.feeds, strict=True))
         self.proj_out = nn.Linear(width, outputs)
         self.norm_out = nn.LayerNorm(outputs)
 
@@ -203,8 +210,7 @@ class _Projection(nn.Module):
         `to_kv` as two linears and so read Diffusers' converted names, not the file's."""
         latents = self.latents.repeat(embeds.shape[0], 1, 1)
         x = self.proj_in(embeds)
-        for attention, feed in self.layers:
-            assert isinstance(attention, _Perceiver)
+        for attention, feed in zip(self.attentions, self.feeds, strict=True):
             tokens = attention.norm1(x)
             queries = attention.norm2(latents)
             key, value = attention.to_kv(torch.cat([tokens, queries], dim=1)).chunk(2, dim=-1)
@@ -231,7 +237,7 @@ class IPGraph:
         root.image_proj = self.projection = _Projection(config)
         #: h94's numbering: 1, 3, 5, … over the UNet's cross-attentions in `attn_processors` order (Diffusers'
         #: `_convert_ip_adapter_attn_to_diffusers`).
-        ids = []
+        ids: list[int] = []
         while _stored(config, f"{COMPONENT}.ip_adapter.{2 * len(ids) + 1}.to_k_ip.weight"):
             ids.append(2 * len(ids) + 1)
         sites = {}
@@ -246,8 +252,9 @@ class IPGraph:
         for site in sites.values():
             assert isinstance(site, _Site)
             with torch.device("meta"):
-                processor = IPAdapterAttnProcessor2_0(site.to_k_ip.out_features, site.to_k_ip.in_features,
-                                                      num_tokens=(queries,))  # fmt: skip
+                processor = IPAdapterAttnProcessor2_0(  # type: ignore[no-untyped-call]  # Diffusers' __init__ is unannotated
+                    site.to_k_ip.out_features, site.to_k_ip.in_features, num_tokens=(queries,)
+                )
             processor.to_k_ip, processor.to_v_ip = nn.ModuleList([site.to_k_ip]), nn.ModuleList([site.to_v_ip])
             self.processors.append(processor)
         self.components: dict[str, nn.Module] = {COMPONENT: root.to(torch.float16).eval()}
@@ -273,8 +280,9 @@ class _Steered:
         attention_mask: torch.Tensor | None = None, ip_hidden_states: References | None = None,
     ) -> torch.Tensor:
         assert ip_hidden_states is not None and encoder_hidden_states is not None
-        out: torch.Tensor = self.processor(attn, hidden_states, (encoder_hidden_states, [ip_hidden_states.tokens]),
-                                           attention_mask)  # fmt: skip
+        # Diffusers types `encoder_hidden_states` one tensor; its body takes the (text, pictures) pair.
+        pair = (encoder_hidden_states, [ip_hidden_states.tokens])
+        out: torch.Tensor = self.processor(attn, hidden_states, pair, attention_mask)  # type: ignore[arg-type]
         return out
 
 
