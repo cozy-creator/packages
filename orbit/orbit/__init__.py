@@ -1,6 +1,6 @@
 """Orbit: a picture's subject seen from all the way round. MiniMax H3 under MATLOWAI's ORB360 LoRA turns the camera
-once, clockwise, around the frozen subject, from the caption ORB360 was trained on, starting and ending on the picture,
-so it loops (README.md)."""
+once, clockwise, around the frozen subject, from the caption ORB360 was trained on, starting and ending on the first
+picture its instructions mention, so it loops (README.md)."""
 
 from __future__ import annotations
 
@@ -14,8 +14,8 @@ from typing import Annotated, NamedTuple
 import msgspec
 import numpy as np
 import numpy.typing as npt
-from cozy_runtime.author import App, Context, Outputs, Seed, Telemetry, call
-from cozy_runtime.fields import FileBound, Image, ImagePreparation, Placeholder, Prompt, Range
+from cozy_runtime.author import App, Context, InvalidRequest, Outputs, Seed, Telemetry, call
+from cozy_runtime.fields import FileBound, Image, Prompt
 from cozy_runtime.media import (
     DecodedMediaEvent,
     DecodedMediaHeader,
@@ -38,15 +38,14 @@ ORB360 = "matlowai/orb360@0.1.1"
 TURN: dict[str, str | int | bool] = {"degrees": 360, "direction": "cw", "loops": True}
 #: The share of the turn the loop's join redraws, from about 330 degrees (se-114: a longer one reversed and stalled).
 JOINED = 1 / 12
+#: One turn's length: 15 s turns smoothest, 5 s ghosts drawn characters (README.md, Measured). A turn has no length to choose.
+DURATION = MAX_DURATION_S
 
 
 class Orbit(msgspec.Struct, kw_only=True):
-    #: The view the turn starts and ends on: a picture put in this field.
-    picture: Annotated[ImageFile, ImagePreparation(max_pixels=16 << 20)]
-    #: What the picture shows, in a word or two: the caption names it.
-    subject: Annotated[str, Placeholder("motorcycle")] = ""
-    #: One turn's length. 15 s turns smoothest; 5 s ghosts drawn characters.
-    duration: Annotated[int, Range(MIN_DURATION_S, MAX_DURATION_S, unit="s")] = MAX_DURATION_S
+    #: The picture it turns around, the first it mentions, and what's said of it; every other picture it mentions is a
+    #: reference H3 reads by its mention (up to H3's limit), as qwen-image-2's `instructions` takes them.
+    instructions: Prompt[Image] = Prompt()
     seed: Seed | None = None
 
 
@@ -65,11 +64,6 @@ class Turned(NamedTuple):
     warnings: list[str]
 
 
-def named(subject: str) -> str:
-    """The subject as a mention's name: no brackets, dots or line breaks."""
-    return " ".join(re.sub(r"[<>.\n]", " ", subject).split()) or "subject"
-
-
 def backdrop(picture: ImageFile) -> str:
     """`white` or `plain` when the picture's edges are one even color (a character drawn on white), else "": a real
     scene's caption on a plain backdrop grows snow and ground (demo run 46150)."""
@@ -83,9 +77,11 @@ def backdrop(picture: ImageFile) -> str:
     return "white" if middle.min() > 200 else "plain"
 
 
-def caption(subject: str, frames: int, plain: str) -> str:
+def caption(subject: str, words: str, frames: int, plain: str) -> str:
     """ORB360's trained caption (its card's `orbit_realscene_caption.txt`, or the demo's plain-backdrop wording), its
-    120-degree milestones on the clip's frames. H3 opens the summary with the task its references make."""
+    120-degree milestones on the clip's frames, `subject` the first mention's name. What the instructions say beyond
+    their mentions (`words`) follows the shot's description, so the other pictures they mention go with it. H3 opens the
+    summary with the task its references make."""
     s, last = f"<{subject}>", frames - 1
     if plain:
         backdrop_words = "plain white" if plain == "white" else "plain"
@@ -132,6 +128,7 @@ def caption(subject: str, frames: int, plain: str) -> str:
         "detailed_description:",
         f"[Shot 1] {scene} No articulation, deformation, secondary motion, wind, zoom, dolly, camera roll, cuts, lighting "
         "changes, or scene changes.",
+        *([words] if words else []),
         "",
         "All four milestones below belong to the same uninterrupted [Shot 1], not separate shots. The video runs at 24 "
         "fps. Angles describe camera motion clockwise as viewed from above, relative to the starting camera azimuth; the "
@@ -182,38 +179,58 @@ def frame_image(video: VideoFile, index: int) -> ImageFile:
     return ImageFile.from_image(PILImage.frombytes("RGB", (decoded.width, decoded.height), decoded.frames_rgb[0]), format="png")
 
 
-def orbit_shot(payload: Orbit, subject: str, text: str, *, pinned: bool) -> PackageShot:
-    """The ORB360 shot on Ref2VA: the picture as `<subject>`, and with `pinned` as its first and last frame too."""
-    picture = payload.picture
-    beat = Beat(duration=payload.duration, description=Prompt(text=text, references=References({subject: Image(file=picture)})))
+#: A mention as written, `<name>`.
+MENTION = re.compile(r"<[^<>\n]+>")
+
+
+def first_picture(payload: Orbit) -> tuple[str, ImageFile]:
+    """The picture the turn is around: the first the instructions mention, by its mention's name."""
+    first = next(iter(payload.instructions.references.items()), None)
+    if first is None:
+        raise InvalidRequest("Orbit turns around a picture: mention it in the instructions, like <picture>.",
+                             fields=["instructions"])  # fmt: skip
+    return first[0], first[1].file
+
+
+def said(payload: Orbit) -> str:
+    """The instructions, when they say anything beyond their mentions."""
+    text = payload.instructions.text.strip()
+    return text if any(ch.isalnum() for ch in MENTION.sub("", text)) else ""
+
+
+def orbit_shot(payload: Orbit, text: str, *, pinned: bool) -> PackageShot:
+    """The ORB360 shot on Ref2VA: every picture the instructions mention, by its mention, and with `pinned` the first
+    as the shot's first and last frame too."""
+    picture = first_picture(payload)[1]
+    beat = Beat(duration=DURATION, description=Prompt(text=text, references=References(dict(payload.instructions.references))))
     ends = picture if pinned else None
     return PackageShot(shot=Shot(beats=[beat], first_frame=ends, last_frame=ends, seed=payload.seed),
                        loras=[ShotLoRA(model=ORB360)])  # fmt: skip
 
 
-async def pinned(payload: Orbit, subject: str, text: str, tel: Telemetry) -> Turned:
+async def pinned(payload: Orbit, text: str, tel: Telemetry) -> Turned:
     """Ref2VA under ORB360 with the picture as its first and last frame: its last frame is the turn's end."""
     with tel.scope("Turn"):
-        made = await call(render_shot, orbit_shot(payload, subject, text, pinned=True))
+        made = await call(render_shot, orbit_shot(payload, text, pinned=True))
     thumbs = [grey(frame) for frame in frames_of(made.video)]
     return Turned([(made.video, i) for i in range(len(thumbs) - 1)], psnr(thumbs[-1], thumbs[0]), made.warnings)
 
 
-async def bridged(payload: Orbit, subject: str, text: str, out: Outputs, tel: Telemetry) -> Turned:
+async def bridged(payload: Orbit, text: str, out: Outputs, tel: Telemetry) -> Turned:
     """se-114's B: the Ref2VA turn under ORB360, cut where its tail comes closest to frame 0, its last twelfth redrawn
     by a 5 s FL2VA shot without the LoRA from there to frame 0, fitted into those frames."""
     with tel.scope("Turn"):
-        made = await call(render_shot, orbit_shot(payload, subject, text, pinned=False))
+        made = await call(render_shot, orbit_shot(payload, text, pinned=False))
     out.publish("video", made.video, label="Turn, before its loop is joined")
     thumbs = [grey(frame) for frame in frames_of(made.video)]
     tail = range(max(1, len(thumbs) - 16), len(thumbs))
     turn = max(tail, key=lambda i: psnr(thumbs[0], thumbs[i]))
     start = turn - max(1, round(turn * JOINED))
     arc = round(360 * (turn - start) / turn)
-    words = (f"[Shot 1] The camera continues a slow, smooth clockwise orbit around the completely stationary {subject}, "
+    words = ("[Shot 1] The camera continues a slow, smooth clockwise orbit around the completely stationary subject, "
              "moving from the first frame's viewpoint to the last frame's viewpoint: about "
              f"{arc} degrees of arc over the whole shot, at constant angular speed, constant radius, constant elevation and "
-             f"constant focal length, without pausing or reversing. The {subject} and the whole scene stay frozen in time "
+             "constant focal length, without pausing or reversing. The subject and the whole scene stay frozen in time "
              "and perfectly rigid. No zoom, dolly, camera roll, cuts, lighting changes or scene changes.\n\n"
              "overall_soundscape:\nN/A\n\nnon_diegetic_music:\nN/A")  # fmt: skip
     beat = Beat(duration=MIN_DURATION_S, description=Prompt(text=words))
@@ -260,18 +277,18 @@ def silent(frames: Sequence[tuple[VideoFile, int]]) -> Iterator[DecodedMediaEven
 
 @app.tool(label="Orbit", named="video")
 async def orbit(ctx: Context, payload: Orbit, out: Outputs, tel: Telemetry) -> OrbitResult:
-    """The picture's subject seen from all the way round: one clockwise camera turn around it, frozen in time, that
-    loops. H3 renders it under ORB360 from its trained caption, which names the subject and the angle every third of
-    the turn, its end meeting its start (`ENDS`)."""
+    """The first picture the instructions mention, seen from all the way round: one clockwise camera turn around it,
+    frozen in time, that loops. H3 renders it under ORB360 from its trained caption, which names the picture by its
+    mention and the angle every third of the turn, its end meeting its start (`ENDS`), with what the instructions say and
+    every other picture they mention."""
     ctx.raise_if_cancelled()
-    subject = named(payload.subject)
-    frames = frames_for(payload.duration)
-    plain = backdrop(payload.picture)
-    text = caption(subject, frames, plain)
+    name, picture = first_picture(payload)
+    plain = backdrop(picture)
+    text = caption(name, said(payload), frames_for(DURATION), plain)
     if ENDS == "pinned":
-        turned = await pinned(payload, subject, text, tel)
+        turned = await pinned(payload, text, tel)
     else:
-        turned = await bridged(payload, subject, text, out, tel)
+        turned = await bridged(payload, text, out, tel)
     with tel.stage("writing the turn"):
         # Every frame a keyframe, so the canvas shows any angle at once.
         saved = out.save_video_stream(silent(turned.frames), keyframe_interval=1)

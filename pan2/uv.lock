@@ -164,8 +164,8 @@ wheels = [
 
 [[package]]
 name = "cozy-runtime"
-version = "0.48.0.dev2316+ge1ab5640"
-source = { url = "https://github.com/cozy-creator/cozy-runtime/releases/download/rc-0.27.0/cozy_runtime-0.48.0.dev2316+ge1ab5640-py3-none-any.whl" }
+version = "0.48.0.dev2326+g58310368"
+source = { url = "https://github.com/cozy-creator/cozy-runtime/releases/download/rc-0.27.0/cozy_runtime-0.48.0.dev2326+g58310368-py3-none-any.whl" }
 dependencies = [
     { name = "msgspec" },
     { name = "numpy" },
@@ -174,7 +174,7 @@ dependencies = [
     { name = "tensorfs" },
 ]
 wheels = [
-    { url = "https://github.com/cozy-creator/cozy-runtime/releases/download/rc-0.27.0/cozy_runtime-0.48.0.dev2316+ge1ab5640-py3-none-any.whl", hash = "sha256:7a0361e521824b1bf7679689e51ee1ea6f1e3b31dc30e944b16b74ff74d9ae50" },
+    { url = "https://github.com/cozy-creator/cozy-runtime/releases/download/rc-0.27.0/cozy_runtime-0.48.0.dev2326+g58310368-py3-none-any.whl", hash = "sha256:081edabf4ffbf80cf570dbb91cefa0d84b6da0b0c5db9e890d796ea128ba628b" },
 ]
 
 [package.optional-dependencies]
@@ -452,7 +452,7 @@ wheels = [
 
 [[package]]
 name = "pan2"
-version = "0.3.0rc1"
+version = "0.4.0rc2"
 source = { editable = "." }
 dependencies = [
     { name = "cozy-runtime", extra = ["adapters", "media"] },
@@ -467,7 +467,7 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
-    { name = "cozy-runtime", extras = ["adapters", "media"], url = "https://github.com/cozy-creator/cozy-runtime/releases/download/rc-0.27.0/cozy_runtime-0.48.0.dev2316+ge1ab5640-py3-none-any.whl" },
+    { name = "cozy-runtime", extras = ["adapters", "media"], url = "https://github.com/cozy-creator/cozy-runtime/releases/download/rc-0.27.0/cozy_runtime-0.48.0.dev2326+g58310368-py3-none-any.whl" },
     { name = "diffusers", specifier = ">=0.43,<0.44" },
     { name = "msgspec", specifier = ">=0.19" },
     { name = "numpy", specifier = ">=1.26" },

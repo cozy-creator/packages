@@ -67,7 +67,7 @@ def decoded_image(decoded: torch.Tensor) -> PILImage.Image:
     pixels = decoded[0].detach().float()
     if not bool(torch.isfinite(pixels).all()):
         raise OutputError(
-            "Qwen Image decoder produced non-finite pixels, so there is no picture: try another seed, "
+            "Qwen Image 2.1's decoder produced non-finite pixels, so there is no picture: try another seed, "
             "and if it repeats another lane with `--lane bf16`",
             code="output_integrity",
         )
@@ -81,18 +81,19 @@ def decoded_image(decoded: torch.Tensor) -> PILImage.Image:
     return PILImage.fromarray(pixels.contiguous().cpu().numpy())
 
 
-def _said(prompt: Prompt[Image], adj: Adjustments) -> tuple[str, list[Image]]:
+def _said(prompt: Prompt[Image], adj: Adjustments, before: int = 0) -> tuple[str, list[Image]]:
     """Its text, and what each picture it mentions is, each mention in the model's words (`label`), and the pictures:
     a mention reads as `<image3>` alone, and with no words for it a third picture was dropped in 3 of 3 seeds (runs
-    27130, 27161, 27174), kept with them (27190, 27200)."""
+    27130, 27161, 27174), kept with them (27190, 27200). `before`: the pictures ahead of these (an upscale's own)."""
     keys = list(prompt.references)
-    if len(keys) > MAX_PICTURES:
-        adj.warn("prompt", f"Qwen Image 2 takes {MAX_PICTURES} pictures, so it goes without {', '.join(f'<{key}>' for key in keys[MAX_PICTURES:])}")
-        keys = keys[:MAX_PICTURES]
+    room = MAX_PICTURES - before
+    if len(keys) > room:
+        adj.warn("prompt", f"Qwen Image 2.1 takes {MAX_PICTURES} pictures, so it goes without {', '.join(f'<{key}>' for key in keys[room:])}")
+        keys = keys[:room]
     words = "\n".join(f"<{key}>: {prompt.references[key].description.strip()}" for key in keys if prompt.references[key].description.strip())
     said = "\n\n".join(filter(None, (prompt.text.strip(), words)))
     # One pass: a label never reads as another key (a box named `image1`).
-    labels = {key: label(n, key, len(keys)) for n, key in enumerate(keys, 1)}
+    labels = {key: label(before + n, key, before + len(keys)) for n, key in enumerate(keys, 1)}
     return MENTION.sub(lambda found: labels.get(found[1], found[0]), said), [prompt.references[key] for key in keys]
 
 
@@ -290,7 +291,7 @@ def image(
     tel: Telemetry,
     adj: Adjustments,
 ) -> ImageResult:
-    """Qwen Image 2 on a canvas: Turbo (the base model and its Fun Acc overlay), or the full 40 steps."""
+    """Qwen Image 2.1 on a canvas: Turbo (the base model and its Fun Acc overlay), or the full 40 steps."""
     request = GenerateInput(prompt=payload.instructions, aspect_ratio=payload.aspect_ratio,
                             megapixels=payload.megapixels, seed=payload.seed,
                             prompt_upsampling=payload.prompt_upsampling, creativity=payload.creativity)  # fmt: skip
@@ -298,8 +299,9 @@ def image(
                      turbo_lora if payload.turbo else None)  # fmt: skip
 
 
-#: What Qwen Image 2 is asked of a picture it upscales: a restoration, after ausboss's Qwen-Image-2.1 Restore LoRA card (se-147).
-UPSCALE_PROMPT = ("Restore the picture at a higher resolution: remove the blur, noise and JPEG compression artifacts and "
+#: What Qwen Image 2.1 is asked of a picture it upscales: a restoration, after ausboss's Qwen-Image-2.1 Restore LoRA card (se-147).
+#: `{}` is the picture: `the picture`, or `<image1>` when a prompt's pictures follow it.
+UPSCALE_PROMPT = ("Restore {} at a higher resolution: remove the blur, noise and JPEG compression artifacts and "
                   "recover sharp, clean detail and edges, keeping the same composition, subject, line work and colours.")
 #: The base model's steps for an upscale: 20, 28 and 40 score alike against the clean pictures (se-147 round 2).
 UPSCALE_STEPS = 20
@@ -308,6 +310,9 @@ UPSCALE_STEPS = 20
 class UpscaleInput(msgspec.Struct, kw_only=True):
     #: `upscale`: the picture, the box's own version.
     image: Annotated[ImageFile, FileBound(max_decoded_bytes=256 << 20)]
+    #: `upscale`: what the picture should show, after the restoration request, never in place of it: text too small to
+    #: read, a colour, a face. Each picture it mentions is a reference after the picture, at its 1 MP (`_said`).
+    prompt: Prompt[Image] = Prompt()
     #: `upscale`: the picture's ratio at this size (`SIZES.fit`), up to Qwen's 4 MP.
     megapixels: Literal[2, 4] = 4
     seed: Seed | None = None
@@ -321,18 +326,28 @@ _UPSCALE = {"model": "qwen/qwen-image-2.1@0.1.0", "text_encoder": "atomicchat/qw
           components={"model": ("transformer",), "text_encoder": ("text_encoder",), "vae": ("vae",)}, memoize=True)  # fmt: skip
 def upscale(ctx: Context, payload: UpscaleInput, model: QwenImage21DiT, text_encoder: QwenImage21TextEncoder,
             vae: QwenImage21VAE, tel: Telemetry, adj: Adjustments) -> ImageResult:
-    """The picture restored at the size asked: the base model edits it from noise, the picture its reference at the
-    canvas's size, as Diffusers sizes a reference to its output, so the edit keeps to it pixel for pixel. A start from
-    the picture blown up keeps its blur and blocks at any strength (se-147)."""
+    """Qwen Image 2.1 restores the picture at the size asked: the base model edits it from noise, the picture its reference
+    at the canvas's size, as Diffusers sizes a reference to its output, so the edit keeps to it pixel for pixel. A start from
+    the picture blown up keeps its blur and blocks at any strength (se-147). `prompt` follows the restoration request,
+    and the pictures it mentions follow the picture as references, each at its 1 MP as `generate` takes them."""
     with tel.stage("reading picture"):
         picture = payload.image.read(mode="RGBA")
+        said, pictures = _said(payload.prompt, adj, before=1)
+        mentioned = [mention.file.read(mode="RGBA") for mention in pictures]
     width, height = SIZES.fit(adj, picture.size, payload.megapixels * MEGAPIXEL)
     seed = payload.seed if payload.seed is not None else ImageRequest(prompt="").drawn_seed()
     vae.hold(tel)
     with tel.stage("encoding reference images"):
         conditioning, latents = vae.encode_reference_images([picture], (width, height))
+        if mentioned:
+            more, more_latents = vae.encode_reference_images(mentioned)
+            conditioning, latents = [*conditioning, *more], torch.cat([latents, more_latents], dim=1)
+    request = UPSCALE_PROMPT.format("<image1>" if mentioned else "the picture")
     with tel.stage("encoding prompt"):
-        embeds, mask, image_pad_mask = text_encoder.encode_image_prompt(UPSCALE_PROMPT, conditioning)
+        prompt, keep, given = text_encoder.fit_prompt("\n\n".join(filter(None, (request, said))), reference_grids(conditioning))
+        if keep < given:
+            adj.warn("prompt", f"Qwen Image 2.1 reads {keep} of the upscale's {given} tokens, so it goes without the rest")
+        embeds, mask, image_pad_mask = text_encoder.encode_image_prompt(prompt, conditioning)
     ctx.raise_if_cancelled()
     with tel.stage("generating image"):
         latents = model.denoise(embeds, mask, width=width, height=height, steps=UPSCALE_STEPS, seed=seed,
@@ -342,5 +357,6 @@ def upscale(ctx: Context, payload: UpscaleInput, model: QwenImage21DiT, text_enc
         image = decoded_image(vae.decode(latents, width=width, height=height))
     with tel.stage("saving image"):
         asset = ImageFile.from_image(image, format="png")
-    tel.log("upscale", source=f"{picture.width}x{picture.height}", width=width, height=height, steps=UPSCALE_STEPS)
-    return ImageResult(asset, width, height, seed, UPSCALE_PROMPT)
+    tel.log("upscale", source=f"{picture.width}x{picture.height}", width=width, height=height, steps=UPSCALE_STEPS,
+            references=len(mentioned))  # fmt: skip
+    return ImageResult(asset, width, height, seed, prompt)

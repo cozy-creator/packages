@@ -11,6 +11,7 @@ from cozy_runtime import rng
 from cozy_runtime.author import Adjustments, App, Context, Outputs, Seed, Telemetry
 from cozy_runtime.fields import Advanced, AspectRatio, FileBound, ImagePreparation, Range, Ratios
 from cozy_runtime.media import ImageFile, VideoFile
+from PIL import Image
 
 from . import quantize as quantize  # its recipe
 from .model import COMPONENTS, FPS, REFINE_SIGMAS, SIGMAS, Ltx25
@@ -42,6 +43,17 @@ class VideoResult(msgspec.Struct):
     prompt: str
 
 
+def fit(picture: Image.Image, width: int, height: int) -> Image.Image:
+    """The picture's centre at the canvas's shape: native LTX and its ComfyUI template crop a conditioning picture to
+    the canvas rather than stretch it, as Diffusers' resize would."""
+    w, h = picture.size
+    if w * height > h * width:
+        crop = round(h * width / height)
+        return picture.crop(((w - crop) // 2, 0, (w - crop) // 2 + crop, h))
+    crop = round(w * height / width)
+    return picture.crop((0, (h - crop) // 2, w, (h - crop) // 2 + crop))
+
+
 def canvas(resolution: str, ratio: AspectRatio | None, first: tuple[int, int] | None) -> tuple[int, int]:
     native = (1920, 1088) if resolution == "1080p" else (1280, 704)
     if ratio is None and first is None:
@@ -69,6 +81,8 @@ def generate(ctx: Context, payload: Generate, model: Ltx25, out: Outputs, tel: T
         adj.warn("duration_s", f"LTX-2.5 renders 1-20 seconds, so this clip runs {(frames - 1) / FPS:g} seconds")
     picture = payload.first_frame.read().convert("RGB") if payload.first_frame else None
     width, height = canvas(payload.resolution, payload.aspect_ratio, picture.size if picture else None)
+    if picture is not None:
+        picture = fit(picture, width, height)
     generator = rng.generator(seed)
     with tel.stage("encoding prompt"):
         embeds = model.encode(payload.prompt)

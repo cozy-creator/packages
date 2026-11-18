@@ -1,4 +1,4 @@
-# Qwen Image
+# Qwen Image 1
 
 Qwen's 20B dual-stream DiT with a Qwen2.5-VL-7B text encoder. One function generates from text with
 Qwen-Image-2512, or edits and composes the pictures its prompt mentions with Qwen-Image-Edit-2511. The two
@@ -10,8 +10,8 @@ DiT changes between requests.
 | `generate` | `qwen/qwen-image-2512@0.1.1` | `qwen/qwen-image-edit-2511@0.1.0` | 50 / 40 | true CFG 4.0 |
 | `generate_turbo` | the same, with `lightx2v/qwen-image-2512-lightning-lora@0.1.0` | the same, with `lightx2v/qwen-image-edit-2511-lightning-lora@0.1.0` | 8 | none |
 
-`image` is the canvas tool, its prompt `instructions`, one box for both: `turbo` (on by default), `aspect_ratio` and `seed`, at
-the card's 1328² class. Each DiT and LoRA loads only when a render asks for it.
+On a canvas it's one tool, `image` (Qwen Image 1; Qwen Image 2.1 is `qwen-image-2`), its prompt `instructions`, one box for
+both: `turbo` (on by default), `aspect_ratio`, `megapixels` and `seed`. Each DiT and LoRA loads only when a render asks for it.
 
 Write the request in a file, `request.yaml`:
 
@@ -43,7 +43,11 @@ Chinese quality negative, and Qwen-Image-Edit-2511's single space. With pictures
 
 ## Slots
 
-`model` is a whole checkpoint: the text-to-image DiT, the text encoder, the VAE and the tokenizer.
+`model` binds the text-to-image DiT and the VAE of a Qwen-Image checkpoint, and `text_encoder` its text encoder:
+Qwen2.5-VL-7B-Instruct, stock in both Qwen checkpoints. Its default is abliterated (Paul, 11-17: "use abliterated
+models wherever possible"): [coder3101's Heretic](https://huggingface.co/coder3101/Qwen2.5-VL-7B-Instruct-heretic)
+(`coder3101/qwen2.5-vl-7b-instruct-heretic`, 5/100 refusals against 100/100, KL 0.016), composed on
+Qwen-Image-2512. Qwen's own is any Qwen-Image checkpoint: `--model text_encoder=qwen/qwen-image-2512@0.1.1`.
 `edit_model` binds only the edit checkpoint's DiT, and the first request with references fetches and
 builds it (and `edit_turbo_lora`). Runtime keeps each DiT's residency: going from one to the other
 pages weights, it does not reload them. `--lane` picks the lane of `model`; the edit DiT takes the
@@ -53,7 +57,8 @@ machine's default lane.
 
 Text to image defaults to Qwen-Image-2512's 1328×1328 (1.68 MiP); an explicit `aspect_ratio` keeps that
 area. With references and neither size input, the output takes the first reference's aspect ratio and
-pixel count (upstream takes the last reference's ratio at 1 MiP). Sides are rounded to the 16 px grid.
+pixel count (upstream takes the last reference's ratio at 1 MiP). The `image` box always names a size, made or
+edited: `megapixels` 1 (Qwen-Image-Edit-2511's 1024²), 1.7 (Qwen-Image-2512's 1328², the default) or 2. Sides are rounded to the 16 px grid.
 The model serves 256² to 2 MiP with sides from 128 to 4096 px; anything outside is clamped and
 reported as a `clamp` adjustment.
 
@@ -103,6 +108,10 @@ cozy model upload hf://lightx2v/Qwen-Image-2512-Lightning@4609161e308ce82018a42c
 cozy model quantize qwen/qwen-image-2512@sha256:<bf16 commit> --lane int8 --package qwen-image --on <machine>
 cozy model quantize qwen/qwen-image-2512@sha256:<bf16 commit> --lane nvfp4 --package qwen-image --on <machine>
 cozy model publish qwen/qwen-image-2512 <version> sha256:<bf16 commit> sha256:<int8 commit> sha256:<nvfp4 commit>
+cozy model upload hf://coder3101/Qwen2.5-VL-7B-Instruct-heretic@7c9234bfdb274f4cc922dc39a5b8484b02b06248/model.safetensors.index.json \
+  coder3101/qwen2.5-vl-7b-instruct-heretic --lane bf16 --base qwen/qwen-image-2512@sha256:<bf16 commit>:text_encoder \
+  --mirror https://huggingface.co/coder3101/Qwen2.5-VL-7B-Instruct-heretic --on <machine>
+cozy model quantize coder3101/qwen2.5-vl-7b-instruct-heretic@sha256:<bf16 commit> --lane int8 --package qwen-image --on <machine>
 ```
 
 The edit checkpoint is `hf://Qwen/Qwen-Image-Edit-2511@6f3ccc0b56e431dc6a0c2b2039706d7d26f22cb9`, its

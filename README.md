@@ -17,8 +17,8 @@ dependencies or qualifying a worker image.
 | `ltx-2.5/` | LTX-2.5 Distilled text/image-to-video with synchronized stereo audio and spatial refinement |
 | `sdxl/` | SDXL text-to-image package plus the family's `int8`/`fp8`/`w4a8` recipes (se-008, cr-073, se-023) |
 | `anima/` | Anima text-to-image package for local development and benchmarking (se-009; model license is non-commercial) |
-| `qwen-image-2/` | Qwen-Image-2.1 image generation and reference editing with native Runtime execution (research model licence) |
-| `qwen-image/` | Qwen-Image-2512 text-to-image and Qwen-Image-Edit-2511 editing on one shared text encoder and VAE (Apache-2.0) |
+| `qwen-image-2/` | Qwen Image 2.1: Qwen-Image-2.1 image generation and reference editing with native Runtime execution (research model licence) |
+| `qwen-image/` | Qwen Image 1: Qwen-Image-2512 text-to-image and Qwen-Image-Edit-2511 editing on one shared text encoder and VAE (Apache-2.0) |
 | `fibo-2/` | Bria Fibo 2.0 text-to-image and editing, Dev and Edit Turbo (CC BY-NC 4.0 model licence) |
 | `ideogram-4/` | Ideogram 4 text-to-image from JSON captions, with layout regions and rendered text (Ideogram Non-Commercial model licence) |
 | `moss-image/` | OpenMOSS MOSS-Image text-to-image with layout boxes for objects and text (Apache-2.0) |

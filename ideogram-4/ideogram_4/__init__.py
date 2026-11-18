@@ -108,8 +108,11 @@ def refusal_card(image: PILImage.Image) -> bool:
             and float((np.abs(luma - field) <= 8).mean()) >= 0.85)
 
 
-_DEFAULTS = {"model": "ideogram-ai/ideogram-4@0.2.0", "text_encoder": "qwen/qwen3-vl-8b-instruct@0.1.1",
-             "upsampler": "qwen/qwen3-vl-8b-instruct@0.1.1"}
+#: The text encoder and the upsampler are stock Qwen3-VL-8B-Instruct, so both default to pottokao's Heretic
+#: abliteration of it (Paul, 11-17: "use abliterated models wherever possible"), one checkpoint for both; Qwen's own
+#: is `model.text_encoder=qwen/qwen3-vl-8b-instruct@0.1.1` (and `model.upsampler=`).
+_QWEN = "pottokao/qwen-image-2.1-text-encoder-heretic@0.1.0"
+_DEFAULTS = {"model": "ideogram-ai/ideogram-4@0.2.0", "text_encoder": _QWEN, "upsampler": _QWEN}
 _COMPONENTS = {"model": ("transformer", "unconditional_transformer", "vae"), "text_encoder": ("model",),
                "upsampler": ("model",)}
 

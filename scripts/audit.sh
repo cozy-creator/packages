@@ -12,9 +12,14 @@ done | grep -E '^[A-Za-z0-9][A-Za-z0-9._-]*==' | sed 's/ *;.*//' | sort -u \
   | awk -F== -v dir="$work" '{ print > (dir "/" ++seen[tolower($1)] ".txt") }'
 ignore=$(sed -nE 's/^([A-Z]+-[A-Za-z0-9-]+).*/--ignore-vuln \1/p' pip-audit-known.txt | tr '\n' ' ')
 uvx pip-audit@2.9.0 --version > /dev/null
-for batch in "$work"/*.txt; do
+# audit <batch>: PyPI read in 60 s (pip-audit's 15 s timed out under the parallel batches: packages#983's queue, twice),
+# a batch asked again once when it fails.
+audit() {
   # shellcheck disable=SC2086
-  uvx pip-audit@2.9.0 --disable-pip --no-deps --progress-spinner off --cache-dir "${batch%.txt}.cache" -r "$batch" $ignore > "${batch%.txt}.out" 2>&1 &
+  uvx pip-audit@2.9.0 --disable-pip --no-deps --progress-spinner off --timeout 60 --cache-dir "${1%.txt}.cache" -r "$1" $ignore
+}
+for batch in "$work"/*.txt; do
+  { audit "$batch" > "${batch%.txt}.out" 2>&1 || audit "$batch" > "${batch%.txt}.out" 2>&1; } &
 done
 status=0
 for job in $(jobs -p); do wait "$job" || status=1; done

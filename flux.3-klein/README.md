@@ -91,6 +91,14 @@ The default upsampler is [AtomicChat's abliterated one](https://huggingface.co/A
 32 attention outputs and 32 MLP down projections (`W' = W - 0.75 r rᵀW`), every other tensor BFL's. BFL's own is one
 setting away: `model.upsampler=black-forest-labs/flux-3-klein-upsampler@0.2.0`.
 
+## Text encoder
+
+Klein's text encoder is stock Qwen3-VL-4B-Instruct (BFL's `text_encoder` shards are Qwen's), bound as its own slot,
+`text_encoder`; `model` and `full` read only the DiT and the VAE. Its default is abliterated (Paul, 11-17: "use
+abliterated models wherever possible"): [DreamFast's Heretic](https://huggingface.co/DreamFast/Qwen3-VL-4b-Heretic)
+(`dreamfast/qwen3-vl-4b-heretic-klein`, 0/400 HarmBench refusals, KL 0.028), composed on Klein; Krea 2 and Fibo 2.0
+read the same weights. BFL's own is any Klein checkpoint: `--model text_encoder=black-forest-labs/flux-3-klein@0.1.0`.
+
 ## Sampling
 
 The sampling follows BFL's reference code (`black-forest-labs/flux-3-image-klein` at `bfc8889`): Euler
@@ -129,6 +137,16 @@ cozy model upload hf://AtomicChat/FLUX-3-Image-Klein-pup-Uncensored-GGUF@8671d09
 cozy run ./scripts/abliterated_ingest.py/assemble kind=pup model.stock=black-forest-labs/flux-3-klein-upsampler@0.2.0 \
   model.gguf=atomicchat/flux-3-klein-upsampler-abliterated@sha256:<gguf commit> --lane bf16 --on <machine>
 cozy model upload run:<run> atomicchat/flux-3-klein-upsampler-abliterated --lane bf16
+```
+
+DreamFast's encoder is Qwen3-VL-4B-Instruct's layout, so it goes in as Klein's `text_encoder` by reference, the rest
+BFL's; its `int8` lane is this package's recipe:
+
+```sh
+cozy model upload hf://DreamFast/Qwen3-VL-4b-Heretic@d8af0c92971d54d90fde7d44180b807b99cef5c5/model.safetensors.index.json \
+  dreamfast/qwen3-vl-4b-heretic-klein --lane bf16 --base black-forest-labs/flux-3-klein@sha256:<bf16 commit>:text_encoder \
+  --mirror https://huggingface.co/DreamFast/Qwen3-VL-4b-Heretic --on <machine>
+cozy model quantize dreamfast/qwen3-vl-4b-heretic-klein@sha256:<bf16 commit> --lane int8 --package ./flux.3-klein --on <machine>
 ```
 
 Klein never builds Qwen3-VL's vision tower, its last four layers or its head, so it never loads those
