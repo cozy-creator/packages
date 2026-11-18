@@ -2498,8 +2498,9 @@ def read_reference_video(
         raise InvalidRequest("reference video has no frame on the 24-fps clock", code="reference_policy")
     if guide and kept < frames:
         # A guide holds its last frame to the call's end, so no frame of the render goes unguided (Paul, 11-17: an
-        # edit's tail past its plate fell back to the character's picture); the edit is cut at the plate's end.
-        out[kept:] = out[kept - 1]
+        # edit's tail past its plate fell back to the character's picture); the edit is cut at the plate's end. Its last
+        # frame: one the 24-fps clock rounded away (shown under half a slot) still ends the clip.
+        out[kept:] = held[1] if held[1] is not None else out[kept - 1]
         kept = frames
     soundtrack = None
     if audio_start is not None:
