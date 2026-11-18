@@ -224,16 +224,18 @@ def _generate(
 #: edit's (`expander_i2i`), and the text encoder, the `text_encoder` of a Qwen-Image-2.1 checkpoint and one for every function, are abliterated by
 #: default (Paul, 11-06). Qwen's own are `qwen/qwen-image-2.1-pe-t2i@0.1.0`, `qwen/qwen-image-2.1-pe-i2i@0.1.0` and
 #: any Qwen-Image-2.1 checkpoint (`model.text_encoder=qwen/qwen-image-2.1@0.1.0`). Turbo is the base model with
-#: Alibaba PAI's Fun Acc over it (`turbo_lora`). `vae` encodes the pictures and decodes the image: the base model's
-#: own by default, or another Qwen-Image-2.1 VAE (`model.vae=madebyollin/texture-fix-vae`).
+#: Alibaba PAI's Fun Acc over it (`turbo_lora`). `vae` encodes the pictures and decodes the image: madebyollin's
+#: texture-fix fine-tune by default (`TEXTURE_FIX`), or any Qwen-Image-2.1 VAE (`model.vae=qwen/qwen-image-2.1@0.1.0`).
+#: The stock decoder leaves one pixel of every 2x2 a level or two dark, a dot grid at 200% (se-155).
+TEXTURE_FIX = "madebyollin/texture-fix-vae@0.3.0"
 _FULL = {"expander_i2i": "darrellbest/qwen-image-2.1-pe-i2i-abliterated@0.1.0",
          "expander_t2i": "pottokao/qwen-image-2.1-pe-t2i-abliterated@0.1.0", "matte": "zhengpeng7/birefnet@0.1.0",
          "model": "qwen/qwen-image-2.1@0.1.0", "text_encoder": "atomicchat/qwen-image-2.1-text-encoder-abliterated@0.1.0",
-         "vae": "qwen/qwen-image-2.1@0.1.0"}
+         "vae": TEXTURE_FIX}
 _TURBO = {"expander_i2i": "darrellbest/qwen-image-2.1-pe-i2i-abliterated@0.1.0",
           "expander_t2i": "pottokao/qwen-image-2.1-pe-t2i-abliterated@0.1.0", "matte": "zhengpeng7/birefnet@0.1.0",
           "model": "qwen/qwen-image-2.1@0.1.0", "text_encoder": "atomicchat/qwen-image-2.1-text-encoder-abliterated@0.1.0",
-          "turbo_lora": "alibaba-pai/qwen-image-2.1-fun-acc@0.1.1", "vae": "qwen/qwen-image-2.1@0.1.0"}
+          "turbo_lora": "alibaba-pai/qwen-image-2.1-fun-acc@0.1.1", "vae": TEXTURE_FIX}
 _COMPONENTS = {"model": ("transformer",), "text_encoder": ("text_encoder",), "vae": ("vae",)}
 #: Which requests need each enhancer (cl-1103): one with pictures the edit's, one without the other, and
 #: `prompt_upsampling=False` neither. A machine fetches the one its request needs before it starts, never the other.
@@ -349,7 +351,7 @@ class UpscaleInput(msgspec.Struct, kw_only=True):
 
 
 _UPSCALE = {"model": "qwen/qwen-image-2.1@0.1.0", "text_encoder": "atomicchat/qwen-image-2.1-text-encoder-abliterated@0.1.0",
-            "vae": "qwen/qwen-image-2.1@0.1.0"}
+            "vae": TEXTURE_FIX}
 
 
 @app.tool(label="Upscale", named="image", defaults=_UPSCALE,

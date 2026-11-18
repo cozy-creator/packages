@@ -77,9 +77,10 @@ Each slot builds only what it reads, so a model of that part alone serves it: a 
 other parts come from the other slots' models.
 
 `vae` is its own slot too, one for every function: it reads a checkpoint's `vae`, which encodes the pictures and decodes
-the image. It is the base model's own by default; `model.vae=madebyollin/texture-fix-vae` takes madebyollin's
-[fine-tune of it](https://huggingface.co/madebyollin/texture-fix-vae-for-qwen-image-2.1) (cleaner textures, no
-checkerboard).
+the image. By default it is madebyollin's [texture-fix fine-tune](https://huggingface.co/madebyollin/texture-fix-vae-for-qwen-image-2.1)
+of the base model's (`madebyollin/texture-fix-vae@0.3.0`); `model.vae=qwen/qwen-image-2.1@0.1.0` takes Qwen's own. Qwen's
+decoder, in Diffusers as here, prints a fixed 2-px pattern: one pixel of every 2x2 sits a level or two darker, a dot grid
+at 200%. The fine-tune cuts it about tenfold and leaves the picture otherwise as it was (se-155).
 
 Outputs use lossless WebP to preserve the same decoded pixels and alpha while reducing the
 bytes returned to the client. A canvas with either side at least 16384 pixels uses PNG,
