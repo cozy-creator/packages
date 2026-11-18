@@ -103,11 +103,11 @@ def layout_prompt(prompt: str, regions: list[Region] | None, width: int, height:
     return json.dumps(layout, ensure_ascii=False, separators=(",", ":"))
 
 
-#: MOSS-Image's text encoder is stock Qwen3.5-9B, its own slot: pottokao's Heretic abliteration of it by default (Paul,
-#: 11-17: "use abliterated models wherever possible"), made for MOSS-Image and the same weights as pan2's encoder. Stock
-#: is any MOSS-Image checkpoint: `model.text_encoder=openmoss-team/moss-image@0.1.1`. `model` reads the DiT and the VAE.
-TEXT_ENCODER = "pottokao/moss-image-text-encoder-heretic@0.1.0"
-_DEFAULTS = {"model": "openmoss-team/moss-image@0.1.1", "text_encoder": TEXT_ENCODER}
+#: MOSS-Image's text encoder is stock Qwen3.5-9B, its own slot, MOSS-Image's own by default. pottokao's Heretic abliteration
+#: (`model.text_encoder=pottokao/moss-image-text-encoder-heretic@0.1.0`) drew a poster's small lettering worse in se-160's
+#: A/B (44280850673) and softened nothing the stock encoder did, so it is not the default. `model` reads the DiT and the VAE.
+MOSS = "openmoss-team/moss-image@0.1.1"
+_DEFAULTS = {"model": MOSS, "text_encoder": MOSS}
 _COMPONENTS = {"model": ("transformer", "vae"), "text_encoder": ("text_encoder",)}
 
 
