@@ -1736,12 +1736,13 @@ class OfficialH3Pipeline:
         whole decode by more than 1e-4 and 1e-3, and the largest difference: the decoder's right context in effect."""
         audio_vae = self.components["audio_vae"]
         device = next(audio_vae.parameters()).device
-        mean = torch.tensor(audio_vae.config.latents_mean, device=device).view(1, -1, 1)
-        std = torch.tensor(audio_vae.config.latents_std, device=device).view(1, -1, 1)
+        mean = torch.tensor(audio_vae.config["latents_mean"], device=device).view(1, -1, 1)
+        std = torch.tensor(audio_vae.config["latents_std"], device=device).view(1, -1, 1)
         rows = latents.to(device)
 
         def decode(part: torch.Tensor) -> torch.Tensor:
-            return audio_vae.decode(part * std + mean, return_dict=False)[0].float()
+            decoded: torch.Tensor = audio_vae.decode(part * std + mean, return_dict=False)[0]
+            return decoded.float()
 
         found: list[list[float]] = []
         with torch.no_grad(), _audio_weight_norm_scope(audio_vae):

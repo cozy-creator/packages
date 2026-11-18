@@ -530,7 +530,7 @@ def _finish(
     _, height, width, _ = (int(value) for value in pixels.shape)
     if shot is not None:
         with tel.stage("decode_end"):
-            probe = {name: state.values[name] for name in ("probe_head", "probe_reach") if name in state.values}
+            probe: dict[str, Tensor] = {name: state.values[name] for name in ("probe_head", "probe_reach") if name in state.values}
             shot.hand_on(model, out, latents, waveform, sample_rate, ended=None if shot.ends else ended, probe=probe)
     if ended is not None and (shot is None or shot.ends):
         ended(pixels)

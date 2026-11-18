@@ -47,6 +47,10 @@ def _bands(x: npt.NDArray[np.float64], rate: int) -> npt.NDArray[np.float64]:
     return db
 
 
+def _rms_db(v: npt.NDArray[np.float64]) -> float:
+    return float(20 * np.log10(np.sqrt(np.mean(v**2)) + 1e-12))
+
+
 def _energy(x: npt.NDArray[np.float64], frame: int) -> npt.NDArray[np.float64]:
     count = len(x) // frame
     return (x[: count * frame].reshape(count, frame) ** 2).mean(axis=1)
@@ -60,7 +64,6 @@ def seam(a: Wave, b: Wave, rate: int) -> dict[str, str]:
     mid = slice(n // 4, 3 * n // 4)
     xm, ym = x[mid], y[mid]
     best, lag = _xcorr(xm, ym, rate // 50)
-    rms = lambda v: 20 * np.log10(np.sqrt(np.mean(v**2)) + 1e-12)  # noqa: E731
     env = rate // 100
     spectral = _bands(xm, rate) - _bands(ym, rate)
     out = {
@@ -70,7 +73,7 @@ def seam(a: Wave, b: Wave, rate: int) -> dict[str, str]:
         "xcorr_mid": f"{best:.3f}",
         "xcorr_lag_ms": f"{1000 * lag / rate:.2f}",
         "envelope_corr_mid": f"{_corr(np.sqrt(_energy(xm, env)), np.sqrt(_energy(ym, env))):.3f}",
-        "level_db_mid": f"{rms(xm):.1f}/{rms(ym):.1f}",
+        "level_db_mid": f"{_rms_db(xm):.1f}/{_rms_db(ym):.1f}",
         "band_diff_db_mean": f"{np.nanmean(np.abs(spectral)):.1f}",
         "band_diff_db_max": f"{np.nanmax(np.abs(spectral)):.1f}",
     }
