@@ -103,8 +103,12 @@ def layout_prompt(prompt: str, regions: list[Region] | None, width: int, height:
     return json.dumps(layout, ensure_ascii=False, separators=(",", ":"))
 
 
-_DEFAULTS = {"model": "openmoss-team/moss-image@0.1.1"}
-_COMPONENTS = {"model": ("transformer", "text_encoder", "vae")}
+#: MOSS-Image's text encoder is stock Qwen3.5-9B, its own slot: pottokao's Heretic abliteration of it by default (Paul,
+#: 11-17: "use abliterated models wherever possible"), made for MOSS-Image and the same weights as pan2's encoder. Stock
+#: is any MOSS-Image checkpoint: `model.text_encoder=openmoss-team/moss-image@0.1.1`. `model` reads the DiT and the VAE.
+TEXT_ENCODER = "pottokao/moss-image-text-encoder-heretic@0.1.0"
+_DEFAULTS = {"model": "openmoss-team/moss-image@0.1.1", "text_encoder": TEXT_ENCODER}
+_COMPONENTS = {"model": ("transformer", "vae"), "text_encoder": ("text_encoder",)}
 
 
 def steering(payload: GenerateInput) -> list[Control[Kinds]]:
@@ -173,7 +177,7 @@ async def generate(ctx: Context, payload: GenerateInput) -> ImageResult:
 
 
 @app.entrypoint(defaults=_DEFAULTS, components=_COMPONENTS, memoize=True, private=True)
-def text_to_image(ctx: Context, payload: GenerateInput, model: MossImage, tel: Telemetry,
+def text_to_image(ctx: Context, payload: GenerateInput, model: MossImage, text_encoder: MossImage, tel: Telemetry,
                   adj: Adjustments) -> ImageResult:
     """MOSS-Image SFT, 50 Euler steps at CFG 3, with `regions` laid out as upstream's layout JSON.
 
@@ -187,8 +191,8 @@ def text_to_image(ctx: Context, payload: GenerateInput, model: MossImage, tel: T
     prompt = layout_prompt(payload.prompt.text, payload.regions, width, height)
     ctx.raise_if_cancelled()
     with tel.stage("encoding prompt"):
-        positive = model.encode(prompt)
-        negative = None if guidance == 1.0 else model.encode(payload.negative_prompt or "")
+        positive = text_encoder.encode(prompt)
+        negative = None if guidance == 1.0 else text_encoder.encode(payload.negative_prompt or "")
     ctx.raise_if_cancelled()
     with tel.stage("generating image"):
         latents = model.denoise(
@@ -203,7 +207,7 @@ def text_to_image(ctx: Context, payload: GenerateInput, model: MossImage, tel: T
 
 
 @app.entrypoint(defaults=_DEFAULTS, components=_COMPONENTS, memoize=True, private=True)
-def control(ctx: Context, payload: GenerateInput, model: MossImage, tel: Telemetry,
+def control(ctx: Context, payload: GenerateInput, model: MossImage, text_encoder: MossImage, tel: Telemetry,
             adj: Adjustments) -> ImageResult:
     """`generate` under its first control map, the kind's adapter stacked on `model` by its caller (thedeoxen's
     workflows, ComfyUI's `ai-toolkit` edit format): the map at the picture's size is the one noise-free reference at
@@ -232,8 +236,8 @@ def control(ctx: Context, payload: GenerateInput, model: MossImage, tel: Telemet
     with tel.stage("encoding control map"):
         reference = model.encode_image(shown)
     with tel.stage("encoding prompt"):
-        positive = model.encode(text, (shown,))
-        negative = None if guidance == 1.0 else model.encode(payload.negative_prompt or CONTROL_NEGATIVE, (shown,))
+        positive = text_encoder.encode(text, (shown,))
+        negative = None if guidance == 1.0 else text_encoder.encode(payload.negative_prompt or CONTROL_NEGATIVE, (shown,))
     ctx.raise_if_cancelled()
     with tel.stage("generating image"):
         latents = model.denoise(positive, negative, width=width, height=height, steps=steps, guidance=guidance,
@@ -248,7 +252,7 @@ def control(ctx: Context, payload: GenerateInput, model: MossImage, tel: Telemet
 
 
 @app.entrypoint(defaults=_DEFAULTS, components=_COMPONENTS, memoize=True, private=True)
-def edit(ctx: Context, payload: GenerateInput, model: MossImage, tel: Telemetry,
+def edit(ctx: Context, payload: GenerateInput, model: MossImage, text_encoder: MossImage, tel: Telemetry,
          adj: Adjustments) -> ImageResult:
     """`generate` with pictures, Moss-Image-Edit stacked on `model` by its caller: each picture a noise-free
     reference at t = 0 (`MossImage.denoise`'s `references`), 30 Euler steps at CFG 4 against an empty negative that
@@ -268,8 +272,8 @@ def edit(ctx: Context, payload: GenerateInput, model: MossImage, tel: Telemetry,
     with tel.stage("encoding reference images"):
         references = [model.encode_image(reference(image)) for image in images]
     with tel.stage("encoding prompt"):
-        positive = model.encode(text)
-        negative = None if guidance == 1.0 else model.encode(payload.negative_prompt or "")
+        positive = text_encoder.encode(text)
+        negative = None if guidance == 1.0 else text_encoder.encode(payload.negative_prompt or "")
     ctx.raise_if_cancelled()
     with tel.stage("generating image"):
         latents = model.denoise(positive, negative, width=width, height=height, steps=steps, guidance=guidance,
@@ -320,14 +324,14 @@ class UpscaleInput(msgspec.Struct, kw_only=True):
 
 
 @app.tool(label="Upscale", named="image", defaults=_DEFAULTS, components=_COMPONENTS, memoize=True)
-def upscale(ctx: Context, payload: UpscaleInput, model: MossImage, tel: Telemetry,
+def upscale(ctx: Context, payload: UpscaleInput, model: MossImage, text_encoder: MossImage, tel: Telemetry,
             adj: Adjustments) -> ImageResult:
     """The picture larger: `remake` at the size asked, from `UPSCALE_PROMPT` (50-step schedule, CFG 3)."""
     with tel.stage("reading picture"):
         picture = payload.image.read()
     width, height = SIZES.fit(adj, picture.size, payload.megapixels * MEGAPIXEL)
     seed = payload.seed if payload.seed is not None else ImageRequest(prompt="").drawn_seed()
-    result = remake(ctx, model, tel, picture, UPSCALE_PROMPT, "", width=width, height=height, steps=STEPS,
+    result = remake(ctx, model, text_encoder, tel, picture, UPSCALE_PROMPT, "", width=width, height=height, steps=STEPS,
                     guidance=GUIDANCE, seed=seed, strength=payload.denoise)  # fmt: skip
     tel.log("upscale", source=f"{picture.width}x{picture.height}", width=width, height=height, denoise=payload.denoise)
     return result
@@ -350,7 +354,7 @@ class ImageToImageInput(msgspec.Struct, kw_only=True):
 
 
 @app.entrypoint(defaults=_DEFAULTS, components=_COMPONENTS, memoize=True)
-def image_to_image(ctx: Context, payload: ImageToImageInput, model: MossImage, tel: Telemetry,
+def image_to_image(ctx: Context, payload: ImageToImageInput, model: MossImage, text_encoder: MossImage, tel: Telemetry,
                    adj: Adjustments) -> ImageResult:
     """The picture remade from the prompt (`remake`): 50 Euler steps at CFG 3, those above `strength` skipped."""
     with tel.stage("reading picture"):
@@ -360,11 +364,11 @@ def image_to_image(ctx: Context, payload: ImageToImageInput, model: MossImage, t
     guidance = held(adj, "guidance", GUIDANCE if payload.guidance is None else payload.guidance, 1.0, 20.0,
                     "MOSS-Image's CFG 1-20")
     seed = payload.seed if payload.seed is not None else ImageRequest(prompt="").drawn_seed()
-    return remake(ctx, model, tel, picture, payload.prompt, payload.negative_prompt or "", width=width,
+    return remake(ctx, model, text_encoder, tel, picture, payload.prompt, payload.negative_prompt or "", width=width,
                   height=height, steps=steps, guidance=guidance, seed=seed, denoise=payload.strength)  # fmt: skip
 
 
-def remake(ctx: Context, model: MossImage, tel: Telemetry, picture: PILImage.Image, prompt: str,
+def remake(ctx: Context, model: MossImage, text_encoder: MossImage, tel: Telemetry, picture: PILImage.Image, prompt: str,
            negative_prompt: str, *, width: int, height: int, steps: int, guidance: float, seed: int,
            strength: float = 1.0, denoise: float | None = None) -> ImageResult:
     """Image-to-image: the picture Lanczos to `width` x `height`, encoded, noised to the sigma `strength` (or the
@@ -374,8 +378,8 @@ def remake(ctx: Context, model: MossImage, tel: Telemetry, picture: PILImage.Ima
     with tel.stage("encoding picture"):
         start = model.encode_image(picture.convert("RGB").resize((width, height), PILImage.Resampling.LANCZOS))
     with tel.stage("encoding prompt"):
-        positive = model.encode(prompt)
-        negative = None if guidance == 1.0 else model.encode(negative_prompt)
+        positive = text_encoder.encode(prompt)
+        negative = None if guidance == 1.0 else text_encoder.encode(negative_prompt)
     ctx.raise_if_cancelled()
     with tel.stage("generating image"):
         latents = model.denoise(positive, negative, width=width, height=height, steps=steps, guidance=guidance, seed=seed,
