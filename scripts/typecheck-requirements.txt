@@ -7,7 +7,7 @@ av==19.0.2
 certifi==2026.10.23
 charset-normalizer==3.5.2
 click==8.5.1
-cozy-runtime @ git+https://github.com/cozy-creator/cozy-runtime@3a10e27ce74e68f46b8f76d02ce4ea171f62363a
+cozy-runtime @ git+https://github.com/cozy-creator/cozy-runtime@a4ac226d3ff24f2574ae7f7228a03b63beb4b3d0
 diffusers==0.43.0
 einops==0.8.2
 filelock==4.2.10
@@ -52,7 +52,7 @@ safetensors==0.8.0
 setuptools==84.2.1
 shellingham==1.5.4
 sympy==1.14.0
-tensorfs==0.26.0
+tensorfs @ https://github.com/cozy-creator/cozy-creator/releases/download/rc-0.27.0/tensorfs-0.27.0.dev3343+g123c40b8-cp311-abi3-manylinux_2_28_x86_64.whl
 timm==1.0.31
 tokenizers==0.23.3
 torch @ https://download.pytorch.org/whl/cpu/torch-2.15.0%2Bcpu-cp312-cp312-manylinux_2_28_x86_64.whl
