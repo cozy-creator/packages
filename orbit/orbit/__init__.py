@@ -14,7 +14,7 @@ from typing import Annotated, NamedTuple
 import msgspec
 import numpy as np
 import numpy.typing as npt
-from cozy_runtime.author import App, Context, InvalidRequest, Outputs, Seed, Telemetry, call
+from cozy_runtime.author import App, Context, InvalidRequest, Outputs, Seed, Telemetry, Weights, call
 from cozy_runtime.fields import FileBound, Image, Prompt
 from cozy_runtime.media import (
     DecodedMediaEvent,
@@ -275,8 +275,10 @@ def silent(frames: Sequence[tuple[VideoFile, int]]) -> Iterator[DecodedMediaEven
                         break
 
 
-@app.tool(label="Orbit", named="video")
-async def orbit(ctx: Context, payload: Orbit, out: Outputs, tel: Telemetry) -> OrbitResult:
+# cl-1281 proof harness, never merged: ORB360 as a slot default, so a static plan names it. The body still sends the
+# constant; reading the slot's value waits on the author API (cl-1281, "What the author contract can't express").
+@app.tool(label="Orbit", named="video", defaults={"orb360": ORB360})
+async def orbit(ctx: Context, payload: Orbit, orb360: Weights, out: Outputs, tel: Telemetry) -> OrbitResult:
     """The first picture the instructions mention, seen from all the way round: one clockwise camera turn around it,
     frozen in time, that loops. H3 renders it under ORB360 from its trained caption, which names the picture by its
     mention and the angle every third of the turn, its end meeting its start (`ENDS`), with what the instructions say and
