@@ -375,14 +375,13 @@ def segment_plans(seconds: Sequence[int], carry: Carry, *, carried: bool = False
     """Each segment's clocks. Every one carries into a successor, its last too (the video's latents keep that carry,
     which a pickup resumes), and each after the first carries in, the first too when it goes on from a take (`carried`).
     With a plate of `plate` frames, the segments are its frames (Paul, 11-17): a last segment the one before already runs
-    past the plate's end isn't made, and what the last samples past it is never delivered (`ContinuationPlan.cut`)."""
+    past the plate's end isn't made, and the last's `cut` is what it samples past it, never delivered."""
     plans = [ContinuationPlan(length, carry if index or carried else Carry(), carry) for index, length in enumerate(seconds)]
     if plate is not None:
         while len(plans) > 1 and sum(plan.delivered_frames for plan in plans[:-1]) >= plate:
             plans.pop()
-        if (over := sum(plan.delivered_frames for plan in plans) - plate) > 0:
-            last = plans[-1]
-            plans[-1] = ContinuationPlan(last.seconds, last.carried, last.successor, over)
+        last = plans[-1]
+        plans[-1] = ContinuationPlan(last.seconds, last.carried, last.successor, sum(p.delivered_frames for p in plans) - plate)
     return plans
 
 

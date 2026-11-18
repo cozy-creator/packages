@@ -99,18 +99,18 @@ class ContinuationPlan:
     picture ends at the last sampled frame, where a successor's picture window must end;
     a successor carrying sound alone needs the sound to reach the join, so the picture
     then ends on the last frame the sound covers (one frame earlier when the grid rounds
-    the sound down). `cut` frames at the sample's end are sampled and never delivered: an
-    edit's last segment past its plate's end (Paul, 11-17)."""
+    the sound down). An edit's last segment has a `cut` (Paul, 11-17): the frames past its
+    plate's end, sampled and never delivered, and its sound ends with its last delivered frame."""
 
     seconds: int
     carried: Carry = Carry()
     successor: Carry = Carry()
-    cut: int = 0
+    cut: int | None = None
 
     def __post_init__(self) -> None:
         if type(self.seconds) is not int or not 5 <= self.seconds <= 15:
             _refuse("a segment delivers 5-15 new seconds")
-        if type(self.cut) is not int or not 0 <= self.cut < self.sample_frames - self.prefix_frames:
+        if self.cut is not None and (type(self.cut) is not int or not 0 <= self.cut < self.sample_frames - self.prefix_frames):
             _refuse("a segment's cut leaves at least one of its new frames")
         if self.sample_frames > MAX_FRAMES:
             _refuse(
@@ -130,7 +130,7 @@ class ContinuationPlan:
 
     @property
     def delivery_end(self) -> int:
-        end = self.sample_frames - self.cut
+        end = self.sample_frames - (self.cut or 0)
         if self.successor.audio and not self.successor.frames:
             return min(end, 3 * audio_ticks(self.sample_frames) // 5)
         return end
@@ -143,10 +143,10 @@ class ContinuationPlan:
     def sound_end(self) -> Fraction:
         """Where the delivered sound ends, in ticks: at the picture's end, or, when the
         successor carries it, on the first whole tick at or after it (the last sampled one
-        at most), so the carried second is whole ticks within a third of the join. A cut
-        segment's ends with its last delivered frame."""
+        at most), so the carried second is whole ticks within a third of the join. An edit's
+        last segment's (`cut`) ends with its last delivered frame."""
         picture = TICKS_PER_FRAME * self.delivery_end
-        if not self.successor.audio or self.cut:
+        if not self.successor.audio or self.cut is not None:
             return picture
         return Fraction(min(audio_ticks(self.sample_frames), math.ceil(picture)))
 
