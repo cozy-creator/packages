@@ -69,6 +69,11 @@ release; `task publish` makes it. The exception is `cozy-runtime` and `tensorfs`
 package runs on its machine's Runtime, so the package only declares the minimum its
 `cozy-runtime>=` bound admits.
 
+Never lock a first-party dependency before the Hub publishes it: a committed lock pins only what a
+machine can fetch (se-154: a lock that pinned an unpublished birefnet 404'd every source install).
+Until promotion the dependent's lock leaves it out; a dev home's checkout, a gate and a session stage
+it by path, and `task publish -- --gated` publishes it first and relocks the dependent onto it.
+
 Each publication rebinds the committed lock to its target: `cozy package publish --root` to the
 local Hub relocks a private copy against the root's index there and refuses
 (`account_index_lock_drift`) unless every locked version exists unchanged, which is
