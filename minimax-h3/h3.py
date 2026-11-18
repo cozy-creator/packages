@@ -530,7 +530,8 @@ def _finish(
     _, height, width, _ = (int(value) for value in pixels.shape)
     if shot is not None:
         with tel.stage("decode_end"):
-            shot.hand_on(model, out, latents, waveform, sample_rate, ended=None if shot.ends else ended)
+            joined: dict[str, Tensor] = state.values.get("join") or {}
+            shot.hand_on(model, out, latents, waveform, sample_rate, ended=None if shot.ends else ended, joined=joined)
     if ended is not None and (shot is None or shot.ends):
         ended(pixels)
 
@@ -1100,6 +1101,7 @@ def _references_to_video(
             anchors=anchors,
             canvas=(payload.canvas[1], payload.canvas[0]),
         )
+        state.set("continuation_sound_shift", payload.sound_shift)
         for index, reference in enumerate(state.normalized_references):
             if reference.kind == "image":
                 info = assets.info(index)
@@ -1215,6 +1217,8 @@ class Ref2VAInput(msgspec.Struct):
     before: LatentFile | None = None
     totals: LatentFile | None = None
     ends: bool = False
+    #: Probe (cl-1210): where the shot's take holds the predecessor's sound against the shot's clock, thirds of a tick.
+    sound_shift: int = 0
     quality: Quality = "standard"
 
 
@@ -1291,7 +1295,7 @@ class _ShotPart:
         return (vae.windows_ready(tokens) - self.at.window) * vae.window_frames()
 
     def hand_on(self, model: H3Model, out: Outputs, latents: Tensor, sound: Tensor, sample_rate: int, *,
-                ended: Callable[[Tensor], None] | None) -> None:  # fmt: skip
+                ended: Callable[[Tensor], None] | None, joined: dict[str, Tensor] | None = None) -> None:  # fmt: skip
         """What the next segment goes on from: where the decode stands, and a file of its equalizer's totals and this
         segment's sound. `ended` gets where this segment ends: its windows still to come decoded as if the shot ended
         here, which the shot's frame there will be close to, the decode itself going on unchanged."""
@@ -1308,7 +1312,7 @@ class _ShotPart:
             rest = ShotWindows(first=after.window - self._origin, end=True, equalizer=CellEqualizer.going_on(VAE_SPATIAL_RATIO, sums))
             model.decode_shot(latents, rest, on_chunk=keep)
             ended(last[-1].clamp(0, 1).mul(255).round().to(torch.uint8).permute(0, 2, 3, 1).cpu())
-        data = save_tensors({**sums, "sound": sound.to(torch.float32).contiguous(), "sample_rate": torch.tensor(sample_rate)})
+        data = save_tensors({**sums, **(joined or {}), "sound": sound.to(torch.float32).contiguous(), "sample_rate": torch.tensor(sample_rate)})
         self.handed = after, out.save_bytes(data, media_type="application/octet-stream")
 
     @property
@@ -1915,6 +1919,7 @@ async def _render(ctx: Context, shot: Shot, out: Outputs, tel: Telemetry, *, pla
                             latents=True,
                             shot=decoded if joined else None, before=previous if joined else None,
                             totals=totals if joined else None, ends=ends,
+                            sound_shift=so_far.shift if so_far is not None else 0,
                             picture_edges=tuple(_LOOSE_EDGE if ref.kind == "world_state" else 0 for ref in pictures),
                             characters=tuple(ref.name if ref.kind == "character" else "" for ref in pictures),
                         ), assets=_call_assets(files, segment.references), models=models,
@@ -1948,6 +1953,8 @@ async def _render(ctx: Context, shot: Shot, out: Outputs, tel: Telemetry, *, pla
         # Each segment's part shows as it lands, after those before it, so its box plays all made so far while the next
         # renders; the last revision is the take, read again by no one: only its new part and index move.
         revision = so_far.add(result.video, result.decode, last=ends)
+        for name, fields in so_far.probed:
+            tel.log(name, segment=index + 1, **fields)
         if ends and (take is None or carried):
             video = so_far.finish().video
             out.publish("video", video, label="Video")

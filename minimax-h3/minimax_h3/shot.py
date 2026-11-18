@@ -10,7 +10,7 @@ from collections.abc import Callable, Collection, Iterable, Iterator, Mapping, S
 from contextlib import AbstractContextManager
 from fractions import Fraction
 from itertools import accumulate, pairwise
-from typing import Annotated, Literal, NamedTuple, Protocol
+from typing import Annotated, Any, Literal, NamedTuple, Protocol
 
 import msgspec
 import numpy as np
@@ -50,9 +50,9 @@ from cozy_runtime.media import (
 from PIL import Image as PILImage
 from safetensors.torch import load as load_tensors
 
-from minimax_h3 import shot_latents
+from minimax_h3 import shot_latents, sound_probe
 from minimax_h3.continuation import AUDIO_TICKS_PER_S, Carry, ContinuationPlan, audio_ticks, carries, decode_context
-from minimax_h3.official import FPS, MAX_CANVAS_RATIO, MAX_FRAMES, clip_size, shown_width, within_ratio
+from minimax_h3.official import FPS, JOIN_WINDOW, MAX_CANVAS_RATIO, MAX_FRAMES, clip_size, shown_width, within_ratio
 from story import _HEADER, MENTION, MIN_CLIP_SECONDS, StoryReference, description_span, later_part, name_key, without_sections
 
 #: An output's or latents' byte bound: TensorD's output allowance reads it (256 MiB where none is declared), and the
@@ -650,6 +650,12 @@ class _Join(Protocol):
     def finish(self) -> SavedVideo: ...
 
 
+#: Probe (cl-1210): a joined segment's sound takes over this many ticks before its predecessor's end, inside the window
+#: both renderings are interior in (`JOIN_WINDOW` to `_INTERIOR_TO` ticks before it).
+_SWITCH_TICKS = 16
+_INTERIOR_TO = 13
+
+
 class SoFar:
     """A shot's video as it arrives (cl-1210): each segment's part of the shot's one decode, joined by packet copy
     (`Outputs.join_video`) under the shot's soundtrack, encoded once from the segments' own sound (a pickup's kept sound
@@ -661,6 +667,11 @@ class SoFar:
         self._join: _Join | None = None
         self._format: DecodedAudioFormat | None = None
         self._frames, self._samples = 0, 0
+        #: Probe (cl-1210 sound joins, never merged): where the take holds the last segment's sound against the shot's clock
+        #: (thirds of a tick), and what the last `add` measured, as log lines of at most 8 fields.
+        self.shift = 0
+        self.probed: list[tuple[str, dict[str, str]]] = []
+        self._rate = 0
 
     def add(self, piece: VideoFile, decode: File, *, last: bool) -> VideoFile:
         """`piece` after the others, under its stretch of the shot's sound, the segment's in its `decode` file: the
@@ -672,8 +683,39 @@ class SoFar:
             self._format = DecodedAudioFormat(channels=int(sound.shape[0]), sample_rate=rate, channel_layout=layout,
                                               channel_names=names, time_base=Fraction(1, rate))  # fmt: skip
             self._join = self._out.join_video(self._format)
-        self._sound.append(sound)
+        self._rate = rate
+        self.probed = []
+        if "join_sound" in tensors and self._sound:
+            self._joined(tensors, sound, rate)
+        else:
+            self._sound.append(sound)
         return self._join.append(piece, lambda frames: self._stretch(frames, last), last=last)
+
+    def _joined(self, tensors: dict[str, Any], today: npt.NDArray[np.float32], rate: int) -> None:
+        """Probe (cl-1210): the next segment's sound, decoded on from this one's real tail, switched in at `_SWITCH_TICKS`
+        before this one's end, where both renderings are interior; and what that join measures beside today's butt."""
+        joined = tensors["join_sound"].numpy().astype(np.float32)
+        per = rate // 40
+        wave = self._sound[0] if len(self._sound) == 1 else np.concatenate(self._sound, axis=1)
+        end, window, switch = int(wave.shape[1]), JOIN_WINDOW * per, _SWITCH_TICKS * per
+        assert self._samples <= end - switch, "the sound at the switch was already written"
+        self.shift = int(tensors["join_shift"])
+        own, theirs = wave[:, end - window : end - _INTERIOR_TO * per], joined[:, : window - _INTERIOR_TO * per]
+        at, into = end - switch, window - switch
+        width = rate // 500  # a 2 ms ramp, for the numerics between two decodes of the same latents
+        ramp = np.linspace(0.0, 1.0, width, dtype=np.float32)
+        spliced = np.concatenate([wave[:, :at], wave[:, at : at + width] * (1 - ramp) + joined[:, into : into + width] * ramp,
+                                  joined[:, into + width :]], axis=1)  # fmt: skip
+        butted = np.concatenate([wave, today], axis=1)
+        self.probed = [
+            ("h3 join shift", {"shift_ms": f"{self.shift * 25 / 3:.2f}", "first_tick": str(int(tensors["join_first"])), "switch_ms": f"{1000 * switch / rate:.0f}"}),
+            ("h3 join window", sound_probe.alike(own, theirs)),
+            ("h3 join steps", {"switch_hard": sound_probe.step(np.concatenate([wave[:, :at], joined[:, into:]], axis=1), at, rate),
+                               "switch_ramp": sound_probe.step(spliced, at, rate, wide=width),
+                               "seam": sound_probe.step(spliced, end, rate, wide=rate // 50),
+                               "butt_today": sound_probe.step(butted, end, rate, wide=rate // 50)}),
+        ]  # fmt: skip
+        self._sound = [spliced]
 
     def finish(self) -> SavedVideo:
         """The take: the last revision."""
@@ -687,7 +729,15 @@ class SoFar:
         self._frames += frames
         wave = self._sound[0] if len(self._sound) == 1 else np.concatenate(self._sound, axis=1)
         self._sound = [wave]
-        end = int(wave.shape[1]) if last else min(int(wave.shape[1]), self._frames * sound.sample_rate // FPS)
+        if last:
+            # Probe (cl-1210): the take's sound as long as its pictures, to the sample, padded or cut by the last displacement.
+            pictures = round(self._frames * sound.sample_rate / FPS)
+            self.probed.append(("h3 join take", {"sound": str(int(wave.shape[1])), "pictures": str(pictures), "diff": str(int(wave.shape[1]) - pictures)}))
+            wave = wave[:, :pictures] if wave.shape[1] >= pictures else np.pad(wave, ((0, 0), (0, pictures - wave.shape[1])))
+            self._sound = [wave]
+        # Held back: the stretch a joined successor's sound replaces (`_joined`).
+        held = _SWITCH_TICKS * (sound.sample_rate // 40)
+        end = int(wave.shape[1]) if last else min(int(wave.shape[1]) - held, self._frames * sound.sample_rate // FPS)
         if end > self._samples:
             stretch = wave[:, self._samples : end].astype(np.float32)
             yield DecodedAudioChunk(channels=sound.channels, sample_count=end - self._samples, sample_rate=sound.sample_rate,

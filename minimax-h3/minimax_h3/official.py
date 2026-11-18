@@ -75,6 +75,8 @@ from .cell_texture import CellEqualizer
 from .conditioner import FinalHiddenState, PresentationLength, build_text_conditioner
 from .continuation import (
     AUDIO_TICKS,
+    AUDIO_TICKS_PER_S,
+    TICKS_PER_FRAME,
     AVContext,
     ContextReferenceLayout,
     ContinuationPlan,
@@ -1023,6 +1025,11 @@ def _audio_weight_norm_scope(audio_vae: torch.nn.Module) -> Iterator[None]:
                     module.__dict__.pop(hook.name, None)
 
 
+#: Probe (cl-1210): how far before the predecessor's sound end a joined segment's sound starts (ticks): both renderings are
+#: interior from about 27 to 13 ticks before it (the decoder reaches ~330 ms, 44302120600).
+JOIN_WINDOW = 27
+
+
 class OfficialH3Pipeline:
     """Both official task workflows over one shared, dual-DiT construction."""
 
@@ -1722,9 +1729,42 @@ class OfficialH3Pipeline:
         context: AVContext | None = state.values.get("continuation_context")
         entry = context.audio_offset if context is not None else Fraction(0)
         start, end = delivery.audio_samples(entry, int(state.sampling_rate))
+        # Probe (cl-1210 sound joins, never merged): this segment's sound decoded on from its predecessor's real tail.
+        if context is not None and context.audio is not None:
+            state.values["join"] = self._joined(state, context, delivery, entry, end)
         delivered = audio[..., start:end]
         # Only a picture end the grid rounds the sound short of: at most a third of a tick.
         return torch.nn.functional.pad(delivered, (0, end - start - delivered.shape[-1]))
+
+    def _joined(self, state: PipelineState, context: AVContext, delivery: ContinuationPlan, entry: Fraction, end: int) -> dict[str, torch.Tensor]:
+        """Probe (cl-1210): the predecessor's last 40 audio ticks (its carry) then this segment's own from the tick nearest
+        where the take holds the predecessor's sound end, decoded as one sequence. Its sound from `JOIN_WINDOW` ticks before
+        that end to this segment's delivered end, and where its ticks sit against the shot's clock (thirds of a tick)."""
+        rate = int(state.sampling_rate)
+        if rate % AUDIO_TICKS_PER_S:
+            raise InvalidRequest(f"a {rate} Hz soundtrack is no whole number of samples a tick", code="h3_continuation")
+        per = rate // AUDIO_TICKS_PER_S
+        assert context.audio is not None
+        tail = context.audio.reshape(2, AUDIO_TICKS, -1).permute(0, 2, 1)  # export_context's packing, undone: (2, 32, 40)
+        target: torch.Tensor = state.audio_latents  # (2, 32, T), this segment's clock
+        before = Fraction(int(state.values.get("continuation_sound_shift", 0)), 3)
+        at = TICKS_PER_FRAME * delivery.prefix_frames + entry + before
+        first = round(at)
+        shift = at - first
+        joint = torch.cat([tail.to(device=target.device, dtype=target.dtype), target[..., first:]], dim=-1)
+        audio_vae = self.components["audio_vae"]
+        device = next(audio_vae.parameters()).device
+        mean = torch.tensor(audio_vae.config["latents_mean"], device=device).view(1, -1, 1)
+        std = torch.tensor(audio_vae.config["latents_std"], device=device).view(1, -1, 1)
+        with torch.no_grad(), _audio_weight_norm_scope(audio_vae):
+            decoded: torch.Tensor = audio_vae.decode(joint.to(device) * std + mean, return_dict=False)[0]
+        wave = decoded.float()[:, 0, :]  # (2, samples)
+        begin, stop = (AUDIO_TICKS - JOIN_WINDOW) * per, AUDIO_TICKS * per + end - first * per
+        return {
+            "join_sound": wave[:, begin:stop].cpu().contiguous(),
+            "join_shift": torch.tensor(int(shift * 3)),
+            "join_first": torch.tensor(first),
+        }
 
     def decode_video(self, task: Task, state: PipelineState) -> torch.Tensor:
         if state.get("continuation_delivery") is not None:
