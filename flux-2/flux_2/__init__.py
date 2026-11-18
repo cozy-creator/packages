@@ -119,9 +119,13 @@ _TURBO = "fal/flux-2-dev-turbo@0.2.0"
 _COMPONENTS = {"model": ("transformer", "text_encoder", "vae"), "upsampler": ("text_encoder",)}
 _TURBO_COMPONENTS = {"model": ("transformer", "text_encoder", "vae"), "upsampler": ("text_encoder",),
                      "turbo_lora": ("transformer",)}
+#: Which requests need each (cl-1103, `_generate`): the upsampler only with `prompt_upsampling` true (unset is off);
+#: `generate_turbo`'s LoRA always. Over-fetched: the LoRA with a [klein] `model=`, which never reads it, but a rule
+#: sees only the request.
+_UPSAMPLING = "request.prompt_upsampling == true"
 
 
-@app.entrypoint(defaults={"model": _DEV, "upsampler": _DEV}, components=_COMPONENTS, on_demand=("upsampler",),
+@app.entrypoint(defaults={"model": _DEV, "upsampler": _DEV}, components=_COMPONENTS, needs={"upsampler": _UPSAMPLING},
                 memoize=True)
 def generate(ctx: Context, payload: GenerateInput, model: Flux2, upsampler: Flux2Upsampler,
              tel: Telemetry, adj: Adjustments) -> ImageResult:
@@ -130,7 +134,7 @@ def generate(ctx: Context, payload: GenerateInput, model: Flux2, upsampler: Flux
 
 
 @app.entrypoint(defaults={"model": _DEV, "turbo_lora": _TURBO, "upsampler": _DEV},
-                components=_TURBO_COMPONENTS, on_demand=("upsampler", "turbo_lora"), memoize=True)
+                components=_TURBO_COMPONENTS, needs={"turbo_lora": "true", "upsampler": _UPSAMPLING}, memoize=True)
 def generate_turbo(ctx: Context, payload: TurboInput, model: Flux2, turbo_lora: Flux2TurboLoRA,
                    upsampler: Flux2Upsampler, tel: Telemetry, adj: Adjustments) -> ImageResult:
     """The fast model: FLUX.2 [dev] with fal's Turbo LoRA (8 steps, guidance 2.5), or a [klein] by
@@ -153,8 +157,10 @@ class ImageBox(msgspec.Struct, kw_only=True):
     prompt_upsampling: Annotated[bool, Advanced()] = True
 
 
+# The Turbo LoRA with `turbo`; the upsampler with `prompt_upsampling`.
 @app.tool(label="Image", named="image", defaults={"model": _DEV, "turbo_lora": _TURBO, "upsampler": _DEV},
-          components=_TURBO_COMPONENTS, on_demand=("turbo_lora", "upsampler"), memoize=True)
+          components=_TURBO_COMPONENTS, needs={"turbo_lora": "request.turbo", "upsampler": "request.prompt_upsampling"},
+          memoize=True)
 def image(ctx: Context, payload: ImageBox, model: Flux2, turbo_lora: Flux2TurboLoRA, upsampler: Flux2Upsampler,
           tel: Telemetry, adj: Adjustments) -> ImageResult:
     """FLUX.2 [dev] on a canvas: with its Turbo LoRA, which loads only when asked for, or without."""
