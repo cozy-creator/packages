@@ -4,18 +4,20 @@ from __future__ import annotations
 
 import json
 import math
+import re
 import secrets
 from pathlib import Path
 from typing import Annotated
 
 import msgspec
 from cozy_runtime import vlm
-from cozy_runtime.author import Adjustments, App, Context, InvalidRequest, Outputs, OutputError, Seed, Telemetry
+from cozy_runtime.author import Adjustments, App, Context, InvalidRequest, Outputs, Seed, Telemetry
 from cozy_runtime.fields import MENTION, Advanced, AspectRatio, FileBound, Image, Prompt, Range, Ratios
 from cozy_runtime.media import VideoFile
+from PIL.Image import Image as Picture
 
 from . import quantize as quantize  # its recipe
-from .model import DEFAULT_STEPS, FPS, Pan2, Reasoner
+from .model import CAPTION_TOKENS, DEFAULT_STEPS, FPS, Pan2, Reasoner
 
 app = App()
 MODEL = "ifm/pan2@0.3.0"
@@ -28,6 +30,8 @@ TEXT_ENCODER = "pottokao/moss-image-text-encoder-heretic-pan2@0.1.0"
 from . import lanes as lanes  # noqa: E402  # the `curve` lane function; it registers on `app`
 
 REWRITE = Path(__file__).with_name("prompt-policy.md").read_text()
+#: Replies asked for before the video renders the instructions as written.
+ATTEMPTS = 2
 
 
 class Generate(msgspec.Struct, kw_only=True):
@@ -72,19 +76,81 @@ def names(text: str) -> str:
     return MENTION.sub(lambda found: found[1].replace(".", " "), text).strip()
 
 
-def caption(text: str) -> str:
-    text = text.strip()
-    if text.startswith("```"):
-        text = text.partition("\n")[2].rsplit("```", 1)[0].strip()
+#: One level of a JSON string's escapes (`\uXXXX` stays, for the caption's own JSON to read).
+_ESCAPE = re.compile(r'\\(["\\/bfnrt])')
+_ESCAPES = {'"': '"', "\\": "\\", "/": "/", "b": "\b", "f": "\f", "n": "\n", "r": "\r", "t": "\t"}
+
+
+def timeline(text: str) -> dict[str, object] | None:
+    """The event timeline in `text`: its first JSON object, around any prose or fence, that is one (`events`, some)
+    or holds one as `refined_prompt`, a JSON string (the policy's form) or an object. Strings may hold raw control
+    characters. A reply JSON refuses (a quote `refined_prompt` left unescaped, its closing quote escaped) is read again
+    with one level of its escapes undone."""
+    decoder = json.JSONDecoder(strict=False)
+    for form in (text, _ESCAPE.sub(lambda found: _ESCAPES[found[1]], text)):
+        for at in [i for i, c in enumerate(form) if c == "{"]:
+            try:
+                value = decoder.raw_decode(form, at)[0]
+            except json.JSONDecodeError:
+                continue
+            inner = value.get("refined_prompt") if isinstance(value, dict) else None
+            value = timeline(inner) if isinstance(inner, str) else inner if isinstance(inner, dict) else value
+            if isinstance(value, dict) and isinstance(value.get("events"), list) and value["events"]:
+                return value
+    return None
+
+
+def caption(text: str) -> tuple[str | None, str]:
+    """`text`'s event timeline as compact JSON, or None and why not."""
+    found = timeline(text)
+    if found is None:
+        return None, _unread(text)
+    return json.dumps(found, ensure_ascii=False, separators=(",", ":")), ""
+
+
+def _unread(text: str) -> str:
+    """Why `text` holds no timeline, as its first JSON object says."""
+    at = text.find("{")
+    if at < 0:
+        return "it holds no JSON object"
     try:
-        value = json.loads(text)
-        if isinstance(value, dict) and isinstance(value.get("refined_prompt"), str):
-            value = json.loads(value["refined_prompt"])
+        value = json.JSONDecoder(strict=False).raw_decode(text, at)[0]
     except json.JSONDecodeError as exc:
-        raise OutputError(f"PAN2's prompt rewriter did not return a JSON caption: {exc.msg}") from exc
-    if not isinstance(value, dict) or not isinstance(value.get("events"), list):
-        raise OutputError("PAN2's prompt rewriter returned no structured event timeline")
-    return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+        return f"its JSON does not parse: {exc}"
+    inner = value.get("refined_prompt") if isinstance(value, dict) else None
+    if isinstance(inner, str):
+        return f"refined_prompt: {_unread(inner)}"
+    return "it has no event timeline (`events`)"
+
+
+def rewrite(ctx: Context, reasoner: Reasoner, encoder: Pan2, prompt: str, picture: Picture | None, seconds: float,
+            seed: int, adj: Adjustments, tel: Telemetry) -> str:
+    """`prompt` as the rewriter's event timeline. A reply PAN2 can't take (no timeline, or too long for the encoder)
+    is asked once more with the reply and why, the correction `prompt-policy.md` takes; decoding is greedy, so another
+    seed would write the same reply. After two, the video renders `prompt` as written, with a warning."""
+    request = f"Clip duration: {seconds:g} seconds.\nUser request: {prompt}"
+    question, why = request, ""
+    replies: list[str] = []
+    for _ in range(ATTEMPTS):
+        reply = reasoner.ask(
+            [vlm.Question(question, [picture] if picture else [], [])],
+            system=REWRITE, thinking=False, stop=[], max_new_tokens=3072, presence_penalty=0.0,
+            temperature=0.0, top_p=1.0, seed=seed,
+            progress=lambda _: ctx.raise_if_cancelled(),
+        )[0]
+        replies.append(reply)
+        found, why = caption(reply)
+        if found is not None:
+            tokens = encoder.tokens(found)
+            if tokens <= CAPTION_TOKENS:
+                tel.log("action timeline", attempts=len(replies))
+                return found
+            why = f"its caption has {tokens} encoder tokens, over the {CAPTION_TOKENS} PAN2 reads"
+        question = f"{request}\n\nYour reply was rejected: {why}.\nThe rejected reply:\n{reply}"
+    adj.warn("prompt_upsampling", f"PAN2's prompt rewriter gave no caption it can use twice ({why}), so the video "
+                                  "renders the instructions as written")
+    tel.log("action timeline", parsed=False, why=why, answer=replies[-1][-2000:], attempts=len(replies))
+    return prompt
 
 
 # The reasoner only for a request that upsamples, which it rewrites into the event timeline (cl-1103). It is
@@ -111,15 +177,13 @@ def generate(ctx: Context, payload: Generate, model: Pan2, text_encoder: Pan2, r
         raise InvalidRequest("PAN2 needs instructions: the scene and its actions", fields=["instructions"])
     if payload.prompt_upsampling:
         with tel.stage("writing action timeline"):
-            replies = reasoner.ask(
-                [vlm.Question(f"Clip duration: {(frames - 1) / FPS:g} seconds.\nUser request: {prompt}", [picture] if picture else [], [])],
-                system=REWRITE, thinking=False, stop=[], max_new_tokens=3072, presence_penalty=0.0,
-                temperature=0.0, top_p=1.0, seed=seed,
-                progress=lambda _: ctx.raise_if_cancelled(),
-            )
-        prompt = caption(replies[0])
+            prompt = rewrite(ctx, reasoner, text_encoder, prompt, picture, (frames - 1) / FPS, seed, adj, tel)
     else:
-        prompt = caption(prompt)
+        given, why = caption(prompt)
+        if given is None:
+            raise InvalidRequest(f"Without prompt upsampling, PAN2's instructions are its caption JSON: {why}",
+                                 fields=["instructions"])
+        prompt = given
     if seconds != payload.duration:
         adj.warn("duration", f"PAN2 renders 1-20 seconds, so this clip runs {(frames - 1) / FPS:g} seconds")
     with tel.stage("encoding caption"):

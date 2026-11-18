@@ -31,6 +31,9 @@ from transformers import AddedToken, Qwen2Tokenizer, Qwen3_5TextConfig, Qwen3_5T
 FPS = 24
 MAX_FRAMES = 481
 DEFAULT_STEPS = 50
+#: The most tokens of a caption: the assistant suffix also takes the encoder's 1536-token capacity, and the released
+#: prompt-writing policy reserves this margin rather than truncating timed events.
+CAPTION_TOKENS = 1480
 VideoPixels = np.ndarray[tuple[int, int, int, int], np.dtype[np.uint8]]
 
 
@@ -186,13 +189,15 @@ class Pan2(Model[Graph]):
         self.graph = loader.construct(Graph)
         self.tokenizer = tokenizer(loader.assets)
 
+    def tokens(self, caption: str) -> int:
+        """`caption`'s length in the encoder's tokens, as `CAPTION_TOKENS` counts them."""
+        return len(self.tokenizer(caption, add_special_tokens=False).input_ids)
+
     @uses_components("text_encoder")
     def encode(self, prompt: str, frames: int, guidance: float, negative: str | None) -> tuple[torch.Tensor, torch.Tensor | None]:
-        # The assistant suffix also consumes the encoder's 1536-token capacity. The released
-        # prompt-writing policy reserves this margin rather than truncating timed events.
-        tokens = len(self.tokenizer(prompt, add_special_tokens=False).input_ids)
-        if tokens > 1480:
-            raise InvalidRequest(f"PAN2's caption has {tokens} tokens; shorten it to at most 1480", fields=["prompt"])
+        tokens = self.tokens(prompt)
+        if tokens > CAPTION_TOKENS:
+            raise InvalidRequest(f"PAN2's caption has {tokens} tokens; shorten it to at most {CAPTION_TOKENS}", fields=["prompt"])
         if guidance > 1 and not negative:
             negative = get_pan2_default_negative_prompt(frames, FPS)
         state = stage(PAN2TextEncoderStep(), {"text_encoder": self.graph.components["text_encoder"], "tokenizer": self.tokenizer},  # type: ignore[no-untyped-call]  # Diffusers' block constructor is unannotated.

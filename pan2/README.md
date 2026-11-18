@@ -21,6 +21,8 @@ The prompt rewriter uses Qwen3.5-9B to write PAN2's structured, timed caption: h
 (`huihui-ai/huihui-qwen3.5-9b-abliterated`, refusals removed) by default, or Qwen's own with
 `--model reasoner=qwen/qwen3.5-9b@0.2.0`. It sees the first frame when one is mentioned. `prompt_upsampling: false`
 takes an already structured caption JSON in `instructions`; it must fit 1480 PAN2-encoder tokens. The returned `prompt` is the actual caption used.
+A reply it can't use (no event timeline, or over 1480 tokens) is asked once more with that reply and why; if the
+second can't be used either, the video renders the instructions as written, with a warning.
 
 Advanced controls are `steps` (50 by default), `guidance` (2.5), `negative_prompt`, and the seed.
 The model's own negative caption is used by default. Output sides snap to 32 pixels at approximately
