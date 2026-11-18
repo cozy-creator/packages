@@ -119,6 +119,26 @@ Q8_0_HEAD16 = Recipe(
     ),
 )
 
+#: Test only, on a proof branch, never merged (xs-213 phase 3): the int8 lane with the LM head in `int8.convrot` too, timed
+#: beside `int8` (its head bf16) to measure what a quantized head gives a decode step, drafted and plain.
+INT8_HEAD8 = Recipe(
+    lane="int8_head8",
+    model=VisionLM,
+    plan=QuantizationPlan(
+        encoding="int8.convrot",
+        components=("model",),
+        include=(
+            "model.lm_head.weight",
+            "model.model.language_model.layers.*.linear_attn.in_proj_[qz]*.weight",
+            "model.model.language_model.layers.*.linear_attn.out_proj.weight",
+            "model.model.language_model.layers.*.self_attn.[qkvo]_proj.weight",
+            "model.model.language_model.layers.*.mlp.*_proj.weight",
+            "model.mtp.layers.*_proj.weight",
+        ),
+        output_precision="preserve",
+    ),
+)
+
 @app.entrypoint(defaults={"model": MODEL}, memoize=True)
 def ask(ctx: Context, payload: AskRequest, model: VisionLM, tel: Telemetry) -> AskResult:
     """Answer each prompt about its text, images and videos, all prompts in one pass."""
