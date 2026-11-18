@@ -161,15 +161,18 @@ _PICTURE = '.references.exists(r, r.type == "image")'
 _NO_PICTURE = '.references.all(r, r.type != "image")'
 #: Each LoRA slot, by the same rules: a kind's control LoRA with a steering map of that kind (over-fetched when an
 #: earlier map is the one read), the edit LoRA for an edit. A request may replace any of them (`models.<slot>`).
-_LORAS = {"edit_lora": EDIT_LORA, **CONTROL_LORAS}
-_KIND = 'request.control.exists(c, c.strength > 0 && c.kind == "{}")'
+_LORAS = {"edit_lora": EDIT_LORA, "pose": CONTROL_LORAS["pose"], "depth": CONTROL_LORAS["depth"],
+          "canny": CONTROL_LORAS["canny"], "lineart": CONTROL_LORAS["lineart"], "sketch": CONTROL_LORAS["sketch"]}
+_KIND = "request.control.exists(c, c.strength > 0 && c.kind == "
 _NEEDS = {"control": _STEERS, "edit": f"!({_STEERS}) && request.prompt{_PICTURE}",
           "text_to_image": f"!({_STEERS}) && request.prompt{_NO_PICTURE}",
-          "edit_lora": f"!({_STEERS}) && request.prompt{_PICTURE}", **{kind: _KIND.format(kind) for kind in CONTROL_LORAS}}
+          "edit_lora": f"!({_STEERS}) && request.prompt{_PICTURE}", "pose": f'{_KIND}"pose")', "depth": f'{_KIND}"depth")',
+          "canny": f'{_KIND}"canny")', "lineart": f'{_KIND}"lineart")', "sketch": f'{_KIND}"sketch")'}
 _BOX_NEEDS = {"control": _STEERS, "edit": f"!({_STEERS}) && request.instructions{_PICTURE}",
               "text_to_image": f"!({_STEERS}) && request.instructions{_NO_PICTURE}",
-              "edit_lora": f"!({_STEERS}) && request.instructions{_PICTURE}",
-              **{kind: _KIND.format(kind) for kind in CONTROL_LORAS}}
+              "edit_lora": f"!({_STEERS}) && request.instructions{_PICTURE}", "pose": f'{_KIND}"pose")',
+              "depth": f'{_KIND}"depth")', "canny": f'{_KIND}"canny")', "lineart": f'{_KIND}"lineart")',
+              "sketch": f'{_KIND}"sketch")'}
 
 
 @app.entrypoint(defaults=_LORAS, needs=_NEEDS)
