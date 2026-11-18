@@ -13,8 +13,9 @@ case ${1:-pure} in
   native) pattern='manylinux_2_28_x86_64[.]whl$' ;;
   *) echo "usage: scripts/rc-runtime.sh [pure|native]" >&2; exit 2 ;;
 esac
-# awk reads to the end: one that exits at its match leaves curl writing into a closed pipe (exit 23 under pipefail; the
-# 0.27 gate 44223772507's p-h3-image Triton build died so, with nothing logged).
-file=$(curl -fsSL "$base/SHA256SUMS" | awk -v p="$pattern" '$2 ~ p && !f {f = $2} END {print f}')
+# SHA256SUMS.old while rc-dev swaps SHA256SUMS in by rename (cl-1128): it never deletes one under a reader. Read whole, then
+# matched: an awk that exits at its match leaves curl writing into a closed pipe (exit 23 under pipefail: gate 44223772507).
+sums=$(curl -fsSL "$base/SHA256SUMS" || curl -fsSL "$base/SHA256SUMS.old")
+file=$(awk -v p="$pattern" '$2 ~ p && !f {f = $2} END {print f}' <<< "$sums")
 [ -n "$file" ] || { echo "cozy-runtime's rc-$major.$minor.0 holds no ${1:-pure} wheel" >&2; exit 1; }
 echo "$base/$file"
