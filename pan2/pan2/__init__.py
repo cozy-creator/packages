@@ -1,4 +1,4 @@
-"""PAN2: a scene unfolding under timed actions, from text or its first frame."""
+"""PAN2: a scene unfolding under timed actions, from instructions and the first frame they mention."""
 
 from __future__ import annotations
 
@@ -10,9 +10,9 @@ from typing import Annotated
 
 import msgspec
 from cozy_runtime import vlm
-from cozy_runtime.author import Adjustments, App, Context, Outputs, OutputError, Seed, Telemetry
-from cozy_runtime.fields import Advanced, AspectRatio, FileBound, ImagePreparation, Range, Ratios
-from cozy_runtime.media import ImageFile, VideoFile
+from cozy_runtime.author import Adjustments, App, Context, InvalidRequest, Outputs, OutputError, Seed, Telemetry
+from cozy_runtime.fields import MENTION, Advanced, AspectRatio, FileBound, Image, Prompt, Range, Ratios
+from cozy_runtime.media import VideoFile
 
 from . import quantize as quantize  # its recipe
 from .model import COMPONENTS, DEFAULT_STEPS, FPS, Pan2, Reasoner
@@ -27,9 +27,11 @@ REWRITE = Path(__file__).with_name("prompt-policy.md").read_text()
 
 
 class Generate(msgspec.Struct, kw_only=True):
-    prompt: str
-    first_frame: Annotated[ImageFile, ImagePreparation(max_pixels=16 << 20)] | None = None
-    duration_s: Annotated[float, Range(1, 20, unit="s")] = 10.0
+    #: The scene and its actions, in your words. The first picture it mentions is the first frame, which the scene opens
+    #: on, as qwen-image-2's Image and Orbit take pictures: by mention.
+    instructions: Prompt[Image] = Prompt()
+    #: The clip's seconds, as H3's beats take them, on PAN2's `4k+1` frame grid.
+    duration: Annotated[int, Range(1, 20, unit="s")] = 10
     #: Unset: the first frame's shape, else the model's native 16:9.
     aspect_ratio: Annotated[AspectRatio, Ratios(min=0.5, max=2)] | None = None
     seed: Seed | None = None
@@ -61,6 +63,11 @@ def canvas(ratio: AspectRatio | None, first: tuple[int, int] | None) -> tuple[in
     return max(32, round(math.sqrt(area * r) / 32) * 32), max(32, round(math.sqrt(area / r) / 32) * 32)
 
 
+def names(text: str) -> str:
+    """`text` with each mention as its name: `<amy.2>` is amy 2."""
+    return MENTION.sub(lambda found: found[1].replace(".", " "), text).strip()
+
+
 def caption(text: str) -> str:
     text = text.strip()
     if text.startswith("```"):
@@ -83,15 +90,20 @@ def caption(text: str) -> str:
           components={"model": COMPONENTS}, needs={"reasoner": "request.prompt_upsampling"}, memoize=True)
 def generate(ctx: Context, payload: Generate, model: Pan2, reasoner: Reasoner, out: Outputs,
              tel: Telemetry, adj: Adjustments) -> VideoResult:
-    """PAN2's silent video, at 24 fps for up to 20 seconds. A first frame animates that scene."""
+    """PAN2's silent video, at 24 fps for up to 20 seconds. The first picture the instructions mention is the first
+    frame, and the scene opens on it."""
     seed = int(payload.seed) if payload.seed is not None else secrets.randbits(32)
-    seconds = min(20.0, max(1.0, payload.duration_s))
+    seconds = min(20, max(1, payload.duration))
     frames = min(481, 4 * math.ceil(seconds * FPS / 4) + 1)
-    picture = payload.first_frame.read().convert("RGB") if payload.first_frame else None
+    pictures = [key for key, value in payload.instructions.references.items() if isinstance(value, Image)]
+    if len(pictures) > 1:
+        adj.warn("instructions", f"PAN2 opens on one picture, <{pictures[0]}>, so it goes without "
+                                 f"{', '.join(f'<{key}>' for key in pictures[1:])}")
+    picture = payload.instructions.references[pictures[0]].file.read().convert("RGB") if pictures else None
     width, height = canvas(payload.aspect_ratio, picture.size if picture else None)
-    prompt = payload.prompt
-    if not prompt.strip():
-        raise ValueError("PAN2 needs a prompt describing the scene and its actions")
+    prompt = names(payload.instructions.text)
+    if not prompt:
+        raise InvalidRequest("PAN2 needs instructions: the scene and its actions", fields=["instructions"])
     if payload.prompt_upsampling:
         with tel.stage("writing action timeline"):
             replies = reasoner.ask(
@@ -103,8 +115,8 @@ def generate(ctx: Context, payload: Generate, model: Pan2, reasoner: Reasoner, o
         prompt = caption(replies[0])
     else:
         prompt = caption(prompt)
-    if seconds != payload.duration_s:
-        adj.warn("duration_s", f"PAN2 renders 1-20 seconds, so this clip runs {(frames - 1) / FPS:g} seconds")
+    if seconds != payload.duration:
+        adj.warn("duration", f"PAN2 renders 1-20 seconds, so this clip runs {(frames - 1) / FPS:g} seconds")
     with tel.stage("encoding caption"):
         embeds = model.encode(prompt, frames, payload.guidance, payload.negative_prompt)
     image = None
