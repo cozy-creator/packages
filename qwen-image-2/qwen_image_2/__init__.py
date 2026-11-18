@@ -17,6 +17,7 @@ from PIL import Image as PILImage
 
 from . import quantize as quantize  # its recipes
 from .cutout import cut
+from .keep import keep_unchanged
 from .model import QwenImage21DiT, QwenImage21TextEncoder, QwenImage21VAE, reference_grids
 from .rewriter import Creativity, Enhancer, backdrop, cutout, rewrite
 from .turbo import FunAccLoRA
@@ -47,6 +48,8 @@ class GenerateInput(ImageRequest):
     prompt_upsampling: bool = True
     #: How far the rewrite goes beyond the words, so only with it (`_upsampled`); `balanced` is Qwen's own.
     creativity: Annotated[Creativity, When("prompt_upsampling")] = "balanced"
+    #: An edit keeps its first picture's own pixels wherever it left them unchanged (`keep.py`, se-153).
+    keep_unchanged: bool = True
 
 
 def label(n: int, key: str, count: int) -> str:
@@ -198,11 +201,17 @@ def _generate(
             image_pad_mask=image_pad_mask,
         )
     ctx.raise_if_cancelled()
+    kept = None
     with tel.stage("decoding image"):
         decoded = vae.decode(latents, width=width, height=height)
+        if reference_images and payload.keep_unchanged:
+            decoded, kept = keep_unchanged(reference_images[0], decoded)
         # A picture is RGBA only as a cutout, its alpha the matte's: the decoder's strays to 215-250 at a few dozen pixels
         # of an opaque edit (se-153), and a stray RGBA picture is the next edit's reference.
         image = decoded_image(decoded, alpha=False)
+    if kept is not None:
+        tel.log("keep unchanged", kept=round(kept.fraction, 3), scale=round(kept.scale, 4),
+                shift=f"{kept.shift[0]:.1f},{kept.shift[1]:.1f}", skipped=kept.skipped)
     if cutting:
         with tel.stage("cutting out"):
             image = cut(image, matte, adj, tel)
@@ -285,6 +294,8 @@ class ImageBox(msgspec.Struct, kw_only=True):
     prompt_upsampling: Annotated[bool, Advanced()] = True
     #: How far that rewrite goes beyond the words (`rewrite`), so only with it.
     creativity: Annotated[Creativity, Advanced(), When("prompt_upsampling")] = "balanced"
+    #: `GenerateInput.keep_unchanged`: off for an edit of fine texture alone (a retouch), which it would undo.
+    keep_unchanged: Annotated[bool, Advanced()] = True
 
 
 # The Turbo overlay is needed only when a box asks for it, and an enhancer only when the box upsamples: the edit's with
@@ -312,7 +323,8 @@ def image(
     """Qwen Image 2.1 on a canvas: Turbo (the base model and its Fun Acc overlay), or the full 40 steps."""
     request = GenerateInput(prompt=payload.instructions, aspect_ratio=payload.aspect_ratio,
                             megapixels=payload.megapixels, seed=payload.seed,
-                            prompt_upsampling=payload.prompt_upsampling, creativity=payload.creativity)  # fmt: skip
+                            prompt_upsampling=payload.prompt_upsampling, creativity=payload.creativity,
+                            keep_unchanged=payload.keep_unchanged)  # fmt: skip
     return _generate(ctx, request, expander_i2i, expander_t2i, model, text_encoder, vae, tel, adj,
                      turbo_lora if payload.turbo else None, matte)  # fmt: skip
 

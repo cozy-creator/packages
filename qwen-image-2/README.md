@@ -4,7 +4,7 @@
 the same with Alibaba PAI's Fun Acc overlay on it (`alibaba-pai/qwen-image-2.1-fun-acc`, a 330 MiB
 4-step distillation). Both take the same inputs. On a canvas they're one tool, `image` (Qwen Image 2.1; Qwen Image 1 is `qwen-image`):
 its `instructions`, a Turbo toggle (the overlay loads only when asked for), `aspect_ratio`, `megapixels`, `seed` and,
-under Advanced, `prompt_upsampling` and `creativity`. The model checkpoint is selected
+under Advanced, `prompt_upsampling`, `creativity` and `keep_unchanged`. The model checkpoint is selected
 independently from the package. TensorFS owns model downloads and bytes;
 Runtime owns construction, memory residency and component execution.
 
@@ -131,7 +131,28 @@ cozy run qwen-image-2/generate seed=42 prompt='Place <person> in <room>.'
 References are ordered. Each is any image Runtime decodes, up to 32 MiB encoded, read upright
 (EXIF orientation) with its alpha and scaled down to 4 MP when larger. As upstream, the VAE reads
 the alpha and the vision encoder a copy composited over white. Each reference is resized to the
-upstream 1 MP conditioning area independently of the output's `megapixels`.
+upstream 1 MP conditioning area independently of the output's `megapixels` (Diffusers' `output_resolution`
+default). At the canvas's area it measured 4-10% closer to the photo and doubled Turbo's time at 4 MP (se-153), so it
+stays at 1 MP.
+
+What softens an edit is Turbo (se-153, public photos as 1080x1350 JPEGs, an RTX 4090): the full model's kept regions
+are 9% (2 MP) and 24% (4 MP) closer to the photo by DISTS, at 17 and 41 s against Turbo's 2 and 4 s, and Fun Acc's 4
+steps shift the framing at 4 MP (a 5% zoom on average). bf16 against int8 (the DiT, the text encoder, or both) and
+SDPA against 8-bit attention measure alike.
+
+### Keeping what an edit leaves alone
+
+Every edit redraws the whole canvas, so what it leaves alone still comes back redrawn: chained edits (a box editing a
+take) lose detail and drift in colour and, under Turbo, sharpen into an inked look by the third to fifth edit. With
+`keep_unchanged` (on by default) the first picture's own pixels go back wherever the edit left it unchanged
+(`keep.py`): the output is aligned to the picture (scale per axis and shift, from edge correlation), a change mask is
+drawn from their blurred Lab difference (over 10 ΔE, after the colour drift is taken out), grown and feathered, and the
+picture fills the rest. Over five chained edits the untouched eyes stay within DISTS 0.03 of the first picture, where
+the model alone drifts to 0.19. It does nothing when the framing changes (another ratio), when the canvas is over 1.25x
+the picture's size (from a small picture the model's redraw is closer to the photo than its upscale), when the picture
+is transparent, or when the edit is global: under 8% of the picture still (a relight, a style, black and white, a
+night scene left 0-3%; a new background 11-47%) or a colour shift over 8 ΔE. The run's log says what it kept, or why
+not. An edit of fine texture alone (a retouch, a restoration) is under its threshold: turn it off for those.
 
 With references, what is not given is the FIRST reference's (the image being edited): an omitted
 `aspect_ratio` takes its exact ratio and an omitted `megapixels` its pixel count, held inside 1–4 MP
