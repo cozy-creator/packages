@@ -45,7 +45,8 @@ class _Request(ImageRequest):
     named="image",
     defaults={"model": MODEL, "upsampler": MODEL},
     components={"model": IMAGE_COMPONENTS, "upsampler": UPSAMPLER_COMPONENTS},
-    on_demand=("upsampler",),
+    # The upsampler only for a box that upsamples (cl-1103).
+    needs={"upsampler": "request.prompt_upsampling"},
     memoize=True,
 )
 def generate(ctx: Context, payload: ImageBox, model: PH3Image, upsampler: PH3Upsampler,
