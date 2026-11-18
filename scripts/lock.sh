@@ -8,6 +8,23 @@ s=$(mktemp -d); trap 'rm -rf "$s"' EXIT
 cp "$p/pyproject.toml" "$s/"; [ ! -f "$p/uv.lock" ] || cp "$p/uv.lock" "$s/"
 grep -qx '\[tool\.uv\]' "$s/pyproject.toml" || printf '\n[tool.uv]\n' >> "$s/pyproject.toml"
 sed -i '/^\[tool\.uv\]$/a exclude-dependencies = ["torch", "torchvision", "torchaudio", "triton"]' "$s/pyproject.toml"
+# A first-party dependency whose checkout version the Hub's index doesn't hold yet is left out, its requirement and its source
+# (RELEASING.md: a committed lock pins only what a machine can fetch; e2e's cpu lock cell leaves it out the same way, xs-217):
+# `task publish -- --gated` publishes it first and relocks the dependent onto it.
+hub=${LOCK_HUB:-https://tensorhub.com}
+for key in $(sed -n 's/^\([A-Za-z0-9_.-]*\) = { *index = "tensorhub".*/\1/p' "$s/pyproject.toml"); do
+  own=$(sed -n 's/^version = "\(.*\)"$/\1/p' "$(dirname "$p")/$key/pyproject.toml" 2> /dev/null | head -1)
+  [ -n "$own" ] || continue
+  code=$(curl -sSL -o "$s/index.html" -w '%{http_code}' "$hub/v1/index/_/simple/$key/") || code=000
+  case $code in
+    200) ! grep -qF "/v1/index/_/$key/$own/" "$s/index.html" || continue ;;
+    404) ;;
+    *) echo "lock.sh: $hub's index of $key answered $code" >&2; exit 1 ;;
+  esac
+  spelled=$(sed 's/[-_.]/[-_.]/g' <<< "$key")
+  sed -i -E "/^[[:space:]]*\"$spelled([<>=!~;[ ][^\"]*)?\",?[[:space:]]*\$/d; /^$spelled[[:space:]]*=/d" "$s/pyproject.toml"
+  echo "lock.sh: $key $own isn't on $hub's index yet: left out" >&2
+done
 if grep -q '= { *index = "tensorhub"' "$s/pyproject.toml"; then
   printf '\n[[tool.uv.index]]\nname = "tensorhub"\nurl = "%s/v1/index/_/simple/"\nexplicit = true\n' "${LOCK_HUB:-https://tensorhub.com}" >> "$s/pyproject.toml"
 fi
