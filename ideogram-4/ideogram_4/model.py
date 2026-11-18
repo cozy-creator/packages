@@ -321,7 +321,8 @@ class Ideogram4(Model[IdeogramGraph]):
             z = z.view(1, channels, rows, 2, columns, 2).permute(0, 2, 4, 3, 5, 1).reshape(1, rows * columns, 4 * channels)
             mean = vae.bn.running_mean.view(1, 1, -1).to(z)  # type: ignore[union-attr]  # tracked: it keeps its statistics
             std = torch.sqrt(vae.bn.running_var + vae.config["batch_norm_eps"]).view(1, 1, -1).to(z)
-            return ((z - mean) / std).cpu()
+            packed: torch.Tensor = ((z - mean) / std).cpu()
+            return packed
 
     @uses_components("vae")
     def decode(self, latents: torch.Tensor, *, width: int, height: int) -> Image.Image:
