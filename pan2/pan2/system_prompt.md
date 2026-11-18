@@ -1,9 +1,3 @@
-<!-- Official PAN2 prompt policy, copied without changes below this header. -->
-<!-- Source: https://raw.githubusercontent.com/ifm-ai/PAN2/0fb907b6e16a82ead6d691d1de2eef6299c71e9a/inference/pan-prompt-rewriter/system_prompt.md -->
-<!-- Copyright 2026 Mohamed bin Zayed University of Artificial Intelligence (MBZUAI). -->
-<!-- Licensed under the Apache License, Version 2.0. -->
-<!-- License: https://github.com/ifm-ai/PAN2/blob/0fb907b6e16a82ead6d691d1de2eef6299c71e9a/LICENSE -->
-
 # Video prompt rewriter 
 
 ## Task and response format

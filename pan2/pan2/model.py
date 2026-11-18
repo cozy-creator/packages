@@ -10,8 +10,8 @@ from typing import TypedDict, cast
 import numpy as np
 import torch
 from cozy_runtime.accel import sequence_parallel
-from cozy_runtime.vlm import VisionLM
-from cozy_runtime import rng
+from cozy_runtime.vlm import COMPONENT, VisionLM
+from cozy_runtime import lm, rng
 from cozy_runtime.author import Config, InvalidRequest, Loader, Model, ModelAssets, Serving, uses_components
 from diffusers.models.autoencoders.autoencoder_kl_wan import AutoencoderKLWan
 from diffusers.models.embeddings import TimestepEmbedding, Timesteps
@@ -34,6 +34,13 @@ DEFAULT_STEPS = 50
 #: The most tokens of a caption: the assistant suffix also takes the encoder's 1536-token capacity, and the released
 #: prompt-writing policy reserves this margin rather than truncating timed events.
 CAPTION_TOKENS = 1480
+#: The system turn PAN2 encodes a caption under (Diffusers' `PAN2ModularPipeline.system_message`; the rewriter tool's
+#: `production_tokens.VIDEO_TEMPLATE_SYS`).
+VIDEO_TEMPLATE_SYS = "You are a helpful assistant. Generate the video with the following instructions."
+#: How PAN2's own rewriter decodes with a local Qwen3.5-9B (ifm-ai/PAN2@0fb907b6 `inference/prompts_rewritter.py`):
+#: sampled at temperature 0.2 and top-p 0.9, Transformers' default top-k 50 (Qwen3.5-9B ships no generation config),
+#: at most 4096 new tokens, thinking off.
+TEMPERATURE, TOP_P, TOP_K, MAX_NEW_TOKENS = 0.2, 0.9, 50, 4096
 VideoPixels = np.ndarray[tuple[int, int, int, int], np.dtype[np.uint8]]
 
 
@@ -176,7 +183,30 @@ def stage(block: PAN2TextEncoderStep | PAN2VaeEncoderStep | PAN2VaeDecoderStep, 
 
 @sequence_parallel(degrees=(2, 4, 8))
 class Reasoner(VisionLM):
-    """Replicated auxiliary beside the sequence-sharded simulator."""
+    """Replicated auxiliary beside the sequence-sharded simulator: PAN2's prompt rewriter."""
+
+    @uses_components(COMPONENT)
+    def answer(self, system: str, turns: list[str], image: Image.Image | None, *, seed: int,
+               progress: Callable[[int], None]) -> str:
+        """The assistant's next turn after `turns` (user, assistant, user, ...) under `system`, `image` before the
+        first turn's words, decoded as PAN2's rewriter decodes (`TEMPERATURE`, ...) from `seed`."""
+        content = [*([{"type": "image"}] if image is not None else []), {"type": "text", "text": turns[0]}]
+        messages: list[dict[str, object]] = [{"role": "system", "content": system}, {"role": "user", "content": content}]
+        messages += [{"role": "assistant" if i % 2 else "user", "content": turn} for i, turn in enumerate(turns[1:], 1)]
+        chat: str = self.processor.apply_chat_template(  # type: ignore[arg-type, unused-ignore]  # content as parts
+            messages, add_generation_prompt=True, tokenize=False, enable_thinking=False,
+        )
+        model = self.pipe.components[COMPONENT]
+        inputs = self.processor(text=[chat], images=[image] if image is not None else None, return_tensors="pt").to(model.device)
+        if "pixel_values" in inputs:
+            inputs["pixel_values"] = inputs["pixel_values"].to(model.dtype)
+        tokenizer = self.processor.tokenizer
+        configured = model.generation_config.eos_token_id
+        ends = [tokenizer.eos_token_id, *(configured if isinstance(configured, list) else [configured])]
+        stop = [token for token in dict.fromkeys(ends) if isinstance(token, int)]
+        out = lm.generate(model, inputs, max_new_tokens=MAX_NEW_TOKENS, stop=stop, pad=stop[0], temperature=TEMPERATURE,
+                          top_p=TOP_P, top_k=TOP_K, seed=seed, progress=progress)
+        return str(tokenizer.decode(out[0], skip_special_tokens=True, clean_up_tokenization_spaces=False)).strip()
 
 
 @sequence_parallel(degrees=(2, 4, 8))
@@ -190,8 +220,19 @@ class Pan2(Model[Graph]):
         self.tokenizer = tokenizer(loader.assets)
 
     def tokens(self, caption: str) -> int:
-        """`caption`'s length in the encoder's tokens, as `CAPTION_TOKENS` counts them."""
-        return len(self.tokenizer(caption, add_special_tokens=False).input_ids)
+        """`caption`'s length in the encoder's tokens, as `CAPTION_TOKENS` counts them: what the encoder reads after the
+        chat template's user header, the turn's end and the assistant header too (the rewriter tool's
+        `production_tokens.EncoderTokenCounter`, as Diffusers' `get_pan2_prompt_embeds` crops)."""
+        def ids(text: str) -> list[int]:
+            made = self.tokenizer.apply_chat_template(
+                [{"role": "system", "content": VIDEO_TEMPLATE_SYS}, {"role": "user", "content": text}],
+                add_generation_prompt=True, tokenize=True,
+            )
+            return list(made["input_ids"] if hasattr(made, "keys") else made)  # type: ignore[index, call-overload, unused-ignore]  # a BatchEncoding or ids, by Transformers' version
+
+        probe, header = ids("x"), self.tokenizer("<|im_start|>user\n", add_special_tokens=False).input_ids
+        crop = next(i + len(header) for i in range(len(probe)) if probe[i : i + len(header)] == header)
+        return len(ids(caption)) - crop
 
     @uses_components("text_encoder")
     def encode(self, prompt: str, frames: int, guidance: float, negative: str | None) -> tuple[torch.Tensor, torch.Tensor | None]:

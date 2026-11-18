@@ -17,12 +17,17 @@ cozy run pan2/generate instructions='<opening> A hand lifts the cup.' \
   'references:=[{"name": "opening", "image": "opening.webp"}]'
 ```
 
-The prompt rewriter uses Qwen3.5-9B to write PAN2's structured, timed caption: huihui-ai's abliterated one
+The prompt rewriter writes PAN2's structured, timed caption with Qwen3.5-9B: huihui-ai's abliterated one
 (`huihui-ai/huihui-qwen3.5-9b-abliterated`, refusals removed) by default, or Qwen's own with
-`--model reasoner=qwen/qwen3.5-9b@0.2.0`. It sees the first frame when one is mentioned. `prompt_upsampling: false`
-takes an already structured caption JSON in `instructions`; it must fit 1480 PAN2-encoder tokens. The returned `prompt` is the actual caption used.
-A reply it can't use (no event timeline, or over 1480 tokens) is asked once more with that reply and why; if the
-second can't be used either, the video renders the instructions as written, with a warning.
+`--model reasoner=qwen/qwen3.5-9b@0.2.0`. It runs as PAN2 ships it (ifm-ai/PAN2@0fb907b6), from two upstream pieces,
+since neither covers both: the request as the prompt-rewriter skill hands it over (a `{"original_prompt", "duration_sec"}`
+record, the first frame before it when one is mentioned) under the skill's `system_prompt.md`, unchanged; and decoding
+as `inference/prompts_rewritter.py` runs a local Qwen3.5-9B (temperature 0.2, top-p 0.9, top-k 50, 4096 tokens, thinking
+off), from the render's seed. The reply is checked as the skill's `prompt_tools.py` checks it (one `refined_prompt`, the
+seven-key caption over the whole duration, at most 1480 encoder tokens), and one it refuses goes back once with the
+checks' receipt, the correction the policy takes. Ours alone: if that is refused too, the video renders the instructions
+as written, with a warning. `prompt_upsampling: false` takes an already structured caption JSON in `instructions`; it
+must fit 1480 PAN2-encoder tokens. The returned `prompt` is the actual caption used.
 
 Advanced controls are `steps` (50 by default), `guidance` (2.5), `negative_prompt`, and the seed.
 The model's own negative caption is used by default. Output sides snap to 32 pixels at approximately

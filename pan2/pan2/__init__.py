@@ -4,20 +4,20 @@ from __future__ import annotations
 
 import json
 import math
-import re
 import secrets
+from decimal import Decimal
 from pathlib import Path
 from typing import Annotated
 
 import msgspec
-from cozy_runtime import vlm
 from cozy_runtime.author import Adjustments, App, Context, InvalidRequest, Outputs, Seed, Telemetry
 from cozy_runtime.fields import MENTION, Advanced, AspectRatio, FileBound, Image, Prompt, Range, Ratios
 from cozy_runtime.media import VideoFile
 from PIL.Image import Image as Picture
 
 from . import quantize as quantize  # its recipe
-from .model import CAPTION_TOKENS, DEFAULT_STEPS, FPS, Pan2, Reasoner
+from .caption import POSITIVE_SOFT_LIMIT, authored
+from .model import DEFAULT_STEPS, FPS, Pan2, Reasoner
 
 app = App()
 MODEL = "ifm/pan2@0.3.0"
@@ -29,8 +29,10 @@ TEXT_ENCODER = "pottokao/moss-image-text-encoder-heretic-pan2@0.1.0"
 
 from . import lanes as lanes  # noqa: E402  # the `curve` lane function; it registers on `app`
 
-REWRITE = Path(__file__).with_name("prompt-policy.md").read_text()
-#: Replies asked for before the video renders the instructions as written.
+#: PAN2's prompt rewriter policy, its agent skill's `inference/pan-prompt-rewriter/system_prompt.md`
+#: (ifm-ai/PAN2@0fb907b6, Apache-2.0), unchanged: the system turn of every rewrite.
+REWRITE = Path(__file__).with_name("system_prompt.md").read_text()
+#: Replies asked for: the first, and one correction (the policy's "When the caller requests a correction").
 ATTEMPTS = 2
 
 
@@ -76,80 +78,57 @@ def names(text: str) -> str:
     return MENTION.sub(lambda found: found[1].replace(".", " "), text).strip()
 
 
-#: One level of a JSON string's escapes (`\uXXXX` stays, for the caption's own JSON to read).
-_ESCAPE = re.compile(r'\\(["\\/bfnrt])')
-_ESCAPES = {'"': '"', "\\": "\\", "/": "/", "b": "\b", "f": "\f", "n": "\n", "r": "\r", "t": "\t"}
-
-
-def timeline(text: str) -> dict[str, object] | None:
-    """The event timeline in `text`: its first JSON object, around any prose or fence, that is one (`events`, some)
-    or holds one as `refined_prompt`, a JSON string (the policy's form) or an object. Strings may hold raw control
-    characters. A reply JSON refuses (a quote `refined_prompt` left unescaped, its closing quote escaped) is read again
-    with one level of its escapes undone."""
-    decoder = json.JSONDecoder(strict=False)
-    for form in (text, _ESCAPE.sub(lambda found: _ESCAPES[found[1]], text)):
-        for at in [i for i, c in enumerate(form) if c == "{"]:
-            try:
-                value = decoder.raw_decode(form, at)[0]
-            except json.JSONDecodeError:
-                continue
-            inner = value.get("refined_prompt") if isinstance(value, dict) else None
-            value = timeline(inner) if isinstance(inner, str) else inner if isinstance(inner, dict) else value
-            if isinstance(value, dict) and isinstance(value.get("events"), list) and value["events"]:
-                return value
-    return None
-
-
-def caption(text: str) -> tuple[str | None, str]:
-    """`text`'s event timeline as compact JSON, or None and why not."""
-    found = timeline(text)
-    if found is None:
-        return None, _unread(text)
-    return json.dumps(found, ensure_ascii=False, separators=(",", ":")), ""
-
-
-def _unread(text: str) -> str:
-    """Why `text` holds no timeline, as its first JSON object says."""
-    at = text.find("{")
-    if at < 0:
-        return "it holds no JSON object"
+def given(text: str) -> str:
+    """Instructions that are already PAN2's caption, as PAN2 reads them: a caption JSON object, or the rewriter's
+    `{"refined_prompt": ...}` record holding one."""
     try:
-        value = json.JSONDecoder(strict=False).raw_decode(text, at)[0]
+        value = json.loads(text)
+        if isinstance(value, dict) and isinstance(value.get("refined_prompt"), str):
+            value = json.loads(value["refined_prompt"])
     except json.JSONDecodeError as exc:
-        return f"its JSON does not parse: {exc}"
-    inner = value.get("refined_prompt") if isinstance(value, dict) else None
-    if isinstance(inner, str):
-        return f"refined_prompt: {_unread(inner)}"
-    return "it has no event timeline (`events`)"
+        raise InvalidRequest(f"Without prompt upsampling, PAN2's instructions are its caption JSON: {exc.msg}",
+                             fields=["instructions"]) from exc
+    if not isinstance(value, dict) or not isinstance(value.get("events"), list):
+        raise InvalidRequest("Without prompt upsampling, PAN2's instructions are its caption JSON, with its `events`",
+                             fields=["instructions"])
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
 
 
-def rewrite(ctx: Context, reasoner: Reasoner, encoder: Pan2, prompt: str, picture: Picture | None, seconds: float,
+def checked(reply: str, seconds: int, encoder: Pan2) -> tuple[str | None, dict[str, object]]:
+    """`reply`'s positive caption, as PAN2's rewriter tool accepts one (`caption.authored` and the soft limit), or None
+    and what its checks say, in its validation receipt's words."""
+    try:
+        positive = authored(reply, Decimal(seconds))
+    except ValueError as exc:
+        return None, {"errors": [str(exc)]}
+    tokens = encoder.tokens(positive)
+    if tokens > POSITIVE_SOFT_LIMIT:
+        return None, {"errors": ["Token budget exceeded; revise only the positive when needed"],
+                      "positive_tokens": tokens, "positive_soft_limit": POSITIVE_SOFT_LIMIT}
+    return positive, {}
+
+
+def rewrite(ctx: Context, reasoner: Reasoner, encoder: Pan2, prompt: str, picture: Picture | None, seconds: int,
             seed: int, adj: Adjustments, tel: Telemetry) -> str:
-    """`prompt` as the rewriter's event timeline. A reply PAN2 can't take (no timeline, or too long for the encoder)
-    is asked once more with the reply and why, the correction `prompt-policy.md` takes; decoding is greedy, so another
-    seed would write the same reply. After two, the video renders `prompt` as written, with a warning."""
-    request = f"Clip duration: {seconds:g} seconds.\nUser request: {prompt}"
-    question, why = request, ""
-    replies: list[str] = []
-    for _ in range(ATTEMPTS):
-        reply = reasoner.ask(
-            [vlm.Question(question, [picture] if picture else [], [])],
-            system=REWRITE, thinking=False, stop=[], max_new_tokens=3072, presence_penalty=0.0,
-            temperature=0.0, top_p=1.0, seed=seed,
-            progress=lambda _: ctx.raise_if_cancelled(),
-        )[0]
-        replies.append(reply)
-        found, why = caption(reply)
-        if found is not None:
-            tokens = encoder.tokens(found)
-            if tokens <= CAPTION_TOKENS:
-                tel.log("action timeline", attempts=len(replies))
-                return found
-            why = f"its caption has {tokens} encoder tokens, over the {CAPTION_TOKENS} PAN2 reads"
-        question = f"{request}\n\nYour reply was rejected: {why}.\nThe rejected reply:\n{reply}"
-    adj.warn("prompt_upsampling", f"PAN2's prompt rewriter gave no caption it can use twice ({why}), so the video "
+    """`prompt` as PAN2's rewriter writes it, upstream's in two halves: the request as its skill hands it over (one
+    `{"original_prompt", "duration_sec"}` record, the first frame before it) under its policy (`REWRITE`), decoded as
+    its `prompts_rewritter.py` decodes a local Qwen3.5-9B (`Reasoner.answer`). A reply its checks refuse goes back
+    once, as the policy's caller corrects one: the reply as the assistant's turn, then the checks' receipt. Ours alone:
+    if the correction is refused too, the video renders `prompt` as written, with a warning."""
+    turns = [json.dumps({"original_prompt": prompt, "duration_sec": seconds}, ensure_ascii=False)]
+    said: dict[str, object] = {}
+    for attempt in range(1, ATTEMPTS + 1):
+        reply = reasoner.answer(REWRITE, turns, picture, seed=seed, progress=lambda _: ctx.raise_if_cancelled())
+        positive, said = checked(reply, seconds, encoder)
+        if positive is not None:
+            tel.log("action timeline", attempts=attempt)
+            return positive
+        turns += [reply, json.dumps(said, ensure_ascii=False)]
+    errors = said.get("errors")
+    why = errors[0] if isinstance(errors, list) and errors else "refused"
+    adj.warn("prompt_upsampling", f"PAN2's prompt rewriter wrote no caption its checks accept ({why}), so the video "
                                   "renders the instructions as written")
-    tel.log("action timeline", parsed=False, why=why, answer=replies[-1][-2000:], attempts=len(replies))
+    tel.log("action timeline", parsed=False, receipt=said, answer=turns[-2][-2000:], attempts=ATTEMPTS)
     return prompt
 
 
@@ -177,13 +156,9 @@ def generate(ctx: Context, payload: Generate, model: Pan2, text_encoder: Pan2, r
         raise InvalidRequest("PAN2 needs instructions: the scene and its actions", fields=["instructions"])
     if payload.prompt_upsampling:
         with tel.stage("writing action timeline"):
-            prompt = rewrite(ctx, reasoner, text_encoder, prompt, picture, (frames - 1) / FPS, seed, adj, tel)
+            prompt = rewrite(ctx, reasoner, text_encoder, prompt, picture, (frames - 1) // FPS, seed, adj, tel)
     else:
-        given, why = caption(prompt)
-        if given is None:
-            raise InvalidRequest(f"Without prompt upsampling, PAN2's instructions are its caption JSON: {why}",
-                                 fields=["instructions"])
-        prompt = given
+        prompt = given(prompt)
     if seconds != payload.duration:
         adj.warn("duration", f"PAN2 renders 1-20 seconds, so this clip runs {(frames - 1) / FPS:g} seconds")
     with tel.stage("encoding caption"):
