@@ -106,7 +106,15 @@ Q8_0_HEAD16 = Recipe(
     plan=QuantizationPlan(
         encoding="ggml.q8_0",
         components=("model",),
-        include=tuple(p for p in _GGML if p != "model.lm_head.weight"),
+        include=(
+            "model.model.language_model.embed_tokens.weight",
+            "model.model.language_model.layers.*.linear_attn.in_proj_*.weight",
+            "model.model.language_model.layers.*.linear_attn.out_proj.weight",
+            "model.model.language_model.layers.*.self_attn.[qkvo]_proj.weight",
+            "model.model.language_model.layers.*.mlp.*_proj.weight",
+            "model.mtp.fc.weight",
+            "model.mtp.layers.*_proj.weight",
+        ),
         output_precision="preserve",
     ),
 )
