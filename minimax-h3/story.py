@@ -58,6 +58,19 @@ _PREFIX = re.compile(r"\s*\[([^\]\n]*)\]")
 #: The summary's task types (ref guide 3); a summary without one opens with the first.
 TASKS = ("video editing", "video continuation", "keyframe completion", "reference generation",
          "audio reuse", "audio reference")
+#: What a plate's own soundtrack is to an edit's target (ref guide 4.2): its final track, what its sound follows, or
+#: nothing.
+PlateSound = Literal["", "fully_copy", "reference"]
+#: Each marker's definition (after "<Audio N> is the synchronized audio track of <Video M>, "), retention line and soundscape.
+_PLATE_SOUND = {
+    "fully_copy": ("and is reused in the target video.",
+                   "{0} is reused 1:1 as the target video's complete final audio track.",
+                   "{0} is reused 1:1: its speech, ambience and sound effects, on the target video's timeline."),
+    "reference": ("which the target video's sound follows.",
+                  "the target video's sound follows {0}'s voice timbre, delivery, dialogue content, rhythm and sound "
+                  "texture without copying the original signal.",
+                  "The target video's speech, ambience and sound effects follow {0} on the same timeline."),
+}
 
 
 def name_key(name: str) -> str:
@@ -165,13 +178,14 @@ def segment_call(
     added: frozenset[str] = frozenset(),
     keyframes: bool = False,
     continues: bool = False,
+    sound: PlateSound = "",
 ) -> SegmentCall:
     """A Ref2VA segment's text and references: `text` with its music and soundscape sections, whose mentions name
     references too, then what only cozy knows or a field set (`_segment_call`). `retained`: `own_retention` of the
     shot's text. `added`: the references cozy adds at a join. `keyframes`: it has a first or last frame. `continues`: it
-    goes on from a take."""
+    goes on from a take. `sound`: what a plate's soundtrack is to the target."""
     text = _fill(text, {"overall_soundscape": soundscape.strip() or "N/A", "non_diegetic_music": music.strip() or "N/A"})
-    return _segment_call(text, references, "", index, forced, retained, added, keyframes, continues)
+    return _segment_call(text, references, "", index, forced, retained, added, keyframes, continues, sound)
 
 
 def _numbering(references: Sequence[StoryReference]) -> dict[tuple[str, int], StoryReference]:
@@ -195,6 +209,7 @@ def _segment_call(
     added: frozenset[str] = frozenset(),
     keyframes: bool = False,
     continues: bool = False,
+    sound: PlateSound = "",
 ) -> SegmentCall:
     """`forced` always; every other reference only where the text names it, its summary included, all in
     request order, as H3 packs and labels them. With no references left, none: the segment renders from its
@@ -207,6 +222,8 @@ def _segment_call(
     replaces that), each clip bound to the characters who perform it, the soundscape, and the `summary`'s task tag, computed from the request (ref guide 3), replacing a
     different one with a warning, in a section of its own when the text has none. Retention is the writer's: a reference's own line from
     `author` on a segment that lost it, one line for each reference cozy `added` at a join, and `_KEEP_LOOK` for a picture with no line.
+    A plate's soundtrack (`sound`) is the call's last `<Audio N>`, defined, retained and in the soundscape as the guide's
+    2.5 and 4.2 say, and its task.
     """
     pool, owners = voices(references)
     if not pool:
@@ -387,6 +404,14 @@ def _segment_call(
             elif ref.kind == "voice":
                 retention.append(f"<{ref.name}>: reference - its voice timbre guides whoever the text says speaks in it, "
                                  "without copying the original signal.")
+    plate = next((ref for ref in used if ref.kind == "anchor_video"), None)
+    if sound and plate is not None:
+        # The plate's own soundtrack, heard on the target's clock (`guide_rows`): numbered after every other sound.
+        heard = f"<Audio {sum(_SLOT[ref.kind] == 'audio' for ref in used) + 1}>"
+        definitions.append(f"{heard} is the synchronized audio track of {label(plate)}, " + _PLATE_SOUND[sound][0])
+        retention.append(f"{heard}: {sound} - " + _PLATE_SOUND[sound][1].format(heard))
+        soundscape = _PLATE_SOUND[sound][2].format(heard)
+        tasks.add("audio reuse" if sound == "fully_copy" else "audio reference")
     tag = " + ".join(task for task in TASKS if task in tasks)
     given = _tasks(text)
     if given and {task.casefold() for task in given} != tasks:

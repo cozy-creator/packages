@@ -287,8 +287,10 @@ class H3Model(Model[OfficialH3Pipeline]):
         return self.pipe.encode_clip(pixels, regenerate.POSTERIOR_SEED)
 
     @uses_components("vae")
-    def decode_latents(self, latents: torch.Tensor, *, on_chunk: Callable[[torch.Tensor], None]) -> int:
-        return self.pipe.decode_latents(latents, on_chunk)
+    def decode_latents(
+        self, latents: torch.Tensor, *, on_chunk: Callable[[torch.Tensor], None], upto: int | None = None
+    ) -> int:
+        return self.pipe.decode_latents(latents, on_chunk, upto)
 
     @uses_components("audio_vae")
     def silence(self, frames: int) -> torch.Tensor:
@@ -336,8 +338,10 @@ class H3VideoVAE(Model[OfficialH3VideoVAE]):
         return self.pipe.encode_clip(pixels, regenerate.POSTERIOR_SEED)
 
     @uses_components("vae")
-    def decode_latents(self, latents: torch.Tensor, *, on_chunk: Callable[[torch.Tensor], None]) -> int:
-        return self.pipe.decode_latents(latents, on_chunk)
+    def decode_latents(
+        self, latents: torch.Tensor, *, on_chunk: Callable[[torch.Tensor], None], upto: int | None = None
+    ) -> int:
+        return self.pipe.decode_latents(latents, on_chunk, upto)
 
 
 class H3TurboBase(H3Model):
