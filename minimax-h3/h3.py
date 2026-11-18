@@ -1933,7 +1933,17 @@ _PACKAGE_NEEDS = {
 }  # fmt: skip
 
 
-@app.tool(label="Shot", named="shot", reserved=_RESERVED, needs=_SHOT_NEEDS)
+#: What a shot costs (cl-1286): its seconds, every beat's summed, and its steps, Turbo's 8 else the full model's (40 unless
+#: asked). Its time is its card's row (`benchmarks.json`, 15 s Turbo) by seconds^0.98, fitted on an RTX 4090's warm uncapped
+#: 15 s and 24 s Turbo runs (321 s, 509 s), and in proportion to its steps. Its canvas is H3's own at every shape, so no pixels.
+_SHOT_ESTIMATE = {
+    "size": {"seconds": "sum(request.beats.map(b, double(b.duration)))",
+             "steps": "request.turbo ? 8.0 : (request.steps != null ? double(request.steps) : 40.0)"},
+    "ms": "measured(machine).warm_ms * pow(size.seconds / measured(machine).request.seconds, 0.98) * size.steps / 8.0",
+}  # fmt: skip
+
+
+@app.tool(label="Shot", named="shot", reserved=_RESERVED, needs=_SHOT_NEEDS, estimate=_SHOT_ESTIMATE)
 async def generate(ctx: Context, payload: Shot, out: Outputs, tel: Telemetry) -> ShotResult:
     """One continuous shot of any length, with sound (README.md): a summary, then what happens, beat by beat, each text
     with the references it mentions; an optional first and last frame; and Pick up from here, which goes on from a take
