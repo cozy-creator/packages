@@ -1192,8 +1192,8 @@ class Ref2VAInput(msgspec.Struct):
     context_audio: bool = False
     next_context_frames: ContextFrames = 0
     next_context_audio: bool = False
-    #: Frames at the end it samples and never delivers: an edit's last segment past its plate (`ContinuationPlan.cut`).
-    cut_frames: Annotated[int, msgspec.Meta(ge=0)] = 0
+    #: An edit's last segment: the frames it samples past its plate and never delivers (`ContinuationPlan.cut`).
+    cut_frames: Annotated[int, msgspec.Meta(ge=0)] | None = None
     previous_provenance: RenderProvenance | None = None
     context: ContextFile | None = None
     #: Keyframes, anchored as ComfyUI's Add Guide anchors them (`anchor_rows`).
