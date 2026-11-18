@@ -55,6 +55,8 @@ from .model import upright
 Source = Literal["prompt", "decision", "response"]
 #: The neutral mean each source's directions are projected off.
 _BASIS: dict[str, str] = {"prompt": "prompt", "decision": "prompt", "response": "response"}
+#: Answer tokens after `</think>` the format guard reads: the JSON's opening.
+OPENING = 6
 #: Stock top-k log-probabilities kept per reference position; the rest of the mass is one bucket.
 TOP_K = 32
 _LOGIT_ROWS = 512
@@ -147,6 +149,9 @@ class Study(msgspec.Struct, frozen=True, kw_only=True):
     kl_budget: float = 0.05
     #: Each nat per token of KL over the budget costs this much of the faithfulness shift.
     kl_penalty: float = 20.0
+    #: How far the JSON opening's log-likelihood may fall (nats over its tokens), and what each nat past it costs.
+    opening_budget: float = 0.05
+    opening_penalty: float = 1.0
     candidates: list[Arm] | None = None
     #: Ablations measured first, as the search's opening trials (a sweep around a known one).
     seeds: list[Ablation] | None = None
@@ -270,10 +275,10 @@ class _Seq:
     """A sequence after the shared prefix: its ids, and `[start, end)`, the positions it is read at (averaged
     outputs) or the tokens it scores."""
 
-    __slots__ = ("end", "ids", "start")
+    __slots__ = ("end", "ids", "opening", "start")
 
-    def __init__(self, ids: list[int], start: int, end: int) -> None:
-        self.ids, self.start, self.end = ids, start, end
+    def __init__(self, ids: list[int], start: int, end: int, opening: tuple[int, int] = (0, 0)) -> None:
+        self.ids, self.start, self.end, self.opening = ids, start, end, opening
 
 
 def _rows(value: torch.Tensor, rows: int) -> torch.Tensor:
@@ -403,8 +408,13 @@ class _Data:
         def prompts(requests: list[str]) -> list[tuple[list[int], int]]:
             return [((ids := pe.t2i(t2i, r)), len(ids) - 1) for r in requests]
 
+        closing = pe.processor.tokenizer.convert_tokens_to_ids("</think>")
+        self.thought_end: dict[int, int] = {}
+
         def answered(request: str, answer: str) -> tuple[list[int], int]:
             ids, prompt = pe.t2i(t2i, request, answer), pe.t2i(t2i, request)
+            if closing in ids:
+                self.thought_end[id(ids)] = len(ids) - 1 - ids[::-1].index(closing)
             return ids, _shared([ids, prompt]) + 1  # where the answer's tokens start, should they merge with the prompt's
 
         self.sets["sensitive"] = prompts(evidence.sensitive)
@@ -417,14 +427,21 @@ class _Data:
         everything = [ids for rows in self.sets.values() for ids, _ in rows]
         self.prefix = _shared(everything) if everything else 0
 
-    def seqs(self, name: str, read: Literal["last", "answer"]) -> list[_Seq]:
+    def seqs(self, name: str, read: Literal["last", "answer", "thought", "opening"]) -> list[_Seq]:
+        """Each row after the prefix, read at its last token, its whole answer, its thought, or the answer's opening
+        (`</think>` and the `OPENING` tokens after it: where the JSON starts or doesn't)."""
         out = []
         for ids, start in self.sets[name]:
-            tail = ids[self.prefix :]
+            tail, end = ids[self.prefix :], self.thought_end.get(id(ids), len(ids)) - self.prefix
             if read == "last":
                 out.append(_Seq(tail, len(tail) - 1, len(tail)))
+            elif read == "thought":
+                out.append(_Seq(tail, start - self.prefix, max(start - self.prefix + 1, end)))
+            elif read == "opening":
+                out.append(_Seq(tail, min(end, len(tail) - 1), min(len(tail), end + 1 + OPENING)))
             else:
-                out.append(_Seq(tail, start - self.prefix, len(tail)))
+                opening = (min(end, len(tail) - 1), min(len(tail), end + 1 + OPENING))
+                out.append(_Seq(tail, start - self.prefix, len(tail), opening))
         return out
 
 
@@ -461,7 +478,7 @@ def _directions(data: _Data, teacher: _Teacher, layers: Sequence[nn.Module], tel
     raw: dict[str, torch.Tensor] = {}
     neutral: dict[str, torch.Tensor] = {}
 
-    def mean(name: str, read: Literal["last", "answer"]) -> torch.Tensor:
+    def mean(name: str, read: Literal["last", "answer", "thought", "opening"]) -> torch.Tensor:
         return _means(teacher, layers, data.seqs(name, read))
 
     if data.sets["neutral"]:
@@ -471,7 +488,7 @@ def _directions(data: _Data, teacher: _Teacher, layers: Sequence[nn.Module], tel
     if data.sets["sanitized"] and data.sets["kept"]:
         raw["decision"] = mean("sanitized", "last") - mean("kept", "last")
     if data.sets["unfaithful"]:
-        raw["response"] = mean("unfaithful", "answer") - mean("faithful", "answer")
+        raw["response"] = mean("unfaithful", "thought") - mean("faithful", "thought")
     if data.sets["reference"]:
         neutral["response"] = mean("reference", "answer")
     if "response" not in neutral and "prompt" in neutral:
@@ -486,6 +503,9 @@ class _Measure(msgspec.Struct, frozen=True):
     faith: float
     prefer: float
     kl: float
+    #: The change in log-likelihood of the answers' JSON opening (summed over its tokens, mean over rows): below 0,
+    #: the PE ends its turn or writes a bare caption more often.
+    opening: float
 
 
 class _Scorer:
@@ -499,22 +519,32 @@ class _Scorer:
         self.seqs = [*self.unfaithful, *self.faithful, *self.references]
         self.kinds = [0] * len(self.unfaithful) + [1] * len(self.faithful) + [2] * len(self.references)
         self.stock: torch.Tensor | None = None
+        self.stock_openings = torch.zeros(0, dtype=torch.float64)
         self.top: dict[tuple[int, int], tuple[torch.Tensor, torch.Tensor]] = {}
 
-    def _read(self) -> tuple[torch.Tensor, float, int]:
-        """Each sequence's summed log-probability, and the summed KL and positions over the references."""
+    def _read(self) -> tuple[torch.Tensor, torch.Tensor, float, int]:
+        """Each sequence's summed log-probability and its JSON opening's, and the summed KL and positions over the
+        references."""
         teacher = self.teacher
         teacher.refresh()
         sums = torch.zeros(len(self.seqs), dtype=torch.float64)
+        openings = torch.zeros(len(self.seqs), dtype=torch.float64)
         kl, positions = 0.0, 0
         for batch in teacher.batches(self.seqs):
             rows = [self.seqs[i] for i in batch]
             states, targets, owners = teacher.scored(teacher.hidden(rows), rows)
+            spots = torch.cat([torch.arange(r.start, r.end) for r in rows]).to(teacher.device)
+            lows = torch.tensor([r.opening[0] for r in rows], device=teacher.device)[owners]
+            highs = torch.tensor([r.opening[1] for r in rows], device=teacher.device)[owners]
+            inside = (spots >= lows) & (spots < highs)
             totals = torch.zeros(len(rows), device=teacher.device, dtype=torch.float64)
+            opened = torch.zeros(len(rows), device=teacher.device, dtype=torch.float64)
             for at, logp in teacher.log_probs(states):
                 n = logp.shape[0]
                 own = owners[at : at + n]
-                totals.index_add_(0, own, logp.gather(1, targets[at : at + n, None])[:, 0].double())
+                picked = logp.gather(1, targets[at : at + n, None])[:, 0].double()
+                totals.index_add_(0, own, picked)
+                opened.index_add_(0, own, picked * inside[at : at + n])
                 for b in own.unique().tolist():
                     seq = batch[b]
                     if self.kinds[seq] != 2:
@@ -534,18 +564,21 @@ class _Scorer:
                     kl += float(rows_kl.sum())
                     positions += int(rows_kl.shape[0])
             sums[batch] = totals.cpu()
-        return sums, kl, positions
+            openings[batch] = opened.cpu()
+        return sums, openings, kl, positions
 
     def baseline(self) -> None:
         self.stock = None
         self.top.clear()
-        sums, _, _ = self._read()
-        self.stock = sums
+        sums, openings, _, _ = self._read()
+        self.stock, self.stock_openings = sums, openings
 
     def measure(self) -> _Measure:
         assert self.stock is not None
-        sums, kl, positions = self._read()
+        sums, openings, kl, positions = self._read()
         n = len(self.unfaithful)
+        guarded = slice(n, len(self.seqs))  # the faithful answers' and the references' openings
+        opening = float((openings[guarded] - self.stock_openings[guarded]).mean()) if len(self.seqs) > n else 0.0
         shifts, prefer = [], 0
         for i in range(n):
             s, f = self.unfaithful[i], self.faithful[i]
@@ -554,7 +587,7 @@ class _Scorer:
             before = float(self.stock[n + i] - self.stock[i])
             shifts.append((now - before) / ((ns + nf) / 2))
             prefer += int(float(sums[n + i]) / nf > float(sums[i]) / ns)
-        return _Measure(sum(shifts) / max(1, n), prefer / max(1, n), kl / max(1, positions))
+        return _Measure(sum(shifts) / max(1, n), prefer / max(1, n), kl / max(1, positions), opening)
 
 
 def _space(rng: random.Random, sources: list[str], last: int) -> Ablation:
@@ -619,7 +652,8 @@ def _search(ctx: Context, payload: Study, data: _Data, teacher: _Teacher, layers
                 began = time.monotonic()
                 ablator.set(directions, ablation)
                 m = scorer.measure()
-                score = m.faith - payload.kl_penalty * max(0.0, m.kl - payload.kl_budget)
+                score = (m.faith - payload.kl_penalty * max(0.0, m.kl - payload.kl_budget)
+                         - payload.opening_penalty * max(0.0, -m.opening - payload.opening_budget))  # fmt: skip
                 measured.append((ablation, m, score))
                 trials.append({"trial": t, "ablation": msgspec.to_builtins(ablation), **msgspec.to_builtins(m),
                                "score": round(score, 5), "seconds": round(time.monotonic() - began, 1)})  # fmt: skip
@@ -635,7 +669,8 @@ def _search(ctx: Context, payload: Study, data: _Data, teacher: _Teacher, layers
     finally:
         ablator.remove()
         report["trials"] = trials
-    within = sorted((x for x in measured if x[1].kl <= payload.kl_budget), key=lambda x: -x[1].faith)
+    within = sorted((x for x in measured if x[1].kl <= payload.kl_budget and -x[1].opening <= payload.opening_budget),
+                    key=lambda x: -x[1].faith)  # fmt: skip
     return [Arm(name=f"top{i + 1}", ablation=x[0]) for i, x in enumerate(within[: payload.top])]
 
 
