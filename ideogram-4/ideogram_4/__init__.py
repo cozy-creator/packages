@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, Annotated, Literal
 import msgspec
 import numpy as np
 from cozy_runtime.author import Adjustments, App, Context, Seed, Telemetry, UnsupportedInput
-from cozy_runtime.fields import AspectRatio, Ratios
+from cozy_runtime.fields import Advanced, AspectRatio, FileBound, Ratios
 from cozy_runtime.image import (
     Guidance,
     ImageRequest,
@@ -36,6 +36,8 @@ app = App()
 SIZES = Sizes((256 * 256 / MEGAPIXEL, 4.0), (256, 2048), PATCH, "Ideogram 4 serves 0.06-4 MP", widest=6.0)
 #: Diffusers' default: V4_QUALITY_48, 48 steps at guidance 7 with a 3.0 polish tail; V4_TURBO_12 is the box's Turbo.
 STEPS, TURBO_STEPS, GUIDANCE = 48, 12, 7.0
+#: How much of a start picture is redrawn by default (se-175's runs).
+STRENGTH = 0.8
 
 class GenerateInput(ImageRequest):
     steps: Steps = None
@@ -44,6 +46,11 @@ class GenerateInput(ImageRequest):
     prompt_upsampling: bool | None = None
     #: Elements placed by box, in order: an object (`prompt`), or rendered text (`text`, styled as `prompt` says).
     regions: list[Region] = msgspec.field(default_factory=list)
+    #: Image to image: start from this picture's latents, `strength` of the schedule redrawing it (`Ideogram4.denoise`).
+    #: The model takes no picture otherwise (README).
+    image: Annotated[ImageFile, FileBound(max_decoded_bytes=256 << 20)] | None = None
+    #: How much of the picture is redrawn: 1 is from noise.
+    strength: Annotated[float, msgspec.Meta(gt=0.0, le=1.0), Advanced()] = STRENGTH
 
 
 def element(region: Region, index: int) -> dict[str, object]:
@@ -132,18 +139,23 @@ def generate(ctx: Context, payload: GenerateInput, model: Ideogram4, text_encode
     steps = held(adj, "steps", payload.steps or STEPS, 1, 200)
     weight = held(adj, "guidance", GUIDANCE if payload.guidance is None else payload.guidance, 1.0, 20.0)
     seed = payload.drawn_seed()
-    width, height = payload.size(adj, None, SIZES, megapixels=1.0)
+    picture = payload.image.read() if payload.image is not None else None
+    width, height = payload.size(adj, None if picture is None else picture.size, SIZES, megapixels=1.0)
     written = caption(payload, prompt, upsampler, width=width, height=height, seed=seed, tel=tel)
     if written != prompt:
         tel.log("caption", caption=written[:4000])
     ctx.raise_if_cancelled()
     with tel.stage("encoding prompt"):
         features = text_encoder.encode(written)
+    start = None
+    if picture is not None:
+        with tel.stage("encoding picture"):
+            start = model.encode(picture, width=width, height=height)
     ctx.raise_if_cancelled()
     with tel.stage("generating image"):
         latents = model.denoise(
             features, width=width, height=height, guidance=guidance_schedule(steps, weight), seed=seed,
-            progress=ctx.progress,
+            progress=ctx.progress, start=start, strength=payload.strength,
         )
     with tel.stage("decoding image"):
         image = model.decode(latents, width=width, height=height)
@@ -165,6 +177,10 @@ class ImageBox(msgspec.Struct, kw_only=True):
     megapixels: Literal[1, 2, 4] = 1
     #: Ideogram's V4_TURBO_12, 12 steps, else V4_QUALITY_48 (`generate`'s steps).
     turbo: bool = True
+    #: `generate`: start from this picture (image to image).
+    image: Annotated[ImageFile, FileBound(max_decoded_bytes=256 << 20)] | None = None
+    #: `generate`: how much of the start picture is redrawn.
+    strength: Annotated[float, msgspec.Meta(gt=0.0, le=1.0), Advanced()] = STRENGTH
     seed: Seed | None = None
 
 
@@ -176,5 +192,6 @@ def image(ctx: Context, payload: ImageBox, model: Ideogram4, text_encoder: QwenE
           tel: Telemetry, adj: Adjustments) -> ImageResult:
     """Ideogram 4 on a canvas: Turbo's 12 steps, or 48."""
     request = GenerateInput(prompt=payload.instructions, aspect_ratio=payload.aspect_ratio, megapixels=payload.megapixels,
-                            steps=TURBO_STEPS if payload.turbo else STEPS, seed=payload.seed)  # fmt: skip
+                            steps=TURBO_STEPS if payload.turbo else STEPS, seed=payload.seed, image=payload.image,
+                            strength=payload.strength)  # fmt: skip
     return generate(ctx, request, model, text_encoder, upsampler, tel, adj)

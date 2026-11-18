@@ -256,6 +256,8 @@ class Ideogram4(Model[IdeogramGraph]):
         guidance: Sequence[float],
         seed: int,
         progress: Callable[[int, int], None],
+        start: torch.Tensor | None = None,
+        strength: float = 1.0,
     ) -> torch.Tensor:
         """`Ideogram4Pipeline.__call__`'s loop for one caption whose `[tokens, 53248]` text features
         are `features`: `FlowMatchEulerDiscreteScheduler` over the resolution-shifted logit-normal sigmas,
@@ -263,7 +265,10 @@ class Ideogram4(Model[IdeogramGraph]):
         latents in float32, noise drawn on the CPU from `seed`.
 
         The text rows' conditioning is step-invariant, so it is projected once before the loop
-        (`_text_rows`); the image rows never carry the zero text features Diffusers pads them with."""
+        (`_text_rows`); the image rows never carry the zero text features Diffusers pads them with.
+
+        With `start` (a picture's packed latents, `encode`), image to image as Diffusers' flow img2img pipelines run
+        it: the picture noised to the sigma of the last `strength` of the steps (`scale_noise`), which run."""
         tf = self.graph.components["transformer"]
         uncond = self.graph.components["unconditional_transformer"]
         device = torch.device(str(self.device))
@@ -279,11 +284,19 @@ class Ideogram4(Model[IdeogramGraph]):
         with torch.no_grad():
             position_ids, _, _ = Ideogram4Pipeline._prepare_ids([texts], rows, columns, texts, device)
             latents = rng.noise((1, tokens, tf.config["in_channels"]), seed, device=device)
+            first = 0
+            if start is not None:
+                first = steps - max(1, min(steps, int(steps * strength)))
+                scheduler.set_begin_index(first)
+                at = scheduler.timesteps[first : first + 1]
+                latents = scheduler.scale_noise(start.to(device, torch.float32), at, latents)
             prefix = _text_rows(tf, features.to(device, DTYPE))
             positive_rope = _rotary(tf, position_ids)
             negative_rope = _rotary(uncond, position_ids[:, texts:])
             num_train_timesteps = scheduler.config["num_train_timesteps"]
             for i, t in enumerate(scheduler.timesteps):
+                if i < first:
+                    continue
                 t_model = (1.0 - t.float() / num_train_timesteps).expand(1).to(DTYPE)
                 image = latents.to(DTYPE)
                 positive = tf(image, prefix, t_model, positive_rope).to(torch.float32)
@@ -291,8 +304,24 @@ class Ideogram4(Model[IdeogramGraph]):
                 velocity = guidance[i] * positive + (1.0 - guidance[i]) * negative
                 preview(lambda: latents + scheduler.sigmas[i] * velocity, "flux2", grid=(rows, columns))
                 latents = scheduler.step(-velocity, t, latents, return_dict=False)[0]
-                progress(i, steps)
+                progress(i - first, steps - first)
         return latents.cpu()
+
+    @uses_components("vae")
+    def encode(self, picture: Image.Image, *, width: int, height: int) -> torch.Tensor:
+        """`decode` reversed: the picture at the output's size through the encoder (its mean), packed into 2x2
+        patches and normalized by the VAE's BatchNorm statistics. [1, tokens, 128] float32."""
+        vae = self.graph.components["vae"]
+        device = torch.device(str(self.device))
+        rows, columns = height // PATCH, width // PATCH
+        pixels = VaeImageProcessor(vae_scale_factor=PATCH).preprocess(picture, height=height, width=width)
+        with torch.inference_mode():
+            z = vae.encode(pixels.to(device, vae.dtype)).latent_dist.mode().float()
+            channels = z.shape[1]
+            z = z.view(1, channels, rows, 2, columns, 2).permute(0, 2, 4, 3, 5, 1).reshape(1, rows * columns, 4 * channels)
+            mean = vae.bn.running_mean.view(1, 1, -1).to(z)  # type: ignore[union-attr]  # tracked: it keeps its statistics
+            std = torch.sqrt(vae.bn.running_var + vae.config["batch_norm_eps"]).view(1, 1, -1).to(z)
+            return ((z - mean) / std).cpu()
 
     @uses_components("vae")
     def decode(self, latents: torch.Tensor, *, width: int, height: int) -> Image.Image:
