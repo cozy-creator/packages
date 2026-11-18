@@ -10,31 +10,12 @@ import torch
 from transformers import Qwen3VLConfig, Qwen3VLForConditionalGeneration
 
 if TYPE_CHECKING:
-    from torch.utils.hooks import RemovableHandle
     from transformers.models.qwen3_vl.modeling_qwen3_vl import Qwen3VLTextModel
 
 
 _SOURCE_ARCHITECTURE = "Qwen3VLForConditionalGeneration"
 _SOURCE_LAYERS = 64
 _RETAINED_LAYERS = 50
-
-
-def release_position_cache(conditioner: Qwen3VLForConditionalGeneration) -> RemovableHandle:
-    """Release Qwen's autoregressive position cache after every forward of `conditioner`.
-
-    Diffusers requests hidden states with ``use_cache=False``. Qwen3VLModel still stores
-    ``rope_deltas`` on its first image input; no later H3 call consumes it. Its one int64
-    allocation kept 512 CUDA bytes after the second long-form shot, correctly tripping
-    Runtime's strict ledger and rebuilding the entire group. A hook rather than a caller's
-    scope, so it runs wherever the conditioner runs, including a group rank that hosts it,
-    and on a failing forward too.
-    """
-    handle: RemovableHandle = conditioner.model.register_forward_hook(_forget_rope_deltas, always_call=True)
-    return handle
-
-
-def _forget_rope_deltas(module: torch.nn.Module, _args: tuple[object, ...], _output: object) -> None:
-    module.rope_deltas = None  # type: ignore[assignment]  # Qwen3VLModel's cache attribute, not a tensor slot
 
 
 class FinalHiddenState:
@@ -129,7 +110,6 @@ def build_text_conditioner(config: Mapping[str, object]) -> Qwen3VLForConditiona
         parameter.data = parameter.data.to(dtype=torch.bfloat16)
     model.eval()  # type: ignore[no-untyped-call]  # Transformers' eval is untyped
     _validate_census(model, language)
-    release_position_cache(model)
     return model
 
 
