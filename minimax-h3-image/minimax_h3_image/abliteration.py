@@ -78,7 +78,9 @@ class Kernel(msgspec.Struct, frozen=True, kw_only=True):
         return self.peak + distance / self.reach * (self.floor - self.peak)
 
 
-class Ablation(msgspec.Struct, frozen=True, kw_only=True):
+class Part(msgspec.Struct, frozen=True, kw_only=True):
+    """One direction an ablation takes off the residual writers, and its kernels."""
+
     source: Source
     attention: Kernel
     mlp: Kernel
@@ -86,8 +88,11 @@ class Ablation(msgspec.Struct, frozen=True, kw_only=True):
     projected: bool = False
     #: One direction for every layer, interpolated at this layer output; None: each layer its own.
     index: float | None = None
-    #: More directions ablated with this one, each with its own source and kernels, taken off the ones before it.
-    also: list[Ablation] | None = None
+
+
+class Ablation(Part, frozen=True, kw_only=True):
+    #: More directions ablated with this one, each taken off the ones before it.
+    also: list[Part] | None = None
 
 
 class Pair(msgspec.Struct, frozen=True):
@@ -196,7 +201,7 @@ class Directions:
     def sources(self) -> list[str]:
         return sorted(self.raw)
 
-    def per_layer(self, ablation: Ablation) -> torch.Tensor:
+    def per_layer(self, ablation: Part) -> torch.Tensor:
         """`(layers, hidden)` unit rows: the direction each layer's writers lose."""
         r = self.raw[ablation.source]
         if ablation.projected:
@@ -237,7 +242,7 @@ def parts(directions: Directions, ablation: Ablation) -> list[tuple[torch.Tensor
     return out
 
 
-def weights(ablation: Ablation, layers: int) -> torch.Tensor:
+def weights(ablation: Part, layers: int) -> torch.Tensor:
     """`(layers, 2)`: each layer's attention and MLP writer weight."""
     return torch.tensor([[ablation.attention.weight(i), ablation.mlp.weight(i)] for i in range(layers)])
 
