@@ -281,31 +281,7 @@ class WanVSR(nn.Module):
         local = window != (ph, pw)
         made: list[tuple[torch.Tensor, torch.Tensor]] = []
         for index, block in enumerate(cast(list[Block], list(self.blocks))):
-            shift, scale, gate, c_shift, c_scale, c_gate = (block.scale_shift_table[None] + projected.float()).unbind(2)
-            h = (block.norm1(x.float()) * (1 + scale) + shift).type_as(x)
-            attn = block.attn1
-            key, value = attn.keys(h)
-            made.append((key, value))
-            held = [(key, value) if s == f else ring.kv(s, index) for s in slots]
-            keys, values = [kv[0] for kv in held], [kv[1] for kv in held]
-            q = rotate(attn.query(h), *q_rope).to(value.dtype)
-            k = rotate(torch.cat(keys, dim=1), *k_rope).to(value.dtype)
-            v = torch.cat(values, dim=1)
-            if local:
-                y = kernels.window_attention(q, k, v, ph, pw, window)
-            else:
-                y = F.scaled_dot_product_attention(q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2)).transpose(1, 2)
-            x = (x.float() + attn.out(y, q) * gate).type_as(x)
-
-            cross = block.attn2
-            h = block.norm2(x.float()).type_as(x)
-            ck, cv = cross.keys(text)
-            q = cross.query(h)
-            y = F.scaled_dot_product_attention(q.transpose(1, 2), ck.transpose(1, 2), cv.transpose(1, 2)).transpose(1, 2)
-            x = x + cross.out(y, q)
-
-            h = (block.norm3(x.float()) * (1 + c_scale) + c_shift).type_as(x)
-            x = (x.float() + block.ffn(h).float() * c_gate).type_as(x)
+            x = self._block(block, index, x, projected, text, ring, slots, (q_rope, k_rope), (ph, pw, window, local), made)
 
         ring.keep(made)
         del made
@@ -315,3 +291,34 @@ class WanVSR(nn.Module):
         x = self.proj_out(x).reshape(b, ph, pw, self.patch[1], self.patch[2], self.channels)
         velocity: torch.Tensor = x.permute(0, 5, 1, 3, 2, 4).reshape(b, self.channels, lh, lw)
         return (noise - velocity.float()).to(dtype)
+
+    def _block(self, block: Block, index: int, x: torch.Tensor, projected: torch.Tensor, text: torch.Tensor, ring: Ring,
+               slots: list[int], rope: tuple, layout: tuple, made: list[tuple[torch.Tensor, torch.Tensor]]) -> torch.Tensor:
+        """One block of `keyframe` over the new keyframe's tokens `x`: its K/V joins `made`. Its tensors die when it
+        returns, before the next block allocates."""
+        (q_rope, k_rope), (ph, pw, window, local), f = rope, layout, ring.count
+        shift, scale, gate, c_shift, c_scale, c_gate = (block.scale_shift_table[None] + projected.float()).unbind(2)
+        h = (block.norm1(x.float()) * (1 + scale) + shift).type_as(x)
+        attn = block.attn1
+        key, value = attn.keys(h)
+        made.append((key, value))
+        held = [(key, value) if s == f else ring.kv(s, index) for s in slots]
+        keys, values = [kv[0] for kv in held], [kv[1] for kv in held]
+        q = rotate(attn.query(h), *q_rope).to(value.dtype)
+        k = rotate(torch.cat(keys, dim=1), *k_rope).to(value.dtype)
+        v = torch.cat(values, dim=1)
+        if local:
+            y = kernels.window_attention(q, k, v, ph, pw, window)
+        else:
+            y = F.scaled_dot_product_attention(q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2)).transpose(1, 2)
+        x = (x.float() + attn.out(y, q) * gate).type_as(x)
+
+        cross = block.attn2
+        h = block.norm2(x.float()).type_as(x)
+        ck, cv = cross.keys(text)
+        q = cross.query(h)
+        y = F.scaled_dot_product_attention(q.transpose(1, 2), ck.transpose(1, 2), cv.transpose(1, 2)).transpose(1, 2)
+        x = x + cross.out(y, q)
+
+        h = (block.norm3(x.float()) * (1 + c_scale) + c_shift).type_as(x)
+        return (x.float() + block.ffn(h).float() * c_gate).type_as(x)
