@@ -114,8 +114,11 @@ def _generate(ctx: Context, payload: TurboInput, model: Flux2, turbo: Flux2Turbo
 
 _DEV = "black-forest-labs/flux-2-dev@0.1.0"
 _TURBO = "fal/flux-2-dev-turbo@0.2.0"
-#: The upsampler is [dev]'s text encoder, built and fetched only when `prompt_upsampling` is on; the
+#: The upsampler is a Mistral-Small-3.2 (a checkpoint's `text_encoder`), built and fetched only when
+#: `prompt_upsampling` is on: llmfan46's Heretic abliteration of it by default (Paul, 11-17: "use abliterated models
+#: wherever possible"), composed on [dev]; BFL's own is `model.upsampler=black-forest-labs/flux-2-dev@0.1.0`. The
 #: Turbo LoRA only with [dev].
+_UPSAMPLER = "llmfan46/mistral-small-3.2-24b-instruct-2506-ultra-uncensored-heretic@0.1.0"
 _COMPONENTS = {"model": ("transformer", "text_encoder", "vae"), "upsampler": ("text_encoder",)}
 _TURBO_COMPONENTS = {"model": ("transformer", "text_encoder", "vae"), "upsampler": ("text_encoder",),
                      "turbo_lora": ("transformer",)}
@@ -125,15 +128,15 @@ _TURBO_COMPONENTS = {"model": ("transformer", "text_encoder", "vae"), "upsampler
 _UPSAMPLING = "request.prompt_upsampling == true"
 
 
-@app.entrypoint(defaults={"model": _DEV, "upsampler": _DEV}, components=_COMPONENTS, needs={"upsampler": _UPSAMPLING},
-                memoize=True)
+@app.entrypoint(defaults={"model": _DEV, "upsampler": _UPSAMPLER}, components=_COMPONENTS,
+                needs={"upsampler": _UPSAMPLING}, memoize=True)
 def generate(ctx: Context, payload: GenerateInput, model: Flux2, upsampler: Flux2Upsampler,
              tel: Telemetry, adj: Adjustments) -> ImageResult:
     """The full model: FLUX.2 [dev] (50 steps, guidance 4), or a [klein] Base by `model=` (50 steps, CFG 4)."""
     return _generate(ctx, payload, model, None, upsampler, tel, adj)
 
 
-@app.entrypoint(defaults={"model": _DEV, "turbo_lora": _TURBO, "upsampler": _DEV},
+@app.entrypoint(defaults={"model": _DEV, "turbo_lora": _TURBO, "upsampler": _UPSAMPLER},
                 components=_TURBO_COMPONENTS, needs={"turbo_lora": "true", "upsampler": _UPSAMPLING}, memoize=True)
 def generate_turbo(ctx: Context, payload: TurboInput, model: Flux2, turbo_lora: Flux2TurboLoRA,
                    upsampler: Flux2Upsampler, tel: Telemetry, adj: Adjustments) -> ImageResult:
@@ -158,7 +161,7 @@ class ImageBox(msgspec.Struct, kw_only=True):
 
 
 # The Turbo LoRA with `turbo`; the upsampler with `prompt_upsampling`.
-@app.tool(label="Image", named="image", defaults={"model": _DEV, "turbo_lora": _TURBO, "upsampler": _DEV},
+@app.tool(label="Image", named="image", defaults={"model": _DEV, "turbo_lora": _TURBO, "upsampler": _UPSAMPLER},
           components=_TURBO_COMPONENTS, needs={"turbo_lora": "request.turbo", "upsampler": "request.prompt_upsampling"},
           memoize=True)
 def image(ctx: Context, payload: ImageBox, model: Flux2, turbo_lora: Flux2TurboLoRA, upsampler: Flux2Upsampler,
