@@ -72,43 +72,59 @@ _RATIO = re.compile(r"\s*(\d+(?:\.\d+)?)\s*:\s*(\d+(?:\.\d+)?)\s*")
 _FOLLOW = re.compile(r"\s*<image(\d+)>\s*")
 
 
-#: A request for a transparent picture, in the model card's words or a person's: an alpha channel, RGBA, or a
-#: transparent background (not an object that is itself transparent, as glass is).
+_BACKGROUND = r"(?:back(?:ground|drop)s?|bg)"
+#: A transparent background, in the model card's words or a person's: an alpha channel, RGBA, a transparent background
+#: (never an object that is itself transparent, as glass is).
 _TRANSPARENT = re.compile(
-    r"\b(?:rgba|alpha[\s-]*channel|transparent[\s-]+(?:back|bg\b)|background\s+(?:is\s+|that\s+is\s+)?transparent)",
+    rf"\b(?:rgba|alpha[\s-]*channel|transparent[\s-]+{_BACKGROUND}\b|{_BACKGROUND}\s+(?:that\s+is\s+|is\s+)?transparent)", re.IGNORECASE
+)
+#: The background taken away: "remove the white background", "no background", "background removed" (never what is in
+#: it: "remove the people in the background").
+_REMOVED = re.compile(
+    rf"\b(?:remov|delet|eras|strip|eliminat|get\s+rid\s+of)\w*\s+(?:(?!(?:in|from|on|of|at|behind)\b)\w+\s+){{0,4}}?{_BACKGROUND}\b"
+    rf"|\b(?:no|without(?:\s+(?:a|an|the|any))?)\s+{_BACKGROUND}\b|\b{_BACKGROUND}\s+(?:removed|removal)\b",
     re.IGNORECASE,
 )
-#: What a rewrite has lost a transparency request by: a background painted as transparency's stand-in.
-_PAINTED = re.compile(r"\bchecker|\bgrid\s+of\s+(?:gr[ae]y|white)|\btransparency[\s-]*(?:style|pattern|grid)", re.IGNORECASE)
-#: Appended to each enhancer's system prompt: Qwen's PE rewrites "transparent background" into a backdrop (a
-#: gray-and-white checkerboard), and Qwen-Image-2.1 draws RGBA only for the model card's wording.
-KEEP_TRANSPARENCY = (
-    "If the request asks for a transparent background, an alpha channel or an RGBA image, the picture must stay "
-    "transparent: begin rewritten_prompt with \"This is an RGBA image with transparency.\" and end it with \"The image "
-    "has alpha channel and the background is transparent.\", keep the request's own words about transparency, and "
-    "describe no background, backdrop, surface, scenery or checkerboard behind the subject."
+#: Another background in its place: "replace it with a beach", "change the background to blue", "put her on a beach".
+_REPLACED = re.compile(
+    rf"\b(?:replac|swap|substitut)\w*|\b{_BACKGROUND}\s+(?:with|to|into|of)\s|\b(?:new|different|another)\s+{_BACKGROUND}"
+    r"|\b(?:put|place|set)\s+(?:her|him|them|it|the\s+\w+)\s+(?:on|onto|into|against|in\s+front\s+of)\s+(?:a|an)\s",
+    re.IGNORECASE,
+)
+#: Words that make Qwen-Image-2.1 draw transparency, each with what goes in its place: it paints a gray-and-white
+#: checkerboard for "transparent background" (run PRO6-29) and half-transparent RGBA for the model card's wording.
+_SAID_PLAIN = (
+    (re.compile(rf"\b(?:fully\s+|completely\s+)?transparent[\s-]+(?:alpha[\s-]*channel[\s-]+)?{_BACKGROUND}\b", re.IGNORECASE), "plain backdrop"),
+    (re.compile(rf"\b({_BACKGROUND})\s+(?:that\s+is\s+|is\s+)?(?:fully\s+|completely\s+)?transparent", re.IGNORECASE), r"\1 is a plain backdrop"),
+    (re.compile(r"\b(?:an?\s+)?rgba\s+(?:image|picture|png)(?:\s+with\s+transparency)?", re.IGNORECASE), "a picture"),
+    (re.compile(r"\brgba\b", re.IGNORECASE), ""),
+    (re.compile(r"\b(?:an?\s+)?alpha[\s-]*channel", re.IGNORECASE), "a plain backdrop"),
+    (re.compile(r"\b(?:gr[ae]y[\s-]+and[\s-]+white\s+)?checker(?:board|ed)?(?:\s+pattern)?", re.IGNORECASE), "plain backdrop"),
+    (re.compile(r"\b(?:with\s+)?transparency(?:[\s-]*(?:style|pattern|grid))?", re.IGNORECASE), ""),
+    (re.compile(r"\btransparent\b", re.IGNORECASE), "plain"),
+)
+#: What Qwen-Image-2.1 is asked for in a cutout's place (se-154): the subject on a backdrop the matte cuts away. White, as
+#: it draws "remove the background" unasked (7 of 11, pod-session 44186728100): asked for a colour that contrasts, it drew
+#: charcoal, brown and purple, and on Turbo left a patch of the old white wall by her hair, which the matte kept (44192892033).
+BACKDROP = "The background is a plain, evenly lit, seamless pure white studio backdrop, with no shadows, props, scenery or pattern."
+#: After the request, where the enhancer reads intent: what a cutout's rewrite describes in place of transparency.
+_CUTOUT_ASK = (
+    "Put the subject on a plain, evenly lit, seamless pure white studio backdrop, with no shadows, props or scenery: the "
+    "backdrop is cut away afterwards, so never write transparent, alpha channel, RGBA or checkerboard."
 )
 
 
-#: The model card's own wording, which Qwen-Image-2.1 draws RGBA for (README "Transparent images").
-CARD = ("rgba image with transparency", "alpha channel and the background is transparent")
+def cutout(request: str) -> bool:
+    """Whether `request` asks for a cutout: a transparent background, or the background removed with none in its place."""
+    return bool(_TRANSPARENT.search(request)) or (bool(_REMOVED.search(request)) and not _REPLACED.search(request))
 
 
-def _phrases(text: str) -> set[str]:
-    return {" ".join(found[0].lower().split()) for found in _TRANSPARENT.finditer(text)}
-
-
-def transparent(request: str) -> bool:
-    """Whether `request` asks for a transparent picture."""
-    return bool(_phrases(request))
-
-
-def keeps_transparency(request: str, rewritten: str) -> bool:
-    """Whether a rewrite of `request` still asks for its transparency, in the request's own words or the model card's,
-    and paints no stand-in for it."""
-    flat = " ".join(rewritten.lower().split())
-    words = _phrases(request) <= _phrases(rewritten) or all(phrase in flat for phrase in CARD)
-    return words and _PAINTED.search(rewritten) is None
+def backdrop(prompt: str) -> str:
+    """`prompt` as Qwen-Image-2.1 is asked for a cutout: no word that makes it draw transparency, and the backdrop."""
+    for found, plain in _SAID_PLAIN:
+        prompt = found.sub(plain, prompt)
+    prompt = re.sub(r"[ \t]+([.,;:])", r"\1", re.sub(r"[ \t]{2,}", " ", prompt)).strip()
+    return prompt + ("\n\n" if "\n" in prompt else " ") + BACKDROP
 
 
 @dataclass(frozen=True)
@@ -185,7 +201,7 @@ class Enhancer(VisionLM):
 
     def load(self, loader: Loader) -> None:
         super().load(loader)
-        self.system = loader.assets.read(SYSTEM_PROMPT).decode("utf-8").strip() + "\n\n" + KEEP_TRANSPARENCY
+        self.system = loader.assets.read(SYSTEM_PROMPT).decode("utf-8").strip()
 
     @uses_components(COMPONENT)
     def answer(
@@ -233,14 +249,15 @@ class Enhancer(VisionLM):
 
 def rewrite(
     enhancer: Enhancer, prompt: str, images: list[Image.Image], creativity: Creativity, seed: int,
-    progress: Callable[[int, int], None],
+    progress: Callable[[int, int], None], cut: bool = False,
 ) -> tuple[Rewrite | None, str, int, int]:
     """The enhancer's rewrite of `prompt` (`<imageN>` for two or more pictures, as its system prompt asks), its raw
     answer and the tokens its thought and its answer took; `progress(step, total)` is told the tokens of its budget
-    decoded."""
+    decoded. With `cut`, a cutout's: the subject on a plain backdrop."""
     task = "edit" if images else "t2i"
     steer = _STEER[task].get(creativity, "")
-    question = Question("\n\n".join(filter(None, (prompt.strip(), steer, _BRIEF[task]))),
+    ask = _CUTOUT_ASK if cut else ""
+    question = Question("\n\n".join(filter(None, (prompt.strip(), ask, steer, _BRIEF[task]))),
                         [reference(image) for image in images])
     answer, thought_tokens, answer_tokens = enhancer.answer(
         question, think=THINK_TOKENS, presence_penalty=PRESENCE_PENALTY[task], seed=seed,
