@@ -373,7 +373,7 @@ wheels = [
 
 [[package]]
 name = "minimax-h3-image"
-version = "0.1.0rc5"
+version = "0.2.0rc1"
 source = { editable = "." }
 dependencies = [
     { name = "cozy-runtime", extra = ["adapters", "media"] },
