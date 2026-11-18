@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import itertools
 import math
 import sys
 from collections import deque
@@ -126,7 +127,7 @@ def upscale(
         overlap = 0
     count = 0
 
-    def restore(batch: list[DecodedVideoFrame], width: int, height: int) -> list[Image.Image]:
+    def restore(batch: list[DecodedVideoFrame], width: int, height: int) -> Iterator[Image.Image]:
         frames = [Image.frombytes("RGB", (f.width, f.height), f.rgb) for f in batch]
         if payload.uniform_batch_size and payload.batch_size:
             frames = extend(frames, size - len(frames))
@@ -142,7 +143,7 @@ def upscale(
                 input_noise=payload.input_noise_scale,
                 latent_noise=payload.latent_noise_scale,
             )
-        return restored[: len(batch)]
+        return itertools.islice(restored, len(batch))
 
     def events() -> Iterator[DecodedMediaHeader | DecodedVideoFrame | DecodedAudioChunk]:
         nonlocal count
@@ -162,8 +163,11 @@ def upscale(
             nonlocal tail, count, pending, skip
             ctx.raise_if_cancelled()
             batch = pending[:size]
+            # The window's frames as they are restored: only the overlap kept for the next
+            # window (`tail`) is held, never the window's pictures at once.
+            restored: Iterator[Image.Image]
             if tail and len(batch) == len(tail):
-                restored = tail
+                restored = iter(tail)
             else:
                 restored = restore(batch, width, height)
                 if tail:
@@ -173,16 +177,21 @@ def upscale(
                     current = torch.stack(
                         [
                             vision.to_tensor(frame).permute(1, 2, 0)
-                            for frame in restored[: len(tail)]
+                            for frame in itertools.islice(restored, len(tail))
                         ]
                     )
                     blended = blend_overlapping_frames(previous, current, len(tail))
-                    restored[: len(tail)] = [
-                        vision.to_pil_image(frame.permute(2, 0, 1)) for frame in blended
-                    ]
+                    restored = itertools.chain(
+                        [vision.to_pil_image(frame.permute(2, 0, 1)) for frame in blended],
+                        restored,
+                    )
             final = last and len(pending) <= size
-            emit = len(restored) if final else len(restored) - overlap
-            for original, image in zip(batch[:emit], restored[:emit], strict=True):
+            emit = len(batch) if final else len(batch) - overlap
+            kept: list[Image.Image] = []
+            for at, (original, image) in enumerate(zip(batch, restored, strict=True)):
+                if at >= emit:
+                    kept.append(image)
+                    continue
                 if skip:
                     skip -= 1
                     continue
@@ -192,7 +201,7 @@ def upscale(
                 end = (original.pts + original.duration) * original.time_base
                 while audio and audio[0].start_time < end:
                     yield audio.popleft()
-            tail = [] if final else restored[emit:]
+            tail = [] if final else kept
             pending = [] if final else pending[emit:]
 
         with payload.video.stream() as stream:

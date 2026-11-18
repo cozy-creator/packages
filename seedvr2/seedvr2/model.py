@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ast
 import operator
+from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import Protocol, TypedDict, cast
 
@@ -295,8 +296,10 @@ def restore(
     correction: Correction,
     input_noise: float,
     latent_noise: float,
-) -> list[Image.Image]:
-    """One window: encode, denoise and decode, each its own component scope."""
+) -> Iterator[Image.Image]:
+    """One window: encode, denoise and decode, each its own component scope; then its frames,
+    each colour-corrected and made RGB8 as it is read, so the window is never a list of
+    pictures beside its decoded pixels (9 GB of them at 2160p for 360 frames)."""
     if not frames:
         raise ValueError("SeedVR2 restoration needs at least one frame")
     padded = extend(frames, (1 - len(frames)) % 4)
@@ -330,15 +333,26 @@ def restore(
             sample = model.decode(latent)
         if sample.ndim == 3:
             sample = sample.unsqueeze(1)
-        restored = []
-        for index in range(len(frames)):
-            frame = sample[:, index, crop[0], crop[1]].to(device).float().clamp(-1, 1)[None]
-            reference = _signed(source[index, crop[0], crop[1]].to(device), torch.float32)
-            frame = correct(frame, reference.permute(2, 0, 1)[None], correction)
-            # As torchvision's `to_pil_image` rounds a float frame: down.
-            image = frame[0].clamp(-1, 1).add(1).div(2).mul(255).to(torch.uint8)
-            restored.append(Image.fromarray(image.permute(1, 2, 0).cpu().numpy()))
-    return restored
+    return _corrected(sample, source, crop, device, correction, len(frames))
+
+
+@torch.inference_mode()
+def _corrected(
+    sample: torch.Tensor,
+    source: torch.Tensor,
+    crop: tuple[slice[int, int, None], slice[int, int, None]],
+    device: torch.device,
+    correction: Correction,
+    count: int,
+) -> Iterator[Image.Image]:
+    """The window's first `count` decoded frames, colour-corrected against their sources."""
+    for index in range(count):
+        frame = sample[:, index, crop[0], crop[1]].to(device).float().clamp(-1, 1)[None]
+        reference = _signed(source[index, crop[0], crop[1]].to(device), torch.float32)
+        frame = correct(frame, reference.permute(2, 0, 1)[None], correction)
+        # As torchvision's `to_pil_image` rounds a float frame: down.
+        image = frame[0].clamp(-1, 1).add(1).div(2).mul(255).to(torch.uint8)
+        yield Image.fromarray(image.permute(1, 2, 0).cpu().numpy())
 
 
 def _signed(image: torch.Tensor, dtype: torch.dtype) -> torch.Tensor:
