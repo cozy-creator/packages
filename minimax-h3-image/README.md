@@ -13,8 +13,10 @@ cozy run minimax-h3-image/generate instructions='Put the hat from <hat> on the w
   6272x2688), 1:1 through 21:9 either way. Unset, the ratio is the expander's choice, else Picture 1's, else 1:1. Each
   picture is read at its own size, its short edge held to 1024-2048 px.
 - **`prompt_upsampling`** (on): MiniMax's prompt expander, MiniMax-H3-Image-PE, writes the detailed caption the model
-  renders best and picks the canvas; an edit runs MiniMax's edit PE prompt on the same checkpoint. Off, the
-  instructions render as written. The result's `prompt` is what rendered.
+  renders best and picks the canvas; an edit runs MiniMax's edit PE prompt on the same checkpoint. One added line of
+  system prompt has it write what was asked instead of a sanitized caption; its one exception is nobody under 18 and no
+  real person nude or in sexual content. Off, the instructions render as written. The result's `prompt` is what
+  rendered.
 - **Model.** A 33B DiT (H3's, without audio, one output head per step), MiniMax-H3's text encoder unchanged (its
   `minimaxai/minimax-h3` lanes, so a machine with H3 fetches nothing more for it), and a VAE whose encoder is H3's and
   whose decoder is a 2D ViT. A request fetches the expander only when it upsamples and the VAE encoder only when it
