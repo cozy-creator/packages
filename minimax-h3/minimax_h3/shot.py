@@ -804,27 +804,21 @@ def _at(packet: Packet[VideoStream] | Packet[AudioStream]) -> Fraction:
 
 def _copied(packets: Sequence[Packet[AudioStream]], heard: AudioStream, sound: AudioStream, origin: Fraction,
             end: Fraction) -> list[Packet[AudioStream]]:  # fmt: skip
-    """`heard`'s `packets` from `origin` to `end` on `sound`, moved so `origin` is 0, with the one before the first that
-    reaches it, whose overlap the decoder needs: the MP4's edit list skips what lies before 0."""
+    """`heard`'s `packets` up to `end` on `sound`, moved so `origin` is 0. Every one from the stream's first: the decoder
+    then runs as it does on the plate (Opus converges only over its pre-roll; one packet before `origin` gave run
+    44209703781's long-keep a different PCM), and the MP4's edit list skips what lies before 0."""
     tick = _ratio(heard.time_base)
     shift = round(origin / tick)
     kept: list[Packet[AudioStream]] = []
-    before: Packet[AudioStream] | None = None
     for packet in packets:
         if packet.pts is None:
             continue
         if (packet.pts - shift) * tick >= end:
             break
-        if (packet.pts - shift + (packet.duration or 0)) * tick <= 0:
-            before = packet
-            continue
-        if not kept and before is not None:
-            kept.append(before)
-        kept.append(packet)
-    for packet in kept:
-        packet.pts = (packet.pts or 0) - shift
+        packet.pts -= shift
         packet.dts = packet.pts if packet.dts is None else packet.dts - shift
         packet.stream = sound
+        kept.append(packet)
     return kept
 
 
