@@ -20,6 +20,9 @@ from torch.nn import functional as F
 
 #: The ratio the output may differ from the picture's before its framing counts as changed: past the 32 px rounding.
 RATIO_TOLERANCE = 0.04
+#: How much larger than the picture the canvas may be: past it the picture's pixels are an upscale, and the model's
+#: (base or Qwen's Turbo at 4 MP from a 1080p photo) are closer to the photo than they are (se-153).
+MAX_UPSCALE = 1.25
 #: The longest side the alignment and the mask are measured at.
 MEASURE_SIDE = 512
 #: The scales the output may be off by, searched about its centre (Qwen's small zoom).
@@ -157,6 +160,8 @@ def keep_unchanged(picture: Image.Image, decoded: torch.Tensor) -> tuple[torch.T
         return decoded, Kept(0.0, 1.0, (0.0, 0.0), "the picture has transparency")
     if abs(picture.width / picture.height / (width / height) - 1) > RATIO_TOLERANCE:
         return decoded, Kept(0.0, 1.0, (0.0, 0.0), "the framing changed")
+    if (width * height / (picture.width * picture.height)) ** 0.5 > MAX_UPSCALE:
+        return decoded, Kept(0.0, 1.0, (0.0, 0.0), "the picture is smaller than the canvas")
     device = decoded.device
     over_white = Image.new("RGBA", picture.size, "white")
     over_white.alpha_composite(picture.convert("RGBA"))
@@ -175,7 +180,8 @@ def keep_unchanged(picture: Image.Image, decoded: torch.Tensor) -> tuple[torch.T
     moved = _warp(small_output, sx, sy, tx, ty)
     difference = (_lab(_blur(moved, sigma)) - lab_source).norm(dim=0)
     shift = (tx * width / 2, ty * height / 2)
-    # The colour drift over what stayed: a gain and offset per channel, fit where it stayed.
+    # The colour drift over what stayed, a gain and offset per channel fit where it stayed: taken out before the change
+    # mask is drawn, so a drift is not a change. The model's own pixels keep their colour (a new white backdrop stays white).
     still = difference < STILL_DELTA_E
     if float(still.float().mean()) < MIN_STILL:
         return decoded, Kept(0.0, scale, shift, "the edit changed most of the picture")
@@ -196,7 +202,6 @@ def keep_unchanged(picture: Image.Image, decoded: torch.Tensor) -> tuple[torch.T
     changed = F.max_pool2d(changed[None], 2 * grow + 1, stride=1, padding=grow)[0]
     changed = _blur(changed, grow / 2).clamp(0, 1)
     changed = F.interpolate(changed[None], size=(height, width), mode="bilinear", align_corners=False)[0]
-    edited = _warp(output, sx, sy, tx, ty, "bicubic") * gain.view(3, 1, 1) + offset.view(3, 1, 1)
-    kept = source * (1 - changed) + edited.clamp(0, 1) * changed
+    kept = source * (1 - changed) + _warp(output, sx, sy, tx, ty, "bicubic").clamp(0, 1) * changed
     # F32, so a kept pixel quantizes back to the picture's own byte; the decoder's alpha as it was.
     return torch.cat([kept * 2 - 1, decoded[0, 3:].float()])[None], Kept(float(1 - changed.mean()), scale, shift)
