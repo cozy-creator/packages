@@ -307,8 +307,18 @@ _BOX_NEEDS = {"expander_i2i": f"request.prompt_upsampling && request.instruction
               "turbo_lora": "request.turbo"}  # fmt: skip
 
 
+#: What a box's picture costs (cl-1286): its megapixels and its steps, Turbo's 4 else 40. Its time is `generate`'s row of its
+#: card (`benchmarks.json`: 40 steps at 4 MP) by megapixels^0.52 (an RTX 4090's warm 40-step runs: 18.8 s at 1 MP, 38.5 s at
+#: 4 MP) and 0.27 + 0.73 of its share of 40 steps (an RTX A6000's 1 MP: 6.0 s at 4 steps, 17.4 s at 40). The prompt
+#: enhancer's rewrite (`prompt_upsampling`) is not in it.
+_BOX_ESTIMATE = {
+    "size": {"megapixels": "double(request.megapixels)", "steps": "request.turbo ? 4.0 : 40.0"},
+    "ms": 'measured(machine, "generate").warm_ms * pow(size.megapixels / 4.0, 0.52) * (0.27 + 0.73 * size.steps / 40.0)',
+}  # fmt: skip
+
+
 @app.tool(label="Image", named="image", defaults=_TURBO, components=_COMPONENTS, needs=_BOX_NEEDS, on_demand=("matte",),
-          memoize=True)  # fmt: skip
+          memoize=True, estimate=_BOX_ESTIMATE)  # fmt: skip
 def image(
     ctx: Context,
     payload: ImageBox,
