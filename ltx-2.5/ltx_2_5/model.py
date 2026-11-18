@@ -16,7 +16,8 @@ from diffusers.models.transformers.transformer_ltx2 import LTX2VideoTransformer3
 from diffusers.models.condition_embedders.condition_embedder_ltx2 import LTX2TextConnectors
 from diffusers.schedulers.scheduling_flow_match_euler_discrete import FlowMatchEulerDiscreteScheduler
 from diffusers.pipelines.ltx2.pipeline_ltx2 import LTX2Pipeline
-from diffusers.pipelines.ltx2.pipeline_ltx2_image2video import LTX2ImageToVideoPipeline
+from diffusers.pipelines.ltx2.pipeline_ltx2_image2video import LTX2ImageToVideoPipeline, retrieve_latents
+from diffusers.pipelines.ltx2.utils import apply_image_conditioning_crf, resolve_default_image_crf
 from diffusers.pipelines.ltx2.pipeline_ltx2_latent_upsample import LTX2LatentUpsamplePipeline
 from diffusers.models.latent_upscaler.latent_upscaler_ltx2 import LTX2LatentUpsamplerModel
 from diffusers.pipelines.ltx2.vocoder import LTX2VocoderWithBWE
@@ -162,6 +163,15 @@ class Ltx25(Model[Graph]):
         # The VAE roots are also leased: their latent-statistic buffers participate here.
         pipe = self._pipeline(image=image is not None)
         sigmas = list(SIGMAS if latents is None else REFINE_SIGMAS)
+        if latents is not None and image is not None:
+            # Stage 2 conditions on the picture encoded at its own size, as native LTX-2.5 (ltx_pipelines'
+            # image_conditionings_for_chunk) and its ComfyUI template do; Diffusers' pipeline given `latents` would keep
+            # the upsampled half-size encode, a blurred first frame.
+            first = self._first_frame(pipe, image, width=width, height=height)
+            with torch.inference_mode():
+                video = latents[0].clone()
+                video[:, :, :1] = first.to(video.dtype)
+            latents = (video, latents[1])
 
         def callback(_pipe: object, index: int, _t: torch.Tensor, values: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
             check()
@@ -189,6 +199,19 @@ class Ltx25(Model[Graph]):
             return video, audio
         finally:
             pipe.transformer._reset_stateful_cache()
+
+    def _first_frame(self, pipe: LTX2Pipeline | LTX2ImageToVideoPipeline, image: Image.Image, *, width: int,
+                     height: int) -> torch.Tensor:
+        """The picture's unnormalized latent at `width`x`height`, encoded as Diffusers' pipeline encodes a first frame:
+        CRF re-compression, resize, the posterior's mode."""
+        vae = self.graph.components["vae"]
+        crf = resolve_default_image_crf(pipe.text_encoder)
+        if crf:
+            image = Image.fromarray(apply_image_conditioning_crf(np.asarray(image.convert("RGB")), crf))
+        pixels = pipe.video_processor.preprocess(image, height=height, width=width)
+        with torch.inference_mode():
+            pixels = pixels.to(torch.device(str(self.device)), vae.dtype)
+            return cast(torch.Tensor, retrieve_latents(vae.encode(pixels.unsqueeze(2)), None, "argmax"))
 
     @uses_components("latent_upsampler", "vae")
     def upscale(self, latents: torch.Tensor) -> torch.Tensor:

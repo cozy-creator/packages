@@ -108,6 +108,7 @@ def asker(model: PreTrainedModel) -> vlm.VisionLM:
     asking.pipe = vlm.Pipeline.__new__(vlm.Pipeline)
     asking.pipe.components = {vlm.COMPONENT: model}
     asking.processor = vlm.processor(cast(ModelAssets, Files()))  # Files: the names and reads processor makes
+    asking.engine = vlm.TransformersEngine(asking.pipe, asking.processor)  # as VisionLM.load makes it
     model.generation_config = GenerationConfig(**json.loads((FILES / "generation_config.json").read_text()))  # type: ignore[no-untyped-call]  # Transformers leaves its __init__ unannotated
     return asking
 
@@ -128,14 +129,15 @@ def case(name: str, moe_layout: bool) -> None:
     assert split == (4 if moe_layout else 0), split
     asking = asker(model)
     q = question()
-    text = asking._chat(q, "Answer briefly.", False)
+    engine = vlm.TransformersEngine(asking.pipe, asking.processor)
+    text = engine._chat(q, "Answer briefly.", False)
     expected = asking.processor.apply_chat_template(
         [{"role": "system", "content": "Answer briefly."},  # type: ignore[arg-type, unused-ignore]  # Transformers annotates text-only content
          {"role": "user", "content": [{"type": "image"}, {"type": "video"}, {"type": "text", "text": q.text}]}],
         add_generation_prompt=True, tokenize=False, enable_thinking=False,
     )
     assert text == expected and text.endswith("<think>\n\n</think>\n\n"), text
-    inputs = asking._inputs(
+    inputs = engine._inputs(
         text=[text], images=q.images, videos=[q.videos[0].frames], do_sample_frames=False,
         video_metadata=[{"total_num_frames": 4, "fps": 1000.0, "frames_indices": [250, 750, 1250, 1750]}],
     )

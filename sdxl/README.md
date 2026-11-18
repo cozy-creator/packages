@@ -30,7 +30,8 @@ cozy run sdxl/generate prompt='a fox in fresh snow' aspect_ratio=16:9 megapixels
 
 Inputs: `prompt`, `aspect_ratio` (any W:H), `megapixels` (any size, 1024² pixels each), `seed`, `steps`, `guidance`, `negative_prompt` and `hidiffusion`. Left out, each is SDXL's default: 1:1 at 1 MP, 30 steps at
 guidance 7 (HiDiffusion's 30 at 7.5 above 1 MP, where it runs unless `hidiffusion=false`), no
-negative prompt, a random seed. Sizes snap to the 64 px stride and stay within 1–8 MP (16 MP at
+negative prompt (guidance then runs against SDXL's zero unconditional, as Diffusers and Stability's own sampler do), a
+random seed. Sizes snap to the 64 px stride and stay within 1–8 MP (16 MP at
 1:1), 1:4–4:1 and 4096 px sides; steps 1–50, guidance 0–20. Out of range clamps with a `clamp`
 adjustment. SDXL makes images from text only: its prompt is words, so a picture mentioned in it goes as its name ([references](../docs/references.md)). The
 result is `image` (a WebP in `~/.cozy/outputs`), `width`, `height`, `seed` and `prompt`.

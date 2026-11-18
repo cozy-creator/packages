@@ -115,9 +115,10 @@ class LatentResizer3D(nn.Module):
         return self._forward_seg(x, scale, size)
 
     def _forward_seg(self, x: torch.Tensor, scale: float | None, size: tuple[int, ...]) -> torch.Tensor:
-        scale_emb = torch.tensor(
-            [scale - 1 if scale is not None else 0.0],
-            dtype=x.dtype, device=x.device).unsqueeze(0)
+        # Filled on the device, not copied from the host (the node's `torch.tensor`): a CUDA graph
+        # capture refuses a pageable copy, and `scale` keys the graph.
+        offset = scale - 1 if scale is not None else 0.0
+        scale_emb = torch.full((1, 1), offset, dtype=x.dtype, device=x.device)
         emb: torch.Tensor = self.embed(scale_emb)
 
         x = self.conv_in(x)

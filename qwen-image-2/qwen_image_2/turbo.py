@@ -1,4 +1,4 @@
-"""Qwen Image 2's Turbo: Alibaba PAI's Qwen-Image-2.1-Fun-Acc-4Step over the base model, its own model.
+"""Qwen Image 2.1's Turbo: Alibaba PAI's Qwen-Image-2.1-Fun-Acc-4Step over the base model, its own model.
 
 A Parallel Decoding Distillation export (hf://alibaba-pai/Qwen-Image-2.1-Fun-Acc-LoRAs@f7545234,
 `qwenimage21_pdd.py`): rank-64 factors on every DiT linear but the output projection, one output
@@ -51,7 +51,7 @@ def read_plan(raw: bytes) -> Plan:
     if len(grid) != steps + 1 or config.get("pdd_block_size", 1) != 1:
         raise UnsupportedInput(
             f"{PLAN}: {len(grid)} sigmas for {steps} steps in blocks of {config.get('pdd_block_size', 1)}; "
-            "Qwen Image 2 runs a grid of steps + 1 sigmas, one step a block",
+            "Qwen Image 2.1 runs a grid of steps + 1 sigmas, one step a block",
             code="artifact_config",
             fields=[PLAN],
         )

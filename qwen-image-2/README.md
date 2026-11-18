@@ -1,8 +1,8 @@
-# Qwen Image 2
+# Qwen Image 2.1
 
 `generate` creates or edits one lossless image using Qwen-Image-2.1, and `generate_turbo` does
 the same with Alibaba PAI's Fun Acc overlay on it (`alibaba-pai/qwen-image-2.1-fun-acc`, a 330 MiB
-4-step distillation). Both take the same inputs. On a canvas they're one tool, `image` (Qwen Image 2):
+4-step distillation). Both take the same inputs. On a canvas they're one tool, `image` (Qwen Image 2.1; Qwen Image 1 is `qwen-image`):
 its `instructions`, a Turbo toggle (the overlay loads only when asked for), `aspect_ratio`, `megapixels`, `seed` and,
 under Advanced, `prompt_upsampling` and `creativity`. The model checkpoint is selected
 independently from the package. TensorFS owns model downloads and bytes;
@@ -22,7 +22,13 @@ noise with a restoration request, the picture its reference at the canvas's size
 output (`output_resolution`), so the edit keeps to it. On 225 px JPEGs of clean pictures (cozy-creator
 `release-gate/sessions/fixtures/upscale-bench`, se-147) its DISTS to the clean original is 0.13 against the Lanczos
 blow-up's 0.34; a start from the blow-up keeps its blur and JPEG blocks at any strength, and Fun Acc's 4 steps zoom and
-redraw it. 29 s on an RTX 4090 at 4 MP. `megapixels` and `seed`.
+redraw it. 29 s on an RTX 4090 at 4 MP. `megapixels`, `seed` and an optional `prompt`.
+
+`prompt` steers it ("the sign says OPEN", "her eyes are green"): its words follow the restoration request, which they
+never replace, and empty it runs exactly as without. Each picture it mentions (a face, the correct text) follows the
+picture as a reference at its own 1 MP, as `generate` takes them: the picture is `<image1>` (the request then says
+"Restore <image1>"), the mentioned ones `<image2>` on in order of first mention, with their descriptions, up to 10
+pictures in all.
 
 ## Prompt upsampling
 

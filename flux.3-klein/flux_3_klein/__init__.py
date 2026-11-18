@@ -75,6 +75,7 @@ class GenerateInput(TurboInput):
 def _render(
     ctx: Context,
     model: Klein,
+    text_encoder: Klein,
     upsampler: Upsampler,
     drafter: Drafter,
     tel: Telemetry,
@@ -114,8 +115,8 @@ def _render(
         with tel.stage("encoding reference images"):
             references = model.encode_references(prepared)
     with tel.stage("encoding prompt"):
-        embeds = model.encode(caption)
-        negatives = model.encode(negative) if guidance is not None else None
+        embeds = text_encoder.encode(caption)
+        negatives = text_encoder.encode(negative) if guidance is not None else None
     ctx.raise_if_cancelled()
     with tel.stage("generating image"):
         tokens = model.denoise(
@@ -218,7 +219,7 @@ def layout_rows(payload: TurboInput, placed: dict[str, Corners | None]) -> list[
     return rows
 
 
-def _generate(ctx: Context, function: str, payload: TurboInput, drafter: Drafter, model: Klein,
+def _generate(ctx: Context, function: str, payload: TurboInput, drafter: Drafter, model: Klein, text_encoder: Klein,
               upsampler: Upsampler, tel: Telemetry, adj: Adjustments) -> ImageResult:
     default, most = _STEPS[function]
     steps = held(adj, "steps", payload.steps or default, 1, most)
@@ -236,7 +237,7 @@ def _generate(ctx: Context, function: str, payload: TurboInput, drafter: Drafter
     # The upsampler is told the references' order in words, or as the layout record's ids; Klein
     # reading the prompt itself was trained on `<ref_image_N>`.
     prompt = worded(payload.prompt, placed, (ref_id if rows else ordinal) if upsample else tagged)
-    return _render(ctx, model, upsampler, drafter, tel, adj, prompt=prompt, upsample=upsample,
+    return _render(ctx, model, text_encoder, upsampler, drafter, tel, adj, prompt=prompt, upsample=upsample,
                    draft=payload.prompt_drafting, images=images, prepared=prepared, size=size, crop=crop,
                    canvas=canvas, rows=rows, steps=steps, guidance=guidance, negative=negative,
                    seed=payload.drawn_seed())
@@ -249,28 +250,34 @@ _UPSAMPLER = "atomicchat/flux-3-klein-upsampler-abliterated@0.1.0"
 _DRAFTER = "qwen/qwen3.5-9b-mtp@0.2.0"
 _DISTILLED = "black-forest-labs/flux-3-klein@0.1.0"
 _BASE = "black-forest-labs/flux-3-klein-base@0.1.0"
-_KLEIN = ("transformer", "text_encoder", "vae")
-_COMPONENTS = {"model": _KLEIN, "upsampler": ("model",), "drafter": ("model",)}
+#: Klein's text encoder is stock Qwen3-VL-4B-Instruct (BFL's shards are Qwen's), its own slot: DreamFast's Heretic
+#: abliteration by default (Paul, 11-17: "use abliterated models wherever possible"), the same weights as krea-2's.
+#: BFL's own is any Klein checkpoint: `model.text_encoder=black-forest-labs/flux-3-klein@0.1.0`. `model` (and `full`)
+#: read only the DiT and the VAE.
+_TEXT_ENCODER = "dreamfast/qwen3-vl-4b-heretic-klein@0.1.0"
+_KLEIN = ("transformer", "vae")
+_TEXT = ("text_encoder",)
+_COMPONENTS = {"model": _KLEIN, "text_encoder": _TEXT, "upsampler": ("model",), "drafter": ("model",)}
 #: Which requests need each (cl-1103, `_render`): the upsampler with upsampling on (unset is on), the drafter with
 #: drafting on too. Over-fetched: a finished layout caption (`is_finished`), which goes as written, but only its text says so.
 _NEEDS = {"upsampler": "request.prompt_upsampling != false",
           "drafter": "request.prompt_upsampling != false && request.prompt_drafting"}
 
 
-@app.entrypoint(defaults={"model": _BASE, "upsampler": _UPSAMPLER, "drafter": _DRAFTER}, components=_COMPONENTS,
-                needs=_NEEDS, memoize=True)
-def generate(ctx: Context, payload: GenerateInput, drafter: Drafter, model: Klein, upsampler: Upsampler,
-             tel: Telemetry, adj: Adjustments) -> ImageResult:
+@app.entrypoint(defaults={"model": _BASE, "text_encoder": _TEXT_ENCODER, "upsampler": _UPSAMPLER, "drafter": _DRAFTER},
+                components=_COMPONENTS, needs=_NEEDS, memoize=True)
+def generate(ctx: Context, payload: GenerateInput, drafter: Drafter, model: Klein, text_encoder: Klein,
+             upsampler: Upsampler, tel: Telemetry, adj: Adjustments) -> ImageResult:
     """Klein Base, 50 steps with CFG 4: text to image, or an edit of up to ten ordered pictures."""
-    return _generate(ctx, "generate", payload, drafter, model, upsampler, tel, adj)
+    return _generate(ctx, "generate", payload, drafter, model, text_encoder, upsampler, tel, adj)
 
 
-@app.entrypoint(defaults={"model": _DISTILLED, "upsampler": _UPSAMPLER, "drafter": _DRAFTER}, components=_COMPONENTS,
-                needs=_NEEDS, memoize=True)
-def generate_turbo(ctx: Context, payload: TurboInput, drafter: Drafter, model: Klein, upsampler: Upsampler,
-                   tel: Telemetry, adj: Adjustments) -> ImageResult:
+@app.entrypoint(defaults={"model": _DISTILLED, "text_encoder": _TEXT_ENCODER, "upsampler": _UPSAMPLER,
+                          "drafter": _DRAFTER}, components=_COMPONENTS, needs=_NEEDS, memoize=True)
+def generate_turbo(ctx: Context, payload: TurboInput, drafter: Drafter, model: Klein, text_encoder: Klein,
+                   upsampler: Upsampler, tel: Telemetry, adj: Adjustments) -> ImageResult:
     """The distilled Klein, 16 steps, no guidance: text to image, or an edit of up to ten ordered pictures."""
-    return _generate(ctx, "generate_turbo", payload, drafter, model, upsampler, tel, adj)
+    return _generate(ctx, "generate_turbo", payload, drafter, model, text_encoder, upsampler, tel, adj)
 
 
 class ImageBox(msgspec.Struct, kw_only=True):
@@ -295,16 +302,18 @@ _BOX_NEEDS = {"drafter": "request.prompt_upsampling", "full": "!request.turbo", 
 
 
 @app.tool(label="FLUX.3 Klein", named="image",
-          defaults={"drafter": _DRAFTER, "full": _BASE, "model": _DISTILLED, "upsampler": _UPSAMPLER},
-          components={"drafter": ("model",), "full": _KLEIN, "model": _KLEIN, "upsampler": ("model",)},
+          defaults={"drafter": _DRAFTER, "full": _BASE, "model": _DISTILLED, "text_encoder": _TEXT_ENCODER,
+                    "upsampler": _UPSAMPLER},
+          components={"drafter": ("model",), "full": _KLEIN, "model": _KLEIN, "text_encoder": _TEXT,
+                      "upsampler": ("model",)},
           needs=_BOX_NEEDS, memoize=True)  # fmt: skip
-def image(ctx: Context, payload: ImageBox, drafter: Drafter, full: Klein, model: Klein, upsampler: Upsampler,
-          tel: Telemetry, adj: Adjustments) -> ImageResult:
+def image(ctx: Context, payload: ImageBox, drafter: Drafter, full: Klein, model: Klein, text_encoder: Klein,
+          upsampler: Upsampler, tel: Telemetry, adj: Adjustments) -> ImageResult:
     """FLUX.3 Klein on a canvas, upsampled: the distilled model, or Base, which loads only when asked for."""
     kind, function, klein = (TurboInput, "generate_turbo", model) if payload.turbo else (GenerateInput, "generate", full)
     request = kind(prompt=payload.instructions, aspect_ratio=payload.aspect_ratio, megapixels=payload.megapixels,
                    seed=payload.seed, prompt_upsampling=payload.prompt_upsampling)  # fmt: skip
-    return _generate(ctx, function, request, drafter, klein, upsampler, tel, adj)
+    return _generate(ctx, function, request, drafter, klein, text_encoder, upsampler, tel, adj)
 
 
 #: What Klein is asked of a picture it upscales, read directly (`tagged`).
@@ -322,9 +331,9 @@ class UpscaleInput(msgspec.Struct, kw_only=True):
     seed: Seed | None = None
 
 
-@app.tool(label="Upscale", named="image", defaults={"model": _DISTILLED}, components={"model": _KLEIN},
-          memoize=True)  # fmt: skip
-def upscale(ctx: Context, payload: UpscaleInput, model: Klein, tel: Telemetry,
+@app.tool(label="Upscale", named="image", defaults={"model": _DISTILLED, "text_encoder": _TEXT_ENCODER},
+          components={"model": _KLEIN, "text_encoder": _TEXT}, memoize=True)  # fmt: skip
+def upscale(ctx: Context, payload: UpscaleInput, model: Klein, text_encoder: Klein, tel: Telemetry,
             adj: Adjustments) -> ImageResult:
     """The picture larger: Klein edits it at the size asked, the picture Lanczos-upscaled to the canvas both as the
     reference and, below `denoise`, as the start."""
@@ -337,7 +346,7 @@ def upscale(ctx: Context, payload: UpscaleInput, model: Klein, tel: Telemetry,
     with tel.stage("encoding reference images"):
         references = model.encode_references([canvas])
     with tel.stage("encoding prompt"):
-        embeds = model.encode(UPSCALE_PROMPT)
+        embeds = text_encoder.encode(UPSCALE_PROMPT)
     ctx.raise_if_cancelled()
     with tel.stage("generating image"):
         tokens = model.denoise(

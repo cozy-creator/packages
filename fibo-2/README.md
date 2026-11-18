@@ -65,6 +65,15 @@ Both are Qwen3-VL-4B fine-tunes, decoded greedily (Bria samples at temperature 0
 on first use. `prompt_upsampling=false` sends the prompt as typed. The returned `prompt` reproduces
 the image with `prompt_upsampling=false` and the same seed.
 
+## Text encoder
+
+Fibo 2.0's text encoder is stock Qwen3-VL-4B-Instruct, bound as its own slot, `text_encoder`; `model` and `full`
+read only the DiT and the VAE. Its default is abliterated (Paul, 11-17: "use abliterated models wherever
+possible"): [DreamFast's Heretic](https://huggingface.co/DreamFast/Qwen3-VL-4b-Heretic)
+(`dreamfast/qwen3-vl-4b-heretic-fibo`, 0/400 HarmBench refusals, KL 0.028), composed on Fibo 2.0 Dev; Krea 2 and
+FLUX.3 Klein read the same weights. Bria's own is any Fibo 2.0 checkpoint:
+`--model text_encoder=briaai/fibo-2-dev@0.1.1`. Bria's prompt VLMs have no abliterated release, so they stay Bria's.
+
 ## Sampling
 
 Diffusers' `BriaFibo2Pipeline` (main `48cdbaef`, #14991, verified by Bria against its reference code),
@@ -89,6 +98,10 @@ cozy model upload hf://briaai/Fibo-2.0-dev@fb2b781f9e9e5572a6c348a5af7a4d155a2b1
 cozy model upload hf://briaai/Fibo-2.0-edit-turbo@7b133d62d92e897f1468af0427a73cc41a03cb5d briaai/fibo-2-edit-turbo --lane bf16 --on <machine>
 cozy model upload hf://briaai/FIBO-vlm@bd13da5e0b73c808014d6260963e311c8cdf0d8b briaai/fibo-vlm --lane bf16 --on <machine>
 cozy model upload hf://briaai/FIBO-edit-vlm@61d852ebd380ac79e04ec171552f5d7cca1a04cc briaai/fibo-edit-vlm --lane bf16 --on <machine>
+cozy model upload hf://DreamFast/Qwen3-VL-4b-Heretic@d8af0c92971d54d90fde7d44180b807b99cef5c5/model.safetensors.index.json \
+  dreamfast/qwen3-vl-4b-heretic-fibo --lane bf16 --base briaai/fibo-2-dev@sha256:<bf16 commit>:text_encoder \
+  --mirror https://huggingface.co/DreamFast/Qwen3-VL-4b-Heretic --on <machine>
+cozy model quantize dreamfast/qwen3-vl-4b-heretic-fibo@sha256:<bf16 commit> --lane int8 --package ./fibo-2 --on <machine>
 ```
 
 ## Quantized lanes

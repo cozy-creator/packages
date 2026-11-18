@@ -380,7 +380,10 @@ class SdxlModel(Model[SdxlPipeline]):
         """Text encoding, every step and the decode: DPM++ 2M Karras (Diffusers'
         `DPMSolverMultistepScheduler`), or with HiDiffusion its recipe's `DDIMScheduler` at eta 1. HiDiffusion's blocks choose by step
         (RAU-Net's switch, each window's shift). Returns the image, conditioning and latents. With `start` (pixels
-        [1, 3, H, W] in -1..1), Diffusers' img2img: its latents noised to the last `strength` of the steps, which run."""
+        [1, 3, H, W] in -1..1), Diffusers' img2img: its latents noised to the last `strength` of the steps, which run.
+        Guidance above 1 runs CFG against `negative_tokens`, or without them against zeros: SDXL's unconditional, which
+        its training dropped the text to (generative-models' `force_uc_zero_embeddings`, Diffusers'
+        `force_zeros_for_empty_prompt`)."""
         components = self.pipe.components
         first, second = components["text_encoder"], components["text_encoder_2"]
         unet, vae = components["unet"], components["vae"]
@@ -398,7 +401,7 @@ class SdxlModel(Model[SdxlPipeline]):
             scheduler, advance = dpm, functools.partial(dpm.step, return_dict=False)
             dpm.set_begin_index(0)
         unet.begin_denoise_request(steps, hidiffusion, seed)
-        batch = 1 if negative_tokens is None else 2
+        batch = 2 if guidance > 1.0 else 1
         dtype, scale = next(vae.parameters()).dtype, self.pipe.vae_scale
         latents = rng.noise((1, 4, height // 8, width // 8), generator, dtype=torch.float16, device=device)
         first_step = 0
@@ -420,8 +423,11 @@ class SdxlModel(Model[SdxlPipeline]):
         )
         with torch.no_grad():
             prompt, pooled = encode_tokens(first, second, *(t.to(device) for t in tokens))
-            if negative_tokens is not None:
-                negative, negative_pool = encode_tokens(first, second, *(t.to(device) for t in negative_tokens))
+            if guidance > 1.0:
+                if negative_tokens is None:
+                    negative, negative_pool = torch.zeros_like(prompt), torch.zeros_like(pooled)
+                else:
+                    negative, negative_pool = encode_tokens(first, second, *(t.to(device) for t in negative_tokens))
                 prompt, pooled = torch.cat([negative, prompt]), torch.cat([negative_pool, pooled])
             prompt, pooled = prompt.to(torch.float16), pooled.to(torch.float16)
             # The schedulers read their own tables by the host timestep; the UNet takes the device one.
@@ -537,7 +543,7 @@ def _sample(
     """Encode, denoise and decode: DPM++ 2M Karras, or HiDiffusion's DDIM."""
     with tel.stage("generate"):
         image, prompt, pooled, latents = model.generate(
-            tokens, negative_tokens if guidance > 1.0 else None,
+            tokens, negative_tokens,
             width=width, height=height, steps=steps, guidance=guidance,
             hidiffusion=hidiffusion_applied, seed=seed, progress=progress,
         )
@@ -607,7 +613,8 @@ def generate(
 
     with tel.stage("tokenize"):
         ids, ids_2 = _tokenize(model.tokenizers, prompt)
-        negative = _tokenize(model.tokenizers, negative_prompt) if classifier_free else None
+        # No negative words: SDXL's zero unconditional (`SdxlModel.generate`), not CLIP's reading of "".
+        negative = _tokenize(model.tokenizers, negative_prompt) if classifier_free and negative_prompt.strip() else None
 
     image = _sample(
         model, (ids, ids_2), negative,
