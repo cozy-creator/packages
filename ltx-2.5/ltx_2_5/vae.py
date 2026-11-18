@@ -55,9 +55,7 @@ class VideoVAE(AutoencoderKLLTX2Video):
             rows, cols = min(crop.shape[3], result.shape[1] - y), min(crop.shape[4], result.shape[2] - x)
             part = crop[0, :, :, :rows, :cols].permute(1, 2, 3, 0)
             for start in range(0, count, _FRAMES):
-                chunk = part[start:start + _FRAMES].to(dtype=torch.float32, copy=True).add_(1).mul_(127.5)
-                rgb = chunk.round_().clamp_(0, 255).to(torch.uint8).cpu().numpy()
-                result[start:start + _FRAMES, y:y + rows, x:x + cols] = rgb
+                result[start:start + _FRAMES, y:y + rows, x:x + cols] = _rgb8(part[start:start + _FRAMES])
         return result
 
     def _tiles(self, z: torch.Tensor, temb: torch.Tensor | None,
@@ -98,3 +96,9 @@ class VideoVAE(AutoencoderKLLTX2Video):
                                                      :self.tile_sample_stride_width]
                     del tile
                 above = below
+
+
+def _rgb8(pixels: torch.Tensor) -> np.ndarray[tuple[int, ...], np.dtype[np.uint8]]:
+    """`pixels` in [-1, 1] as RGB8 on host; its float32 copy goes when this returns, before the next one is made."""
+    chunk = pixels.to(dtype=torch.float32, copy=True).add_(1).mul_(127.5).round_().clamp_(0, 255)
+    return chunk.to(torch.uint8).cpu().numpy()

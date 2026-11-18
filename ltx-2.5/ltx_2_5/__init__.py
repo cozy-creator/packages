@@ -4,17 +4,24 @@ from __future__ import annotations
 
 import math
 import secrets
+from collections.abc import Iterator
+from fractions import Fraction
 from typing import Annotated, Literal
 
 import msgspec
+import numpy as np
+import torch
 from cozy_runtime import rng
 from cozy_runtime.author import Adjustments, App, Context, Outputs, Seed, Telemetry
 from cozy_runtime.fields import Advanced, AspectRatio, FileBound, ImagePreparation, Range, Ratios
-from cozy_runtime.media import ImageFile, VideoFile
+from cozy_runtime.media import (
+    DecodedAudioChunk, DecodedAudioFormat, DecodedMediaHeader, DecodedVideoFormat, DecodedVideoFrame, ImageFile, VideoFile,
+)
 from PIL import Image
 
 from . import quantize as quantize  # its recipe
 from .model import COMPONENTS, FPS, REFINE_SIGMAS, SIGMAS, Ltx25
+from .vae import VideoPixels
 
 app = App()
 MODEL = "lightricks/ltx-2.5@0.2.0"
@@ -105,7 +112,43 @@ def generate(ctx: Context, payload: Generate, model: Ltx25, out: Outputs, tel: T
         with tel.stage("decoding audio"):
             audio, rate = model.decode_audio(latents[1])
     with tel.stage("saving video"):
-        video = out.save_video(pixels, fps=FPS, audio=audio, sample_rate=rate)
+        video = out.save_video_stream(_events(pixels, audio, rate)).video
     tel.log("ltx-2.5", width=width, height=height, frames=len(pixels), audio=payload.audio,
             sampler="diffusers-euler", stages=2, steps=len(SIGMAS) + len(REFINE_SIGMAS))
     return VideoResult(video, width, height, float(FPS), len(pixels), seed, payload.prompt)
+
+
+type Waveform = np.ndarray[tuple[int, int], np.dtype[np.float32]]
+_LAYOUTS = {1: ("mono", ("FC",)), 2: ("stereo", ("FL", "FR"))}
+
+
+def _events(pixels: VideoPixels, audio: torch.Tensor | None,
+            rate: int | None) -> Iterator[DecodedMediaHeader | DecodedVideoFrame | DecodedAudioChunk]:
+    """The clip for `save_video_stream`, BT.709 as H3's tools write theirs: each frame as it is read, each second of
+    frames followed by its sound, so the encoder never takes the whole video at once."""
+    frames, height, width, _ = pixels.shape
+    sound: Waveform | None = None if audio is None or rate is None else audio.numpy()
+    channels, samples, sample_rate = (0, 0, 1) if sound is None or rate is None else (*sound.shape, rate)
+    yield DecodedMediaHeader(
+        video=DecodedVideoFormat(width=width, height=height, time_base=Fraction(1, FPS), pixel_aspect_ratio=Fraction(1),
+                                 nominal_frame_rate=Fraction(FPS), color_primaries=1, color_transfer=1, color_matrix=1,
+                                 color_range=1),
+        audio=None if sound is None else DecodedAudioFormat(
+            channels=channels, sample_rate=sample_rate, channel_layout=_LAYOUTS[channels][0],
+            channel_names=_LAYOUTS[channels][1], time_base=Fraction(1, sample_rate)),
+    )
+    sent = 0
+    for index in range(frames):
+        yield DecodedVideoFrame(width=width, height=height, rgb=pixels[index].tobytes(), pts=index, duration=1,
+                                time_base=Fraction(1, FPS), pixel_aspect_ratio=Fraction(1), color_primaries=1,
+                                color_transfer=1, color_matrix=1, color_range=1)
+        last = index + 1 == frames
+        if sound is None or not (last or (index + 1) % FPS == 0):
+            continue
+        upto = samples if last else min(samples, (index + 1) * sample_rate // FPS)
+        if upto > sent:
+            yield DecodedAudioChunk(channels=channels, sample_count=upto - sent, sample_rate=sample_rate,
+                                    channel_layout=_LAYOUTS[channels][0], channel_names=_LAYOUTS[channels][1],
+                                    pcm_f32le=tuple(sound[c, sent:upto].tobytes() for c in range(channels)), pts=sent,
+                                    time_base=Fraction(1, sample_rate))
+            sent = upto
