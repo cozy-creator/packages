@@ -833,8 +833,12 @@ class AttnProcessor(MiniMaxH3AttnProcessor):
             attended: torch.Tensor = self.whole(attn, hidden_states, rotary_emb, attention_mask)
             whole_out: torch.Tensor = attn.to_out[1](attn.to_out[0](attended.flatten(2, 3)))
             return whole_out
+        # The windows read the q, k and v leaves' int8 operand where all three take one; the bf16
+        # rows then have no reader and go here, before any window runs (var-030).
+        heads = heads.quantized()
+        del hidden_states
         attended = split(heads, heads, Cut(2), holds=HEAD_HOLDS)
-        del heads, hidden_states  # an owned input goes before the out projection's output comes
+        del heads  # an owned input goes before the out projection's output comes
         out: torch.Tensor = attn.to_out[1](split(attn.to_out[0], attended.flatten(2, 3), Cut(1), holds=2))
         del attended
         return out
@@ -947,6 +951,18 @@ class _Heads:
         if q is None or k is None or v is None:
             return None
         return cls(processor, attn, hidden, rotary, (q, k, v))
+
+    def quantized(self) -> _Heads:
+        """These heads reading the int8 operand their q, k and v leaves would each make from the
+        bf16 rows (the leaves' own quantizer: `int8_rows` with no prologue), where all three take
+        one; themselves otherwise. Same bytes: the leaves read that operand either way."""
+        if not isinstance(self.hidden, torch.Tensor):
+            return self
+        attn = self.attn
+        operand = int8_rows(self.hidden, (attn.to_q, attn.to_k, attn.to_v))
+        if operand is None:
+            return self
+        return type(self)(self.processor, attn, operand, self.rotary, self.projections)
 
     def dim(self) -> int:
         return len(self.shape)

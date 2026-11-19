@@ -48,7 +48,7 @@ from cozy_runtime.accel.attention import (
     register_attention,
 )
 from cozy_runtime.author import Cut, split
-from cozy_runtime.accel.kernels import PreQuantized, quantize_once, ROWWISE_FP8
+from cozy_runtime.accel.kernels import PreQuantized, int8_rows, quantize_once, ROWWISE_FP8
 from cozy_runtime.accel.rows import Rows
 from cozy_runtime.accel.rows import rows as columns
 
@@ -383,9 +383,9 @@ def produce(
                 geometry = (layout.live_tokens, attn.heads, layout.protected_prefix)
                 state.statistics[key] = (layout.step, geometry, seed.slot, None)
         return output
-    # The input (an owned one taken here) is the helper's alone: it goes as it returns, before
-    # the out projection's output comes.
-    output, reuse = _attend(name, call, key, take(hidden_states), rotary_emb)
+    # The input (an owned one taken here) is the helper's alone: it goes inside it, before the
+    # out projection's output comes.
+    output, reuse = _attend(name, call, key, Owned(take(hidden_states)), rotary_emb)
     statistics = "kmean=previous-step,vscale=current-call" if reuse else "current-call"
     call.served(
         f"comfy_kitchen.sol_attn_chunked(int8, stats={statistics}, vmargin=1.1, "
@@ -472,6 +472,18 @@ class _Heads:
             return None
         return cls(call, means, hidden, freqs, found)  # type: ignore[arg-type]
 
+    def quantized(self) -> _Heads:
+        """These heads reading the int8 operand their q, k and v leaves would each make from the
+        bf16 rows (the leaves' own quantizer: `int8_rows` with no prologue), where all three take
+        one; themselves otherwise. Same bytes: the leaves read that operand either way."""
+        if not isinstance(self.hidden, torch.Tensor):
+            return self
+        attn = _attn(self.call)
+        operand = int8_rows(self.hidden, (attn.to_q, attn.to_k, attn.to_v))
+        if operand is None:
+            return self
+        return _Heads(self.call, self.means, operand, self.freqs, self.projections)
+
     def dim(self) -> int:
         return len(self.shape)
 
@@ -505,11 +517,12 @@ def _attend(
     name: str,
     call: ProducerCall,
     key: tuple[object, ...],
-    hidden_states: torch.Tensor | PreQuantized,
+    owned: Owned[torch.Tensor | PreQuantized],
     rotary_emb: tuple[torch.Tensor, torch.Tensor] | None,
 ) -> tuple[torch.Tensor, bool]:
     """A sparse step's attention, before its out projection, and whether last step's statistics
-    carried: its input's references end here, at its return."""
+    carried: its input's references end here."""
+    hidden_states = take(owned)
     attn, layout, state = _attn(call), call.layout, _state(call)
     parallel = call.group is not None
     if rotary_emb is None or hidden_states.shape[0] != 1:
@@ -538,7 +551,11 @@ def _attend(
             means.keep(slice(0, attn.heads), mean)
         else:
             # Kitchen's call holds the whole document's K/V codes and its whole output: an exact
-            # split by query heads, which the Runtime sizes beside the DiT's weights.
+            # split by query heads, which the Runtime sizes beside the DiT's weights. Its windows
+            # read the q, k and v leaves' int8 operand where all three take one; the bf16 rows
+            # then have no reader and go here, before any window runs (var-030).
+            heads = heads.quantized()
+            del hidden_states
             output = split(heads, heads, Cut(2), holds=HEAD_HOLDS)
         means.close()
         reuse = means.prior is not None
