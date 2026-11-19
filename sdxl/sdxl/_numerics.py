@@ -14,6 +14,8 @@ if TYPE_CHECKING:
     from diffusers.models.unets.unet_2d_condition import UNet2DConditionModel
     from transformers.models.clip.modeling_clip import CLIPTextModel, CLIPTextModelWithProjection
 
+    from .adapters import Controls, References
+
 
 def _clip_text(model: CLIPTextModel, ids: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     """CLIP's tensor orchestration, with an explicit penultimate result.
@@ -117,13 +119,20 @@ def hold_decode_dtype(vae: AutoencoderKL, tel: Telemetry) -> None:
 
 def guided(
     unet: UNet2DConditionModel, latents: torch.Tensor, timestep: torch.Tensor, prompt: torch.Tensor, pooled: torch.Tensor,
-    time_ids: torch.Tensor, guidance: float,
+    time_ids: torch.Tensor, guidance: float, *, controls: Controls | None = None, references: References | None = None,
 ) -> torch.Tensor:
-    """The UNet's noise prediction, guided against the negative half of `prompt` above 1."""
+    """The UNet's noise prediction, guided against the negative half of `prompt` above 1: with `controls` their
+    ControlNet's residuals added, with `references` its cross-attentions reading the pictures too."""
     batch = torch.cat([latents] * 2) if guidance > 1.0 else latents
+    steered: dict[str, object] = {}
+    if controls is not None:
+        down, mid = controls.residuals(batch, timestep, prompt, pooled, time_ids)
+        steered.update(down_block_additional_residuals=down, mid_block_additional_residual=mid)
+    if references is not None:
+        steered["cross_attention_kwargs"] = {"ip_hidden_states": references}
     noise: torch.Tensor = unet(
         batch, timestep, encoder_hidden_states=prompt,
-        added_cond_kwargs={"text_embeds": pooled, "time_ids": time_ids},
+        added_cond_kwargs={"text_embeds": pooled, "time_ids": time_ids}, **steered,
     ).sample
     if guidance > 1.0:
         uncond, cond = noise.chunk(2)

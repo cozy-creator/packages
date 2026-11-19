@@ -34,7 +34,8 @@ and checks every mention names something, so a package only replaces `<key>` wit
 | minimax-h3 | `<Picture N>`, `<Video N>`, `<Audio N>` per segment; see its README | MiniMax's reference guide |
 | anima | its description, else nothing | the pictures go to its IP-Adapter, which upstream prompts never name |
 | moss-image | its name; several as `image N`; as words under a control map | no convention upstream: Moss-Image-Edit's instructions say "the image" |
-| ideogram-4, sdxl | (takes no pictures) | text to image only |
+| sdxl | its description, else nothing | the pictures go to its IP-Adapter, which upstream prompts never name |
+| ideogram-4 | its name | its release takes no reference pictures (se-175) |
 
 ```python
 from cozy_runtime.author import Image, ImageRequest, Prompt
