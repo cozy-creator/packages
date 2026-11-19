@@ -30,7 +30,7 @@ Inline inputs work too, and override the file's:
 ```sh
 cozy run qwen3/ask "Describe this character's clothing." --file images=./character.png
 cozy run qwen3/ask "What happens, and when?" --file videos=./clip.mp4
-cozy run qwen3/ask "What happens, and when?" --file videos=./clip.mp4 --model model=llmfan46/qwen3.6-35b-a3b-uncensored-heretic-native-mtp-preserved@0.1.0
+cozy run qwen3/ask "What happens, and when?" --file videos=./clip.mp4 --model model=llmfan46/qwen3.6-35b-a3b-uncensored-heretic-native-mtp-preserved@0.2.0
 ```
 
 The request and the model code are Runtime's shared Qwen-VL ones (`cozy_runtime.vlm`):
@@ -60,7 +60,9 @@ divergence from the stock model are the author's own numbers (Heretic's 100 harm
 | `huihui-ai/huihui-qwen3.5-9b-abliterated` | Qwen3.5-9B | 9B dense | 19.3 GB | not stated | not stated |
 | `huihui-ai/huihui-qwen3.5-0.8b-abliterated` | Qwen3.5-0.8B | 0.8B dense | 1.7 GB | not stated | not stated |
 
-Each keeps the vision tower (unedited, by its card), video processing and multi-token-prediction head. The 35B-A3B reads images and video
+Each keeps the vision tower (unedited, by its card), video processing and multi-token-prediction head, stored as their own
+components (`vision`, `mtp`) beside the language model (`model`): `ask` and `write` fetch the vision tower only for a request
+that shows a picture or a video (`needs={"model.vision": …}`); `caption` always does. The 35B-A3B reads images and video
 within about a point of the 27Bs at a ninth of the compute per token; the 27Bs lead on coding and agent tasks.
 
 Each serves its int8 lane where it fits the GPU and a 4-bit lane where only that fits (`min_bits=4`): `w4a8` before
@@ -70,8 +72,9 @@ resident and pages the rest.
 ## Model preparation
 
 Each checkpoint is its author's, mirrored as uploaded under the author's org: the upload keeps the repository's
-`config.json`, tokenizer, processor and chat template, and TensorFS stores a MoE's fused experts one per expert. The lanes
-are written from the bf16 commit on the same machine:
+`config.json`, tokenizer, processor and chat template, TensorFS stores a MoE's fused experts one per expert, and the vision
+tower and multi-token-prediction head as the `vision` and `mtp` components. The lanes are written from the bf16 commit on
+the same machine:
 
 ```sh
 cozy model upload hf://llmfan46/Qwen3.8-27B-Uncensored-Heretic-Native-MTP-Preserved@4b9e1517a43fdca25872318ed272a1c88e72c360 llmfan46/qwen3.8-27b-uncensored-heretic-native-mtp-preserved --lane bf16 --mirror https://huggingface.co/llmfan46/Qwen3.8-27B-Uncensored-Heretic-Native-MTP-Preserved --on <name>
