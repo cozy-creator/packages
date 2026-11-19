@@ -35,7 +35,9 @@ from .klein import (
     reference_canvas,
 )
 from . import quantize as quantize  # its recipes
-from .upsampler import MAX_REFERENCES, Drafter, Row, Upsampler, canvas_box, is_finished, with_table
+from .upsampler import (
+    MAX_ASPECT_RATIO, MAX_REFERENCES, Drafter, Row, Upsampler, canvas_box, is_finished, past_ratio, with_table,
+)
 
 app = App()
 
@@ -235,6 +237,10 @@ def _generate(ctx: Context, function: str, payload: TurboInput, drafter: Drafter
     images = [payload.prompt.references[key].file.read() for key in placed]
     prepared, size, crop, canvas = _layout(adj, payload, images, any(box is not None for box in placed.values()))
     upsample = True if payload.prompt_upsampling is None else payload.prompt_upsampling
+    if upsample and (past := past_ratio(images)) is not None:
+        adj.warn("prompt_upsampling",
+                 f"picture {past} is past the upsampler's {MAX_ASPECT_RATIO}:1, so the prompt goes as written")
+        upsample = False
     # The upsampler is told the references' order in words, or as the layout record's ids; Klein
     # reading the prompt itself was trained on `<ref_image_N>`.
     prompt = worded(payload.prompt, placed, (ref_id if rows else ordinal) if upsample else tagged)

@@ -82,7 +82,7 @@ def _generate(ctx: Context, payload: TurboInput, model: Flux2, turbo: Flux2Turbo
             guidance=guidance, cfg=cfg)
     if payload.prompt_upsampling:
         with tel.stage("upsampling prompt"):
-            caption = upsampler.upsample(prompt, images)
+            caption = upsampler.upsample(prompt, images, seed)
         if caption:
             prompt = caption
         else:

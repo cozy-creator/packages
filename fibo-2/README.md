@@ -56,14 +56,15 @@ A JSON `prompt` is used as given; an edit's needs an `edit_instruction`. Otherwi
 points to (Bria's own API path, `bria-vgl`, calls Gemini):
 
 - text-to-image: `briaai/FIBO-vlm` (`<generate>`);
-- one reference: `briaai/FIBO-edit-vlm` (`<edit>`, the image thumbnailed to 1024 px), whose restated
-  request (`reworded_prompt`) becomes the caption's `edit_instruction`;
+- one reference: `briaai/FIBO-edit-vlm` (`<edit>`, the image thumbnailed to 1024 px), whose caption keeps its
+  own `edit_instruction`, as Bria's edit block does;
 - several references: neither VLM reads more than one image, so the instruction goes as typed, with a
   warning.
 
-Both are Qwen3-VL-4B fine-tunes, decoded greedily (Bria samples at temperature 0.2/0.4), each fetched
-on first use. `prompt_upsampling=false` sends the prompt as typed. The returned `prompt` reproduces
-the image with `prompt_upsampling=false` and the same seed.
+Both are Qwen3-VL-4B fine-tunes, run as Bria's blocks run them: sampled at temperature 0.2 (an edit 0.4),
+top-p 0.9 and top-k 20 from the render's seed, the answer kept to its trained fields. Each is fetched on first
+use. `prompt_upsampling=false` sends the prompt as typed. The returned `prompt` reproduces the image with
+`prompt_upsampling=false` and the same seed.
 
 ## Text encoder
 

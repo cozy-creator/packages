@@ -15,7 +15,7 @@ from PIL import Image as PILImage
 
 from .model import Fibo2, Fibo2TextEncoder
 from . import quantize as quantize  # its recipes
-from .upsampler import Captioner
+from .upsampler import EDIT_FIELDS, FIELDS, Captioner, clean
 
 app = App()
 
@@ -81,11 +81,12 @@ def _json_object(prompt: str) -> dict[str, object] | None:
 
 def _caption(
     prompt: str, images: list[PILImage.Image], upsample: bool, upsampler: Captioner, edit_upsampler: Captioner,
-    adj: Adjustments,
+    seed: int, adj: Adjustments,
 ) -> str:
     """The prompt Fibo 2.0 reads. A JSON object is already structured; otherwise Bria's VLMs write
-    one: `FIBO-vlm` from a prompt, `FIBO-edit-vlm` from a request and its one image. Several images
-    take the instruction as typed, a form Fibo 2.0 was also trained on."""
+    one from the render's `seed`: `FIBO-vlm` from a prompt, `FIBO-edit-vlm` from a request and its one
+    image, each cleaned as Bria's blocks clean it. Several images take the instruction as typed, a form
+    Fibo 2.0 was also trained on."""
     structured = _json_object(prompt)
     if structured is not None:
         if images and "edit_instruction" not in structured:
@@ -101,15 +102,12 @@ def _caption(
         return prompt
     try:
         if not images:
-            return upsampler.caption(prompt, None)
-        caption = json.loads(edit_upsampler.caption(prompt, images[0]))
+            return clean(json.loads(upsampler.caption(prompt, None, seed)), FIELDS, strings_as_json=False)
+        caption = json.loads(edit_upsampler.caption(prompt, images[0], seed))
     except UnsupportedInput as failed:
         adj.warn("prompt_upsampling", f"{failed.message}; the prompt goes as typed")
         return prompt
-    # FIBO-edit-vlm restates the request as `reworded_prompt`, which Bria's cleaning drops; Fibo 2.0
-    # reads the request as `edit_instruction`.
-    caption["edit_instruction"] = caption.pop("reworded_prompt", None) or caption.get("edit_instruction") or prompt
-    return json.dumps(caption, separators=(",", ":"), ensure_ascii=False)
+    return clean(caption, EDIT_FIELDS, strings_as_json=True)
 
 
 def _generate(
@@ -137,7 +135,7 @@ def _generate(
     width, height = payload.size(adj, images[0].size if images else None, SIZES, megapixels=1.0)
     upsample = True if payload.prompt_upsampling is None else payload.prompt_upsampling
     with tel.stage("upsampling prompt"):
-        caption = _caption(prompt, images, upsample, upsampler, edit_upsampler, adj)
+        caption = _caption(prompt, images, upsample, upsampler, edit_upsampler, seed, adj)
     if caption != prompt:
         tel.log("upsampled prompt", caption=caption[:2000])
     ctx.raise_if_cancelled()
