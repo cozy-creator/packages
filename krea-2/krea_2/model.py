@@ -336,7 +336,8 @@ class _Heads:
         query = self.query[:, :, window]
         out = query.new_empty(query.shape)
         for start, stop, bias in self.bias.rows:
-            out[:, start:stop] = transformer_krea2.dispatch_attention_fn(
+            # Read through the module at each call: the Runtime rebinds it there.
+            out[:, start:stop] = transformer_krea2.dispatch_attention_fn(  # type: ignore[attr-defined]  # not re-exported by Diffusers
                 query[:, start:stop], key, value, attn_mask=bias, backend=self.processor._attention_backend,
                 parallel_config=self.processor._parallel_config)
         return out
@@ -358,14 +359,16 @@ class Attention(Krea2AttnProcessor):
                  attention_mask: torch.Tensor | RowBias | None = None,
                  image_rotary_emb: tuple[torch.Tensor, torch.Tensor] | None = None) -> torch.Tensor:
         if not isinstance(attention_mask, RowBias):
-            return cast(torch.Tensor, super().__call__(attn, hidden_states, attention_mask, image_rotary_emb))
+            return super().__call__(attn, hidden_states, attention_mask, image_rotary_emb)
         query = attn.to_q(hidden_states).unflatten(-1, (attn.num_heads, attn.head_dim))
         key = attn.to_k(hidden_states).unflatten(-1, (attn.num_kv_heads, attn.head_dim))
         value = attn.to_v(hidden_states).unflatten(-1, (attn.num_kv_heads, attn.head_dim))
         query, key = attn.norm_q(query), attn.norm_k(key)
         if image_rotary_emb is not None:
-            query = transformer_krea2.apply_rotary_emb(query, image_rotary_emb, sequence_dim=1)
-            key = transformer_krea2.apply_rotary_emb(key, image_rotary_emb, sequence_dim=1)
+            # Read through the module at each call: the Runtime rebinds it there. Diffusers' own processor passes the
+            # (cos, sin) pair too; its annotation says `tuple[Tensor]`.
+            query = transformer_krea2.apply_rotary_emb(query, image_rotary_emb, sequence_dim=1)  # type: ignore[attr-defined, arg-type]  # see above
+            key = transformer_krea2.apply_rotary_emb(key, image_rotary_emb, sequence_dim=1)  # type: ignore[attr-defined, arg-type]  # see above
         group = attn.num_heads // attn.num_kv_heads
         heads = _Heads(self, query, key, value, attention_mask, group)
         out = split(heads, heads, Cut(2, align=group), holds=_HEAD_HOLDS)
@@ -467,7 +470,7 @@ def _transformer(config: Config) -> Transformer:
     transformer.__class__ = Transformer
     for block in transformer.transformer_blocks:
         block.__class__ = Block
-        cast(Krea2Attention, block.attn).set_processor(Attention())
+        cast(Krea2Attention, block.attn).set_processor(Attention())  # type: ignore[arg-type]  # Diffusers' union lists its own processors, not a Krea2AttnProcessor subclass
     as_stored(config, "transformer", transformer)
     return cast(Transformer, transformer.eval())  # its class, set above
 
@@ -698,9 +701,9 @@ class Krea2DiT(Model[Krea2DiTGraph]):
             if isolated:
                 blind = torch.zeros(1, 1, 1, at, device=device, dtype=DTYPE)
                 blind[..., :target + size] = float("-inf")
-            rows = [(0, target, None), (target, target + size, boosted), (target + size, at, blind)]
+            ranges = [(0, target, None), (target, target + size, boosted), (target + size, at, blind)]
             merged: list[tuple[int, int, torch.Tensor | None]] = []
-            for start, stop, bias in rows:
+            for start, stop, bias in ranges:
                 if stop <= start:
                     continue
                 if merged and bias is None and merged[-1][2] is None:
