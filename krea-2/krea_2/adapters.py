@@ -109,13 +109,13 @@ class Adapter(Model[AdapterGraph]):
             factors.scale = self.graph.unit * strength
         projection = self.graph.projection
         if projection is not None:
-            transformer._cozy_projection = (projection.weight, projection.bias)
+            transformer._control_projection = (projection.weight, projection.bias)
         try:
             with sites.applied(self.graph.factors):
                 return body()
         finally:
             if projection is not None:
-                transformer._cozy_projection = None
+                transformer._control_projection = None
 
 
 def armed(adapters: list[tuple[Adapter, float]], dit: Krea2DiTGraph, body: Callable[[], T]) -> T:

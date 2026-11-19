@@ -297,8 +297,11 @@ class RowBias:
 
 class Attention(Krea2AttnProcessor):
     """Diffusers' processor, with a `RowBias` attended one range of query rows at a time against every key,
-    each with its own bias: the same softmax a row takes under the dense mask. Its RoPE and attention are
-    the module's own names at each call, as Diffusers' processor reads them (the Runtime cuts and selects there)."""
+    each with its own bias: the same softmax a row takes under the dense mask. It goes a K/V head at a time,
+    that head's query heads beside it alone (a view, never a copy per query head): the kernels that take a
+    bias beside grouped heads materialize the whole score matrix. Each piece's output lands in the result as
+    it is made, and the gate is made after. Its RoPE and attention are the module's own names at each call,
+    as Diffusers' processor reads them (the Runtime cuts and selects there)."""
 
     def __call__(self, attn: Krea2Attention, hidden_states: torch.Tensor,
                  attention_mask: torch.Tensor | RowBias | None = None,
@@ -308,20 +311,23 @@ class Attention(Krea2AttnProcessor):
         query = attn.to_q(hidden_states).unflatten(-1, (attn.num_heads, attn.head_dim))
         key = attn.to_k(hidden_states).unflatten(-1, (attn.num_kv_heads, attn.head_dim))
         value = attn.to_v(hidden_states).unflatten(-1, (attn.num_kv_heads, attn.head_dim))
-        gate = attn.to_gate(hidden_states)
         query, key = attn.norm_q(query), attn.norm_k(key)
         if image_rotary_emb is not None:
             query = transformer_krea2.apply_rotary_emb(query, image_rotary_emb, sequence_dim=1)
             key = transformer_krea2.apply_rotary_emb(key, image_rotary_emb, sequence_dim=1)
-        groups = attn.num_heads // attn.num_kv_heads
-        if groups > 1:  # as Diffusers' processor: every kernel takes repeated heads beside a bias
-            key, value = key.repeat_interleave(groups, dim=2), value.repeat_interleave(groups, dim=2)
-        out = torch.cat([
-            transformer_krea2.dispatch_attention_fn(query[:, start:stop], key, value, attn_mask=bias,
-                                                    backend=self._attention_backend,
-                                                    parallel_config=self._parallel_config)
-            for start, stop, bias in attention_mask.rows
-        ], dim=1)
+        group = attn.num_heads // attn.num_kv_heads
+        out = torch.empty_like(query)
+
+        for head in range(attn.num_kv_heads):
+            heads = slice(head * group, (head + 1) * group)
+            k = key[:, :, head:head + 1].expand(-1, -1, group, -1)
+            v = value[:, :, head:head + 1].expand(-1, -1, group, -1)
+            for start, stop, bias in attention_mask.rows:
+                out[:, start:stop, heads] = transformer_krea2.dispatch_attention_fn(
+                    query[:, start:stop, heads], k, v, attn_mask=bias, backend=self._attention_backend,
+                    parallel_config=self._parallel_config)
+        del query, key, value
+        gate = attn.to_gate(hidden_states)
         return cast(torch.Tensor, attn.to_out[0](out.flatten(2, 3) * torch.sigmoid(gate)))
 
 
@@ -360,16 +366,16 @@ class Transformer(Krea2Transformer2DModel):
 
     #: A control adapter's expanded input projection while it is armed (`adapters.Adapter.applied`): its
     #: weight [6144, 128] over each image token and its control token side by side, and its bias.
-    _cozy_projection: tuple[torch.Tensor, torch.Tensor] | None = None
+    _control_projection: tuple[torch.Tensor, torch.Tensor] | None = None
 
     def embed(self, latents: torch.Tensor, control: torch.Tensor | None) -> torch.Tensor:
         """`img_in`, in its stored dtype, or with `control` tokens the armed control adapter's projection over
         both (Patil's `ControlInputLayer`)."""
         if control is None:
             return cast(torch.Tensor, self.img_in(latents.to(_dtype(self.img_in)))).to(latents.dtype)
-        if self._cozy_projection is None:
+        if self._control_projection is None:
             raise ValueError("a control map reaches Krea 2 only through an armed control adapter")
-        weight, bias = self._cozy_projection
+        weight, bias = self._control_projection
         x = torch.cat((latents, control.to(latents.dtype)), dim=-1).to(weight.dtype)
         return F.linear(x, weight, bias.to(weight.dtype)).to(latents.dtype)
 
