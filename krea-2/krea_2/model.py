@@ -25,6 +25,7 @@ from cozy_runtime import rng, tiles
 from cozy_runtime.accel import fusion, hold_dtype, lora
 from cozy_runtime.author import (
     Config,
+    Cut,
     Loader,
     Model,
     ModelAssets,
@@ -33,6 +34,7 @@ from cozy_runtime.author import (
     Serving,
     memoize,
     preview,
+    split,
     uses_components,
 )
 from cozy_runtime.accel.kernels import Plan
@@ -45,7 +47,10 @@ from diffusers.models.autoencoders.autoencoder_kl_qwenimage import (
     QwenImageRMS_norm,
     QwenImageUpsample,
 )
+from diffusers.models.transformers import transformer_krea2
 from diffusers.models.transformers.transformer_krea2 import (
+    Krea2Attention,
+    Krea2AttnProcessor,
     Krea2FinalLayer,
     Krea2TextProjection,
     Krea2TimestepEmbedding,
@@ -283,6 +288,96 @@ class Branch:
 
 
 @dataclass(frozen=True)
+class RowBias:
+    """An attention bias that is one row of keys over each range of query rows: `rows` are (start, stop, a
+    [1, 1, 1, keys] bias or None), in order and covering the sequence. A target's logits on its references raised
+    by log `boost` and an isolated `after` blind to the rest are such: held dense, [1, 1, keys, keys] bf16 was
+    1.59 GiB a branch at 2 MP, two with CFG, through every step (var-030 5.7)."""
+
+    rows: tuple[tuple[int, int, torch.Tensor | None], ...]
+
+
+class _Heads:
+    """A `RowBias` attention as `split` cuts it by query heads: its shape is the output's
+    [batch, tokens, heads, head_dim], a window a range of whole K/V groups, and calling it on a window
+    attends those query heads, each range of rows with its own bias, against their K/V heads repeated to
+    them (as Diffusers' processor repeats them, for every kernel takes repeated heads beside a bias).
+    Called on itself (`split` running whole), every head in one call a range: the fast path. Each head's
+    softmax is its own, so any window gives the whole's bytes."""
+
+    __slots__ =("bias", "group", "key", "processor", "query", "shape", "value")
+
+    def __init__(self, processor: Attention, query: torch.Tensor, key: torch.Tensor, value: torch.Tensor,
+                 bias: RowBias, group: int) -> None:
+        self.processor, self.query, self.key, self.value, self.bias = processor, query, key, value, bias
+        self.group, self.shape = group, tuple(query.shape)
+
+    @property
+    def dtype(self) -> torch.dtype:
+        return self.query.dtype
+
+    def dim(self) -> int:
+        return len(self.shape)
+
+    def element_size(self) -> int:
+        return int(self.query.element_size())
+
+    def __getitem__(self, index: tuple[slice[int | None], ...]) -> slice[int, int, None]:
+        return cast("slice[int, int, None]", index[2])  # `Cut(2, align=group)` hands whole K/V groups
+
+    def __call__(self, heads: _Heads | slice[int, int, None]) -> torch.Tensor:
+        window = slice(0, self.shape[2]) if heads is self else heads
+        assert isinstance(window, slice) and window.start is not None and window.stop is not None
+        kv = slice(window.start // self.group, window.stop // self.group)
+        key, value = self.key[:, :, kv], self.value[:, :, kv]
+        if self.group > 1:
+            key = key.repeat_interleave(self.group, dim=2)
+            value = value.repeat_interleave(self.group, dim=2)
+        query = self.query[:, :, window]
+        out = query.new_empty(query.shape)
+        for start, stop, bias in self.bias.rows:
+            # Read through the module at each call: the Runtime rebinds it there.
+            out[:, start:stop] = transformer_krea2.dispatch_attention_fn(  # type: ignore[attr-defined]  # not re-exported by Diffusers
+                query[:, start:stop], key, value, attn_mask=bias, backend=self.processor._attention_backend,
+                parallel_config=self.processor._parallel_config)
+        return out
+
+
+#: A head window's peak beside the whole output, in windows of it: its repeated K and V (each a window,
+#: keys being the rows) and its own output, with a range's kernel output beside them.
+_HEAD_HOLDS = 4
+
+
+class Attention(Krea2AttnProcessor):
+    """Diffusers' processor, with a `RowBias` attended one range of query rows at a time against every key,
+    each with its own bias: the same softmax a row takes under the dense mask. Its heads go in the fewest
+    windows the card's room takes (`split`): all of them in one call a range where they fit, as fast as
+    Diffusers' path, whole K/V groups a window where they don't. Its RoPE and attention are the module's own
+    names at each call, as Diffusers' processor reads them (the Runtime cuts and selects there)."""
+
+    def __call__(self, attn: Krea2Attention, hidden_states: torch.Tensor,
+                 attention_mask: torch.Tensor | RowBias | None = None,
+                 image_rotary_emb: tuple[torch.Tensor, torch.Tensor] | None = None) -> torch.Tensor:
+        if not isinstance(attention_mask, RowBias):
+            return super().__call__(attn, hidden_states, attention_mask, image_rotary_emb)
+        query = attn.to_q(hidden_states).unflatten(-1, (attn.num_heads, attn.head_dim))
+        key = attn.to_k(hidden_states).unflatten(-1, (attn.num_kv_heads, attn.head_dim))
+        value = attn.to_v(hidden_states).unflatten(-1, (attn.num_kv_heads, attn.head_dim))
+        query, key = attn.norm_q(query), attn.norm_k(key)
+        if image_rotary_emb is not None:
+            # Read through the module at each call: the Runtime rebinds it there. Diffusers' own processor passes the
+            # (cos, sin) pair too; its annotation says `tuple[Tensor]`.
+            query = transformer_krea2.apply_rotary_emb(query, image_rotary_emb, sequence_dim=1)  # type: ignore[attr-defined, arg-type]  # see above
+            key = transformer_krea2.apply_rotary_emb(key, image_rotary_emb, sequence_dim=1)  # type: ignore[attr-defined, arg-type]  # see above
+        group = attn.num_heads // attn.num_kv_heads
+        heads = _Heads(self, query, key, value, attention_mask, group)
+        out = split(heads, heads, Cut(2, align=group), holds=_HEAD_HOLDS)
+        del heads, query, key, value
+        gate = attn.to_gate(hidden_states)
+        return cast(torch.Tensor, attn.to_out[0](out.flatten(2, 3) * torch.sigmoid(gate)))
+
+
+@dataclass(frozen=True)
 class Stream:
     """A branch as each step reads it, built once: its fused text, its pictures through `img_in`, its
     rotary tables, its attention bias, and where its target tokens sit."""
@@ -291,7 +386,7 @@ class Stream:
     before: torch.Tensor | None
     after: torch.Tensor | None
     rotary: tuple[torch.Tensor, torch.Tensor]
-    mask: torch.Tensor | None
+    mask: RowBias | None
     target: int
 
 
@@ -317,16 +412,16 @@ class Transformer(Krea2Transformer2DModel):
 
     #: A control adapter's expanded input projection while it is armed (`adapters.Adapter.applied`): its
     #: weight [6144, 128] over each image token and its control token side by side, and its bias.
-    _cozy_projection: tuple[torch.Tensor, torch.Tensor] | None = None
+    _control_projection: tuple[torch.Tensor, torch.Tensor] | None = None
 
     def embed(self, latents: torch.Tensor, control: torch.Tensor | None) -> torch.Tensor:
         """`img_in`, in its stored dtype, or with `control` tokens the armed control adapter's projection over
         both (Patil's `ControlInputLayer`)."""
         if control is None:
             return cast(torch.Tensor, self.img_in(latents.to(_dtype(self.img_in)))).to(latents.dtype)
-        if self._cozy_projection is None:
+        if self._control_projection is None:
             raise ValueError("a control map reaches Krea 2 only through an armed control adapter")
-        weight, bias = self._cozy_projection
+        weight, bias = self._control_projection
         x = torch.cat((latents, control.to(latents.dtype)), dim=-1).to(weight.dtype)
         return F.linear(x, weight, bias.to(weight.dtype)).to(latents.dtype)
 
@@ -375,6 +470,7 @@ def _transformer(config: Config) -> Transformer:
     transformer.__class__ = Transformer
     for block in transformer.transformer_blocks:
         block.__class__ = Block
+        cast(Krea2Attention, block.attn).set_processor(Attention())  # type: ignore[arg-type]  # Diffusers' union lists its own processors, not a Krea2AttnProcessor subclass
     as_stored(config, "transformer", transformer)
     return cast(Transformer, transformer.eval())  # its class, set above
 
@@ -593,12 +689,28 @@ class Krea2DiT(Model[Krea2DiTGraph]):
         isolated = branch.isolated and after is not None
         mask = None
         if isolated or any(boost != 1.0 for _, _, boost in boosts):
-            mask = torch.zeros(1, 1, at, at, device=device, dtype=DTYPE)
-            for start, end, boost in boosts:
-                if boost != 1.0:
-                    mask[..., target:target + size, start:end] = math.log(max(boost, 1e-4))
+            # The target's rows raise its logits on each boosted reference; an isolated `after`'s rows see only
+            # themselves; every other row is unbiased. One bias row per range, never [at, at].
+            boosted = None
+            if any(boost != 1.0 for _, _, boost in boosts):
+                boosted = torch.zeros(1, 1, 1, at, device=device, dtype=DTYPE)
+                for start, end, boost in boosts:
+                    if boost != 1.0:
+                        boosted[..., start:end] = math.log(max(boost, 1e-4))
+            blind = None
             if isolated:
-                mask[..., target + size:, :target + size] = float("-inf")
+                blind = torch.zeros(1, 1, 1, at, device=device, dtype=DTYPE)
+                blind[..., :target + size] = float("-inf")
+            ranges = [(0, target, None), (target, target + size, boosted), (target + size, at, blind)]
+            merged: list[tuple[int, int, torch.Tensor | None]] = []
+            for start, stop, bias in ranges:
+                if stop <= start:
+                    continue
+                if merged and bias is None and merged[-1][2] is None:
+                    merged[-1] = (merged[-1][0], stop, None)
+                else:
+                    merged.append((start, stop, bias))
+            mask = RowBias(tuple(merged))
         return Stream(text, before, after, transformer.rotary_emb(torch.cat(ids)), mask, target)
 
     @uses_components("transformer")
