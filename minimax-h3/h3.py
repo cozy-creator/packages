@@ -1573,10 +1573,11 @@ class FL2VAInput(msgspec.Struct, kw_only=True):
 
 
 def _frame(asset: ImageFile | None, shape: tuple[int, ...]) -> PILImage.Image | None:
-    """A keyframe as a segment reads it: its middle, scaled to fill the shot's canvas (`shape`)."""
+    """A keyframe as a segment reads it: its middle, scaled to fill the shot's canvas (`shape`) with LANCZOS, as Diffusers'
+    keyframe step resizes it (se-156: bicubic left a 1024 px frame's anchor with 24% less fine detail)."""
     if asset is None:
         return None
-    return ImageOps.fit(asset.read(), shape, method=PILImage.Resampling.BICUBIC)  # type: ignore[arg-type]  # the canvas: (width, height)
+    return ImageOps.fit(asset.read(), shape, method=PILImage.Resampling.LANCZOS)  # type: ignore[arg-type]  # the canvas: (width, height)
 
 
 @app.entrypoint(
