@@ -153,7 +153,7 @@ tasks:
               break
             fi
             said=$(cd "$work/$1" && COZY_HUB_URL="$h" cozy package publish --root --json) \
-              || { echo "cozy package publish $1 $(ver "$1") on $h failed: $(tail -c 600 <<< "$said")" >&2; exit 1; }
+              || { echo "cozy package publish $1 $(ver "$1") on $h failed: $said" >&2; exit 1; }
             status=$(jq -r .status <<< "$said"); echo "$1 $(ver "$1") on $h: $status"
             case $status in published*) ;; *) echo "$h holds $1 $(ver "$1") already ($status): bump its version on master" >&2; exit 1 ;; esac
           done
