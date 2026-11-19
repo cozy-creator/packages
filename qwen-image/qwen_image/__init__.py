@@ -22,7 +22,7 @@ from cozy_runtime.image import (
 from cozy_runtime.media import ImageFile
 
 from . import quantize as quantize  # its recipes
-from .model import PATCH, QwenImage, QwenImageLoRA, QwenImageTransformer, text_rows
+from .model import PATCH, QwenImage, QwenImageLoRA, QwenImageTextEncoder, QwenImageTransformer, text_rows
 
 if TYPE_CHECKING:
     from PIL.Image import Image as Picture
@@ -76,9 +76,11 @@ def _said(prompt: Prompt[Image], adj: Adjustments) -> tuple[str, list[Image]]:
     return said, [prompt.references[key] for key in keys]
 
 
-def _read(adj: Adjustments, field: str, model: QwenImage, text: str, pictures: list[Picture], rows: int) -> str:
-    """`text` as the edit reads it beside its pictures (`QwenImage.edit_prompt`), with a warning when its end goes."""
-    kept, keep, given = model.edit_prompt(text, pictures, rows)
+def _read(adj: Adjustments, field: str, text_encoder: QwenImageTextEncoder, text: str, pictures: list[Picture],
+          rows: int) -> str:
+    """`text` as the edit reads it beside its pictures (`QwenImageTextEncoder.edit_prompt`), with a warning when its end
+    goes."""
+    kept, keep, given = text_encoder.edit_prompt(text, pictures, rows)
     if keep < given:
         adj.warn(field, f"Qwen-Image-Edit reads {keep} of its {given} tokens beside {len(pictures)} pictures, "
                         f"so it goes without the rest")
@@ -88,7 +90,7 @@ def _read(adj: Adjustments, field: str, model: QwenImage, text: str, pictures: l
 def _render(
     ctx: Context,
     model: QwenImage,
-    text_encoder: QwenImage,
+    text_encoder: QwenImageTextEncoder,
     dit: QwenImage | QwenImageTransformer,
     lora: QwenImageLoRA | None,
     tel: Telemetry,
@@ -139,7 +141,7 @@ def _render(
 
 
 def _full(ctx: Context, payload: GenerateInput, edit_model: QwenImageTransformer, model: QwenImage,
-          text_encoder: QwenImage, tel: Telemetry, adj: Adjustments) -> ImageResult:
+          text_encoder: QwenImageTextEncoder, tel: Telemetry, adj: Adjustments) -> ImageResult:
     edit = bool(payload.prompt.references)
     steps = held(adj, "steps", payload.steps or (EDIT_STEPS if edit else TEXT_STEPS), 2, 100,
                  "at least 2 (the schedule stretches its last step to the terminal sigma), at most 100")
@@ -152,7 +154,7 @@ def _full(ctx: Context, payload: GenerateInput, edit_model: QwenImageTransformer
 
 
 def _turbo(ctx: Context, payload: TurboInput, edit_model: QwenImageTransformer, edit_turbo_lora: QwenImageLoRA,
-           model: QwenImage, text_encoder: QwenImage, turbo_lora: QwenImageLoRA, tel: Telemetry,
+           model: QwenImage, text_encoder: QwenImageTextEncoder, turbo_lora: QwenImageLoRA, tel: Telemetry,
            adj: Adjustments) -> ImageResult:
     steps = held(adj, "steps", payload.steps or TURBO_STEPS, 1, 100)
     edit = bool(payload.prompt.references)
@@ -163,9 +165,10 @@ def _turbo(ctx: Context, payload: TurboInput, edit_model: QwenImageTransformer, 
 _BASE = "qwen/qwen-image-2512@0.1.1"
 _EDIT = "qwen/qwen-image-edit-2511@0.1.0"
 #: The text encoder is its own slot: Qwen2.5-VL-7B-Instruct, stock in both Qwen checkpoints, so coder3101's Heretic
-#: abliteration of it is the default (Paul, 11-17: "use abliterated models wherever possible"). Qwen's own is any
-#: Qwen-Image checkpoint: `model.text_encoder=qwen/qwen-image-2512@0.1.1`.
-_TEXT_ENCODER = "coder3101/qwen2.5-vl-7b-instruct-heretic@0.1.0"
+#: abliteration of it is the default (Paul, 11-17: "use abliterated models wherever possible"). 0.2.0 holds the
+#: encoder and its tokenizer alone (se-160: a release holds only its author's work); `QwenImageTextEncoder` builds only
+#: the encoder, so Qwen's own is any Qwen-Image checkpoint: `model.text_encoder=qwen/qwen-image-2512@0.1.1`.
+_TEXT_ENCODER = "coder3101/qwen2.5-vl-7b-instruct-heretic@0.2.0"
 _DEFAULTS = {"model": _BASE, "edit_model": _EDIT, "text_encoder": _TEXT_ENCODER}
 _TURBO_DEFAULTS = {"model": _BASE, "edit_model": _EDIT, "text_encoder": _TEXT_ENCODER,
                    "turbo_lora": "lightx2v/qwen-image-2512-lightning-lora@0.1.0",
@@ -177,12 +180,12 @@ _EDIT_RULE = '.references.exists(r, r.type == "image")'
 _TEXT_RULE = '.references.all(r, r.type != "image")'
 
 
-# The edit DiT is all `edit_model` binds: the text encoder, VAE and tokenizer are `model`'s. It, and
+# The edit DiT is all `edit_model` binds: the VAE is `model`'s, the encoder `text_encoder`'s. It, and
 # its LoRA, are fetched for a request with references.
 @app.entrypoint(defaults=_DEFAULTS, components=_COMPONENTS,
                 needs={"edit_model": f"request.prompt{_EDIT_RULE}"}, memoize=True)
 def generate(ctx: Context, payload: GenerateInput, edit_model: QwenImageTransformer, model: QwenImage,
-             text_encoder: QwenImage, tel: Telemetry, adj: Adjustments) -> ImageResult:
+             text_encoder: QwenImageTextEncoder, tel: Telemetry, adj: Adjustments) -> ImageResult:
     """Qwen-Image-2512 from text (50 steps), or Qwen-Image-Edit-2511 with pictures (40 steps).
 
     Both with true CFG 4.0."""
@@ -193,7 +196,7 @@ def generate(ctx: Context, payload: GenerateInput, edit_model: QwenImageTransfor
                 needs={"edit_model": f"request.prompt{_EDIT_RULE}", "edit_turbo_lora": f"request.prompt{_EDIT_RULE}",
                        "turbo_lora": f"request.prompt{_TEXT_RULE}"}, memoize=True)  # fmt: skip
 def generate_turbo(ctx: Context, payload: TurboInput, edit_model: QwenImageTransformer, edit_turbo_lora: QwenImageLoRA,
-                   model: QwenImage, text_encoder: QwenImage, turbo_lora: QwenImageLoRA, tel: Telemetry,
+                   model: QwenImage, text_encoder: QwenImageTextEncoder, turbo_lora: QwenImageLoRA, tel: Telemetry,
                    adj: Adjustments) -> ImageResult:
     """Each DiT with lightx2v's 8-step Lightning LoRA for it: 8 steps, no CFG."""
     return _turbo(ctx, payload, edit_model, edit_turbo_lora, model, text_encoder, turbo_lora, tel, adj)
@@ -219,7 +222,7 @@ class ImageBox(msgspec.Struct, kw_only=True):
                  "edit_turbo_lora": f"request.turbo && request.instructions{_EDIT_RULE}",
                  "turbo_lora": f"request.turbo && request.instructions{_TEXT_RULE}"}, memoize=True)  # fmt: skip
 def image(ctx: Context, payload: ImageBox, edit_model: QwenImageTransformer, edit_turbo_lora: QwenImageLoRA,
-          model: QwenImage, text_encoder: QwenImage, turbo_lora: QwenImageLoRA, tel: Telemetry,
+          model: QwenImage, text_encoder: QwenImageTextEncoder, turbo_lora: QwenImageLoRA, tel: Telemetry,
           adj: Adjustments) -> ImageResult:
     """Qwen Image 1 on a canvas: Lightning, or the full models."""
     request = GenerateInput(prompt=payload.instructions, aspect_ratio=payload.aspect_ratio,

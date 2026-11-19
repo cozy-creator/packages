@@ -355,17 +355,36 @@ class MossScheduler(FlowMatchEulerDiscreteScheduler):
         super().set_timesteps(device=device, sigmas=sigmas.tolist())  # type: ignore[arg-type]  # Diffusers' own default is None
 
 
+def _text_encoder(config: Config) -> Qwen3_5Model:
+    """Qwen3.5-9B from a checkpoint's `text_encoder` section, or from the whole config of a checkpoint of the encoder
+    alone (Runtime gives one component's config unsectioned)."""
+    section = config.section("text_encoder") if "text_encoder" in config.keys() else config
+    with no_init_weights():
+        encoder = Qwen3_5Model._from_config(  # type: ignore[no-untyped-call]  # Transformers' _from_config is unannotated
+            Qwen3_5Config(**section.mapping()), dtype=DTYPE
+        )
+    built: Qwen3_5Model = _stored(encoder, "text_encoder", config).eval()
+    return built
+
+
 class MossGraph:
     def __init__(self, config: Config) -> None:
         with no_init_weights():
-            self.components: Components = {
-                "transformer": MossTransformer(**config.section("transformer").mapping()).to(DTYPE).eval(),
-                "text_encoder": _stored(Qwen3_5Model._from_config(  # type: ignore[no-untyped-call]  # Transformers' _from_config is unannotated
-                    Qwen3_5Config(**config.section("text_encoder").mapping()), dtype=DTYPE
-                ), "text_encoder", config).eval(),
-                "vae": _to(construct(AutoencoderKLFlux2, config.section("vae").mapping()), torch.float32).eval(),
-            }
+            transformer = MossTransformer(**config.section("transformer").mapping()).to(DTYPE).eval()
+            vae = _to(construct(AutoencoderKLFlux2, config.section("vae").mapping()), torch.float32).eval()
+        self.components: Components = {"transformer": transformer, "text_encoder": _text_encoder(config), "vae": vae}
         self.scheduler_config: dict[str, object] = config.section("scheduler").mapping()
+
+
+class TextEncoderComponents(TypedDict):
+    text_encoder: Qwen3_5Model
+
+
+class MossTextEncoderGraph:
+    """The `text_encoder` of a MOSS-Image checkpoint, or a checkpoint of the encoder alone."""
+
+    def __init__(self, config: Config) -> None:
+        self.components: TextEncoderComponents = {"text_encoder": _text_encoder(config)}
 
 
 class Components(TypedDict):
@@ -397,14 +416,16 @@ def _to[M: torch.nn.Module](module: M, dtype: torch.dtype) -> M:
 
 
 def build_tokenizer(assets: ModelAssets) -> PreTrainedTokenizerFast:
-    """Qwen3.5's tokenizer and chat template from the checkpoint's `tokenizer/` files, parsed in memory."""
-    config = json.loads(assets.read("tokenizer/tokenizer_config.json"))
+    """Qwen3.5's tokenizer and chat template from the checkpoint's `tokenizer/` files (its root's, for one that keeps
+    them there), parsed in memory."""
+    folder = "tokenizer/" if any(name.startswith("tokenizer/") for name in assets.names()) else ""
+    config = json.loads(assets.read(folder + "tokenizer_config.json"))
     for key in ("tokenizer_file", "name_or_path", "added_tokens_decoder", "tokenizer_class", "processor_class",
                 "backend", "is_local", "local_files_only", "chat_template", "model_specific_special_tokens"):
         config.pop(key, None)
     return PreTrainedTokenizerFast(  # type: ignore[no-untyped-call]  # Transformers' tokenizer __init__ is unannotated
-        tokenizer_object=Tokenizer.from_str(assets.read("tokenizer/tokenizer.json").decode()),
-        chat_template=assets.read("tokenizer/chat_template.jinja").decode(),
+        tokenizer_object=Tokenizer.from_str(assets.read(folder + "tokenizer.json").decode()),
+        chat_template=assets.read(folder + "chat_template.jinja").decode(),
         **config,
     )
 
@@ -429,28 +450,18 @@ def glimpse(picture: Image.Image) -> Image.Image:
     return picture if size == picture.size else picture.resize(size, Image.Resampling.BOX)
 
 
-class MossImage(Model[MossGraph]):
-    """One MOSS-Image checkpoint (Base or SFT)."""
+class MossTextEncoder(Model[MossTextEncoderGraph]):
+    """MOSS-Image's Qwen3.5-9B, the `text_encoder` slot: a MOSS-Image checkpoint's encoder and tokenizer, or a
+    checkpoint of the encoder alone. Only the encoder is built."""
 
-    #: Caller LoRAs on the DiT, at any strength: the Runtime bakes them into the weights.
-    serving = Serving(attention_bits={"transformer.layers.": 8}, loras=("transformer",))
-
-    graph: MossGraph
+    graph: MossTextEncoderGraph
     tokenizer: PreTrainedTokenizerFast
     processor: Qwen2VLImageProcessorPil | None
 
     def load(self, loader: Loader) -> None:
-        self.graph = loader.construct(MossGraph)
+        self.graph = loader.construct(MossTextEncoderGraph)
         self.tokenizer = build_tokenizer(loader.assets)
         self.processor = build_processor(loader.assets)
-
-    def hold_vae(self, tel: Telemetry) -> None:
-        """Serve the VAE at `VAE_DTYPE` on a GPU from now on, before any VAE scope opens: the Runtime
-        casts the stored float32 bytes when it next fills them. A CPU keeps float32."""
-        vae = self.graph.components["vae"]
-        if torch.device(str(self.device)).type == "cuda" and next(vae.parameters()).dtype != VAE_DTYPE:
-            hold_dtype(vae, VAE_DTYPE)
-            tel.log("vae representation", dtype=str(VAE_DTYPE).removeprefix("torch."))
 
     @memoize
     @uses_components("text_encoder")
@@ -484,6 +495,26 @@ class MossImage(Model[MossGraph]):
                 visual["mm_token_type_ids"] = (ids == encoder.config.image_token_id).int()
             out = encoder(input_ids=ids, attention_mask=inputs.attention_mask.to(device), use_cache=False, **visual)
             return out.last_hidden_state[0].cpu()  # type: ignore[no-any-return]
+
+
+class MossImage(Model[MossGraph]):
+    """One MOSS-Image checkpoint (Base or SFT): its DiT and VAE; a function's `text_encoder` slot is `MossTextEncoder`."""
+
+    #: Caller LoRAs on the DiT, at any strength: the Runtime bakes them into the weights.
+    serving = Serving(attention_bits={"transformer.layers.": 8}, loras=("transformer",))
+
+    graph: MossGraph
+
+    def load(self, loader: Loader) -> None:
+        self.graph = loader.construct(MossGraph)
+
+    def hold_vae(self, tel: Telemetry) -> None:
+        """Serve the VAE at `VAE_DTYPE` on a GPU from now on, before any VAE scope opens: the Runtime
+        casts the stored float32 bytes when it next fills them. A CPU keeps float32."""
+        vae = self.graph.components["vae"]
+        if torch.device(str(self.device)).type == "cuda" and next(vae.parameters()).dtype != VAE_DTYPE:
+            hold_dtype(vae, VAE_DTYPE)
+            tel.log("vae representation", dtype=str(VAE_DTYPE).removeprefix("torch."))
 
     @uses_components("vae")
     def encode_image(self, image: Image.Image) -> torch.Tensor:

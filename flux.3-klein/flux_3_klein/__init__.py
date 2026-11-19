@@ -29,6 +29,7 @@ from .klein import (
     MAX_SIDE,
     MIN_SIDE,
     Klein,
+    KleinTextEncoder,
     prepare_multi_reference,
     prepare_reference,
     reference_canvas,
@@ -75,7 +76,7 @@ class GenerateInput(TurboInput):
 def _render(
     ctx: Context,
     model: Klein,
-    text_encoder: Klein,
+    text_encoder: KleinTextEncoder,
     upsampler: Upsampler,
     drafter: Drafter,
     tel: Telemetry,
@@ -219,7 +220,7 @@ def layout_rows(payload: TurboInput, placed: dict[str, Corners | None]) -> list[
     return rows
 
 
-def _generate(ctx: Context, function: str, payload: TurboInput, drafter: Drafter, model: Klein, text_encoder: Klein,
+def _generate(ctx: Context, function: str, payload: TurboInput, drafter: Drafter, model: Klein, text_encoder: KleinTextEncoder,
               upsampler: Upsampler, tel: Telemetry, adj: Adjustments) -> ImageResult:
     default, most = _STEPS[function]
     steps = held(adj, "steps", payload.steps or default, 1, most)
@@ -252,9 +253,10 @@ _DISTILLED = "black-forest-labs/flux-3-klein@0.1.0"
 _BASE = "black-forest-labs/flux-3-klein-base@0.1.0"
 #: Klein's text encoder is stock Qwen3-VL-4B-Instruct (BFL's shards are Qwen's), its own slot: DreamFast's Heretic
 #: abliteration by default (Paul, 11-17: "use abliterated models wherever possible"), the same weights as krea-2's.
-#: BFL's own is any Klein checkpoint: `model.text_encoder=black-forest-labs/flux-3-klein@0.1.0`. `model` (and `full`)
-#: read only the DiT and the VAE.
-_TEXT_ENCODER = "dreamfast/qwen3-vl-4b-heretic-klein@0.1.0"
+#: 0.2.0 holds the encoder alone (se-160: a release holds only its author's work); `KleinTextEncoder` builds only the
+#: encoder, so BFL's own is any Klein checkpoint: `model.text_encoder=black-forest-labs/flux-3-klein@0.1.0`. `model`
+#: (and `full`) read only the DiT and the VAE.
+_TEXT_ENCODER = "dreamfast/qwen3-vl-4b-heretic-klein@0.2.0"
 _KLEIN = ("transformer", "vae")
 _TEXT = ("text_encoder",)
 _COMPONENTS = {"model": _KLEIN, "text_encoder": _TEXT, "upsampler": ("model",), "drafter": ("model",)}
@@ -266,7 +268,7 @@ _NEEDS = {"upsampler": "request.prompt_upsampling != false",
 
 @app.entrypoint(defaults={"model": _BASE, "text_encoder": _TEXT_ENCODER, "upsampler": _UPSAMPLER, "drafter": _DRAFTER},
                 components=_COMPONENTS, needs=_NEEDS, memoize=True)
-def generate(ctx: Context, payload: GenerateInput, drafter: Drafter, model: Klein, text_encoder: Klein,
+def generate(ctx: Context, payload: GenerateInput, drafter: Drafter, model: Klein, text_encoder: KleinTextEncoder,
              upsampler: Upsampler, tel: Telemetry, adj: Adjustments) -> ImageResult:
     """Klein Base, 50 steps with CFG 4: text to image, or an edit of up to ten ordered pictures."""
     return _generate(ctx, "generate", payload, drafter, model, text_encoder, upsampler, tel, adj)
@@ -274,7 +276,7 @@ def generate(ctx: Context, payload: GenerateInput, drafter: Drafter, model: Klei
 
 @app.entrypoint(defaults={"model": _DISTILLED, "text_encoder": _TEXT_ENCODER, "upsampler": _UPSAMPLER,
                           "drafter": _DRAFTER}, components=_COMPONENTS, needs=_NEEDS, memoize=True)
-def generate_turbo(ctx: Context, payload: TurboInput, drafter: Drafter, model: Klein, text_encoder: Klein,
+def generate_turbo(ctx: Context, payload: TurboInput, drafter: Drafter, model: Klein, text_encoder: KleinTextEncoder,
                    upsampler: Upsampler, tel: Telemetry, adj: Adjustments) -> ImageResult:
     """The distilled Klein, 16 steps, no guidance: text to image, or an edit of up to ten ordered pictures."""
     return _generate(ctx, "generate_turbo", payload, drafter, model, text_encoder, upsampler, tel, adj)
@@ -307,7 +309,7 @@ _BOX_NEEDS = {"drafter": "request.prompt_upsampling", "full": "!request.turbo", 
           components={"drafter": ("model",), "full": _KLEIN, "model": _KLEIN, "text_encoder": _TEXT,
                       "upsampler": ("model",)},
           needs=_BOX_NEEDS, memoize=True)  # fmt: skip
-def image(ctx: Context, payload: ImageBox, drafter: Drafter, full: Klein, model: Klein, text_encoder: Klein,
+def image(ctx: Context, payload: ImageBox, drafter: Drafter, full: Klein, model: Klein, text_encoder: KleinTextEncoder,
           upsampler: Upsampler, tel: Telemetry, adj: Adjustments) -> ImageResult:
     """FLUX.3 Klein on a canvas, upsampled: the distilled model, or Base, which loads only when asked for."""
     kind, function, klein = (TurboInput, "generate_turbo", model) if payload.turbo else (GenerateInput, "generate", full)
@@ -333,7 +335,7 @@ class UpscaleInput(msgspec.Struct, kw_only=True):
 
 @app.tool(label="Upscale", named="image", defaults={"model": _DISTILLED, "text_encoder": _TEXT_ENCODER},
           components={"model": _KLEIN, "text_encoder": _TEXT}, memoize=True)  # fmt: skip
-def upscale(ctx: Context, payload: UpscaleInput, model: Klein, text_encoder: Klein, tel: Telemetry,
+def upscale(ctx: Context, payload: UpscaleInput, model: Klein, text_encoder: KleinTextEncoder, tel: Telemetry,
             adj: Adjustments) -> ImageResult:
     """The picture larger: Klein edits it at the size asked, the picture Lanczos-upscaled to the canvas both as the
     reference and, below `denoise`, as the start."""

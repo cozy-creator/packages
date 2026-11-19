@@ -70,9 +70,10 @@ the image with `prompt_upsampling=false` and the same seed.
 Fibo 2.0's text encoder is stock Qwen3-VL-4B-Instruct, bound as its own slot, `text_encoder`; `model` and `full`
 read only the DiT and the VAE. Its default is abliterated (Paul, 11-17: "use abliterated models wherever
 possible"): [DreamFast's Heretic](https://huggingface.co/DreamFast/Qwen3-VL-4b-Heretic)
-(`dreamfast/qwen3-vl-4b-heretic-fibo`, 0/400 HarmBench refusals, KL 0.028), composed on Fibo 2.0 Dev; Krea 2 and
-FLUX.3 Klein read the same weights. Bria's own is any Fibo 2.0 checkpoint:
-`--model text_encoder=briaai/fibo-2-dev@0.1.1`. Bria's prompt VLMs have no abliterated release, so they stay Bria's.
+(`dreamfast/qwen3-vl-4b-heretic-fibo`, 0/400 HarmBench refusals, KL 0.028); Krea 2 and FLUX.3 Klein read the same
+weights. Its 0.2.0 holds the encoder and its processor alone, DreamFast's work only (se-160), and the slot
+(`Fibo2TextEncoder`) builds only the encoder; the caption's text images take the fonts of `model`'s checkpoint. Bria's own
+is any Fibo 2.0 checkpoint: `--model text_encoder=briaai/fibo-2-dev@0.1.1`. Bria's prompt VLMs have no abliterated release, so they stay Bria's.
 
 ## Sampling
 
@@ -102,7 +103,11 @@ cozy model upload hf://DreamFast/Qwen3-VL-4b-Heretic@d8af0c92971d54d90fde7d44180
   dreamfast/qwen3-vl-4b-heretic-fibo --lane bf16 --base briaai/fibo-2-dev@sha256:<bf16 commit>:text_encoder \
   --mirror https://huggingface.co/DreamFast/Qwen3-VL-4b-Heretic --on <machine>
 cozy model quantize dreamfast/qwen3-vl-4b-heretic-fibo@sha256:<bf16 commit> --lane int8 --package ./fibo-2 --on <machine>
+cozy model upload --lane <lane> 'dreamfast/qwen3-vl-4b-heretic-fibo@sha256:<lane commit>:text_encoder,processor' \
+  dreamfast/qwen3-vl-4b-heretic-fibo --mirror https://huggingface.co/DreamFast/Qwen3-VL-4b-Heretic --on <machine>
 ```
+
+The last line, once a lane, keeps the encoder and its processor alone: a header-only cut, the same chunks.
 
 ## Quantized lanes
 
