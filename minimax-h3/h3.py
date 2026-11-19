@@ -1933,7 +1933,25 @@ _PACKAGE_NEEDS = {
 }  # fmt: skip
 
 
-@app.tool(label="Shot", named="shot", reserved=_RESERVED, needs=_SHOT_NEEDS)
+#: What a shot costs (cl-1286): its beats, its segments (15 s each: a 30 s shot of two 15 s beats runs two), its seconds, every
+#: beat's summed, and its steps, Turbo's 8 else the full model's (40 unless asked). Its time is its card's nearest row
+#: (`benchmarks.json`) times `_SEGMENTS` of the request over `_ROW_SEGMENTS`, the same of the row's seconds: the first segment by its seconds^1.18,
+#: 0.585 for each later one (an RTX 4090's warm uncapped 5, 15 and 24 s runs: 88 s, 321 s, 509 s); in proportion to its steps.
+#: Its canvas is H3's own at every shape, so pixels don't vary.
+_SHOT_SECONDS = "sum(request.beats.map(b, double(b.duration)))"
+_ROW_SECONDS = "measured(machine).request.seconds"
+_SEGMENTS = "(pow(min(size.seconds, 15.0) / 15.0, 1.18) + 0.585 * (double(int((size.seconds + 14.999) / 15.0)) - 1.0))"
+_ROW_SEGMENTS = (f"(pow(min({_ROW_SECONDS}, 15.0) / 15.0, 1.18)"
+                 f" + 0.585 * (double(int(({_ROW_SECONDS} + 14.999) / 15.0)) - 1.0))")
+_SHOT_ESTIMATE = {
+    "size": {"beats": "double(size(request.beats))", "seconds": _SHOT_SECONDS,
+             "segments": f"double(int(({_SHOT_SECONDS} + 14.999) / 15.0))",
+             "steps": "request.turbo ? 8.0 : (request.steps != null ? double(request.steps) : 40.0)"},
+    "ms": f"measured(machine).warm_ms * {_SEGMENTS} / {_ROW_SEGMENTS} * size.steps / 8.0",
+}  # fmt: skip
+
+
+@app.tool(label="Shot", named="shot", reserved=_RESERVED, needs=_SHOT_NEEDS, estimate=_SHOT_ESTIMATE)
 async def generate(ctx: Context, payload: Shot, out: Outputs, tel: Telemetry) -> ShotResult:
     """One continuous shot of any length, with sound (README.md): a summary, then what happens, beat by beat, each text
     with the references it mentions; an optional first and last frame; and Pick up from here, which goes on from a take
