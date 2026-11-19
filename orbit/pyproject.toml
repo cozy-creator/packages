@@ -4,7 +4,7 @@ version = "0.5.1rc2"
 description = "Orbit: a picture's subject seen from all the way round, one clockwise camera turn by MiniMax H3 and ORB360"
 requires-python = ">=3.12,<3.15"
 dependencies = [
-    "cozy-runtime[media]>=0.48.0.dev0,<0.50",
+    "cozy-runtime[media]>=0.49.0.dev2356,<0.50",
     "minimax-h3>=0.15.0rc2",
     "msgspec>=0.19",
     "numpy>=1.26",
