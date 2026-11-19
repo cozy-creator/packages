@@ -54,7 +54,7 @@ A video without H3 latents carries its last 22/39/56 frames encoded (`h3.HeldFra
 24-fps clock) and its last second of sound encoded from its soundtrack at 32 kHz, as a cut's sound is. The encoder runs
 each 17-frame chunk alone, so the window is the same kind of tokens as a carry, in phase. The new part's first segment
 saves its latents led by that window (`lead` in their metadata), and its last decodes the part from it, so the part
-decodes in phase without the regenerated head. The kept start is joined by pixels (`shot.join_kept`): its last 4 frames
+decodes in phase without the regenerated head. The new part is spliced into the video (`shot.join_kept`, `Outputs.splice_video`): its last 4 frames
 cross-fade into the part's decode of the carried window, and its last 40 ms of sound, equal power, into the regenerated
 head's sound. The kept sound is resampled to the new part's. The result has no latents.
 
@@ -72,7 +72,8 @@ window longer than one sample chains segments of whole chunks, the suffix only o
 carried window to the suffix's in place of its regenerated head and tail, and joins by pixels at both ends as above
 (no picture cross-fade at a shot change).
 
-The kept parts are re-encoded: `Outputs.join_video` joins whole videos by packet copy, and nothing cuts one.
+Outside the window every packet is the take's, byte for byte; the window and the frames up to the take's next IDR are encoded
+again at its size and clock. A take that can't be cut by packet copy is encoded again whole (`shot._joined`).
 
 ## API
 
