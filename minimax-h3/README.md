@@ -35,8 +35,8 @@ turbo: true
 ```yaml
 # edit.yaml — cozy run minimax-h3/edit --input edit.yaml
 plate: <take3@48-336>                         # frames 48 to 336 of take3: the edit's timeline
-edit: character_swap                          # its trigger (`body_swap:`) opens each beat, at the LoRA's strength
-summary: <kyogre> walks the man's route through the market at dusk.
+edit: character_swap                          # the character_swap slot's LoRA, at its release's strength
+summary: "body_swap: <kyogre> walks the man's route through the market at dusk."   # its trigger, as the page puts it
 beats: [{duration: 5, description: <kyogre> in place of the man.}, {duration: 7, description: <kyogre> stops at the stall.}]
 ```
 
