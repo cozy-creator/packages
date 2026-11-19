@@ -49,7 +49,7 @@ def _conv(inputs: int, outputs: int, kernel: int = 3, stride: int = 1) -> nn.Con
 
 
 class _Basic(nn.Module):
-    """mmdet's ResNetV1e BasicBlock; a strided block's shortcut averages 2×2 before its 1×1 projection (ResNet-D)."""
+    """mmdet's ResNetV1e BasicBlock; a strided block's shortcut averages 2x2 before its 1x1 projection (ResNet-D)."""
 
     def __init__(self, inputs: int, outputs: int, stride: int) -> None:
         super().__init__()
@@ -140,7 +140,7 @@ class _Affine(nn.Module):
 
 class _IBasic(nn.Module):
     """arcface_torch's IBasicBlock: bn1, conv1 (bn2 folded), PReLU, conv2 (bn3 folded, the stride), and a strided
-    block's 1×1 shortcut (its batch norm folded)."""
+    block's 1x1 shortcut (its batch norm folded)."""
 
     def __init__(self, inputs: int, outputs: int, stride: int) -> None:
         super().__init__()
@@ -260,7 +260,7 @@ def _decoded(levels: list[tuple[torch.Tensor, torch.Tensor, torch.Tensor]], side
         boxes.append(np.concatenate([centers - distance[:, :2], centers + distance[:, 2:]], axis=1)[kept])
         landmarks.append((centers[:, None, :] + offset)[kept])
     score = np.concatenate(scores)
-    box = np.concatenate(boxes) / scale
+    box = (np.concatenate(boxes) / scale).astype(np.float32)
     landmark = np.concatenate(landmarks) / scale
     return [Face((float(box[i, 0]), float(box[i, 1]), float(box[i, 2]), float(box[i, 3])), float(score[i]),
                  landmark[i].astype(np.float64)) for i in _nms(box, score)]  # fmt: skip
@@ -347,4 +347,4 @@ class FaceAnalysis(Model[FaceGraph]):
         pixels = (torch.cat(list(faces)) - 127.5) / 127.5
         with torch.no_grad():
             features: torch.Tensor = net(pixels.to(weight.device, weight.dtype)).float()
-        return features / features.norm(dim=-1, keepdim=True)
+        return features.div(features.norm(dim=-1, keepdim=True))

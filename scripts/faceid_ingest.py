@@ -63,7 +63,7 @@ LICENSE = ("For non-commercial research use only: insightface's pretrained model
 
 
 def fetched(url: str, name: str, digest: str, given: Path | None) -> bytes:
-    data = given.read_bytes() if given else urllib.request.urlopen(url).read()  # noqa: S310  # a pinned https source
+    data = given.read_bytes() if given else urllib.request.urlopen(url).read()  # a pinned https source
     found = hashlib.sha256(data).hexdigest()
     if found != digest:
         raise SystemExit(f"{name}: sha256 {found}, not the pinned {digest}")
@@ -83,9 +83,9 @@ def _convolutions(net: nn.Module) -> Iterator[str]:
     if isinstance(net, SCRFD):
         yield from (f"stem.{i}" for i in range(3))
         for s, stage in enumerate(net.stages):
-            for b, block in enumerate(stage):
+            for b, block in enumerate(stage.children()):
                 yield from (f"stages.{s}.{b}.conv1", f"stages.{s}.{b}.conv2")
-                if block.downsample is not None:
+                if getattr(block, "downsample", None) is not None:
                     yield f"stages.{s}.{b}.downsample.1"
         yield from (f"lateral.{i}" for i in range(3))
         yield from (f"fpn.{i}" for i in range(3))
@@ -97,9 +97,9 @@ def _convolutions(net: nn.Module) -> Iterator[str]:
     assert isinstance(net, IResNet)
     yield "conv1"
     for s, layer in enumerate(net.layers):
-        for b, block in enumerate(layer):
+        for b, block in enumerate(layer.children()):
             yield from (f"layers.{s}.{b}.conv1", f"layers.{s}.{b}.conv2")
-            if block.downsample is not None:
+            if getattr(block, "downsample", None) is not None:
                 yield f"layers.{s}.{b}.downsample"
 
 
@@ -196,9 +196,11 @@ def faceid(out: Path, given: Path | None) -> None:
     name, digest = FACEID
     state = torch.load(io.BytesIO(fetched(H94 + name, name, digest, given)), map_location="cpu", weights_only=True)
     with torch.device("meta"):
-        unet = UNet2DConditionModel()  # its converter reads only the file
+        unet = UNet2DConditionModel()  # type: ignore[no-untyped-call]  # its converter reads only the file
     image_proj: dict[str, torch.Tensor] = state["image_proj"]
-    projection: nn.Module = unet._convert_ip_adapter_image_proj_to_diffusers(image_proj, low_cpu_mem_usage=False)
+    # Diffusers' loader converter, a method of its UNet loader mixin that its stubs don't show.
+    convert = unet._convert_ip_adapter_image_proj_to_diffusers  # type: ignore[attr-defined]
+    projection: nn.Module = convert(image_proj, low_cpu_mem_usage=False)
     tensors = {k: v.to(torch.float16) for k, v in projection.state_dict().items()}
     metadata = {"source": H94 + name, "sha256": digest}
     written(out / "image_proj", tensors, metadata, "diffusion_pytorch_model")

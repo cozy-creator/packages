@@ -276,10 +276,10 @@ class IPAdapter(Model[IPGraph]):
         """The pictures' tokens side by side, [1, n·16, 2048], under the black picture's when CFG runs."""
         projection = self.graph.projection
         weight = projection.latents
-        cond = projection(embeds.to(weight.device, weight.dtype)).flatten(0, 1).unsqueeze(0)
+        cond: torch.Tensor = projection(embeds.to(weight.device, weight.dtype)).flatten(0, 1).unsqueeze(0)
         if not guided:
             return cond
-        uncond = projection(empty.to(weight.device, weight.dtype)).flatten(0, 1).unsqueeze(0)
+        uncond: torch.Tensor = projection(empty.to(weight.device, weight.dtype)).flatten(0, 1).unsqueeze(0)
         return torch.cat([uncond, cond])
 
     @uses_components(COMPONENT)
@@ -303,7 +303,7 @@ class _FaceProjection(IPAdapterFaceIDPlusImageProjection):
     a component's call by its arguments."""
 
     def forward(self, id_embeds: torch.Tensor, clip_embeds: torch.Tensor | None = None) -> torch.Tensor:
-        self.clip_embeds = clip_embeds
+        self.clip_embeds = clip_embeds  # type: ignore[assignment]  # Diffusers types it None, which a pipeline then sets
         try:
             out: torch.Tensor = super().forward(id_embeds)
         finally:
@@ -350,7 +350,8 @@ class FaceIDAdapter(Model[FaceIDGraph]):
         weight = projection.norm.weight
 
         def tokens(ids: torch.Tensor, clip: torch.Tensor) -> torch.Tensor:
-            out = projection(ids.to(weight.device, weight.dtype), clip.to(weight.device, weight.dtype).unsqueeze(1))
+            out: torch.Tensor = projection(ids.to(weight.device, weight.dtype),
+                                           clip.to(weight.device, weight.dtype).unsqueeze(1))  # fmt: skip
             return out.flatten(0, 1).unsqueeze(0)
 
         cond = tokens(identities, embeds)
@@ -386,7 +387,7 @@ class FaceLoRAGraph:
             if len(down) != 2 or len(up) != 2:
                 raise ValueError(f"FaceID's LoRA has no stored factors for {path}")
             (rank, inputs), (outputs, _) = down, up
-            # α: the config's `lora_alpha` (h94's is the rank at every module), else r.
+            # Alpha: the config's `lora_alpha` (h94's is the rank at every module), else r.
             factors = lora.Pair(inputs, outputs, rank, float(adapter.get("lora_alpha", rank)) / rank)
             dtype = {"f32": torch.float32, "bf16": torch.bfloat16, "f16": torch.float16}[
                 config.tensor_dtype(f"{key}.lora_A.weight", default="f16")]

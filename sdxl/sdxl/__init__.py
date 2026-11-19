@@ -801,7 +801,6 @@ def _generate(ctx: Context, payload: GenerateInput, facts: GenerateFacts, model:
         with tel.stage("encoding references"):
             parts, faced = _references(ctx, [p.file.read() for p in pictures], payload.reference_strength,
                                        classifier_free, adapters)  # fmt: skip
-        tel.log("references", plus=len(pictures) - faced, faceid=faced)
 
     def body(references: References | None = None) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         return model.generate(
@@ -817,7 +816,7 @@ def _generate(ctx: Context, payload: GenerateInput, facts: GenerateFacts, model:
     run: Callable[[], tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]] = steered if parts else body
     if controls is not None:
         run = functools.partial(controlnet.armed, run)
-    if len(pictures) > faced and parts:
+    if parts and faced < len(pictures):
         run = functools.partial(adapters.ip_adapter.armed, run)
     if faced:
         run = functools.partial(adapters.face_adapter.armed, run)
