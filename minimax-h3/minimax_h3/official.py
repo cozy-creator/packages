@@ -1101,7 +1101,7 @@ class OfficialH3Pipeline:
         return MiniMaxH3ImageReference(image=image if image.mode == "RGB" else image.convert("RGB"))
 
     def audio_reference(self, audio: DecodedAudio) -> MiniMaxH3AudioReference:
-        waveform = _resample(_audio_tensor(audio), audio.sample_rate, self.sample_rate)
+        waveform = resample(_audio_tensor(audio), audio.sample_rate, self.sample_rate)
         return MiniMaxH3AudioReference(audio=waveform, sample_rate=self.sample_rate)
 
     def video_reference(self, clip: ReferenceClip) -> MotionVideo:
@@ -1110,7 +1110,7 @@ class OfficialH3Pipeline:
         puts the real frames in its place, so nothing is resized twice."""
         soundtrack = clip.soundtrack
         if soundtrack is not None:
-            soundtrack = _resample(soundtrack, clip.sample_rate, self.sample_rate)
+            soundtrack = resample(soundtrack, clip.sample_rate, self.sample_rate)
         height, width = (int(v) for v in resolve_canvas_size(clip.width, clip.height, *CANVAS))
         stand_in = np.broadcast_to(
             np.zeros((1, 1, 1, 3), dtype=np.uint8), (len(clip.frames), height, width, 3)
@@ -1128,7 +1128,7 @@ class OfficialH3Pipeline:
         audio VAE's rate, as the official normalization puts a reference's."""
         audio = clip.soundtrack
         if audio is not None:
-            audio = _resample(audio, clip.sample_rate, self.sample_rate).to(torch.float32)
+            audio = resample(audio, clip.sample_rate, self.sample_rate).to(torch.float32)
             audio = audio.expand(2, -1).contiguous() if audio.shape[0] == 1 else audio
         return GuideClip(clip.frames, audio)
 
@@ -1187,13 +1187,15 @@ class OfficialH3Pipeline:
         guide: GuideClip | None = None,
         anchors: Sequence[tuple[PILImage.Image, Literal["first", "last"]]] = (),
         canvas: tuple[int, int] | None = None,
+        suffix: AVContext | None = None,
     ) -> PipelineState:
         """``reference_image_short_edges`` is one resolved edge per image reference, in
         packed order; the official setup step resizes each image to its own. A `guide` sets
         the render's canvas (`guide_rows`), else the carried picture does, else the first
         keyframe `anchor`, as FL2VA's first keyframe does; each anchor is fitted to it
         (`anchor_rows`). Else `canvas`, the (height, width) asked for, else the official 16:9:
-        a reference picture never sets it."""
+        a reference picture never sets it. A redo's `suffix`, the kept frames after its window,
+        is held over the sample's tail as the carry is over its head (`align_context_rows`)."""
         if context is not None:
             context.validate()
             if delivery is None or delivery.carried != context.carry:
@@ -1202,6 +1204,14 @@ class OfficialH3Pipeline:
             raise InvalidRequest(
                 "a carried picture or sound requires a completed context", code="h3_continuation"
             )
+        if suffix is not None:
+            suffix.validate()
+            if context is None or delivery is None or delivery.suffix != suffix.carry:
+                raise InvalidRequest("a suffix needs a carried start and the plan that holds it", code="h3_continuation")
+            if suffix.canvas != context.canvas:
+                raise InvalidRequest("the suffix's canvas differs from the carry's", code="h3_continuation")
+        elif delivery is not None and delivery.suffix:
+            raise InvalidRequest("a held suffix requires its frames", code="h3_continuation")
         if delivery is not None and frames != delivery.sample_frames:
             raise InvalidRequest("sample frames differ from delivery plan", code="h3_continuation")
         size: dict[str, int]
@@ -1240,6 +1250,7 @@ class OfficialH3Pipeline:
                 "continuation canvas differs from this render", code="h3_continuation"
             )
         state.set("continuation_context", context)
+        state.set("continuation_suffix", suffix)
         state.set("continuation_delivery", delivery)
         self._expect(task, state)
         return state
@@ -1349,9 +1360,9 @@ class OfficialH3Pipeline:
                         device="meta",
                     )
                 )
-            context: AVContext | None = scratch.values.get("continuation_context")
-            if context is not None:
-                # `condition_media` appends the carried latents after the public references.
+            held = (scratch.values.get("continuation_context"), scratch.values.get("continuation_suffix"))
+            for context in (item for item in held if item is not None):
+                # `condition_media` appends the carried latents, then a suffix's, after the public references.
                 video.extend(t for t in (context.video,) if t is not None)
                 audio.extend(t for t in (context.audio,) if t is not None)
                 references.append(ContextReferenceLayout.of(context))
@@ -1449,8 +1460,11 @@ class OfficialH3Pipeline:
                 self._encode_guide(task, state, memo)
         if state.get(ANCHORS):
             self._encode_anchors(task, state)
-        context: AVContext | None = state.values.get("continuation_context")
-        if context is not None:
+        # The carried latents, then a redo's suffix: the last condition rows, in that order (`align_context_rows`).
+        held: tuple[AVContext | None, ...] = (
+            state.values.get("continuation_context"), state.values.get("continuation_suffix")
+        )  # fmt: skip
+        for context in (item for item in held if item is not None):
             if context.video is not None:
                 state.set("condition_latents", [*state.condition_latents, context.video])
             if context.audio is not None:
@@ -1626,8 +1640,10 @@ class OfficialH3Pipeline:
             self._run_with(task, scoped, name, state)
 
         context: AVContext | None = state.values.get("continuation_context")
+        suffix: AVContext | None = state.values.get("continuation_suffix")
         if context is not None:
-            align_context_rows(state, context, tuple(scoped.patch_size))
+            delivery = cast(ContinuationPlan, state.get("continuation_delivery"))
+            align_context_rows(state, context, tuple(scoped.patch_size), suffix, delivery.sample_frames)
 
         # The receipt names the schedule the official blocks actually built, proven
         # against the plan by exact float32 equality of both modality vectors.
@@ -1646,7 +1662,7 @@ class OfficialH3Pipeline:
             clips = ClipRows(block_state, references, latents, scoped.patch_size, start=guide + anchors)
             clips.thin(block_state)
         block_state.carried_video_rows = (
-            0 if context is None else unprotect_carried(block_state, context, tuple(scoped.patch_size))
+            0 if context is None else unprotect_carried(block_state, context, tuple(scoped.patch_size), suffix)
         )
         # The anchors pack in front of the guide; its rows follow them.
         block_state.guide_video_rows = unprotect_guide(block_state, anchors, guide) if guide else 0
@@ -1790,6 +1806,14 @@ class OfficialH3Pipeline:
         """Packed rows of a kept soundtrack's last second, encoded with what leads up to it, as a carry holds them."""
         rows = self._sound_rows(waveform[:, -_SOUND_LEAD_S * self.sample_rate :])
         return rows[:, -AUDIO_TICKS:].reshape(-1, rows.shape[-1])
+
+    def held_sound(self, waveform: torch.Tensor, first: int) -> torch.Tensor:
+        """Packed rows of a kept soundtrack's second from its audio latent `first`, encoded with what leads up to it and
+        follows it: a redo's suffix."""
+        rows = self._sound_rows(waveform)
+        if rows.shape[1] < first + AUDIO_TICKS:
+            raise InvalidRequest("the kept sound after a redo is shorter than a second", code="h3_continuation")
+        return rows[:, first : first + AUDIO_TICKS].reshape(-1, rows.shape[-1])
 
     def export_context(self, state: PipelineState, *, provenance: str) -> AVContext | None:
         """The successor's carry from this request's denoised latents; None if it carries
@@ -2339,7 +2363,7 @@ def _audio_tensor(audio: DecodedAudio) -> torch.Tensor:
     )
 
 
-def _resample(waveform: torch.Tensor, rate: int, target: int) -> torch.Tensor:
+def resample(waveform: torch.Tensor, rate: int, target: int) -> torch.Tensor:
     """Bit-identical port of `torchaudio.transforms.Resample(rate, target)` defaults.
 
     The official pipeline resamples reference audio with torchaudio, which has no release for

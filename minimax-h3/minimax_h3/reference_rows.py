@@ -25,7 +25,7 @@ from typing import Protocol
 
 import torch
 
-from .continuation import AVContext, ContextReferenceLayout
+from .continuation import AVContext, ContextReferenceLayout, picture_rows
 
 CANVAS_DIVISOR = 2
 FRAME_STRIDE = 2
@@ -188,18 +188,20 @@ def permute_rows(block_state: LoopState, order: torch.Tensor) -> None:
     block_state.denoiser_input_fields = fields
 
 
-def unprotect_carried(state: LoopState, context: AVContext, patch_size: Sequence[int]) -> int:
-    """The carried picture rows out of the protected prefix: they take the video's own sparsity,
-    dense for the dense steps and routed after (Paul, 11-12). Text, references and audio stay
-    protected, as NVIDIA's recipe has them. The carried rows, the last condition rows, move to
-    just before the first target row, so what stays protected is still one prefix. Returns how
-    many moved; none when the layout isn't the one this reads (its rows stay protected)."""
-    if context.video is None:
-        return 0
-    _, patch_h, patch_w = patch_size
-    _, _, frames, height, width = (int(n) for n in context.video.shape)
-    count = frames * (height // patch_h) * (width // patch_w)
-    return _unprotect(state, state.num_condition_video_rows - count, count)
+def unprotect_carried(
+    state: LoopState, context: AVContext, patch_size: Sequence[int], suffix: AVContext | None = None
+) -> int:
+    """The carried picture rows, and a redo's `suffix` rows after them, out of the protected prefix:
+    they take the video's own sparsity, dense for the dense steps and routed after (Paul, 11-12).
+    Text, references and audio stay protected, as NVIDIA's recipe has them. Each block, the last
+    condition rows, moves to just before the first target row, so what stays protected is still one
+    prefix. Returns how many moved; none of a block when the layout isn't the one this reads (its
+    rows stay protected)."""
+    held = picture_rows(suffix.video if suffix is not None else None, patch_size)
+    count = picture_rows(context.video, patch_size)
+    conditions = state.num_condition_video_rows
+    moved = _unprotect(state, conditions - held, held) if held else 0
+    return moved + (_unprotect(state, conditions - held - count, count) if count else 0)
 
 
 def unprotect_guide(state: LoopState, first: int, count: int) -> int:

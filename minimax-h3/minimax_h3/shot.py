@@ -49,10 +49,11 @@ from cozy_runtime.media import (
 )
 from PIL import Image as PILImage
 from safetensors.torch import load as load_tensors
+from safetensors.torch import save as save_tensors
 
 from minimax_h3 import shot_latents
 from minimax_h3.continuation import AUDIO_TICKS_PER_S, Carry, ContinuationPlan, audio_ticks, carries, decode_context
-from minimax_h3.official import FPS, MAX_CANVAS_RATIO, MAX_FRAMES, clip_size, shown_width, within_ratio
+from minimax_h3.official import FPS, MAX_CANVAS_RATIO, MAX_FRAMES, clip_size, resample, shown_width, within_ratio
 from story import _HEADER, MENTION, MIN_CLIP_SECONDS, StoryReference, description_span, later_part, name_key, without_sections
 
 #: An output's or latents' byte bound: TensorD's output allowance reads it (256 MiB where none is declared), and the
@@ -73,6 +74,8 @@ ShotImage = Annotated[ImageFile, FileBound(max_decoded_bytes=256 << 20)]
 #: Generated frames are square-pixel RGB at 24 fps, tagged BT.709 limited-range in the container.
 VIDEO_COLOR = {"color_primaries": 1, "color_transfer": 1, "color_matrix": 1, "color_range": 1}
 AUDIO_LAYOUTS = {1: ("mono", ("FC",)), 2: ("stereo", ("FL", "FR"))}
+#: H3's sound: stereo at its audio VAE's 32 kHz.
+H3_RATE = 32_000
 
 
 class Beat(msgspec.Struct, kw_only=True):
@@ -605,15 +608,15 @@ def upscale_prompt(script: Script) -> str:
     return re.sub(r"<([^<>]+)>", r"\1", fl2va_text(text, script.soundscape, script.music))
 
 
-def _kept_frames(take: VideoFile, frames: int, size: tuple[int, int]) -> Iterator[DecodedMediaEvent]:
-    """A take's first `frames` on the 24-fps clock, each cover-scaled and centre-cropped to `size`, silent."""
+def _kept_frames(take: VideoFile, frames: int, size: tuple[int, int], *, start: int = 0) -> Iterator[DecodedMediaEvent]:
+    """A take's `frames` from frame `start` on the 24-fps clock, each cover-scaled and centre-cropped to `size`, silent."""
     yield DecodedMediaHeader(
         video=DecodedVideoFormat(width=size[0], height=size[1], time_base=Fraction(1, FPS), pixel_aspect_ratio=Fraction(1),
                                  nominal_frame_rate=Fraction(FPS), **VIDEO_COLOR),
         audio=None,
     )  # fmt: skip
     count, origin, last = 0, None, b""
-    with take.stream(end=Fraction(frames, FPS), audio=False) as events:
+    with take.stream(start=Fraction(start, FPS), end=Fraction(start + frames, FPS), audio=False) as events:
         for event in events:
             if not isinstance(event, DecodedVideoFrame):
                 continue
@@ -688,42 +691,153 @@ class SoFar:
         self._samples += wanted
 
 
-def join_kept(out: Outputs, take: VideoFile, frames: int, new: VideoFile) -> tuple[VideoFile, list[str]]:
-    """A take's first `frames`, then `new`, as one video, when no latents carry the take into it: the kept start is
-    encoded at the new part's size and joined by packet copy (`Outputs.join_video`, which takes the saved start in, so it
-    isn't an output left unreturned), under one soundtrack, the take's to the cut, then the new part's."""
+#: A join of kept frames and a new part by pixels cross-fades this many kept frames into the new part's own copy of them
+#: (Herrgotts' 4-frame crossfade), and 40 ms of kept sound, equal power (se-130: a 4.1 dB step became 2.0, no click).
+CROSSFADE_FRAMES = 4
+CROSSFADE_S = Fraction(1, 25)
+
+
+class Overlap(NamedTuple):
+    """A new part's own copies of the kept frames and sound beside it, which a join cross-fades the kept ones into: the
+    `CROSSFADE_FRAMES` just before it and its sound's last `CROSSFADE_S` there (its regenerated head), and the same just
+    after it (its tail). `(frames, H, W, 3)` RGB8 at its canvas, `(channels, samples)` at its rate."""
+
+    head_frames: torch.Tensor | None = None
+    head_sound: torch.Tensor | None = None
+    tail_frames: torch.Tensor | None = None
+    tail_sound: torch.Tensor | None = None
+
+    def to_bytes(self) -> bytes:
+        return save_tensors({name: value.contiguous() for name, value in self._asdict().items() if value is not None})
+
+    @classmethod
+    def read(cls, data: bytes) -> Overlap:
+        return cls(**load_tensors(data)) if data else cls()
+
+    def joined(self, last: Overlap) -> Overlap:
+        """A part made of segments: this, its first's, with its `last`'s, which decodes the whole part."""
+        return Overlap(self.head_frames if self.head_frames is not None else last.head_frames,
+                       self.head_sound if self.head_sound is not None else last.head_sound,
+                       last.tail_frames, last.tail_sound)  # fmt: skip
+
+
+def h3_sound(wave: npt.NDArray[np.float32] | torch.Tensor, rate: int) -> torch.Tensor:
+    """A `(channels, samples)` soundtrack as H3 hears it: stereo at 32 kHz, a mono one on both sides."""
+    tensor = torch.as_tensor(wave, dtype=torch.float32)
+    tensor = tensor.expand(2, -1) if tensor.shape[0] == 1 else tensor[:2]
+    return resample(tensor.contiguous(), rate, H3_RATE).contiguous() if rate else torch.zeros((2, 0))
+
+
+def take_sound(take: VideoFile, start: Fraction, end: Fraction | None) -> torch.Tensor:
+    """A take's sound from `start` to `end` seconds as H3 hears it (`h3_sound`): `(2, samples)`, empty if it has none."""
+    found = take.probe().soundtrack
+    if found is None:
+        return torch.zeros((2, 0))
+    parts = sound_chunks(take.stream(start=start, end=end, pictures=False))
+    return h3_sound(np.concatenate(parts, axis=1), found.sample_rate) if parts else torch.zeros((2, 0))
+
+
+def _fitted_sound(wave: torch.Tensor, samples: int) -> torch.Tensor:
+    return torch.nn.functional.pad(wave, (0, max(0, samples - int(wave.shape[1]))))[:, :samples]
+
+
+def crossfade(into: torch.Tensor, kept: torch.Tensor, *, kept_first: bool) -> torch.Tensor:
+    """`kept` (its first samples when `kept_first`, else its last) cross-faded with `into`, equal power, over `into`'s
+    length: the kept sound hands over to the new part's copy, or takes over from it."""
+    count = min(int(into.shape[1]), int(kept.shape[1]))
+    if not count:
+        return kept
+    ramp = torch.linspace(0.0, 1.0, count + 2)[1:-1] * (math.pi / 2)
+    out = kept.clone()
+    if kept_first:
+        out[:, :count] = into[:, :count] * torch.cos(ramp) + kept[:, :count] * torch.sin(ramp)
+    else:
+        out[:, -count:] = kept[:, -count:] * torch.cos(ramp) + into[:, -count:] * torch.sin(ramp)
+    return out
+
+
+def _faded(frames: Iterator[DecodedMediaEvent], copies: torch.Tensor | None, *, at_end: bool, count: int
+           ) -> Iterator[DecodedMediaEvent]:  # fmt: skip
+    """`frames` with the `count` last (`at_end`) or first of them cross-faded into, or from, the new part's `copies`."""
+    if copies is None:
+        yield from frames
+        return
+    copies = copies[-CROSSFADE_FRAMES:] if at_end else copies[:CROSSFADE_FRAMES]
+    faded = int(copies.shape[0])
+    for event in frames:
+        if not isinstance(event, DecodedVideoFrame):
+            yield event
+            continue
+        index = event.pts - (count - faded) if at_end else event.pts
+        if 0 <= index < faded:
+            weight = (index + 1) / (faded + 1)
+            kept = torch.frombuffer(bytearray(event.rgb), dtype=torch.uint8).view(event.height, event.width, 3).float()
+            mixed = (1 - weight) * kept + weight * copies[index].float() if at_end else \
+                (1 - weight) * copies[index].float() + weight * kept
+            event = _frame_event(bytes(mixed.round().clamp(0, 255).to(torch.uint8).numpy()), event.pts, (event.width, event.height))
+        yield event
+
+
+def join_kept(out: Outputs, take: VideoFile, frames: int, new: VideoFile, *, after: int | None = None,
+              overlap: Overlap = Overlap(), cut: bool = False) -> tuple[VideoFile, list[str]]:  # fmt: skip
+    """A take's first `frames`, then `new`, then the take again from frame `after` (a redo), as one video, where no latents
+    carry the take through it: each kept part is encoded at the new part's size and joined by packet copy
+    (`Outputs.join_video`, which takes the saved parts in, so none is an output left unreturned), under one soundtrack, the
+    take's, the new part's, then the take's again, resampled to the new part's. At each join the kept frames and sound
+    beside it cross-fade into the new part's own copies (`overlap`), except the picture at a shot change (`cut`), where
+    the next shot starts fresh."""
     probe = new.probe()
     sound = probe.soundtrack
     if sound is None:
         raise OutputError("the new part has no soundtrack to join under", code="output_integrity")
-    warnings = [] if (take.probe().width, take.probe().height) == (probe.width, probe.height) else [
-        f"the kept start is {take.probe().width}x{take.probe().height}, so it's scaled to the new part's {probe.width}x{probe.height}"
+    shape, size = take.probe(), (probe.width, probe.height)
+    warnings = [] if (shape.width, shape.height) == size else [
+        f"the kept part is {shape.width}x{shape.height}, so it's scaled to the new part's {probe.width}x{probe.height}"
     ]  # fmt: skip
-    kept_format = take.probe().soundtrack
-    samples = frames * sound.sample_rate // FPS
-    if kept_format is not None and (kept_format.channels, kept_format.sample_rate) == (sound.channels, sound.sample_rate):
-        parts = sound_chunks(take.stream(end=Fraction(frames, FPS), pictures=False))
-        before = np.concatenate(parts, axis=1)[:, :samples] if parts else np.zeros((sound.channels, 0), dtype=np.float32)
-    else:
-        before = np.zeros((sound.channels, 0), dtype=np.float32)
-        if kept_format is not None:
-            warnings.append("the kept start's sound isn't the new part's format, so it's silent")
-    before = np.pad(before, ((0, 0), (0, samples - before.shape[1]))).astype(np.float32)
+    rate, fade = sound.sample_rate, round(CROSSFADE_S * sound.sample_rate)
+    new_frames = probe_frames(new)
+    total = math.ceil(shape.duration * FPS) if after is not None else 0
+    ends = [frames, frames + new_frames, frames + new_frames + max(0, total - (after or 0))]
+    clock = [end * rate // FPS for end in ends]
+    before = _fitted_sound(_at(take_sound(take, Fraction(0), Fraction(frames, FPS)), rate, sound.channels), clock[0])
+    if overlap.head_sound is not None:
+        before = crossfade(_at(overlap.head_sound, H3_RATE, sound.channels)[:, -fade:], before, kept_first=False)
     parts = sound_chunks(new.stream(pictures=False))
-    after = np.concatenate(parts, axis=1).astype(np.float32) if parts else np.zeros((sound.channels, 0), dtype=np.float32)
+    made = torch.from_numpy(np.concatenate(parts, axis=1)) if parts else torch.zeros((sound.channels, 0))
+    made = _fitted_sound(made, clock[1] - clock[0])
     layout, names = AUDIO_LAYOUTS[sound.channels]
-    track = DecodedAudioFormat(channels=sound.channels, sample_rate=sound.sample_rate, channel_layout=layout,
-                               channel_names=names, time_base=Fraction(1, sound.sample_rate))  # fmt: skip
+    track = DecodedAudioFormat(channels=sound.channels, sample_rate=rate, channel_layout=layout,
+                               channel_names=names, time_base=Fraction(1, rate))  # fmt: skip
 
-    def chunk(wave: npt.NDArray[np.float32], pts: int) -> Iterator[DecodedAudioChunk]:
+    def chunk(wave: torch.Tensor, pts: int) -> Iterator[DecodedAudioChunk]:
         if wave.shape[1]:
-            yield DecodedAudioChunk(channels=sound.channels, sample_count=int(wave.shape[1]), sample_rate=sound.sample_rate,
+            yield DecodedAudioChunk(channels=sound.channels, sample_count=int(wave.shape[1]), sample_rate=rate,
                                     channel_layout=layout, channel_names=names,
-                                    pcm_f32le=tuple(np.ascontiguousarray(channel).tobytes() for channel in wave),
+                                    pcm_f32le=tuple(np.ascontiguousarray(channel.numpy(), dtype=np.float32).tobytes()
+                                                    for channel in wave),
                                     pts=pts, time_base=track.time_base)  # fmt: skip
 
     join = out.join_video(track)
-    start = out.save_video_stream(_kept_frames(take, frames, (probe.width, probe.height))).video
+    start = out.save_video_stream(_faded(_kept_frames(take, frames, size), overlap.head_frames, at_end=True, count=frames)).video
     join.append(start, lambda _: chunk(before, 0))
-    join.append(new, lambda _: chunk(after, samples), last=True)
+    join.append(new, lambda _: chunk(made, clock[0]), last=after is None or ends[2] == ends[1])
+    if after is not None and ends[2] > ends[1]:
+        rest = _fitted_sound(_at(take_sound(take, Fraction(after, FPS), None), rate, sound.channels), clock[2] - clock[1])
+        if overlap.tail_sound is not None:
+            rest = crossfade(_at(overlap.tail_sound, H3_RATE, sound.channels)[:, :fade], rest, kept_first=True)
+        frames_after = _kept_frames(take, ends[2] - ends[1], size, start=after)
+        kept = out.save_video_stream(frames_after if cut else _faded(frames_after, overlap.tail_frames, at_end=False,
+                                                                       count=ends[2] - ends[1])).video  # fmt: skip
+        join.append(kept, lambda _: chunk(rest, clock[1]), last=True)
     return join.finish().video, warnings
+
+
+def _at(wave: torch.Tensor, rate: int, channels: int) -> torch.Tensor:
+    """H3's stereo 32 kHz sound (`h3_sound`) at a soundtrack's `rate` and `channels`."""
+    wave = resample(wave, H3_RATE, rate) if rate != H3_RATE and wave.shape[1] else wave
+    return wave.mean(dim=0, keepdim=True) if channels == 1 else wave
+
+
+def probe_frames(video: VideoFile) -> int:
+    """A video's frames on the 24-fps clock."""
+    return math.floor(video.probe().duration * FPS + Fraction(1, 2))
