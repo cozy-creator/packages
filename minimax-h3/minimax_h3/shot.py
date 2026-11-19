@@ -300,7 +300,7 @@ def written(shot: Shot, *, offset: float = 0.0, length: float | None = None) -> 
 
 def _delivered(seconds: int, first: bool, carry: Carry) -> int:
     """The frames a segment of `seconds` new seconds delivers on H3's 17n+5 grid."""
-    return ContinuationPlan(seconds, Carry() if first else carry).delivered_frames
+    return ContinuationPlan(FPS * seconds, Carry() if first else carry).delivered_frames
 
 
 class ShotPlan(NamedTuple):

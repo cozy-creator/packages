@@ -90,6 +90,7 @@ from minimax_h3.continuation import (
     AUDIO_TICKS,
     AUDIO_TICKS_PER_S,
     TICKS_PER_FRAME,
+    MAX_FRAMES,
     AVContext,
     Carry,
     ContinuationPlan,
@@ -125,7 +126,6 @@ from minimax_h3.official import (
     MAX_VIDEO_REFERENCES,
     FRAMES_PER_CHUNK,
     LATENTS_PER_CHUNK,
-    MAX_FRAMES,
     MIN_FRAMES,
     REFERENCE_IMAGE_SHORT_EDGE,
     VAE_SPATIAL_RATIO,
@@ -2290,7 +2290,7 @@ class Retake(msgspec.Struct, kw_only=True):
 
 
 #: A retake's every segment carries the take's frames in, so runs Ref2VA.
-_RETAKE_NEEDS = {"ref2va_segment": "true", "fl2va_segment": "false"}
+_RETAKE_NEEDS = {"ref2va_segment": "true"}
 
 
 def _shot_change(video: VideoFile, near: int, length: int) -> int | None:

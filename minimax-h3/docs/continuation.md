@@ -48,9 +48,35 @@ decoded-and-encoded link in a resume, and only sound: its one job is to conditio
 segment's head is regenerated beside the carried frames and cut, so no new frame is lost. The kept latents don't change, and the
 video decodes again as one, so only the last few frames before the join differ, where the VAE's overlap reads the new latents.
 
+## Any other video
+
+A video without H3 latents carries its last 22/39/56 frames encoded (`h3.HeldFrames`, at the shot's canvas, on the
+24-fps clock) and its last second of sound encoded from its soundtrack at 32 kHz, as a cut's sound is. The encoder runs
+each 17-frame chunk alone, so the window is the same kind of tokens as a carry, in phase. The new part's first segment
+saves its latents led by that window (`lead` in their metadata), and its last decodes the part from it, so the part
+decodes in phase without the regenerated head. The kept start is joined by pixels (`shot.join_kept`): its last 4 frames
+cross-fade into the part's decode of the carried window, and its last 40 ms of sound, equal power, into the regenerated
+head's sound. The kept sound is resampled to the new part's. The result has no latents.
+
+## Redo a range
+
+`retake` cuts a take at a window and makes only the middle (`minimax_h3/retake.py`). The window goes on from the 22
+frames before it, from the take's latents when they're on its `17k + 5` grid (`shot_latents.cut`), else encoded. At its
+end, a shot change within one chunk of the asked end (picture and colour change both outliers among the frames around
+it) ends it: the last segment samples a few frames past it, cut. Otherwise the take's next 39 frames and their second of
+sound are a suffix, held over the sample's last 12 latents as the carry is over its head
+(`ContinuationPlan.suffix`, `align_context_rows`, `unprotect_carried`); the sample is exactly `22 + L + 39`, so the
+window is `L ≡ 12 (mod 17)` frames, and with latents it ends on a chunk, where the take's own latents follow in phase.
+The sound starts on the nearest tick to the suffix's first frame, encoded from 5 s before to 1 s after its second. A
+window longer than one sample chains segments of whole chunks, the suffix only on the last. The part decodes from the
+carried window to the suffix's in place of its regenerated head and tail, and joins by pixels at both ends as above
+(no picture cross-fade at a shot change).
+
+The kept parts are re-encoded: `Outputs.join_video` joins whole videos by packet copy, and nothing cuts one.
+
 ## API
 
-`minimax_h3/continuation.py`: `Carry`, `ContinuationPlan(seconds, carried, successor)`,
+`minimax_h3/continuation.py`: `Carry`, `ContinuationPlan(frames, carried, successor, suffix, tail)`,
 `AVContext(video, audio, audio_offset, provenance)` with `encode_context`/`decode_context`
 (schema 3, ≤ 16 MiB, ~2.7 MB for 22 frames at 1344×768), `export_context`,
 `align_context_rows`. `OfficialH3Pipeline.start_ref2va` takes `context`, `delivery` and
