@@ -181,10 +181,12 @@ FULL_BALANCED = FullRecipe()
 
 
 class TextGraph:
-    """The `text_encoder` slot's construction: H3's 50-layer conditioner alone."""
+    """The `text_encoder` slot's construction: H3's 50-layer conditioner alone, from an H3 checkpoint's `text_encoder`
+    section or the whole config of a checkpoint of the encoder alone (Runtime gives one component's config unsectioned)."""
 
     def __init__(self, config: Config) -> None:
-        self.components: dict[str, nn.Module] = {"text_encoder": build_text_conditioner(config.section("text_encoder").mapping())}
+        section = config.section("text_encoder") if "text_encoder" in config.keys() else config
+        self.components: dict[str, nn.Module] = {"text_encoder": build_text_conditioner(section.mapping())}
 
 
 @placeable("text_encoder")
