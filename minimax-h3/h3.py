@@ -1421,7 +1421,7 @@ async def regenerate_shot(
     tel: Telemetry,
 ) -> RegenerateOutput:
     """Regenerate-2K over a whole shot: its 768p latent upscaled, refined at
-    `resolution` in overlapping windows where the card needs them, and decoded with its
+    `resolution` (in overlapping windows past `refine_math.WINDOW_ROWS`), and decoded with its
     soundtrack."""
     # The shot's own latent: no encode, and no decode-and-encode loss (NVIDIA's `--input-latents`).
     # Latents it can't use, the video stands for them.
