@@ -10,9 +10,9 @@ from typing import TypedDict, cast
 import numpy as np
 import torch
 from cozy_runtime.accel import sequence_parallel
-from cozy_runtime.vlm import VisionLM
-from cozy_runtime import rng
-from cozy_runtime.author import Config, InvalidRequest, Loader, Model, ModelAssets, Serving, uses_components
+from cozy_runtime.vlm import COMPONENT, VisionLM
+from cozy_runtime import lm, rng
+from cozy_runtime.author import Config, Loader, Model, ModelAssets, Serving, uses_components
 from diffusers.models.autoencoders.autoencoder_kl_wan import AutoencoderKLWan
 from diffusers.models.embeddings import TimestepEmbedding, Timesteps
 from diffusers.models.transformers.transformer_pan2 import PAN2Transformer3DModel, PAN2TransformerBlock
@@ -31,6 +31,15 @@ from transformers import AddedToken, Qwen2Tokenizer, Qwen3_5TextConfig, Qwen3_5T
 FPS = 24
 MAX_FRAMES = 481
 DEFAULT_STEPS = 50
+#: How the rewriter decodes: PAN2's agent skill writes its JSON caption with a reasoning agent, and Qwen3.5-9B reasons
+#: in its thinking mode, at its card's settings for it (Best Practices: temperature 1.0, top-p 0.95, top-k 20, presence
+#: penalty 1.5) and its recommended output length, 32,768 tokens, thought and answer together.
+TEMPERATURE, TOP_P, TOP_K, PRESENCE_PENALTY, MAX_NEW_TOKENS = 1.0, 0.95, 20, 1.5, 32768
+#: The caption tokens the encoder reads (Diffusers' `max_sequence_length`, PAN2's `packed_caption_segment_limit`): past
+#: them a caption is cut, as upstream cuts it, with a warning.
+CAPTION_TOKENS = 1536
+#: The system turn PAN2 encodes a caption under (Diffusers' `PAN2ModularPipeline.system_message`).
+SYSTEM_MESSAGE = "You are a helpful assistant. Generate the video with the following instructions."
 VideoPixels = np.ndarray[tuple[int, int, int, int], np.dtype[np.uint8]]
 
 
@@ -173,7 +182,35 @@ def stage(block: PAN2TextEncoderStep | PAN2VaeEncoderStep | PAN2VaeDecoderStep, 
 
 @sequence_parallel(degrees=(2, 4, 8))
 class Reasoner(VisionLM):
-    """Replicated auxiliary beside the sequence-sharded simulator."""
+    """Replicated auxiliary beside the sequence-sharded simulator: PAN2's prompt rewriter."""
+
+    @uses_components(COMPONENT)
+    def answer(self, system: str, turns: list[str], image: Image.Image | None, *, seed: int,
+               progress: Callable[[int], None]) -> tuple[str, int]:
+        """The assistant's next turn after `turns` (user, assistant, user, ...) under `system`, `image` before the first
+        turn's words: thought first, then the answer, decoded at the card's thinking settings (`TEMPERATURE`, ...) from
+        `seed`. The answer is what follows the thought, empty when the thought takes the whole budget; and the tokens
+        decoded."""
+        content = [*([{"type": "image"}] if image is not None else []), {"type": "text", "text": turns[0]}]
+        messages: list[dict[str, object]] = [{"role": "system", "content": system}, {"role": "user", "content": content}]
+        messages += [{"role": "assistant" if i % 2 else "user", "content": turn} for i, turn in enumerate(turns[1:], 1)]
+        chat: str = self.processor.apply_chat_template(  # type: ignore[arg-type, unused-ignore]  # content as parts
+            messages, add_generation_prompt=True, tokenize=False, enable_thinking=True,
+        )
+        model = self.pipe.components[COMPONENT]
+        inputs = self.processor(text=[chat], images=[image] if image is not None else None, return_tensors="pt").to(model.device)
+        if "pixel_values" in inputs:
+            inputs["pixel_values"] = inputs["pixel_values"].to(model.dtype)
+        tokenizer = self.processor.tokenizer
+        configured = model.generation_config.eos_token_id
+        ends = [tokenizer.eos_token_id, *(configured if isinstance(configured, list) else [configured])]
+        stop = [token for token in dict.fromkeys(ends) if isinstance(token, int)]
+        out = lm.generate(model, inputs, max_new_tokens=MAX_NEW_TOKENS, stop=stop, pad=stop[0], temperature=TEMPERATURE,
+                          top_p=TOP_P, top_k=TOP_K, presence_penalty=PRESENCE_PENALTY, seed=seed, progress=progress)
+        ids = [int(token) for token in out[0].tolist()]
+        closed = tokenizer.convert_tokens_to_ids("</think>")
+        answer = ids[len(ids) - ids[::-1].index(closed):] if closed in ids else []
+        return str(tokenizer.decode(answer, skip_special_tokens=True, clean_up_tokenization_spaces=False)).strip(), len(ids)
 
 
 @sequence_parallel(degrees=(2, 4, 8))
@@ -186,13 +223,20 @@ class Pan2(Model[Graph]):
         self.graph = loader.construct(Graph)
         self.tokenizer = tokenizer(loader.assets)
 
+    def caption_tokens(self, caption: str) -> int:
+        """`caption`'s tokens as the encoder counts them: what follows its chat template's user header, the turn's end
+        and the assistant header included (Diffusers' `get_pan2_prompt_embeds`; PAN2's `build_templated_video_token_ids`)."""
+        header = self.tokenizer("<|im_start|>user\n", add_special_tokens=False).input_ids
+        made = self.tokenizer.apply_chat_template(
+            [{"role": "system", "content": SYSTEM_MESSAGE}, {"role": "user", "content": caption or " "}],
+            add_generation_prompt=True, tokenize=True, return_dict=True,
+        )
+        ids = list(made["input_ids"])  # type: ignore[index, call-overload, unused-ignore]  # a BatchEncoding, by Transformers' version
+        crop = next(i + len(header) for i in range(len(ids)) if ids[i : i + len(header)] == header)
+        return len(ids) - crop
+
     @uses_components("text_encoder")
     def encode(self, prompt: str, frames: int, guidance: float, negative: str | None) -> tuple[torch.Tensor, torch.Tensor | None]:
-        # The assistant suffix also consumes the encoder's 1536-token capacity. The released
-        # prompt-writing policy reserves this margin rather than truncating timed events.
-        tokens = len(self.tokenizer(prompt, add_special_tokens=False).input_ids)
-        if tokens > 1480:
-            raise InvalidRequest(f"PAN2's caption has {tokens} tokens; shorten it to at most 1480", fields=["prompt"])
         if guidance > 1 and not negative:
             negative = get_pan2_default_negative_prompt(frames, FPS)
         state = stage(PAN2TextEncoderStep(), {"text_encoder": self.graph.components["text_encoder"], "tokenizer": self.tokenizer},  # type: ignore[no-untyped-call]  # Diffusers' block constructor is unannotated.
