@@ -336,9 +336,11 @@ class _Heads:
         query = self.query[:, :, window]
         out = query.new_empty(query.shape)
         for start, stop, bias in self.bias.rows:
+            # A kernel takes its bias in the query's dtype: bf16 on the card (the same tensor, unchanged), f32 on a CPU.
+            mask = None if bias is None else bias.to(query.dtype)
             # Read through the module at each call: the Runtime rebinds it there.
             out[:, start:stop] = transformer_krea2.dispatch_attention_fn(  # type: ignore[attr-defined]  # not re-exported by Diffusers
-                query[:, start:stop], key, value, attn_mask=bias, backend=self.processor._attention_backend,
+                query[:, start:stop], key, value, attn_mask=mask, backend=self.processor._attention_backend,
                 parallel_config=self.processor._parallel_config)
         return out
 
