@@ -43,6 +43,28 @@ Sampling follows the released Diffusers Euler path. The newer native LTX pipelin
 ancestral path has different intermediate arithmetic; matching its numerical output is a
 separate comparison. See the [source assessment](../research/ltx-2.5/README.md).
 
+## Continuing a take, and redoing a range of one
+
+Both run on one canvas of at most 20 s, where known frames and sound are held and the rest is made: upstream's retake
+mask (`TemporalRegionMask`), sampled as LTX Desktop samples distilled 2.5's retake and extend (an ancestral 8-step
+stage, then a same-size 3-step Euler refine). The take is read two seconds at a time, never whole.
+
+- **Continue:** `generate` with a `pickup` (the page's "pick up from here") holds the take's last 25 frames and their
+  sound (upstream's long-video carry) and makes `duration_s` after them. A long video is the project's chained boxes.
+- **Redo a range:** `retake` makes `start_s`-`end_s` of `video` again from `prompt`, holding the frames and sound on
+  both sides, its context filling the canvas (Desktop's window) with the mask widened 0.5 s into it. A range longer
+  than one canvas runs in pieces left to right. A shot change within 0.8 s of an edge (a jump in the frame-to-frame
+  difference) becomes that edge, with nothing held across it. `redo` keeps the take's sound or picture.
+
+```sh
+cozy run ltx-2.5/retake --file video=take.mp4 start_s=10 end_s=16 prompt="She turns to the window and laughs."
+```
+
+The result is the whole take. Only the window is encoded again: the edit, a linear blend over the 16 frames just
+outside it, and a 40 ms equal-power sound crossfade (in the held context; just inside at a shot change).
+`Outputs.splice_video` copies every other packet of the take byte for byte. A take it can't splice (not H.264/AAC MP4,
+an edit list, not 24 fps) is written again whole, with a warning.
+
 The model uses the **LTX-2.x Community License**, including its use and redistribution terms;
 the upstream inference code is Apache-2.0. Retain the model license and notices with weights.
 
