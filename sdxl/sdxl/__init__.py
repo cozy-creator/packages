@@ -102,7 +102,7 @@ from .adapters import (
     attention_linears,
     steering,
 )
-from .faces import FaceDetector, FaceRecognizer, aligned, crop, subject
+from .faces import FaceDetector, FaceRecognizer, aligned, crop, readable, subject
 
 if TYPE_CHECKING:
     from diffusers.configuration_utils import ConfigMixin
@@ -743,8 +743,9 @@ class _Adapters:
 def _references(ctx: Context, pictures: list[PILImage.Image], strength: float, guided: bool,
                 adapters: _Adapters) -> tuple[list[Steer], int]:  # fmt: skip
     """Each picture's part of the denoise, and how many are faces: FaceID-PlusV2 for a picture whose subject is a face
-    (SCRFD's, `faces.subject`), IP-Adapter Plus for every other."""
+    ArcFace can read (SCRFD's, `faces.subject`, `faces.readable`), IP-Adapter Plus for every other."""
     found = [subject(adapters.faces.find(picture), *picture.size) for picture in pictures]
+    found = [face if face is not None and readable(face) else None for face in found]
     portraits = [(picture, face) for picture, face in zip(pictures, found, strict=True) if face is not None]
     plain = [picture for picture, face in zip(pictures, found, strict=True) if face is None]
     if portraits:

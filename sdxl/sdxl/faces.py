@@ -37,9 +37,11 @@ SCORE, OVERLAP = 0.5, 0.4
 #: ArcFace's five landmarks (eyes, nose, mouth corners) in its 112² crop (insightface `face_align.arcface_dst`).
 TEMPLATE = np.array([[38.2946, 51.6963], [73.5318, 51.5014], [56.0252, 71.7366], [41.5493, 92.3655],
                      [70.7299, 92.2041]], dtype=np.float64)  # fmt: skip
-#: A face is a picture's subject when its box covers this much of the picture (about 100 px across at 1 MP, ArcFace's
-#: 112² crop) and no other face is half its size: a portrait or a person, not a crowd or a face in the background.
-SUBJECT = 0.01
+#: A face is the picture's subject when it is the main face (insightface's `detect` ranking: area less twice its centre's
+#: squared offset from the picture's), no other face is half its area (FaceID takes one identity), and it is at least
+#: this share of the picture's height: the figure-drawing canon's 8 heads to a standing figure, so a figure framed
+#: closer than full length. A full-length figure, a crowd or a background face keeps Plus, its body and scene with it.
+HEADS = 8
 
 
 def _conv(inputs: int, outputs: int, kernel: int = 3, stride: int = 1) -> nn.Conv2d:
@@ -199,13 +201,25 @@ class Face:
 
 
 def subject(faces: Sequence[Face], width: int, height: int) -> Face | None:
-    """The face that is the picture's subject (`SUBJECT`), if one is."""
-    ranked = sorted(faces, key=lambda face: face.area, reverse=True)
-    if not ranked or ranked[0].area < SUBJECT * width * height:
+    """The face that is the picture's subject (`HEADS`), if one is."""
+
+    def rank(face: Face) -> float:
+        x, y = (face.box[0] + face.box[2]) / 2 - width // 2, (face.box[1] + face.box[3]) / 2 - height // 2
+        return face.area - 2.0 * (x * x + y * y)
+
+    if not faces:
         return None
-    if len(ranked) > 1 and ranked[1].area * 2 >= ranked[0].area:
+    main = max(faces, key=rank)
+    if any(face is not main and face.area * 2 >= main.area for face in faces):
         return None
-    return ranked[0]
+    return main if (main.box[3] - main.box[1]) * HEADS >= height else None
+
+
+def readable(face: Face) -> bool:
+    """Whether the face has the pixels ArcFace reads: aligning it to its 112² template doesn't enlarge it (the alignment
+    is set by the landmarks, so the scale of that similarity, not the box, says it)."""
+    matrix = _similarity(face.landmarks, TEMPLATE)
+    return float(np.hypot(matrix[0, 0], matrix[1, 0])) <= 1.0
 
 
 def _rgb(picture: PILImage.Image) -> torch.Tensor:

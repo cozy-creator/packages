@@ -17,8 +17,10 @@ It takes pictures as Anima's does:
   else as nothing.
 - A picture whose subject is a face steers its identity instead, through h94's
   [IP-Adapter-FaceID-PlusV2](https://huggingface.co/h94/IP-Adapter-FaceID) and its LoRA: insightface's buffalo_l finds
-  the face (SCRFD-10G; one face covering at least 1% of the picture and twice any other's size) and gives its ArcFace
-  identity, and ViT-H reads the face aligned at 224². At the default `reference_strength` it runs at its authors' scale
+  the face (SCRFD-10G) and gives its ArcFace identity, and ViT-H reads the face aligned at 224². The face is the
+  subject when it is insightface's main face, no other is half its area, and it is at least 1/8 of the picture's height
+  (a standing figure is 8 heads, so framed closer than full length); and it is read only if aligning it to ArcFace's
+  112² template doesn't enlarge it. At the default `reference_strength` it runs at its authors' scale
   1 (its scale is 2.5 times `reference_strength`). A face A/B (se-175): ArcFace similarity 0.65 against Plus's 0.42, the
   words still followed. Pictures without such a face keep Plus, beside it in the same request.
   insightface's models and FaceID are for non-commercial research use only.
