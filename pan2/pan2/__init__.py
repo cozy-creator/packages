@@ -106,6 +106,8 @@ def rewrite(ctx: Context, reasoner: Reasoner, encoder: Pan2, prompt: str, pictur
         positive, said = checked(reply, seconds, encoder)
         if positive is not None:
             tel.log("action timeline", attempts=attempt, tokens=decoded)
+            # Proof only (xs-222 row E): whether the first reply passed, and why not.
+            adj.warn("prompt_upsampling", f"rewrite accepted on attempt {attempt}" + (f" (reply: {why[0]})" if why else ""))
             return positive
         errors = said.get("errors")
         why.append(str(errors[0]) if isinstance(errors, list) and errors else "refused")

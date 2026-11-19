@@ -34,7 +34,9 @@ DEFAULT_STEPS = 50
 #: How the rewriter decodes: PAN2's agent skill writes its JSON caption with a reasoning agent, and Qwen3.5-9B reasons
 #: in its thinking mode, at its card's settings for it (Best Practices: temperature 1.0, top-p 0.95, top-k 20, presence
 #: penalty 1.5) and its recommended output length, 32,768 tokens, thought and answer together.
-TEMPERATURE, TOP_P, TOP_K, PRESENCE_PENALTY, MAX_NEW_TOKENS = 1.0, 0.95, 20, 1.5, 32768
+# Proof only (xs-222 row E): Qwen3.8-27B's card, non-thinking: temperature 0.7, top-p 0.8, top-k 20, presence 1.5; final
+# response up to 131,072 tokens.
+TEMPERATURE, TOP_P, TOP_K, PRESENCE_PENALTY, MAX_NEW_TOKENS = 0.7, 0.8, 20, 1.5, 131072
 #: The caption tokens the encoder reads (Diffusers' `max_sequence_length`, PAN2's `packed_caption_segment_limit`): past
 #: them a caption is cut, as upstream cuts it, with a warning.
 CAPTION_TOKENS = 1536
@@ -195,7 +197,7 @@ class Reasoner(VisionLM):
         messages: list[dict[str, object]] = [{"role": "system", "content": system}, {"role": "user", "content": content}]
         messages += [{"role": "assistant" if i % 2 else "user", "content": turn} for i, turn in enumerate(turns[1:], 1)]
         chat: str = self.processor.apply_chat_template(  # type: ignore[arg-type, unused-ignore]  # content as parts
-            messages, add_generation_prompt=True, tokenize=False, enable_thinking=True,
+            messages, add_generation_prompt=True, tokenize=False, enable_thinking=False,
         )
         model = self.pipe.components[COMPONENT]
         inputs = self.processor(text=[chat], images=[image] if image is not None else None, return_tensors="pt").to(model.device)
@@ -209,7 +211,7 @@ class Reasoner(VisionLM):
                           top_p=TOP_P, top_k=TOP_K, presence_penalty=PRESENCE_PENALTY, seed=seed, progress=progress)
         ids = [int(token) for token in out[0].tolist()]
         closed = tokenizer.convert_tokens_to_ids("</think>")
-        answer = ids[len(ids) - ids[::-1].index(closed):] if closed in ids else []
+        answer = ids[len(ids) - ids[::-1].index(closed):] if closed in ids else ids
         return str(tokenizer.decode(answer, skip_special_tokens=True, clean_up_tokenization_spaces=False)).strip(), len(ids)
 
 
