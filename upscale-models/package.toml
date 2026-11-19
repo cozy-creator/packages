@@ -1,0 +1,2 @@
+[application]
+object = "upscale_models:app"

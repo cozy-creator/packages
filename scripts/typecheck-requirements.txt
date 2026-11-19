@@ -51,6 +51,7 @@ rotary-embedding-torch==0.9.2
 safetensors==0.8.0
 setuptools==84.2.1
 shellingham==1.5.4
+spandrel==0.4.2
 sympy==1.14.0
 tensorfs @ https://github.com/cozy-creator/cozy-creator/releases/download/rc-0.27.0/tensorfs-0.27.0.dev3399+g1d8eaf3b-cp311-abi3-manylinux_2_28_x86_64.whl
 timm==1.0.31
