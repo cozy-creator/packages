@@ -11,13 +11,12 @@ sound crossfades over 40 ms, equal power (upstream's chunk seam). A shot change 
 from __future__ import annotations
 
 import math
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from typing import Literal
 
 import numpy as np
 import numpy.typing as npt
-from PIL import Image
 
 FPS = 24
 #: Frames in one canvas: RoPE's 20 s at 24 fps, `8k + 1`.
@@ -36,12 +35,18 @@ CROSSFADE_S = 0.04
 #: A shot change this many frames from an edge, either side, is where the edit ends: the frames a canvas makes past
 #: an edge (the widened mask and a latent's rounding).
 NEAR = WIDEN + 7
-#: A cut is a frame-to-frame change at least this many times the run's median change, and at least `CUT_FLOOR` (the
-#: mean absolute difference of thumbnails, 0-1).
-CUT_RATIO = 3.0
-CUT_FLOOR = 0.08
-#: Thumbnail width the shot-change measure compares.
-_THUMB = 64
+#: A frame pair is a shot change when its pictures differ by this much (mean absolute difference, 0-1, of the frames
+#: shrunk to `_SIDE`) and its colours by this much (total variation of 16-bin channel histograms, 0-1), each at least
+#: `_OUTLIER` times the median pair's around it: a cut replaces the picture and its colours at once. Motion, even a whip
+#: pan, moves the picture for frames running, so a pair beside another that moved is not one; and a flash comes back,
+#: so the change must still hold `FLASH` frames on either side. A missed cut only holds the next frames instead.
+#: MiniMax H3's retake uses the same rule and numbers.
+_PICTURE = 0.08
+_COLOUR = 0.1
+_OUTLIER = 4.0
+_SIDE = 64
+#: The longest flash (a strobe, lightning, a muzzle flash) a shot change outlasts, in frames.
+FLASH = 4
 
 type Frame = npt.NDArray[np.uint8]
 type Waveform = npt.NDArray[np.float32]
@@ -132,26 +137,42 @@ def _fit(start: int, end: int, lo: int, hi: int) -> Piece:
     return Piece(first=start - before, frames=frames, start=start, end=end, limit=end + after, widen=True)
 
 
-def thumbnail(rgb: bytes, size: tuple[int, int]) -> npt.NDArray[np.float32]:
-    """A frame `_THUMB` pixels wide, 0-1, for the shot-change measure."""
-    width, height = size
-    small = Image.frombytes("RGB", size, rgb).resize((_THUMB, max(1, round(_THUMB * height / width))),
-                                                     Image.Resampling.BOX)
-    return np.asarray(small, dtype=np.float32) / 255.0
+def _measures(frame: Frame) -> tuple[npt.NDArray[np.float64], npt.NDArray[np.float64]]:
+    """A frame shrunk by block means to `_SIDE` on its long side, in 0-1, and its colour histogram."""
+    factor = max(1, max(frame.shape[:2]) // _SIDE)
+    height, width = frame.shape[0] // factor * factor, frame.shape[1] // factor * factor
+    small = frame[:height, :width].reshape(height // factor, factor, width // factor, factor, 3).mean(axis=(1, 3)) / 255
+    counts = np.concatenate([np.bincount(frame[..., channel].ravel() >> 4, minlength=16) for channel in range(3)])
+    return small, counts / counts.sum()
 
 
-def cuts(thumbs: Sequence[npt.NDArray[np.float32]]) -> list[int]:
-    """Where shots change in a run of frames: each `i` whose frame starts a new shot. The measure is the mean absolute
-    difference between neighbouring thumbnails; a cut stands out from the run's other changes by `CUT_RATIO` and
-    clears `CUT_FLOOR`, so steady motion and pans don't count, and it works on any video."""
-    changes = np.array([float(np.abs(b - a).mean()) for a, b in zip(thumbs, thumbs[1:], strict=False)])
-    found = []
-    for index, change in enumerate(changes):
-        others = np.delete(changes, index)
-        typical = float(np.median(others)) if others.size else 0.0
-        if change >= CUT_FLOOR and change >= CUT_RATIO * typical:
-            found.append(index + 1)
-    return found
+def shot_changes(frames: Iterable[Frame]) -> list[int]:
+    """The index of each frame among `frames` (consecutive `(h, w, 3)` RGB8 pictures, each read once) that opens a new
+    shot."""
+    measured = [_measures(frame) for frame in frames]
+    if len(measured) < 3:
+        return []
+
+    def picture(a: int, b: int) -> float:
+        return float(np.abs(measured[b][0] - measured[a][0]).mean())
+
+    def colour(a: int, b: int) -> float:
+        return float(0.5 * np.abs(measured[b][1] - measured[a][1]).sum())
+
+    last = len(measured) - 1
+    moved = [picture(index, index + 1) for index in range(last)]
+    least = max(_PICTURE, _OUTLIER * float(np.median(moved)))
+    least_colour = max(_COLOUR, _OUTLIER * float(np.median([colour(index, index + 1) for index in range(last)])))
+
+    def changed(a: int, b: int) -> bool:
+        return picture(a, b) >= least and colour(a, b) >= least_colour
+
+    return [
+        index + 1 for index in range(last)
+        if changed(index, index + 1)
+        and all(moved[beside] < least for beside in (index - 1, index + 1) if 0 <= beside < last)
+        and changed(max(0, index - FLASH), index + 1) and changed(index, min(last, index + 1 + FLASH))
+    ]  # fmt: skip
 
 
 def nearest(found: Sequence[int], edge: int) -> int | None:

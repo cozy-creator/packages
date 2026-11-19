@@ -53,8 +53,9 @@ stage, then a same-size 3-step Euler refine). The take is read two seconds at a 
   sound (upstream's long-video carry) and makes `duration_s` after them. A long video is the project's chained boxes.
 - **Redo a range:** `retake` makes `start_s`-`end_s` of `video` again from `prompt`, holding the frames and sound on
   both sides, its context filling the canvas (Desktop's window) with the mask widened 0.5 s into it. A range longer
-  than one canvas runs in pieces left to right. A shot change within 0.8 s of an edge (a jump in the frame-to-frame
-  difference) becomes that edge, with nothing held across it. `redo` keeps the take's sound or picture.
+  than one canvas runs in pieces left to right. A shot change within 0.8 s of an edge becomes that edge, with nothing
+  held across it: one frame pair alone whose picture and colours change, and stay changed 4 frames on (MiniMax H3's
+  rule), so a whip pan, a flash or a fade isn't one. `redo` keeps the take's sound or picture.
 
 ```sh
 cozy run ltx-2.5/retake --file video=take.mp4 start_s=10 end_s=16 prompt="She turns to the window and laughs."
@@ -62,8 +63,9 @@ cozy run ltx-2.5/retake --file video=take.mp4 start_s=10 end_s=16 prompt="She tu
 
 The result is the whole take. Only the window is encoded again: the edit, a linear blend over the 16 frames just
 outside it, and a 40 ms equal-power sound crossfade (in the held context; just inside at a shot change).
-`Outputs.splice_video` copies every other packet of the take byte for byte. A take it can't splice (not H.264/AAC MP4,
-an edit list, not 24 fps) is written again whole, with a warning.
+`Outputs.splice_video` copies every other packet of the take byte for byte. On a take not at 24 fps the window is on
+the take's clock, the made frames showing some twice, with a warning. A take it can't splice (not H.264/AAC MP4, a
+variable frame rate, an edit list), or a silent take given sound, is written again whole at 24 fps, with a warning.
 
 The model uses the **LTX-2.x Community License**, including its use and redistribution terms;
 the upstream inference code is Apache-2.0. Retain the model license and notices with weights.
