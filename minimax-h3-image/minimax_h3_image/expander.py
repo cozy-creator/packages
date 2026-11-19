@@ -2,10 +2,10 @@
 caption MiniMax-H3-Image renders best, and the canvas it suits.
 
 Text to image runs MiniMax's T2I PE as released (`prompt/t2i/`): its system prompt, its task prompt with the request,
-thinking at `xhigh`, sampled at temperature 1.0 and top-p 0.95, at most 4096 tokens with the thought, answering
-`{"expanded_caption", "aspect_ratio"}`. Runtime's `VisionLM` takes no top-k, so upstream's top-k 20 is not applied, and
-no grammar holds the answer to its JSON schema: `parse` reads an answer loosely, and one that holds no caption (an
-empty answer after the thought, about one in twenty) is asked once more at the next seed.
+thinking at `xhigh`, sampled at temperature 1.0, top-p 0.95 and top-k 20, at most 4096 tokens with the thought,
+answering `{"expanded_caption", "aspect_ratio"}`. No grammar holds the answer to its JSON schema after the thought (the
+Runtime has none to give): `parse` reads an answer loosely, and one that holds no caption (an empty answer after the
+thought, about one in twenty) is asked once more at the next seed.
 
 An edit runs MiniMax's edit PE prompt (`prompt/edit/task_prompt.txt`) on the same checkpoint, as Diffusers'
 `minimax-h3-image-pe-blocks` do: MiniMax releases no edit PE weights, only the prompt "for a vision-language model of
@@ -33,7 +33,7 @@ from PIL import Image
 
 #: The T2I PE's canvases (`prompt/t2i/request_params.json`'s schema).
 RATIOS = ("1:1", "5:4", "4:3", "3:2", "16:9", "21:9", "4:5", "3:4", "2:3", "9:16")
-TEMPERATURE, TOP_P = 1.0, 0.95
+TEMPERATURE, TOP_P, TOP_K = 1.0, 0.95, 20
 #: Upstream's `max_tokens`, the thought included.
 MAX_TOKENS = 4096
 #: What the PE sees of a picture: about one megapixel, as the text encoder's vision tower reads it.
@@ -185,7 +185,7 @@ class H3ImagePE(VisionLM):
         answers: list[str] = []
         for attempt in range(ATTEMPTS):
             params = Params(system=system, thinking=True, reasoning_effort=None, stop=[], max_new_tokens=MAX_TOKENS,
-                            temperature=TEMPERATURE, top_p=TOP_P, presence_penalty=0.0,
+                            temperature=TEMPERATURE, top_p=TOP_P, top_k=TOP_K, presence_penalty=0.0,
                             seed=(seed + attempt) % (1 << 63))  # fmt: skip
             answers.append(self.engine.generate([question], params, on_delta=_unread, progress=progress).texts[0])
             if (found := parse(answers[-1], key)) is not None:

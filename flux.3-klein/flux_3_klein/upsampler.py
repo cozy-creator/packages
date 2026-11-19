@@ -51,6 +51,14 @@ I2I_SCAFFOLD = {
 }
 REFERENCE_MULTIPLE = 32
 MAX_PIXELS_BY_REFS = {1: 1024 * 1024, 2: 724 * 724, **{n: 512 * 512 for n in range(3, 11)}}
+#: BFL's `MAX_ASPECT_RATIO` (`pup.py`): its `reference_size` refuses a reference past it, and `generate` then renders the
+#: prompt as typed.
+MAX_ASPECT_RATIO = 200
+
+
+def past_ratio(images: list[Image.Image]) -> int | None:
+    """The first of `images` (1-based) past `MAX_ASPECT_RATIO`, which BFL's upsampler doesn't read."""
+    return next((n for n, image in enumerate(images, 1) if max(image.size) > MAX_ASPECT_RATIO * min(image.size)), None)
 #: The layout canvas: boxes are integers 0-1000 on each axis.
 SCALE = 1000
 ID = re.compile(r"[A-Za-z][A-Za-z0-9_]*")

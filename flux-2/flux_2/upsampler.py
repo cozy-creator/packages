@@ -1,7 +1,8 @@
 """BFL's local prompt upsampler: FLUX.2 [dev]'s text encoder, Mistral-Small-3.2-24B, as the whole
 vision-language model (`black-forest-labs/flux2` 50fe516, `text_encoder.py` `upsample_prompt`). BFL
 uses it for [klein] too. Its system prompts, the references concatenated side by side under 768²
-pixels and 512 new tokens are BFL's; decoding is greedy where BFL samples at temperature 0.15.
+pixels, 512 new tokens and its sampling are BFL's: temperature 0.15 (Mistral-Small-3.2's generation config) with
+Transformers' default top-k 50 and top-p 1, from the render's seed.
 """
 
 from __future__ import annotations
@@ -28,6 +29,8 @@ from .model import processor, text_encoder
 
 COMPONENT = "text_encoder"
 MAX_NEW_TOKENS = 512
+#: BFL's `upsample_prompt(temperature=0.15)` under `do_sample=True`; Transformers' defaults for the rest.
+TEMPERATURE, TOP_K, TOP_P = 0.15, 50, 1.0
 
 
 class UpsamplerGraph:
@@ -51,7 +54,7 @@ class Flux2Upsampler(Model[UpsamplerGraph]):
 
     @memoize
     @uses_components(COMPONENT)
-    def upsample(self, prompt: str, images: list[Image.Image]) -> str:
+    def upsample(self, prompt: str, images: list[Image.Image], seed: int) -> str:
         model, processor = self.graph.components[COMPONENT], self.processor
         system = SYSTEM_MESSAGE_UPSAMPLING_I2I if images else SYSTEM_MESSAGE_UPSAMPLING_T2I
         shown = None
@@ -68,5 +71,5 @@ class Flux2Upsampler(Model[UpsamplerGraph]):
         tokenizer = processor.tokenizer
         # `model` is a causal LM (`text_encoder`).
         out = lm.generate(cast(PreTrainedModel, model), inputs, max_new_tokens=MAX_NEW_TOKENS, stop=[tokenizer.eos_token_id],
-                          pad=tokenizer.pad_token_id)
+                          pad=tokenizer.pad_token_id, temperature=TEMPERATURE, top_k=TOP_K, top_p=TOP_P, seed=seed)
         return str(tokenizer.decode(out[0], skip_special_tokens=True)).strip()
