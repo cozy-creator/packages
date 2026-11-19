@@ -37,8 +37,9 @@ def aspect_label(width: int, height: int) -> str:
 
 
 def is_edit_prompt(prompt: str) -> bool:
-    """An edit prompt in a form P-H3-Image edits from: the six-section brief, or one `Edit <Picture 1>.` paragraph
-    that says what it keeps."""
+    """An edit prompt in a form P-H3-Image edits from, read by its structure alone: the six-section brief, or one
+    paragraph that opens `Edit <Picture 1>.`. Pruna's check also wants the word "Keep" in the paragraph; a brief that
+    keeps in other words is still a brief (se-171)."""
     text = prompt.strip()
     names = _SECTION.findall(text)
     if names:
@@ -47,7 +48,7 @@ def is_edit_prompt(prompt: str) -> bool:
         retention = [line.strip() for line in body.get("retention_analysis", "").splitlines() if line.strip()]
         return (tuple(names) == _SECTIONS and text.count("[keyframe completion]") == 1 and bool(retention)
                 and all(_RETENTION.match(line) for line in retention))  # fmt: skip
-    return text.startswith("Edit <Picture 1>.") and "Keep" in text and "\n" not in text
+    return text.startswith("Edit <Picture 1>.") and "\n" not in text
 
 
 class UpsamplerGraph:
