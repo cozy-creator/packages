@@ -31,7 +31,8 @@ class Beat(msgspec.Struct, kw_only=True, frozen=True):
 
 class Edit(msgspec.Struct, kw_only=True, frozen=True):
     plate: VideoFile
-    edit: Literal['character_swap', 'head_swap', 'motion_transfer', 'style_transfer', 'vfx_edit']
+    edit: Literal['character_swap', 'head_swap', 'motion_transfer', 'style_transfer', 'vfx_edit'] = 'vfx_edit'
+    summary: Prompt = Prompt(text='')
     beats: Annotated[list[Beat], msgspec.Meta(min_length=1)]
     turbo: bool = True
     quality: Literal['draft', 'full', 'standard'] = 'standard'
@@ -71,6 +72,19 @@ class Shot(msgspec.Struct, kw_only=True, frozen=True):
     seed: None | Seed = None
     pickup: None | ShotPickup = None
 
+class Resolution(Enum):
+    FULL_HD = '1080p'
+    QHD = '1440p'
+    UHD = '2160p'
+    NATIVE = '768p'
+
+class LatentUpscale(msgspec.Struct, kw_only=True, frozen=True):
+    latents: Annotated[File, FileBound(max_bytes=1099511627776, media_types=('application/octet-stream',))]
+    resolution: Resolution = Resolution.QHD
+
+class LatentUpscaleOutput(msgspec.Struct, kw_only=True, frozen=True):
+    latents: Annotated[File, FileBound(max_bytes=1099511627776, media_types=('application/octet-stream',))]
+
 class quantizeRequest(msgspec.Struct, kw_only=True, frozen=True):
     lane: str
     package: str
@@ -82,7 +96,7 @@ class regenerate_loraRequest(msgspec.Struct, kw_only=True, frozen=True):
 
 class ShotLoRA(msgspec.Struct, kw_only=True, frozen=True):
     model: str
-    strength: float = 1
+    strength: float | None = None
 
 class PackageShot(msgspec.Struct, kw_only=True, frozen=True):
     shot: Shot
@@ -128,6 +142,21 @@ class UpscaleOutput(msgspec.Struct, kw_only=True, frozen=True):
 class vaeRequest(msgspec.Struct, kw_only=True, frozen=True):
     pass
 
+class VaeEncodePicture(msgspec.Struct, kw_only=True, frozen=True):
+    image: ImageFile
+
+class VaeEncodePictureOutput(msgspec.Struct, kw_only=True, frozen=True):
+    latents: Annotated[File, FileBound(max_bytes=1099511627776, media_types=('application/octet-stream',))]
+
+class VaeRoundTrip(msgspec.Struct, kw_only=True, frozen=True):
+    video: VideoFile
+    latents: None | File = None
+
+class VaeRoundTripOutput(msgspec.Struct, kw_only=True, frozen=True):
+    video: Annotated[VideoFile, FileBound(max_bytes=1099511627776, media_types=('video/mp4',))]
+    latents: Annotated[File, FileBound(max_bytes=1099511627776, media_types=('application/octet-stream',))]
+    frames: Annotated[File, FileBound(max_bytes=1099511627776, media_types=('application/octet-stream',))]
+
 apply_adaln: Operation[apply_adalnRequest, ModelArtifact] = Operation(
     distribution='minimax-h3', module='minimax_h3.preparation.adaln_operations', export='apply_adaln',
     request=apply_adalnRequest, result=ModelArtifact, models=('source', 'fl2va', 'ref2va'),
@@ -155,7 +184,7 @@ curve_pruned: Operation[curve_prunedRequest, ModelArtifact] = Operation(
 
 edit: Operation[Edit, ShotResult] = Operation(
     distribution='minimax-h3', module='h3', export='edit',
-    request=Edit, result=ShotResult, models=(),
+    request=Edit, result=ShotResult, models=('character_swap', 'head_swap', 'style_transfer', 'vfx_edit', 'motion_transfer'),
 )
 
 fp8_pruned: Operation[fp8_prunedRequest, ModelArtifact] = Operation(
@@ -166,6 +195,11 @@ fp8_pruned: Operation[fp8_prunedRequest, ModelArtifact] = Operation(
 generate: Operation[Shot, ShotResult] = Operation(
     distribution='minimax-h3', module='h3', export='generate',
     request=Shot, result=ShotResult, models=(),
+)
+
+latent_upscale: Operation[LatentUpscale, LatentUpscaleOutput] = Operation(
+    distribution='minimax-h3', module='h3', export='latent_upscale',
+    request=LatentUpscale, result=LatentUpscaleOutput, models=('latent_upscaler',),
 )
 
 quantize: Operation[quantizeRequest, ModelArtifact] = Operation(
@@ -211,4 +245,14 @@ upscale: Operation[Upscale, UpscaleOutput] = Operation(
 vae: Operation[vaeRequest, ModelArtifact] = Operation(
     distribution='minimax-h3', module='minimax_h3.preparation.job', export='vae',
     request=vaeRequest, result=ModelArtifact, models=('source',),
+)
+
+vae_encode_picture: Operation[VaeEncodePicture, VaeEncodePictureOutput] = Operation(
+    distribution='minimax-h3', module='h3', export='vae_encode_picture',
+    request=VaeEncodePicture, result=VaeEncodePictureOutput, models=('base_model',),
+)
+
+vae_round_trip: Operation[VaeRoundTrip, VaeRoundTripOutput] = Operation(
+    distribution='minimax-h3', module='h3', export='vae_round_trip',
+    request=VaeRoundTrip, result=VaeRoundTripOutput, models=('base_model',),
 )

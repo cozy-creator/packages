@@ -12,7 +12,7 @@ Video with sound from MiniMax H3, as three tools. Each is a box on a canvas and 
   the take's own text or a `prompt` that replaces it ([UPSCALE.md](UPSCALE.md)).
 
 For other packages, **`render_shot`** is `generate` with their LoRAs on every segment (`{shot, loras: [{model,
-strength}]}`), returning only the video, as [orbit](../orbit/README.md) puts ORB360 on its shot.
+strength}]}`; no strength: the release's), returning only the video, as [orbit](../orbit/README.md) puts ORB360 on its shot.
 
 Checkpoint preparation now ships in the same package, under `minimax_h3.preparation`:
 the BF16/FP8 producers, AdaLN operations, Turbo and Regenerate LoRA preparation, and

@@ -1962,7 +1962,8 @@ async def generate(ctx: Context, payload: Shot, out: Outputs, tel: Telemetry) ->
 class ShotLoRA(msgspec.Struct, frozen=True, kw_only=True):
     #: `[org/]name@release`.
     model: str
-    strength: float = 1.0
+    #: None: its release's strength, as for any LoRA (`Lora.strength`).
+    strength: float | None = None
 
 
 class PackageShot(msgspec.Struct, kw_only=True):
