@@ -30,7 +30,6 @@
     "threads": 2,
     "request": {},
     "lane": "fp16",
-    "model": "zhengpeng7/birefnet@0.1.0",
     "warm_ms": 28431,
     "cold_ms": 35386,
     "peak_host_bytes": 4447531008,
