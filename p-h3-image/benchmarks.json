@@ -19,8 +19,7 @@
     "peak_host_bytes": 25831264256,
     "ran_on": {
       "cozy": "0.27.0-dev+gf6c0a78a",
-      "runtime": "0.48.0.dev2346+g051d106f",
-      "tensorfs": "0.27.0.dev3401+g5c5b2539"
+      "runtime": "0.48.0.dev2346+g051d106f"
     },
     "note": "pod-session 44407668658 cap-sweep/small-a: cold PRO-77, warm PRO-78; small: 1 MP (its minimum), upsampling on as the box; gemm cozy.int8-convrot256.native-leaf/1"
   },
@@ -44,8 +43,7 @@
     "peak_host_bytes": 28960419840,
     "ran_on": {
       "cozy": "0.27.0-dev+gf6c0a78a",
-      "runtime": "0.48.0.dev2346+g051d106f",
-      "tensorfs": "0.27.0.dev3401+g5c5b2539"
+      "runtime": "0.48.0.dev2346+g051d106f"
     },
     "note": "pod-session 44407668658 cap-sweep/small-a: cold PRO-79, warm PRO-80; small: a 1 MP picture to 2 MP, its smallest offered size; gemm cozy.int8-convrot256.native-leaf/1"
   }

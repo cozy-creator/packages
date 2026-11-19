@@ -43,10 +43,9 @@
     "peak_host_bytes": 5167194112,
     "ran_on": {
       "cozy": "0.27.0-dev+gf6c0a78a",
-      "runtime": "0.48.0.dev2346+g051d106f",
-      "tensorfs": "0.27.0.dev3401+g5c5b2539"
+      "runtime": "0.48.0.dev2346+g051d106f"
     },
-    "note": "pod-session 44407668658 cap-sweep/small-a: cold PRO-12, warm PRO-13; small: 1 MP, the smallest size its box offers, default steps; lanes depth bf16, image_encoder bf16, inpaint bf16, ip_adapter bf16, lineart bf16, model int8, pose bf16, sketch bf16; gemm cozy.int8-convrot256.native-leaf/1"
+    "note": "pod-session 44407668658 cap-sweep/small-a: cold PRO-12, warm PRO-13; small: 1 MP, the smallest size its box offers, default steps; gemm cozy.int8-convrot256.native-leaf/1"
   },
   {
     "function": "image",
@@ -68,10 +67,9 @@
     "peak_host_bytes": 5148205056,
     "ran_on": {
       "cozy": "0.27.0-dev+gf6c0a78a",
-      "runtime": "0.48.0.dev2346+g051d106f",
-      "tensorfs": "0.27.0.dev3401+g5c5b2539"
+      "runtime": "0.48.0.dev2346+g051d106f"
     },
-    "note": "pod-session 44407668658 cap-sweep/small-a: cold PRO-14, warm PRO-15; small: 1 MP, the smallest size its box offers, default steps; lanes depth bf16, image_encoder bf16, inpaint bf16, ip_adapter bf16, lineart bf16, model int8, pose bf16, sketch bf16; gemm cozy.int8-convrot256.native-leaf/1"
+    "note": "pod-session 44407668658 cap-sweep/small-a: cold PRO-14, warm PRO-15; small: 1 MP, the smallest size its box offers, default steps; gemm cozy.int8-convrot256.native-leaf/1"
   },
   {
     "function": "generate",

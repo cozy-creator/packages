@@ -43,10 +43,9 @@
     "peak_host_bytes": 18220478464,
     "ran_on": {
       "cozy": "0.27.0-dev+gf6c0a78a",
-      "runtime": "0.48.0.dev2346+g051d106f",
-      "tensorfs": "0.27.0.dev3401+g5c5b2539"
+      "runtime": "0.48.0.dev2346+g051d106f"
     },
-    "note": "pod-session 44407668658 cap-sweep/small-a: cold PRO-17, warm PRO-18; small: 1 MP, the smallest size its box offers, default steps; cold_ms excludes 16.1 s its call waited on 15.5 GB of weights its child fetched in-call (execution 39.8 s); gemm cozy.int8-convrot256.native-leaf/1"
+    "note": "pod-session 44407668658 cap-sweep/small-a: cold PRO-17, warm PRO-18; small: 1 MP (its box's smallest), default steps; cold_ms is execution 39.8 s less 16.1 s waiting on 15.5 GB its child fetched"
   },
   {
     "function": "image",
@@ -68,8 +67,7 @@
     "peak_host_bytes": 12713013248,
     "ran_on": {
       "cozy": "0.27.0-dev+gf6c0a78a",
-      "runtime": "0.48.0.dev2346+g051d106f",
-      "tensorfs": "0.27.0.dev3401+g5c5b2539"
+      "runtime": "0.48.0.dev2346+g051d106f"
     },
     "note": "pod-session 44407668658 cap-sweep/small-a: cold PRO-19, warm PRO-20; small: 1 MP, the smallest size its box offers, default steps; gemm cozy.int8-convrot256.native-leaf/1"
   },
@@ -93,8 +91,7 @@
     "peak_host_bytes": 18327404544,
     "ran_on": {
       "cozy": "0.27.0-dev+gf6c0a78a",
-      "runtime": "0.48.0.dev2346+g051d106f",
-      "tensorfs": "0.27.0.dev3401+g5c5b2539"
+      "runtime": "0.48.0.dev2346+g051d106f"
     },
     "note": "pod-session 44407668658 cap-sweep/small-a: cold PRO-21, warm PRO-22; small: a 1 MP picture to 2 MP, its smallest offered size; gemm cozy.int8-convrot256.native-leaf/1"
   },
@@ -118,8 +115,7 @@
     "peak_host_bytes": 12801552384,
     "ran_on": {
       "cozy": "0.27.0-dev+gf6c0a78a",
-      "runtime": "0.48.0.dev2346+g051d106f",
-      "tensorfs": "0.27.0.dev3401+g5c5b2539"
+      "runtime": "0.48.0.dev2346+g051d106f"
     },
     "note": "pod-session 44407668658 cap-sweep/small-a: cold PRO-23, warm PRO-24; small: a 1 MP picture at 1 MP, default strength; gemm cozy.int8-convrot256.native-leaf/1"
   },
