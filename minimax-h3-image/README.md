@@ -17,8 +17,9 @@ cozy run minimax-h3-image/generate instructions='Put the hat from <hat> on the w
   system prompt has it write what was asked instead of a sanitized caption; its one exception is nobody under 18 and no
   real person nude or in sexual content. Off, the instructions render as written. The result's `prompt` is what
   rendered.
-- **Model.** A 33B DiT (H3's, without audio, one output head per step), MiniMax-H3's text encoder unchanged (its
-  `minimaxai/minimax-h3` lanes, so a machine with H3 fetches nothing more for it), and a VAE whose encoder is H3's and
+- **Model.** A 33B DiT (H3's, without audio, one output head per step), MiniMax-H3's text encoder unchanged (the
+  `text_encoder` slot: minimax-h3's own default, llmfan46's Heretic abliteration of Qwen3-VL-32B, so a machine with H3
+  fetches nothing more for it; MiniMax's is `model.text_encoder=minimaxai/minimax-h3@1.0.0-rc.8`), and a VAE whose encoder is H3's and
   whose decoder is a 2D ViT. A request fetches the expander only when it upsamples and the VAE encoder only when it
   has pictures. A port of Diffusers 0.43's `minimax_h3_image` pipeline.
 - **Lanes.** `bf16-full` is MiniMax's Diffusers upload as it is. `bf16` replaces the DiT's time embedder and AdaLN
