@@ -305,8 +305,7 @@ class _Heads:
     Called on itself (`split` running whole), every head in one call a range: the fast path. Each head's
     softmax is its own, so any window gives the whole's bytes."""
 
-    PURE_WINDOWS = True
-    __slots__ = ("bias", "group", "key", "processor", "query", "shape", "value")
+    __slots__ =("bias", "group", "key", "processor", "query", "shape", "value")
 
     def __init__(self, processor: Attention, query: torch.Tensor, key: torch.Tensor, value: torch.Tensor,
                  bias: RowBias, group: int) -> None:
