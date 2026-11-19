@@ -15,6 +15,7 @@
     "function": "generate_turbo",
     "gpu": "NVIDIA GeForce RTX 4090",
     "gpus": 1,
+    "lane": "int8",
     "request": {
       "refs": 0,
       "megapixels": 4.0,
