@@ -1,0 +1,28 @@
+[
+  {
+    "function": "upscale",
+    "request": {
+      "refs": 0,
+      "frames": 120,
+      "megapixels": 2.07,
+      "seconds": 5.0
+    },
+    "gpu": "NVIDIA GeForce RTX 4090",
+    "gpus": 1,
+    "lane": "bf16",
+    "warm_ms": 49580,
+    "cold_ms": 59543,
+    "step1_ms": 4107,
+    "steady_step_ms": 176,
+    "vram_bytes": 25757220864,
+    "budget_bytes": null,
+    "peak_device_bytes": 25200558080,
+    "peak_host_bytes": 29808594944,
+    "ran_on": {
+      "cozy": "0.27.0-dev+gf6c0a78a",
+      "runtime": "0.48.0.dev2346+g051d106f",
+      "tensorfs": "0.27.0.dev3401+g5c5b2539"
+    },
+    "note": "pod-session 44417542677 cap-sweep/small-b: cold PRO-16, warm PRO-17; small: a 5 s 1344x768 clip to 1080p; its step times are frame windows"
+  }
+]
