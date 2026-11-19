@@ -116,19 +116,19 @@ def rewrite(ctx: Context, reasoner: Reasoner, encoder: Pan2, prompt: str, pictur
     once, as the policy's caller corrects one: the reply as the assistant's turn, then the checks' receipt. Ours alone:
     if the correction is refused too, the video renders `prompt` as written, with a warning."""
     turns = [json.dumps({"original_prompt": prompt, "duration_sec": seconds}, ensure_ascii=False)]
-    said: dict[str, object] = {}
+    why: list[str] = []
     for attempt in range(1, ATTEMPTS + 1):
         reply = reasoner.answer(REWRITE, turns, picture, seed=seed, progress=lambda _: ctx.raise_if_cancelled())
         positive, said = checked(reply, seconds, encoder)
         if positive is not None:
             tel.log("action timeline", attempts=attempt)
             return positive
+        errors = said.get("errors")
+        why.append(str(errors[0]) if isinstance(errors, list) and errors else "refused")
         turns += [reply, json.dumps(said, ensure_ascii=False)]
-    errors = said.get("errors")
-    why = errors[0] if isinstance(errors, list) and errors else "refused"
-    adj.warn("prompt_upsampling", f"PAN2's prompt rewriter wrote no caption its checks accept ({why}), so the video "
-                                  "renders the instructions as written")
-    tel.log("action timeline", parsed=False, receipt=said, answer=turns[-2][-2000:], attempts=ATTEMPTS)
+    adj.warn("prompt_upsampling", f"PAN2's prompt rewriter wrote no caption its checks accept (reply: {why[0]}; "
+                                  f"correction: {why[-1]}), so the video renders the instructions as written")
+    tel.log("action timeline", parsed=False, why=why, answer=turns[-2][-2000:], attempts=ATTEMPTS)
     return prompt
 
 
