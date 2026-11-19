@@ -71,7 +71,6 @@ def tokenizer(assets: ModelAssets, folder: str = "tokenizer/") -> Qwen2Tokenizer
 
 class Components(TypedDict):
     transformer: PAN2Transformer3DModel
-    text_encoder: Qwen3_5TextModel
     vae: AutoencoderKLWan
 
 
@@ -158,11 +157,12 @@ def text_encoder(config: Config) -> Qwen3_5TextModel:
 
 
 class Graph:
+    """What `Pan2` reads of a PAN2 checkpoint: the DiT, the VAE and the scheduler; the encoder is `TextEncoderGraph`'s."""
+
     components: Components
     def __init__(self, config: Config) -> None:
         self.components = {
             "transformer": transformer(config),
-            "text_encoder": text_encoder(config),
             "vae": stored(AutoencoderKLWan.from_config(config.section("vae").mapping()), "vae", config),
         }
         self.scheduler_config = config.section("scheduler").mapping()
