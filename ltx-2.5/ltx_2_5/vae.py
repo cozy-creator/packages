@@ -1,4 +1,4 @@
-"""LTX's spatial tiling, each tile written out as it is finished.
+"""LTX's spatial tiling, each tile written out as it is finished, and its encode fed from host memory.
 
 The blends and crop are Diffusers 0.43's AutoencoderKLLTX2Video.tiled_decode, in its row-major order: a tile blends
 with the last rows of the tile above it and the last columns of the tile before it, both already blended, and its
@@ -16,7 +16,7 @@ import numpy as np
 import torch
 from cozy_runtime.author import retained
 from diffusers.models.autoencoders.autoencoder_kl_ltx2 import AutoencoderKLLTX2Video
-from diffusers.models.autoencoders.vae import DecoderOutput
+from diffusers.models.autoencoders.vae import DecoderOutput, DiagonalGaussianDistribution
 
 VideoPixels = np.ndarray[tuple[int, int, int, int], np.dtype[np.uint8]]
 GetStrip = Callable[[], tuple[torch.Tensor, ...]]
@@ -57,6 +57,37 @@ class VideoVAE(AutoencoderKLLTX2Video):
             for start in range(0, count, _FRAMES):
                 result[start:start + _FRAMES, y:y + rows, x:x + cols] = _rgb8(part[start:start + _FRAMES])
         return result
+
+    def latents(self, frames: VideoPixels, device: torch.device) -> torch.Tensor:
+        """RGB8 frames [F, H, W, 3] in host memory (F = 8k + 1, sides on 32) as the posterior's mode [1, C, f, h, w] in
+        float32, unnormalized: Diffusers 0.43's `tiled_encode` (all frames at once, causal in time; spatial tiles
+        blended), each tile's pixels sent to the card only when it is encoded."""
+        count, height, width, _ = frames.shape
+        scale = self.spatial_compression_ratio
+        tile_h, tile_w = self.tile_sample_min_height, self.tile_sample_min_width
+        step_h, step_w = self.tile_sample_stride_height, self.tile_sample_stride_width
+        blend_h, blend_w = (tile_h - step_h) // scale, (tile_w - step_w) // scale
+        rows: list[list[torch.Tensor]] = []
+        for i in range(0, height, step_h):
+            row: list[torch.Tensor] = []
+            for j in range(0, width, step_w):
+                tile = torch.from_numpy(np.ascontiguousarray(frames[:, i:i + tile_h, j:j + tile_w]))
+                pixels = tile.to(device=device).permute(3, 0, 1, 2)[None].to(self.dtype) / 127.5 - 1
+                row.append(self.encoder(pixels))
+                del pixels
+            rows.append(row)
+        joined: list[torch.Tensor] = []
+        for i, row in enumerate(rows):
+            parts = []
+            for j, tile in enumerate(row):
+                if i > 0:
+                    tile = self.blend_v(rows[i - 1][j], tile, blend_h)
+                if j > 0:
+                    tile = self.blend_h(row[j - 1], tile, blend_w)
+                parts.append(tile[:, :, :, :step_h // scale, :step_w // scale])
+            joined.append(torch.cat(parts, dim=4))
+        moments = torch.cat(joined, dim=3)[:, :, :, :height // scale, :width // scale]
+        return DiagonalGaussianDistribution(moments).mode().float()
 
     def _tiles(self, z: torch.Tensor, temb: torch.Tensor | None,
                causal: bool | None) -> Iterator[tuple[int, int, torch.Tensor]]:
