@@ -20,11 +20,20 @@ from cozy_runtime.media import (
 from PIL import Image
 
 from . import quantize as quantize  # its recipe
-from .model import COMPONENTS, FPS, REFINE_SIGMAS, SIGMAS, Ltx25
+from .model import FPS, REFINE_SIGMAS, SIGMAS, Ltx25, Ltx25TextEncoder
 from .vae import VideoPixels
 
 app = App()
 MODEL = "lightricks/ltx-2.5@0.2.0"
+#: The Gemma 4 12B encoder is its own slot, abliterated by default (Paul, 11-17: "use abliterated models wherever
+#: possible"): igorls' Heretic edit of Gemma 4 12B moved onto Lightricks' fine-tune of it, the encoder and its tokenizer
+#: alone (se-160: a release holds only its author's work). `Ltx25TextEncoder` builds only the encoder, so Lightricks' own
+#: is any LTX-2.5 checkpoint: `text_encoder=lightricks/ltx-2.5@0.2.0`. `model` reads everything else.
+TEXT_ENCODER = "igorls/gemma-4-12b-it-heretic-v1-ltx-2.5@0.1.0"
+_COMPONENTS = {"model": ("transformer", "connectors", "vae", "audio_vae", "vocoder", "latent_upsampler"),
+               "text_encoder": ("text_encoder",)}
+
+from . import encoder as encoder  # noqa: E402  # `transplant`, which writes TEXT_ENCODER; it registers on `app`
 
 
 class Generate(msgspec.Struct, kw_only=True):
@@ -76,8 +85,10 @@ def canvas(resolution: str, ratio: AspectRatio | None, first: tuple[int, int] | 
     return max(64, round(math.sqrt(area * r) / 64) * 64), max(64, round(math.sqrt(area / r) / 64) * 64)
 
 
-@app.tool(label="LTX-2.5", named="video", defaults={"model": MODEL}, components={"model": COMPONENTS}, memoize=True)
-def generate(ctx: Context, payload: Generate, model: Ltx25, out: Outputs, tel: Telemetry, adj: Adjustments) -> VideoResult:
+@app.tool(label="LTX-2.5", named="video", defaults={"model": MODEL, "text_encoder": TEXT_ENCODER}, components=_COMPONENTS,
+          memoize=True)
+def generate(ctx: Context, payload: Generate, model: Ltx25, text_encoder: Ltx25TextEncoder, out: Outputs, tel: Telemetry,
+             adj: Adjustments) -> VideoResult:
     """LTX-2.5 Distilled, in two stages: a scene and its synchronized sound, then x2 spatial refinement."""
     if not payload.prompt.strip():
         raise ValueError("LTX-2.5 needs a prompt describing the video and its sound")
@@ -92,7 +103,7 @@ def generate(ctx: Context, payload: Generate, model: Ltx25, out: Outputs, tel: T
         picture = fit(picture, width, height)
     generator = rng.generator(seed)
     with tel.stage("encoding prompt"):
-        embeds = model.encode(payload.prompt)
+        embeds = text_encoder.encode(payload.prompt)
     with tel.stage("generating video and audio"):
         latents = model.denoise(embeds, picture, width=width // 2, height=height // 2, frames=frames,
                                 generator=generator, check=ctx.raise_if_cancelled,

@@ -31,7 +31,7 @@ separate from this convolutional-decode tool.
 
 `lightricks/ltx-2.5@0.2.0` has two lanes: `bf16` and `int8` (int8 ConvRot on the transformer blocks and Gemma's language
 layers, [`quantize.py`](ltx_2_5/quantize.py)). A GPU with int8 tensor cores runs `int8`; `--lane bf16` pins 16 bits.
-`ENHANCER_INT8` writes the same lane of the Gemma 4 E2B prompt enhancer.
+`ENHANCER_INT8` writes the same lane of the Gemma 4 E2B prompt enhancer; no function runs an enhancer yet.
 
 ```sh
 cozy model quantize lightricks/ltx-2.5@0.1.0 --lane int8 --package ./ltx-2.5 --on <machine>
@@ -53,6 +53,31 @@ for exact cohorts and the separate publication/installed-package gates.
 The [CPU importer](../examples/client-scripts/ingest-ltx25.py) reproduces the pinned Distilled
 checkpoint with BF16 transformer/video and F32 audio VAE/vocoder. It runs before serving;
 `HF_TOKEN` supplies gated source access, or `--token-stdin` reads it from standard input.
+
+## Text encoder
+
+The Gemma 4 12B encoder is its own slot, `text_encoder`; `model` reads everything else. Its default is abliterated
+(Paul, 11-17: "use abliterated models wherever possible"): `igorls/gemma-4-12b-it-heretic-v1-ltx-2.5`, igorls'
+[Heretic](https://huggingface.co/igorls/gemma-4-12B-it-heretic-v1) of Gemma 4 12B (0/100 refusals, KL 0.028) moved onto
+Lightricks' encoder. That encoder is Lightricks' fine-tune of Gemma 4 12B (diverofdark measured 1-11% from Google's from
+layer 11 on), so the edit goes on as its difference: Heretic changed 22 tensors (`down_proj` in layers 22-34, `o_proj` in
+29-37), and each is Lightricks' plus `heretic - google`, rounded to bf16, as
+[diverofdark's int8 file](https://huggingface.co/diverofdark/LTX-2.5-Gemma4-12B-heretic-int8-convrot) did it. The other
+655 tensors are Lightricks'. The slot's class, `Ltx25TextEncoder`, builds only the encoder, so Lightricks' own is any
+LTX-2.5 checkpoint: `--model text_encoder=lightricks/ltx-2.5@0.2.0`.
+
+It is made on a machine by `transplant` ([`encoder.py`](ltx_2_5/encoder.py)) from
+`igorls/gemma-4-12B-it-heretic-v1@192d14f6` and `google/gemma-4-12B-it@707f0a3b`, written to `int8` by this package's
+recipe, and each lane cut to the encoder, its tokenizer and Lightricks' licence (a header alone, on the same chunks):
+
+```sh
+cozy model quantize igorls/gemma-4-12b-it-heretic-v1-ltx-2.5@sha256:<bf16 commit> --lane int8 --package ./ltx-2.5 --on <machine>
+cozy model upload 'igorls/gemma-4-12b-it-heretic-v1-ltx-2.5@sha256:<commit>:text_encoder,tokenizer,model' \
+  igorls/gemma-4-12b-it-heretic-v1-ltx-2.5 --lane <lane> --mirror https://huggingface.co/igorls/gemma-4-12B-it-heretic-v1 --on <machine>
+```
+
+Licences: LTX-2.x Community License (Lightricks' encoder); Gemma 4, Apache-2.0 (Google's card); igorls' Heretic, `gemma`
+(its card).
 
 ## Several GPUs
 
