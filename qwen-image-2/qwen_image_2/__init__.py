@@ -297,20 +297,19 @@ _BOX_NEEDS = {"expander_i2i": f"request.prompt_upsampling && request.instruction
 #: What a box's picture costs (cl-1286): its megapixels, its steps (Turbo's 4 else 40) and its rewrite (`prompt_upsampling`, 1 on,
 #: 0 off: on by default). Its picture is `generate`'s row of its card nearest it (`benchmarks.json`: 40 steps, no rewrite), from that
 #: row's megapixels: 0.966 of it denoising, by megapixels^1.19 and in proportion to steps, and 0.034 fixed (an RTX 4090's warm
-#: 40-step runs: generating image 7.2 s at 1 MP, 37.5 s at 4 MP, 38.8 s in all). Its rewrite is what a row of `image` with it on
-#: measured beyond its picture; with none yet, 0.29 of the card's `generate` row (an RTX 4090's "upsampling prompt" stage, warm:
-#: 9.4 to 14.1 s, 12.3 s at the median).
+#: 40-step runs: generating image 7.2 s at 1 MP, 37.5 s at 4 MP, 38.8 s in all). Its rewrite is what `image`'s own row (its
+#: defaults, the rewrite on) took beyond its picture, at any size: its time is its tokens' (17 ms each on an RTX 4090), more for a
+#: longer prompt and varying with the seed, never the picture's (the row's note). A box with it off reads no `image` row.
 _GENERATE = 'measured(machine, "generate")'
-_BOX = 'measured(machine, "image", {"request": {}})'
+_BOX = "measured(machine)"
 _ASKED = (f"{_GENERATE}.warm_ms * (0.966 * pow(size.megapixels / {_GENERATE}.request.megapixels, 1.19)"
           " * size.steps / 40.0 + 0.034)")
 _BOX_PICTURE = (f"{_GENERATE}.warm_ms * (0.966 * pow({_BOX}.request.megapixels / {_GENERATE}.request.megapixels, 1.19)"
                 f" * {_BOX}.request.steps / 40.0 + 0.034)")
-_REWRITTEN = f"has({_BOX}.request.prompt_upsampling) && {_BOX}.request.prompt_upsampling == 1.0"
 _BOX_ESTIMATE = {
     "size": {"megapixels": "double(request.megapixels)", "steps": "request.turbo ? 4.0 : 40.0",
              "prompt_upsampling": "request.prompt_upsampling ? 1.0 : 0.0"},
-    "ms": f"{_ASKED} + size.prompt_upsampling * (({_REWRITTEN}) ? {_BOX}.warm_ms - {_BOX_PICTURE} : 0.29 * {_GENERATE}.warm_ms)",
+    "ms": f"{_ASKED} + (size.prompt_upsampling == 1.0 ? {_BOX}.warm_ms - {_BOX_PICTURE} : 0.0)",
 }  # fmt: skip
 
 
