@@ -4,16 +4,16 @@
 the same with Alibaba PAI's Fun Acc overlay on it (`alibaba-pai/qwen-image-2.1-fun-acc`, a 330 MiB
 4-step distillation). Both take the same inputs. On a canvas they're one tool, `image` (Qwen Image 2.1; Qwen Image 1 is `qwen-image`):
 its `instructions`, a Turbo toggle (the overlay loads only when asked for), `aspect_ratio`, `megapixels`, `seed` and,
-under Advanced, `prompt_upsampling`, `creativity` and `keep_unchanged`. The model checkpoint is selected
+under Advanced, `prompt_upsampling` and `keep_unchanged`. The model checkpoint is selected
 independently from the package. TensorFS owns model downloads and bytes;
 Runtime owns construction, memory residency and component execution.
 
 Each picture's `description` follows the prompt as `<name>: description`, in the words tuned on this model: a mention reads as `<image3>` alone, and with no words for it a third picture was dropped. In a `cozy project`, each `<name>` the text mentions is that box's picture and description, and a text box goes in as its words.
 
 `prompt`, then those words, goes to Qwen's prompt enhancer first (below), and its rewrite reaches the model. The image is
-RGB, or RGBA for a cutout ([below](#cutouts)): the decoder's own alpha is dropped. `seed` is optional and the chosen seed is
+RGBA when the decoder's alpha is transparent ([below](#transparent-images)), else RGB. `seed` is optional and the chosen seed is
 returned. Seeds range from 0 through 9007199254740991 (the interoperable 53-bit
-integer range); omitting one chooses a random seed in that range. Inputs: `prompt` (its text and the pictures it mentions), `aspect_ratio` (any W:H), `megapixels` (any size, 1024² pixels each), `seed`, `prompt_upsampling` and `creativity`. The full model runs 40 steps, Turbo 4 on Fun Acc's
+integer range); omitting one chooses a random seed in that range. Inputs: `prompt` (its text and the pictures it mentions), `aspect_ratio` (any W:H), `megapixels` (any size, 1024² pixels each), `seed` and `prompt_upsampling`. The full model runs 40 steps, Turbo 4 on Fun Acc's
 grid, with its own output head each step and an F32 state (`qwenimage21_pdd.py`). Qwen runs no CFG, so it has no `guidance` or `negative_prompt`. Unknown fields are ignored with a warning. The result is `image`, `width`, `height`, `seed` and `prompt`, the prompt the image was made from.
 
 `upscale` (the Upscale tool on a picture box) restores the box's picture at 2 or 4 MP: the base model, 20 steps, edits it from
@@ -37,26 +37,18 @@ one that names what changes, pushes it to full strength and holds the rest; `Qwe
 request from words into a long description of the finished picture. `prompt_upsampling` (on by default) runs the
 one that fits before generating; off, the prompt goes as written and neither enhancer is fetched.
 
-Each runs as upstream's `pe_core.py`: its own `system_prompt.txt`, thinking first, then a JSON answer; temperature
-1.0, top-p 0.95, presence penalty 0 for edits and 1.5 for words; each picture over white at most 1 MP. Runtime's
-sampler has no top-k, so upstream's top-k 20 is not applied. The rewrite is sampled from the render's `seed`: a new
-render rewrites anew, and a given seed repeats its rewrite. The rewrite is the result's `prompt`, and the run's log has it with its
-seed, canvas and token counts.
-
-Upstream lets the enhancer think for up to 24,000 tokens, which on a 4090 added about 69 s to a 5 s edit. Here its
-thought stops at 128 tokens and it answers, closed as Qwen3 closes a thinking budget, and an edit's rewrite is asked
-to stay within 80 words. That adds about 9 s to an edit and keeps the rewriter's gains: a designed scene for a new
-shot, and no props the new picture has no use for. It holds the person's clothes as often as Turbo alone does (3 of 6),
-where upstream's full thought held them 6 of 6. With no thought at all, the enhancer reasons in its answer and never
-gives one. With no `aspect_ratio`, the enhancer's canvas is used, as upstream passes it to the renderer: its
-`wh_ratio`, or the shape of the picture its `ratio_follow` names.
-
-For a cutout ([below](#cutouts)) the enhancer is asked, after the request, for the subject on a plain backdrop and
-never for transparency.
-
-`creativity` steers how far the rewrite goes beyond the words: `balanced` (the default) is Qwen's own rewrite;
-`faithful` and `creative` add one sentence after the request, where the enhancer reads intent: change only what was
-asked, or make a striking new picture, bold with expression, pose, styling, setting, light and camera.
+Each runs as upstream's `pe_core.py` and `run_vllm.py` run it, under its own `system_prompt.txt`, with one instruction of
+ours after the request (below, Transparent images): the request thinking first, then a JSON answer, in one generation of at most 24,000 tokens for an edit and
+16,256 for words; temperature 1.0, top-p 0.95, top-k 20, presence penalty 0 for edits and 1.5 for words; each picture
+RGB (its alpha dropped) at most 1 MP. Upstream applies the presence penalty before top-k; Runtime's sampler applies it
+after, so words (penalty 1.5) sample slightly differently until Runtime matches. The thought takes most of the time:
+upstream's took 25-143 s of a 4090 for an edit. The rewrite is sampled from the render's `seed`: a new render rewrites
+anew, and a given seed repeats its rewrite. The request is the prompt's text, each mention as `<imageN>` (or a lone
+picture's name), without the pictures' descriptions, which go to the model only with upsampling off. Its answer's last
+JSON object is read as upstream reads it (strict JSON, then `json_repair`). An answer with no rewrite (the thought used
+the whole budget, or the answer isn't JSON) is no prompt to render: the prompt goes as written, with a warning. The rewrite is the result's `prompt`, and the run's log
+has it with its seed, canvas and token count. With no `aspect_ratio`, the enhancer's canvas is used, as upstream passes
+it to the renderer: its `wh_ratio`, or the shape of the picture its `ratio_follow` names.
 
 ## Abliterated by default
 
@@ -92,24 +84,24 @@ The size is upstream's `calculate_dimensions` at `megapixels` (held to 1–4 MP)
 text-to-image defaults to `1:1` at 2 MP; 4 MP is the model's native 2048×2048. A ratio past the model's rotary
 range (a 32768 px side) is served at the nearest size it admits, reported as a `clamp` adjustment.
 
-## Cutouts
+## Transparent images
 
-Ask for the background removed or transparent, in any words: "remove the background", "no background", "on a
-transparent background", an alpha channel, RGBA. The image is RGBA: the subject, and the background cleared.
+Qwen-Image-2.1 draws transparency itself: its VAE is RGBA, and the decoder's alpha is the picture's. The image is RGBA
+when more than 0.1% of it is under half opaque, its alpha's noise (0-4 and 251-255) snapped to exact; else RGB, so the
+few dozen pixels the decoder leaves at 215-250 on an opaque picture make no RGBA picture. Qwen's model card gives the
+wording it draws transparency for:
 
-Qwen-Image-2.1 draws transparency itself only in its model card's words ("This is an RGBA image with transparency. … The
-image has alpha channel and the background is transparent."). In other words, on Turbo's 4 steps, it paints a checkerboard
-over a background left opaque (se-154: Paul's run PRO6-29), and its enhancer, asked to remove a background, writes a white
-backdrop, loose transparency words or the card's, by seed. So a cutout is drawn on a plain, evenly lit, pure white studio
-backdrop and BiRefNet (`matte`, `zhengpeng7/birefnet@0.1.0`, fetched only for a cutout) cuts it away, whatever the
-wording. Its matte is the alpha, and each edge pixel's colour is unmixed from the backdrop behind it, so the
-white leaves no fringe. The prompt Qwen reads, the result's `prompt`, has no transparency words and ends with the
-backdrop. A request that names another background ("replace it with a beach", "change the background to blue", "put her
-on a beach") is an edit, not a cutout. A backdrop that comes out busy gets a warning; a matte that finds no subject leaves
-the picture as drawn, with a warning.
+> `This is an RGBA image with transparency. <your description>. The image has alpha channel and the background is transparent.`
+
+As Qwen built it, the enhancer never writes that wording: with upsampling on no request came out transparent (0 of 22,
+se-154), with the wording as written and upsampling off 4 of 4 did. So one instruction follows each request: if it asks
+for a transparent background, or the background removed with nothing in its place, the rewrite takes the card's
+template and describes no backdrop. The enhancer decides whether it asks. Off, the words go to the model as written. Edits
+take the same wording (the card gives none of their own).
 
 ```sh
-cozy run qwen-image-2/generate_turbo seed=42 prompt='A cute cartoon dragon sticker on a transparent background.'
+cozy run qwen-image-2/generate_turbo seed=42 prompt_upsampling=false \
+  prompt='This is an RGBA image with transparency. A cute cartoon dragon sticker. The image has alpha channel and the background is transparent.'
 ```
 
 ## Image editing and references
@@ -151,7 +143,7 @@ drawn from their blurred Lab difference (over 10 ΔE, after the colour drift is 
 picture fills the rest. Over five chained edits the untouched eyes stay within DISTS 0.03 of the first picture, where
 the model alone drifts to 0.19. It does nothing when the framing changes (another ratio), when the canvas is over 1.25x
 the picture's size (from a small picture the model's redraw is closer to the photo than its upscale), when the picture
-is transparent, or when the edit is global: under 8% of the picture still (a relight, a style, black and white, a
+or the edit's output is transparent, or when the edit is global: under 8% of the picture still (a relight, a style, black and white, a
 night scene left 0-3%; a new background 11-47%) or a colour shift over 8 ΔE. The run's log says what it kept, or why
 not. An edit of fine texture alone (a retouch, a restoration) is under its threshold: turn it off for those.
 

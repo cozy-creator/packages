@@ -39,7 +39,7 @@ GLOBAL_FRACTION = 0.85
 MIN_STILL = 0.08
 #: A colour shift this large over what stayed is an intended relight, and nothing is kept.
 GLOBAL_SHIFT = 8.0
-#: Past this fraction of pixels under half opaque, a picture is transparent (a cutout) and nothing is kept.
+#: Past this fraction of pixels under half opaque, a picture is transparent (`transparent`).
 TRANSPARENT = 0.001
 #: The changed mask grows by this fraction of the long side, then feathers by half of it.
 GROW = 0.015
@@ -53,6 +53,12 @@ class Kept:
     scale: float
     shift: tuple[float, float]  # px, x and y
     skipped: str = ""
+
+
+def transparent(opacity: torch.Tensor) -> bool:
+    """Whether a picture of this opacity (0 to 1) has transparency: past `TRANSPARENT` of it under half opaque. The
+    decoder's stray alpha on an opaque picture, a few dozen pixels at 215-250 (se-153, se-154), is not."""
+    return float((opacity < 0.5).float().mean()) > TRANSPARENT
 
 
 def _lab(rgb: torch.Tensor) -> torch.Tensor:
@@ -152,10 +158,13 @@ def _align(picture: torch.Tensor, output: torch.Tensor) -> tuple[float, float, f
 
 def keep_unchanged(picture: Image.Image, decoded: torch.Tensor) -> tuple[torch.Tensor, Kept]:
     """`decoded` (1, C, H, W in [-1, 1], the decoder's; its colour the first three) with `picture`'s own pixels wherever
-    the edit left it unchanged."""
+    the edit left it unchanged. Only between opaque pictures: a transparent one's colour under its clear pixels is no
+    picture to compare or keep."""
     height, width = decoded.shape[-2:]
-    if "A" in picture.getbands() and float((np.asarray(picture.getchannel("A")) < 128).mean()) > TRANSPARENT:
+    if "A" in picture.getbands() and transparent(torch.from_numpy(np.asarray(picture.getchannel("A"))).float() / 255):
         return decoded, Kept(0.0, 1.0, (0.0, 0.0), "the picture has transparency")
+    if decoded.shape[1] > 3 and transparent(decoded[0, 3].float() / 2 + 0.5):
+        return decoded, Kept(0.0, 1.0, (0.0, 0.0), "the edit made the picture transparent")
     if abs(picture.width / picture.height / (width / height) - 1) > RATIO_TOLERANCE:
         return decoded, Kept(0.0, 1.0, (0.0, 0.0), "the framing changed")
     if (width * height / (picture.width * picture.height)) ** 0.5 > MAX_UPSCALE:
