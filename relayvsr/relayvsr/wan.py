@@ -216,6 +216,8 @@ class Ring:
     #: per keyframe: its store and each block's (k, v), (batch, tokens, heads, head_dim)
     frames: dict[int, tuple[Store, list[State]]] = field(default_factory=dict)
     count: int = 0
+    #: the keyframe being made: its store and the blocks' K/V put so far
+    making: tuple[Store, list[State]] | None = None
 
     def slots(self) -> list[int]:
         """The keyframes held, in slot order, with the one being made."""
@@ -226,19 +228,32 @@ class Ring:
         k, v = self.frames[frame][1][block].get()
         return k, v
 
-    def keep(self, kv: list[tuple[torch.Tensor, torch.Tensor]]) -> None:
-        """The new keyframe's K/V; the one leaving the window goes."""
+    def begin(self, nbytes: int) -> None:
+        """The new keyframe's store, `nbytes` of K/V, before its blocks run."""
+        self.making = (retained(nbytes), [])
+
+    def put(self, k: torch.Tensor, v: torch.Tensor) -> State:
+        """One block's K/V of the new keyframe, held by the store from its block on: no block's K/V waits on the
+        card for the keyframe's last block."""
+        assert self.making is not None
+        store, states = self.making
+        states.append(store.put(k, v))
+        return states[-1]
+
+    def keep(self) -> None:
+        """The new keyframe joins the ring; the one leaving the window goes."""
+        assert self.making is not None
         f = self.count
-        store = retained(sum(k.nbytes + v.nbytes for k, v in kv))
-        self.frames[f] = (store, [store.put(k, v) for k, v in kv])
+        self.frames[f], self.making = self.making, None
         for old in [s for s in self.frames if s <= f - self.context]:
             self.frames.pop(old)[0].close()
         self.count += 1
 
     def close(self) -> None:
-        for store, _ in self.frames.values():
+        for store, _ in [*self.frames.values(), *([self.making] if self.making else [])]:
             store.close()
         self.frames.clear()
+        self.making = None
 
 
 class WanVSR(nn.Module):
@@ -279,39 +294,44 @@ class WanVSR(nn.Module):
         k_rope = rope_tables(self.head_dim, ph, pw, [s - origin for s in slots], x.device)
         window = (min(self.window[0], ph), min(self.window[1], pw))
         local = window != (ph, pw)
-        made: list[tuple[torch.Tensor, torch.Tensor]] = []
+        # Every block's K and V are (b, tokens, heads, head_dim) in x's dtype: x's size each.
+        ring.begin(len(self.blocks) * 2 * x.numel() * x.element_size())
         for index, block in enumerate(cast(list[Block], list(self.blocks))):
-            shift, scale, gate, c_shift, c_scale, c_gate = (block.scale_shift_table[None] + projected.float()).unbind(2)
-            h = (block.norm1(x.float()) * (1 + scale) + shift).type_as(x)
-            attn = block.attn1
-            key, value = attn.keys(h)
-            made.append((key, value))
-            held = [(key, value) if s == f else ring.kv(s, index) for s in slots]
-            keys, values = [kv[0] for kv in held], [kv[1] for kv in held]
-            q = rotate(attn.query(h), *q_rope).to(value.dtype)
-            k = rotate(torch.cat(keys, dim=1), *k_rope).to(value.dtype)
-            v = torch.cat(values, dim=1)
-            if local:
-                y = kernels.window_attention(q, k, v, ph, pw, window)
-            else:
-                y = F.scaled_dot_product_attention(q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2)).transpose(1, 2)
-            x = (x.float() + attn.out(y, q) * gate).type_as(x)
-
-            cross = block.attn2
-            h = block.norm2(x.float()).type_as(x)
-            ck, cv = cross.keys(text)
-            q = cross.query(h)
-            y = F.scaled_dot_product_attention(q.transpose(1, 2), ck.transpose(1, 2), cv.transpose(1, 2)).transpose(1, 2)
-            x = x + cross.out(y, q)
-
-            h = (block.norm3(x.float()) * (1 + c_scale) + c_shift).type_as(x)
-            x = (x.float() + block.ffn(h).float() * c_gate).type_as(x)
-
-        ring.keep(made)
-        del made
+            x = self._block(block, index, x, projected, text, ring, slots, (q_rope, k_rope), (ph, pw, window, local))
+        ring.keep()
 
         shift, scale = (self.scale_shift_table[None] + temb[:, :, None]).unbind(2)
         x = (self.norm_out(x.float()) * (1 + scale) + shift).type_as(x)
         x = self.proj_out(x).reshape(b, ph, pw, self.patch[1], self.patch[2], self.channels)
         velocity: torch.Tensor = x.permute(0, 5, 1, 3, 2, 4).reshape(b, self.channels, lh, lw)
         return (noise - velocity.float()).to(dtype)
+
+    def _block(self, block: Block, index: int, x: torch.Tensor, projected: torch.Tensor, text: torch.Tensor, ring: Ring,
+               slots: list[int], rope: tuple, layout: tuple) -> torch.Tensor:
+        """One block of `keyframe` over the new keyframe's tokens `x`: its K/V goes to the ring's store at once. Its
+        tensors die when it returns, before the next block allocates."""
+        (q_rope, k_rope), (ph, pw, window, local), f = rope, layout, ring.count
+        shift, scale, gate, c_shift, c_scale, c_gate = (block.scale_shift_table[None] + projected.float()).unbind(2)
+        h = (block.norm1(x.float()) * (1 + scale) + shift).type_as(x)
+        attn = block.attn1
+        key, value = ring.put(*attn.keys(h)).get()
+        held = [(key, value) if s == f else ring.kv(s, index) for s in slots]
+        keys, values = [kv[0] for kv in held], [kv[1] for kv in held]
+        q = rotate(attn.query(h), *q_rope).to(value.dtype)
+        k = rotate(torch.cat(keys, dim=1), *k_rope).to(value.dtype)
+        v = torch.cat(values, dim=1)
+        if local:
+            y = kernels.window_attention(q, k, v, ph, pw, window)
+        else:
+            y = F.scaled_dot_product_attention(q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2)).transpose(1, 2)
+        x = (x.float() + attn.out(y, q) * gate).type_as(x)
+
+        cross = block.attn2
+        h = block.norm2(x.float()).type_as(x)
+        ck, cv = cross.keys(text)
+        q = cross.query(h)
+        y = F.scaled_dot_product_attention(q.transpose(1, 2), ck.transpose(1, 2), cv.transpose(1, 2)).transpose(1, 2)
+        x = x + cross.out(y, q)
+
+        h = (block.norm3(x.float()) * (1 + c_scale) + c_shift).type_as(x)
+        return (x.float() + block.ffn(h).float() * c_gate).type_as(x)
