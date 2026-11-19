@@ -84,8 +84,8 @@ wheels = [
 
 [[package]]
 name = "cozy-runtime"
-version = "0.49.0.dev2360+g92c951e2"
-source = { url = "https://github.com/cozy-creator/cozy-runtime/releases/download/rc-0.28.0/cozy_runtime-0.49.0.dev2360+g92c951e2-py3-none-any.whl" }
+version = "0.49.0.dev2376+gb069644c"
+source = { url = "https://github.com/cozy-creator/cozy-runtime/releases/download/rc-0.28.0/cozy_runtime-0.49.0.dev2376+gb069644c-py3-none-any.whl" }
 dependencies = [
     { name = "msgspec" },
     { name = "numpy" },
@@ -95,7 +95,7 @@ dependencies = [
     { name = "tensorfs", version = "0.28.0.dev3432+g6337ebcf", source = { url = "https://github.com/cozy-creator/cozy-creator/releases/download/rc-0.28.0/tensorfs-0.28.0.dev3432+g6337ebcf-cp311-abi3-manylinux_2_28_x86_64.whl" }, marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
 ]
 wheels = [
-    { url = "https://github.com/cozy-creator/cozy-runtime/releases/download/rc-0.28.0/cozy_runtime-0.49.0.dev2360+g92c951e2-py3-none-any.whl", hash = "sha256:beec5cc185f12eaa027e20f9238e28dc8cba4cad57405db41b791baaccdaac90" },
+    { url = "https://github.com/cozy-creator/cozy-runtime/releases/download/rc-0.28.0/cozy_runtime-0.49.0.dev2376+gb069644c-py3-none-any.whl", hash = "sha256:9b9612b371c00e68220757a5ae7fbd8f4bad51851c061253056914c5b6aaf94b" },
 ]
 
 [package.optional-dependencies]
@@ -453,7 +453,7 @@ wheels = [
 
 [[package]]
 name = "qwen3"
-version = "0.2.0rc1"
+version = "0.2.1rc1"
 source = { editable = "." }
 dependencies = [
     { name = "cozy-runtime", extra = ["media"] },
@@ -468,7 +468,7 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
-    { name = "cozy-runtime", extras = ["media"], url = "https://github.com/cozy-creator/cozy-runtime/releases/download/rc-0.28.0/cozy_runtime-0.49.0.dev2360+g92c951e2-py3-none-any.whl" },
+    { name = "cozy-runtime", extras = ["media"], url = "https://github.com/cozy-creator/cozy-runtime/releases/download/rc-0.28.0/cozy_runtime-0.49.0.dev2376+gb069644c-py3-none-any.whl" },
     { name = "msgspec", specifier = ">=0.19" },
     { name = "numpy", specifier = ">=1.26" },
     { name = "pillow", specifier = ">=12" },
