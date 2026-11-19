@@ -57,7 +57,7 @@ Ideogram 4 reads only JSON captions (`high_level_description`, `style_descriptio
 `prompt` is used as given. A plain one is expanded by the upsampler: Diffusers' local prompt enhancer,
 the same Qwen3-VL with its language head, Ideogram's system message and the target ratio, sampled at
 temperature 1 from the request's seed by the Runtime's `lm.generate`, constrained to the caption schema
-(outlines-core's index, `allowed=`). A plain prompt
+(outlines-core's index through the Runtime's `lm.Grammar`, `allowed=`). A plain prompt
 with `prompt_upsampling=false` is refused: the model reads only captions, and draws its own refusal card
 on a bare description.
 
