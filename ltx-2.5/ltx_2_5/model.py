@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable
+from contextlib import nullcontext
 from typing import TypedDict, cast
 
 import numpy as np
@@ -26,6 +27,8 @@ from tokenizers import Tokenizer
 from torch import nn
 from transformers import AddedToken, Gemma4UnifiedConfig, Gemma4UnifiedForConditionalGeneration, GemmaTokenizer
 
+from .frames import install as install_frames
+from .frames import per_frame
 from .vae import VideoVAE
 from .parallel import install
 
@@ -108,6 +111,7 @@ class Graph:
             "latent_upsampler": stored(LTX2LatentUpsamplerModel.from_config(config.section("latent_upsampler").mapping()), "latent_upsampler", config),
         }
         install(self.components["transformer"])
+        install_frames(self.components["transformer"])
         self.scheduler_config = config.section("scheduler").mapping()
 
 
@@ -193,8 +197,10 @@ class Ltx25(Model[Graph]):
         if latents is not None:
             kwargs.update(latents=latents[0], audio_latents=latents[1], noise_scale=REFINE_SIGMAS[0])
         check()
+        # Diffusers' image-to-video timestep is `t * (1 - mask)` with the mask set on whole latent frames (frame 0,
+        # pipeline_ltx2_image2video.py:806-807 and 850-851), so its video modulation embeds once a frame.
         try:
-            with torch.inference_mode():
+            with torch.inference_mode(), per_frame() if image is not None else nullcontext():
                 video, audio = pipe(**kwargs)
             return video, audio
         finally:
