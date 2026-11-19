@@ -202,7 +202,7 @@ wheels = [
 
 [[package]]
 name = "flux-2"
-version = "0.13.1rc1"
+version = "0.13.2rc1"
 source = { editable = "." }
 dependencies = [
     { name = "cozy-runtime", extra = ["media"] },
