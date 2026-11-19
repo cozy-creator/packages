@@ -18,7 +18,6 @@ from cozy_runtime.author import Config, Cut, Loader, Model, ModelAssets, Serving
 from .color import Correction, correct
 from .frames import extend
 from .upstream.infer import VideoDiffusionInfer
-from .upstream.models.dit.nablocks.mmsr_block import GROUP
 from .upstream.models.dit.nadit import NaDiT
 from .upstream.models.video_vae_v3.modules.attn_video_vae import VideoAutoencoderKLWrapper
 
@@ -34,12 +33,8 @@ ARCHITECTURE = "SeedVR2-7B"
 #: DiT tokens (2x2 latent px a frame) restored together at most: whole frames, 16 at 1080p, 9 at
 #: 1440p, 4 at 2160p. Window attention spans a piece, so the pieces are part of the result and
 #: come from the clip's shape alone (`split`'s `most`), never from free memory. Inside a piece,
-#: attention runs by window groups and the MLP by tokens (both exact), so a piece fits 8 GB.
+#: attention runs by window groups and the MLP by tokens, both as the room left chooses (exact).
 PIECE = 131072
-#: A piece's activation peak, in 2-byte elements: during its MLP, the block's input, the
-#: attention's residual sum and the MLP's input and output (4 DIM a token) beside one `GROUP`'s
-#: projection and GELU (2 EXPAND DIM a token). `split`'s `holds` counts it in windows of the
-#: piece's fp16 latent, `most` elements each.
 _OPERATORS = {ast.Add: operator.add, ast.Sub: operator.sub, ast.Mult: operator.mul, ast.FloorDiv: operator.floordiv}
 
 
@@ -81,9 +76,11 @@ class Settings:
 
     @property
     def peak(self) -> int:
-        """`PEAK` at this DiT's width and MLP expansion."""
-        dim, expand = cast(int, self.dit["vid_dim"]), cast(int, self.dit["expand_ratio"])
-        return int((4 * PIECE + 2 * expand * GROUP) * dim)
+        """A piece's bytes at its peak, beside which its window groups and MLP pieces take what room is left:
+        four `PIECE`-token wholes of the residual stream, which runs F32 under the bf16 autocast (a 16,200-row
+        group's gather is 199 MB, var-030 4.1): the block's input, the attention's residual sum, and the MLP's
+        input and output."""
+        return 4 * PIECE * cast(int, self.dit["vid_dim"]) * torch.float32.itemsize
 
 
 def settings(assets: ModelAssets) -> Settings:
@@ -256,7 +253,7 @@ class RestorationModel(Model[Graph]):
 
         x = torch.cat([noise, condition], dim=-1)
         most = PIECE * 4 * x.shape[-1]
-        return split(dit, x, Cut(0), most=most, holds=-(-self.graph.settings.peak // most))
+        return split(dit, x, Cut(0), most=most, holds=-(-self.graph.settings.peak // (most * x.element_size())))
 
     @uses_components("vae")
     def decode(self, latent: torch.Tensor) -> torch.Tensor:
