@@ -12,7 +12,8 @@ Runtime's streaming media API.
 through the same encode, denoise and decode. On a box its `image` is the box's own version (`<self.N>`), and the
 result is the box's next version. It takes `resolution` (the picture's short side, as the ComfyUI node's: a 9:16 picture at 2160p
 is 2160x3840; held to that 16:9 canvas's pixels; 2160p by default, where a small JPEG comes out closest to its clean
-original, se-149), `seed`, `color_correction`, `input_noise_scale` and `latent_noise_scale`.
+original, se-149), `seed`, `color_correction` (`adain` by default for a picture, below), `input_noise_scale` and
+`latent_noise_scale`.
 
 Resolution defines the maximum 16:9 canvas; source-aspect output fits inside it. Internally,
 padding meets the model's 16-pixel grid and is cropped from the result. Audio is decoded and
@@ -29,7 +30,7 @@ clip restores on an 8 GB card.
 
 | field | default | effect |
 |---|---|---|
-| `color_correction` | `lab` | `lab`, `wavelet`, `wavelet_adaptive`, `hsv`, `adain` or `none`: match the restoration's colour to the source. Upstream defaults to `wavelet` and recommends `lab` for fidelity; we measured `lab` closest. |
+| `color_correction` | `lab` (`adain` for `upscale_image`) | `lab`, `wavelet`, `wavelet_adaptive`, `hsv`, `adain` or `none`: match the restoration's colour to the source. Upstream defaults to `wavelet` and recommends `lab` for fidelity; we measured `lab` closest on video (H3 run 5515, below). On a small JPEG picture `lab`'s wavelet step re-imports the blown-up input's blocks and chroma; `adain` (mean and spread only) cut the mascots' DISTS from 0.086 to 0.076 and tied on photos (se-151). Video was not measured, so it keeps `lab`. |
 | `latent_noise_scale` | 0 | 0–1: noise on the conditioning latent; softens excessive invented detail. Try 0.1–0.2. |
 | `input_noise_scale` | 0 | 0–1: noise on the input frames; reduces artifacts at high resolutions. |
 | `batch_size` | whole clip | most frames per temporal window; must be 4n+1 (1, 5, 9, 13, 17, …). The DiT runs each window in the fewest pieces that fit the GPU. |

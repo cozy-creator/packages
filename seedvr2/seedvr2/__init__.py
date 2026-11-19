@@ -248,6 +248,9 @@ class UpscaleImageInput(Restoration, kw_only=True):
     resolution: Annotated[Resolution, Shape(pixels=_RESOLUTIONS)] = Resolution.UHD
     #: `restore_window`.
     seed: Seed = 42  # type: ignore[assignment]  # a literal: the interface is read from source (Seed is an int NewType)
+    #: `restore_window`'s `correction`: `adain` matches only the source's mean and spread. `lab` first takes the source's
+    #: low band, which for a small JPEG is its blocks and chroma blown up (se-151: mascots' DISTS 0.086 to 0.076).
+    color_correction: Annotated[Correction, Advanced()] = "adain"
 
 
 class UpscaleImageOutput(msgspec.Struct):
