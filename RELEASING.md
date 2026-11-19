@@ -41,8 +41,9 @@ Triton sets compile with the RC's Runtime. A lock the relock changes goes into t
 
 A package runs on its machine's Runtime: an RC machine, and every gate, runs the open RC's newest build. A package that
 needs what only that Runtime has names its floor, never a wheel: `cozy-runtime>=0.47.0.dev0,<0.48` (the RC's minor). No
-release meets it yet, so a lock (`task lock`, Calcifer's) takes the RC's newest build, binding its wheel in a private copy
-only. A Runtime merge adds a newer build (the RC's prerelease keeps its newest 20, so a lock's URL stays good meanwhile):
+release meets it yet, so a lock (`task lock`, Calcifer's) takes the RC's newest build that meets it, binding its wheel in a
+private copy only. `task lock` reads which RC from the checkout's history (`scripts/rc-runtime.sh open`: the `rc/<x.y.z>` its
+branch was cut from), never from the computer's `cozy --version`. A Runtime merge adds a newer build (the RC's prerelease keeps its newest 20, so a lock's URL stays good meanwhile):
 Calcifer relocks a source run onto the newest build, a machine installs its own Runtime over a lock's, and `scripts/triton.sh` builds with the newest.
 Nothing needs relocking. Once 0.47.0 is on PyPI, the same floor locks it there.
 
