@@ -28,7 +28,7 @@ from cozy_runtime.image import (
 )
 
 from . import quantize as quantize  # its recipes
-from .model import MossImage
+from .model import MossImage, MossTextEncoder
 
 app = App()
 
@@ -105,10 +105,11 @@ def layout_prompt(prompt: str, regions: list[Region] | None, width: int, height:
 
 #: MOSS-Image's text encoder is stock Qwen3.5-9B, its own slot: pottokao's Heretic abliteration of it by default (Paul,
 #: 11-17: "use abliterated models wherever possible"), made for MOSS-Image. On se-160's four lettering seeds it drew text as
-#: well as stock on three and worse on one poster. Stock is `model.text_encoder=openmoss-team/moss-image@0.1.1`. `model`
-#: reads the DiT and the VAE.
+#: well as stock on three and worse on one poster. 0.2.0 holds the encoder and its tokenizer alone (se-160: a release holds
+#: only its author's work); `MossTextEncoder` builds only the encoder, so stock is any MOSS-Image checkpoint:
+#: `model.text_encoder=openmoss-team/moss-image@0.1.1`. `model` reads the DiT and the VAE.
 MOSS = "openmoss-team/moss-image@0.1.1"
-TEXT_ENCODER = "pottokao/moss-image-text-encoder-heretic@0.1.0"
+TEXT_ENCODER = "pottokao/moss-image-text-encoder-heretic@0.2.0"
 _DEFAULTS = {"model": MOSS, "text_encoder": TEXT_ENCODER}
 _COMPONENTS = {"model": ("transformer", "vae"), "text_encoder": ("text_encoder",)}
 
@@ -179,7 +180,7 @@ async def generate(ctx: Context, payload: GenerateInput) -> ImageResult:
 
 
 @app.entrypoint(defaults=_DEFAULTS, components=_COMPONENTS, memoize=True, private=True)
-def text_to_image(ctx: Context, payload: GenerateInput, model: MossImage, text_encoder: MossImage, tel: Telemetry,
+def text_to_image(ctx: Context, payload: GenerateInput, model: MossImage, text_encoder: MossTextEncoder, tel: Telemetry,
                   adj: Adjustments) -> ImageResult:
     """MOSS-Image SFT, 50 Euler steps at CFG 3, with `regions` laid out as upstream's layout JSON.
 
@@ -209,7 +210,7 @@ def text_to_image(ctx: Context, payload: GenerateInput, model: MossImage, text_e
 
 
 @app.entrypoint(defaults=_DEFAULTS, components=_COMPONENTS, memoize=True, private=True)
-def control(ctx: Context, payload: GenerateInput, model: MossImage, text_encoder: MossImage, tel: Telemetry,
+def control(ctx: Context, payload: GenerateInput, model: MossImage, text_encoder: MossTextEncoder, tel: Telemetry,
             adj: Adjustments) -> ImageResult:
     """`generate` under its first control map, the kind's adapter stacked on `model` by its caller (thedeoxen's
     workflows, ComfyUI's `ai-toolkit` edit format): the map at the picture's size is the one noise-free reference at
@@ -254,7 +255,7 @@ def control(ctx: Context, payload: GenerateInput, model: MossImage, text_encoder
 
 
 @app.entrypoint(defaults=_DEFAULTS, components=_COMPONENTS, memoize=True, private=True)
-def edit(ctx: Context, payload: GenerateInput, model: MossImage, text_encoder: MossImage, tel: Telemetry,
+def edit(ctx: Context, payload: GenerateInput, model: MossImage, text_encoder: MossTextEncoder, tel: Telemetry,
          adj: Adjustments) -> ImageResult:
     """`generate` with pictures, Moss-Image-Edit stacked on `model` by its caller: each picture a noise-free
     reference at t = 0 (`MossImage.denoise`'s `references`), 30 Euler steps at CFG 4 against an empty negative that
@@ -326,7 +327,7 @@ class UpscaleInput(msgspec.Struct, kw_only=True):
 
 
 @app.tool(label="Upscale", named="image", defaults=_DEFAULTS, components=_COMPONENTS, memoize=True)
-def upscale(ctx: Context, payload: UpscaleInput, model: MossImage, text_encoder: MossImage, tel: Telemetry,
+def upscale(ctx: Context, payload: UpscaleInput, model: MossImage, text_encoder: MossTextEncoder, tel: Telemetry,
             adj: Adjustments) -> ImageResult:
     """The picture larger: `remake` at the size asked, from `UPSCALE_PROMPT` (50-step schedule, CFG 3)."""
     with tel.stage("reading picture"):
@@ -356,7 +357,7 @@ class ImageToImageInput(msgspec.Struct, kw_only=True):
 
 
 @app.entrypoint(defaults=_DEFAULTS, components=_COMPONENTS, memoize=True)
-def image_to_image(ctx: Context, payload: ImageToImageInput, model: MossImage, text_encoder: MossImage, tel: Telemetry,
+def image_to_image(ctx: Context, payload: ImageToImageInput, model: MossImage, text_encoder: MossTextEncoder, tel: Telemetry,
                    adj: Adjustments) -> ImageResult:
     """The picture remade from the prompt (`remake`): 50 Euler steps at CFG 3, those above `strength` skipped."""
     with tel.stage("reading picture"):
@@ -370,7 +371,7 @@ def image_to_image(ctx: Context, payload: ImageToImageInput, model: MossImage, t
                   height=height, steps=steps, guidance=guidance, seed=seed, denoise=payload.strength)  # fmt: skip
 
 
-def remake(ctx: Context, model: MossImage, text_encoder: MossImage, tel: Telemetry, picture: PILImage.Image, prompt: str,
+def remake(ctx: Context, model: MossImage, text_encoder: MossTextEncoder, tel: Telemetry, picture: PILImage.Image, prompt: str,
            negative_prompt: str, *, width: int, height: int, steps: int, guidance: float, seed: int,
            strength: float = 1.0, denoise: float | None = None) -> ImageResult:
     """Image-to-image: the picture Lanczos to `width` x `height`, encoded, noised to the sigma `strength` (or the

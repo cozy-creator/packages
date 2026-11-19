@@ -150,15 +150,35 @@ def transformer(config: Config) -> PAN2Transformer3DModel:
     return stored(model, "transformer", config)
 
 
+def text_encoder(config: Config) -> Qwen3_5TextModel:
+    """Qwen3.5's text model from a checkpoint's `text_encoder` section, or from the whole config of a checkpoint of the
+    encoder alone (Runtime gives one component's config unsectioned)."""
+    section = config.section("text_encoder") if "text_encoder" in config.keys() else config
+    return stored(Qwen3_5TextModel(Qwen3_5TextConfig(**section.mapping())), "text_encoder", config)
+
+
 class Graph:
     components: Components
     def __init__(self, config: Config) -> None:
         self.components = {
             "transformer": transformer(config),
-            "text_encoder": stored(Qwen3_5TextModel(Qwen3_5TextConfig(**config.section("text_encoder").mapping())), "text_encoder", config),
+            "text_encoder": text_encoder(config),
             "vae": stored(AutoencoderKLWan.from_config(config.section("vae").mapping()), "vae", config),
         }
         self.scheduler_config = config.section("scheduler").mapping()
+
+
+class TextEncoderComponents(TypedDict):
+    text_encoder: Qwen3_5TextModel
+
+
+class TextEncoderGraph:
+    """The `text_encoder` of a PAN2 checkpoint, or a checkpoint of the encoder alone."""
+
+    components: TextEncoderComponents
+
+    def __init__(self, config: Config) -> None:
+        self.components = {"text_encoder": text_encoder(config)}
 
 
 def stage(block: PAN2TextEncoderStep | PAN2VaeEncoderStep | PAN2VaeDecoderStep, components: Mapping[str, object], values: dict[str, object]) -> PipelineState:
@@ -177,14 +197,17 @@ class Reasoner(VisionLM):
 
 
 @sequence_parallel(degrees=(2, 4, 8))
-class Pan2(Model[Graph]):
-    serving = Serving(attention_bits={"transformer.transformer_blocks.": 8})
-    graph: Graph
+class Pan2TextEncoder(Model[TextEncoderGraph]):
+    """PAN2's Qwen3.5 text model, the `text_encoder` slot: a PAN2 checkpoint's encoder and tokenizer, or a checkpoint of
+    the encoder alone. Only the encoder is built."""
+
+    graph: TextEncoderGraph
     tokenizer: Qwen2Tokenizer
 
     def load(self, loader: Loader) -> None:
-        self.graph = loader.construct(Graph)
-        self.tokenizer = tokenizer(loader.assets)
+        self.graph = loader.construct(TextEncoderGraph)
+        held = any(name.startswith("tokenizer/") for name in loader.assets.names())
+        self.tokenizer = tokenizer(loader.assets, "tokenizer/" if held else "")
 
     @uses_components("text_encoder")
     def encode(self, prompt: str, frames: int, guidance: float, negative: str | None) -> tuple[torch.Tensor, torch.Tensor | None]:
@@ -199,6 +222,17 @@ class Pan2(Model[Graph]):
                       {"prompt": prompt, "negative_prompt": negative if guidance > 1 else None,
                        "num_frames": frames, "fps": float(FPS)})
         return cast(torch.Tensor, state.values["prompt_embeds"]), cast(torch.Tensor | None, state.values.get("negative_prompt_embeds"))
+
+
+@sequence_parallel(degrees=(2, 4, 8))
+class Pan2(Model[Graph]):
+    """A PAN2 checkpoint: its DiT and VAE; a function's `text_encoder` slot is `Pan2TextEncoder`."""
+
+    serving = Serving(attention_bits={"transformer.transformer_blocks.": 8})
+    graph: Graph
+
+    def load(self, loader: Loader) -> None:
+        self.graph = loader.construct(Graph)
 
     @uses_components("vae")
     def encode_image(self, image: Image.Image, width: int, height: int) -> torch.Tensor:

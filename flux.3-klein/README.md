@@ -96,8 +96,9 @@ setting away: `model.upsampler=black-forest-labs/flux-3-klein-upsampler@0.2.0`.
 Klein's text encoder is stock Qwen3-VL-4B-Instruct (BFL's `text_encoder` shards are Qwen's), bound as its own slot,
 `text_encoder`; `model` and `full` read only the DiT and the VAE. Its default is abliterated (Paul, 11-17: "use
 abliterated models wherever possible"): [DreamFast's Heretic](https://huggingface.co/DreamFast/Qwen3-VL-4b-Heretic)
-(`dreamfast/qwen3-vl-4b-heretic-klein`, 0/400 HarmBench refusals, KL 0.028), composed on Klein; Krea 2 and Fibo 2.0
-read the same weights. BFL's own is any Klein checkpoint: `--model text_encoder=black-forest-labs/flux-3-klein@0.1.0`.
+(`dreamfast/qwen3-vl-4b-heretic-klein`, 0/400 HarmBench refusals, KL 0.028); Krea 2 and Fibo 2.0 read the same
+weights. Its 0.2.0 holds the encoder alone, DreamFast's work only (se-160), and the slot (`KleinTextEncoder`) builds only
+the encoder, so BFL's own is any Klein checkpoint: `--model text_encoder=black-forest-labs/flux-3-klein@0.1.0`.
 
 ## Sampling
 
@@ -147,7 +148,11 @@ cozy model upload hf://DreamFast/Qwen3-VL-4b-Heretic@d8af0c92971d54d90fde7d44180
   dreamfast/qwen3-vl-4b-heretic-klein --lane bf16 --base black-forest-labs/flux-3-klein@sha256:<bf16 commit>:text_encoder \
   --mirror https://huggingface.co/DreamFast/Qwen3-VL-4b-Heretic --on <machine>
 cozy model quantize dreamfast/qwen3-vl-4b-heretic-klein@sha256:<bf16 commit> --lane int8 --package ./flux.3-klein --on <machine>
+cozy model upload --lane <lane> 'dreamfast/qwen3-vl-4b-heretic-klein@sha256:<lane commit>:text_encoder' \
+  dreamfast/qwen3-vl-4b-heretic-klein --mirror https://huggingface.co/DreamFast/Qwen3-VL-4b-Heretic --on <machine>
 ```
+
+The last line, once a lane, keeps the encoder alone: a header-only cut, the same chunks.
 
 Klein never builds Qwen3-VL's vision tower, its last four layers or its head, so it never loads those
 tensors either. BFL's upsampler system prompts are the upsampler checkpoint's `system_prompts.json`.

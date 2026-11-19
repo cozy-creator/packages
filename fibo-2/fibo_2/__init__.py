@@ -13,7 +13,7 @@ from cozy_runtime.image import Guidance, ImageRequest, ImageResult, NegativeProm
 from cozy_runtime.media import ImageFile
 from PIL import Image as PILImage
 
-from .model import Fibo2
+from .model import Fibo2, Fibo2TextEncoder
 from . import quantize as quantize  # its recipes
 from .upsampler import Captioner
 
@@ -117,7 +117,7 @@ def _generate(
     function: str,
     payload: TurboInput,
     model: Fibo2,
-    text_encoder: Fibo2,
+    text_encoder: Fibo2TextEncoder,
     upsampler: Captioner,
     edit_upsampler: Captioner,
     tel: Telemetry,
@@ -142,7 +142,8 @@ def _generate(
         tel.log("upsampled prompt", caption=caption[:2000])
     ctx.raise_if_cancelled()
     with tel.stage("encoding prompt"):
-        encoded = text_encoder.encode(caption, images, width=width, height=height, guidance=guidance, negative=negative)
+        encoded = text_encoder.encode(caption, images, width=width, height=height, guidance=guidance, negative=negative,
+                                      fonts=model.fonts)
     latents = []
     if images:
         with tel.stage("encoding reference images"):
@@ -160,13 +161,15 @@ def _generate(
     return ImageResult(asset, image.width, image.height, seed, caption)
 
 
-#: `model` (and `full`) read the DiT and the VAE; `text_encoder` is its own slot. Fibo 2.0's encoder is stock
-#: Qwen3-VL-4B-Instruct, so DreamFast's Heretic abliteration is the default (Paul, 11-17: "use abliterated models
-#: wherever possible"), the same weights as krea-2's and flux.3-klein's; Bria's own is any Fibo 2.0 checkpoint
+#: `model` (and `full`) read the DiT and the VAE, and hold the fonts the caption's text images are drawn in;
+#: `text_encoder` is its own slot. Fibo 2.0's encoder is stock Qwen3-VL-4B-Instruct, so DreamFast's Heretic
+#: abliteration is the default (Paul, 11-17: "use abliterated models wherever possible"), the same weights as krea-2's
+#: and flux.3-klein's. 0.2.0 holds the encoder and its processor alone (se-160: a release holds only its author's
+#: work); `Fibo2TextEncoder` builds only the encoder, so Bria's own is any Fibo 2.0 checkpoint
 #: (`model.text_encoder=briaai/fibo-2-dev@0.1.1`).
 _MODEL = ("transformer", "vae")
 _TEXT = ("text_encoder",)
-_TEXT_ENCODER = "dreamfast/qwen3-vl-4b-heretic-fibo@0.1.0"
+_TEXT_ENCODER = "dreamfast/qwen3-vl-4b-heretic-fibo@0.2.0"
 _DEV = "briaai/fibo-2-dev@0.1.1"
 _TURBO = "briaai/fibo-2-edit-turbo@0.2.0"
 _VLM = "briaai/fibo-vlm@0.1.0"
@@ -185,7 +188,7 @@ _NEEDS = {"upsampler": f"request.prompt_upsampling != false && request.prompt{_N
 # parameters are in name order: Runtime refuses a binding set whose paths are not sorted.
 @app.entrypoint(defaults={"model": _DEV, "text_encoder": _TEXT_ENCODER, "upsampler": _VLM, "edit_upsampler": _EDIT_VLM},
                 components=_COMPONENTS, needs=_NEEDS, memoize=True)
-def generate(ctx: Context, payload: GenerateInput, edit_upsampler: Captioner, model: Fibo2, text_encoder: Fibo2,
+def generate(ctx: Context, payload: GenerateInput, edit_upsampler: Captioner, model: Fibo2, text_encoder: Fibo2TextEncoder,
              upsampler: Captioner, tel: Telemetry, adj: Adjustments) -> ImageResult:
     """Fibo 2.0 Dev, 50 steps with CFG 5: text to image, or an edit of up to four ordered pictures."""
     return _generate(ctx, "generate", payload, model, text_encoder, upsampler, edit_upsampler, tel, adj)
@@ -193,7 +196,7 @@ def generate(ctx: Context, payload: GenerateInput, edit_upsampler: Captioner, mo
 
 @app.entrypoint(defaults={"model": _TURBO, "text_encoder": _TEXT_ENCODER, "upsampler": _VLM,
                           "edit_upsampler": _EDIT_VLM}, components=_COMPONENTS, needs=_NEEDS, memoize=True)
-def generate_turbo(ctx: Context, payload: TurboInput, edit_upsampler: Captioner, model: Fibo2, text_encoder: Fibo2,
+def generate_turbo(ctx: Context, payload: TurboInput, edit_upsampler: Captioner, model: Fibo2, text_encoder: Fibo2TextEncoder,
                    upsampler: Captioner, tel: Telemetry, adj: Adjustments) -> ImageResult:
     """Fibo 2.0 Edit Turbo, 4 steps without guidance: text to image, or an edit of up to four ordered pictures."""
     return _generate(ctx, "generate_turbo", payload, model, text_encoder, upsampler, edit_upsampler, tel, adj)
@@ -225,7 +228,7 @@ _BOX_NEEDS = {"full": "!request.turbo", "model": "request.turbo",
           components={"model": _MODEL, "full": _MODEL, "text_encoder": _TEXT, "upsampler": ("model",),
                       "edit_upsampler": ("model",)},
           needs=_BOX_NEEDS, memoize=True)
-def image(ctx: Context, payload: ImageBox, edit_upsampler: Captioner, full: Fibo2, model: Fibo2, text_encoder: Fibo2,
+def image(ctx: Context, payload: ImageBox, edit_upsampler: Captioner, full: Fibo2, model: Fibo2, text_encoder: Fibo2TextEncoder,
           upsampler: Captioner, tel: Telemetry, adj: Adjustments) -> ImageResult:
     """Fibo 2.0 on a canvas: Edit Turbo, or Dev."""
     kind, function, dit = (TurboInput, "generate_turbo", model) if payload.turbo else (GenerateInput, "generate", full)

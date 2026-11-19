@@ -15,15 +15,16 @@ from cozy_runtime.fields import MENTION, Advanced, AspectRatio, FileBound, Image
 from cozy_runtime.media import VideoFile
 
 from . import quantize as quantize  # its recipe
-from .model import DEFAULT_STEPS, FPS, Pan2, Reasoner
+from .model import DEFAULT_STEPS, FPS, Pan2, Pan2TextEncoder, Reasoner
 
 app = App()
 MODEL = "ifm/pan2@0.3.0"
 REASONER = "huihui-ai/huihui-qwen3.5-9b-abliterated@0.1.0"
 #: PAN2's text encoder is stock Qwen3.5-9B's language model, its own slot: pottokao's Heretic abliteration of it by default
-#: (Paul, 11-17: "use abliterated models wherever possible"), the weights moss-image encodes with. Stock is any PAN2
-#: checkpoint: `model.text_encoder=ifm/pan2@0.3.0`. `model` reads the DiT and the VAE.
-TEXT_ENCODER = "pottokao/moss-image-text-encoder-heretic-pan2@0.1.0"
+#: (Paul, 11-17: "use abliterated models wherever possible"), the weights moss-image encodes with. 0.2.0 holds the encoder
+#: and its tokenizer alone (se-160: a release holds only its author's work); `Pan2TextEncoder` builds only the encoder,
+#: so stock is any PAN2 checkpoint: `model.text_encoder=ifm/pan2@0.3.0`. `model` reads the DiT and the VAE.
+TEXT_ENCODER = "pottokao/moss-image-text-encoder-heretic-pan2@0.2.0"
 
 from . import lanes as lanes  # noqa: E402  # the `curve` lane function; it registers on `app`
 
@@ -93,7 +94,7 @@ def caption(text: str) -> str:
 @app.tool(label="PAN2", named="video", defaults={"model": MODEL, "text_encoder": TEXT_ENCODER, "reasoner": REASONER},
           components={"model": ("transformer", "vae"), "text_encoder": ("text_encoder",)},
           needs={"reasoner": "request.prompt_upsampling"}, memoize=True)
-def generate(ctx: Context, payload: Generate, model: Pan2, text_encoder: Pan2, reasoner: Reasoner, out: Outputs,
+def generate(ctx: Context, payload: Generate, model: Pan2, text_encoder: Pan2TextEncoder, reasoner: Reasoner, out: Outputs,
              tel: Telemetry, adj: Adjustments) -> VideoResult:
     """PAN2's silent video, at 24 fps for up to 20 seconds. The first picture the instructions mention is the first
     frame, and the scene opens on it."""
