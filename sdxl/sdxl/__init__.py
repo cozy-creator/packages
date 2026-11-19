@@ -742,18 +742,18 @@ class _Adapters:
 
 def _references(ctx: Context, pictures: list[PILImage.Image], strength: float, guided: bool,
                 adapters: _Adapters) -> tuple[list[Steer], int]:  # fmt: skip
-    """Each picture's part of the denoise, and how many are faces: FaceID-PlusV2 for a picture whose subject is a face
-    ArcFace can read (SCRFD's, `faces.subject`, `faces.readable`), IP-Adapter Plus for every other."""
+    """The denoise's parts, and how many pictures are faces: IP-Adapter Plus over every picture whole (its hair, outfit,
+    style and scene), and FaceID-PlusV2 besides for a picture whose subject is a face ArcFace can read (`faces.subject`,
+    `faces.readable`), each at its own scale on the same cross-attentions (Diffusers' multi-IP-Adapter)."""
     found = [subject(adapters.faces.find(picture), *picture.size) for picture in pictures]
     found = [face if face is not None and readable(face) else None for face in found]
     portraits = [(picture, face) for picture, face in zip(pictures, found, strict=True) if face is not None]
-    plain = [picture for picture, face in zip(pictures, found, strict=True) if face is None]
     if portraits:
         for slot in _ON_DEMAND:
             ctx.need(slot)
     parts = []
-    if plain:
-        embeds, empty = adapters.image_encoder.tokens(plain)
+    if pictures:
+        embeds, empty = adapters.image_encoder.tokens(pictures)
         tokens = adapters.ip_adapter.tokens(embeds, empty, guided)
         parts.append(Steer(tokens, adapters.ip_adapter.graph.sites, strength))
     if portraits:
@@ -819,7 +819,7 @@ def _generate(ctx: Context, payload: GenerateInput, facts: GenerateFacts, model:
     run: Callable[[], tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]] = steered if parts else body
     if controls is not None:
         run = functools.partial(controlnet.armed, run)
-    if parts and faced < len(pictures):
+    if parts:
         run = functools.partial(adapters.ip_adapter.armed, run)
     if faced:
         run = functools.partial(adapters.face_adapter.armed, run)
