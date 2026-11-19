@@ -13,6 +13,7 @@ from __future__ import annotations
 from cozy_runtime.author import EncodingRule, QuantizationPlan, Recipe
 
 from .model import Flux2
+from .upsampler import Flux2Upsampler
 
 #: Every linear of the DiT's blocks: attention and MLPs of both streams.
 _DIT = (
@@ -76,6 +77,19 @@ KLEIN_NVFP4 = Recipe(
         components=KLEIN_INT8.plan.components,
         include=KLEIN_INT8.plan.include,
         encodings=_NVFP4,
+        output_precision="preserve",
+    ),
+)
+
+#: The encoder's fp8 lane (`fp8.rowwise`), for cards with no int8 tensor cores (B300): the int8 lane's
+#: projections, on a checkpoint of the encoder alone (the `upsampler` slot's).
+UPSAMPLER_FP8 = Recipe(
+    lane="fp8",
+    model=Flux2Upsampler,
+    plan=QuantizationPlan(
+        encoding="fp8.rowwise",
+        components=("text_encoder",),
+        include=(*_MISTRAL,),
         output_precision="preserve",
     ),
 )
