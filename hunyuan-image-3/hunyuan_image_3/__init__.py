@@ -83,7 +83,10 @@ def _generate(ctx: Context, payload: HunyuanRequest, steps: int, model: HunyuanI
             cot, picked, routing = model.think(
                 prompt, references, seed=seed, pick_size=size is None, cancel=ctx.raise_if_cancelled,
                 on_token=lambda i: ctx.progress(i, MAX_NEW_TOKENS))
-        tel.log("thinking routing", **routing)  # type: ignore[arg-type]  # its keys are statistics' names, never `level`
+        # Its 16 statistics in rows of 8, the fields an observation keeps: none is dropped.
+        stats = list(routing.items())
+        for at in range(0, len(stats), 8):
+            tel.log("thinking routing", **dict(stats[at : at + 8]))  # type: ignore[arg-type]  # its keys are statistics' names, never `level`
         tel.log("rewritten prompt", caption=caption(cot, prompt)[:2000])
         size = size or picked
     if size is None:
