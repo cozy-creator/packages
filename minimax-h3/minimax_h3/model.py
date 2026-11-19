@@ -44,6 +44,7 @@ from .official import (
     ReferenceMemo,
     Schedule,
     ScheduleFacts,
+    ShotWindows,
     Task,
     _validate_sol_dense_steps,
     build_h3_pipeline,
@@ -55,6 +56,7 @@ from .official import (
     regenerate_plan,
 )
 from .overlay import ATTENTION_KWARG, OVERLAY_KWARG, TURBO_BANK
+from .vae_tiles import TileBatchedVideoVAE
 
 if TYPE_CHECKING:
     from diffusers.modular_pipelines.modular_pipeline import PipelineState
@@ -289,6 +291,15 @@ class H3Model(Model[OfficialH3Pipeline]):
     @uses_components("vae")
     def decode_latents(self, latents: torch.Tensor, *, on_chunk: Callable[[torch.Tensor], None]) -> int:
         return self.pipe.decode_latents(latents, on_chunk)
+
+    @uses_components("vae")
+    def decode_shot(self, latents: torch.Tensor, shot: ShotWindows, *, on_chunk: Callable[[torch.Tensor], None]) -> int:
+        """A shot's latents so far, decoded from where its decode stands (cl-1210)."""
+        return self.pipe.decode_shot(latents, shot, on_chunk)
+
+    def video_vae(self) -> TileBatchedVideoVAE:
+        """The video VAE, for its temporal geometry; nothing runs on it."""
+        return self.pipe.video_vae()
 
     @uses_components("audio_vae")
     def silence(self, frames: int) -> torch.Tensor:

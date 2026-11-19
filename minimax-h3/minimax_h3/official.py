@@ -1762,6 +1762,19 @@ class OfficialH3Pipeline:
         state.set("latents", latents)
         return self.decode_video_chunks("fl2va", state, on_chunk)
 
+    def decode_shot(self, latents: torch.Tensor, shot: ShotWindows, on_chunk: Callable[[torch.Tensor], None]) -> int:
+        """`decode_latents` of a shot's normalized latents so far, the windows `shot` names (cl-1210)."""
+        components = _ScopedPipeline(self._pipes[self._workflow("fl2va", PipelineState())], self.components["vae"])
+        vae = cast(TileBatchedVideoVAE, components.vae)  # `_apply_video_vae_dtype` built it
+        return decode_chunks(
+            vae, components._execution_device, latents,
+            (tuple(components.pixel_mean), tuple(components.pixel_std)), on_chunk, shot=shot,
+        )  # fmt: skip
+
+    def video_vae(self) -> TileBatchedVideoVAE:
+        """The video VAE, for its temporal geometry."""
+        return self.components["vae"]
+
     def encode_clip(self, pixels: torch.Tensor, seed: int) -> torch.Tensor:
         """A `(T, H, W, 3)` uint8 clip's normalized `(1, 24, T', H/16, W/16)` latents: the
         official keyframe encode (`encode_condition`) over the whole clip, posterior sampled
@@ -2160,19 +2173,22 @@ def decode_chunks(
     pixel: tuple[Sequence[float], Sequence[float]],
     on_chunk: Callable[[torch.Tensor], None],
     delivery: ContinuationPlan | None = None,
+    shot: ShotWindows | None = None,
 ) -> int:
     """Upstream's `MiniMaxH3VideoDecodeStep` per temporal chunk (`OfficialH3Pipeline.decode_video_chunks`):
     `latents` denormalized, decoded under float16 autocast, the ImageNet normalization reverted, each
-    `(t, 3, H, W)` float32 piece handed to `on_chunk` before clipping. Returns the frame count."""
+    `(t, 3, H, W)` float32 piece handed to `on_chunk` before clipping. Returns the frame count. `shot`
+    decodes a shot's latents so far from where its decode stands (`TileBatchedVideoVAE.decode_chunks`)."""
     latents_mean = torch.tensor(vae.config["latents_mean"], device=device).view(1, -1, 1, 1, 1)
     latents_std = torch.tensor(vae.config["latents_std"], device=device).view(1, -1, 1, 1, 1)
     pixel_mean = torch.tensor(pixel[0], device=device).view(1, -1, 1, 1, 1)
     pixel_std = torch.tensor(pixel[1], device=device).view(1, -1, 1, 1, 1)
     frames = 0
     tail = DeliveredFrames(delivery) if delivery is not None else None
-    equalize = CellEqualizer(VAE_SPATIAL_RATIO)
+    equalize = CellEqualizer(VAE_SPATIAL_RATIO) if shot is None else shot.equalizer
     with torch.no_grad():
-        chunks = vae.decode_chunks(latents * latents_std + latents_mean)
+        z = latents * latents_std + latents_mean
+        chunks = vae.decode_chunks(z) if shot is None else vae.decode_chunks(z, first=shot.first, end=shot.end)
         while True:
             with torch.autocast(device_type=device.type, dtype=torch.float16, enabled=device.type == "cuda"):
                 chunk = next(chunks, None)
@@ -2185,6 +2201,16 @@ def decode_chunks(
                 selected = tail.push(selected)
             if selected.shape[0]:
                 on_chunk(selected)
+
+
+@dataclass(frozen=True)
+class ShotWindows:
+    """Which of a shot's windows a decode hands out (cl-1210): from `first`, to the shot's end or only those
+    whose latents are all here, and the cell equalizer as the shot's decode left it."""
+
+    first: int
+    end: bool
+    equalizer: CellEqualizer
 
 
 @dataclass(frozen=True)

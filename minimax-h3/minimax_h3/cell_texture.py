@@ -46,11 +46,28 @@ class CellEqualizer:
         self._tile: torch.Tensor | float = 0.0
         self._weight: torch.Tensor | float = 0.0
 
+    def totals(self) -> dict[str, torch.Tensor]:
+        """Its running totals, on the CPU: what a decode that goes on later starts from (cl-1210)."""
+        return {name: torch.as_tensor(getattr(self, f"_{name}")).detach().cpu().clone() for name in ("energy", "tile", "weight")}
+
+    @classmethod
+    def going_on(cls, period: int, totals: dict[str, torch.Tensor]) -> CellEqualizer:
+        """One that goes on from `totals`, as the decode that measured them would; none measured: a new one."""
+        equalizer = cls(period)
+        if totals:
+            for name in ("energy", "tile", "weight"):
+                value = totals[name]
+                setattr(equalizer, f"_{name}", value.clone() if value.ndim else float(value))
+        return equalizer
+
     def __call__(self, frames: torch.Tensor) -> torch.Tensor:
         """`frames`, in place, without the pattern; a piece with non-finite values passes
         through for the caller's integrity check to find."""
         if not bool(torch.isfinite(frames).all()):
             return frames
+        for name in ("_energy", "_tile", "_weight"):  # totals it went on from are on the CPU
+            if isinstance(value := getattr(self, name), torch.Tensor) and value.device != frames.device:
+                setattr(self, name, value.to(frames.device))
         kernel = _kernel(frames)
         luma = torch.tensor(_LUMA, device=frames.device, dtype=frames.dtype).view(3, 1, 1)
         for frame in frames[:: _MEASURE_EVERY]:

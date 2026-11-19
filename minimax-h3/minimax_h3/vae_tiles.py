@@ -46,57 +46,86 @@ class TileBatchedVideoVAE(AutoencoderKLMiniMaxH3):
     decode hands out each finished chunk as it lands (h3a-017), and whose picture encode
     batches its tiles (cr-323)."""
 
-    def decode_chunks(self, z: torch.Tensor) -> Iterator[torch.Tensor]:
+    def decode_chunks(self, z: torch.Tensor, *, first: int = 0, end: bool = True) -> Iterator[torch.Tensor]:
         """Upstream's `_decode` temporal loop as a generator: every yielded `(B, C, t, H, W)`
         piece is final — cross-faded with its predecessor and clear of the padding frames
         upstream cuts off the end — so a consumer may encode it while the next chunk
         decodes. `_decode` below is this same loop concatenated, so the two are one
         computation, not two.
+
+        A shot decodes this way as its latents arrive (cl-1210): `first` starts at that window
+        (the one before is decoded again for its cross-fade, not handed out), and without `end`
+        `z` is the shot so far, more to follow, so only the windows whose latents are all here
+        decode. Every piece is the one the whole shot's decode hands out there, so the frames
+        are its frames.
         """
         z = z.to(next(self.decoder.parameters()).dtype)
+        if not end:
+            yield from self._decode_pieces(z, 0, first, self.windows_ready(int(z.shape[2])))
+            return
         tokens_chunk_size = self.tokens_chunk_size
-        temporal_ratio = self.temporal_compression_ratio
         num_tokens = z.shape[2] + self.config["token_drop"]
         pad_tokens = (-num_tokens) % tokens_chunk_size
-        intra_tail = self.config["clip_length"] % temporal_ratio
-        pad_frames = sum(
-            intra_tail
-            if intra_tail and (z.shape[2] + k) % tokens_chunk_size == 0
-            else temporal_ratio
-            for k in range(pad_tokens)
-        )
+        pad_frames = self._pad_frames(int(z.shape[2]), pad_tokens)
         # Release a piece only while at least `pad_frames` frames stay held, so the trailing
         # padding is never handed out and no length formula has to predict the loop.
         held: list[torch.Tensor] = []
         held_frames = 0
-        for piece in self._decode_pieces(z, pad_tokens):
+        for piece in self._decode_pieces(z, pad_tokens, first):
             held.append(piece)
             held_frames += int(piece.shape[2])
             while held and held_frames - int(held[0].shape[2]) >= pad_frames:
-                first = held.pop(0)
-                held_frames -= int(first.shape[2])
-                yield first
+                released = held.pop(0)
+                held_frames -= int(released.shape[2])
+                yield released
         if held and held_frames > pad_frames:
             rest = held[0] if len(held) == 1 else torch.cat(held, dim=2)
             yield rest[:, :, : held_frames - pad_frames]
 
-    def _decode_pieces(self, z: torch.Tensor, pad_tokens: int) -> Iterator[torch.Tensor]:
+    def windows_ready(self, tokens: int) -> int:
+        """How many of a shot's temporal windows `tokens` latents hold whole: those its decode
+        hands out the same whatever follows (`decode_chunks` without `end`)."""
+        return max(0, (tokens - int(self.tokens_chunk_size) - int(self.token_overlap)) // int(self.tokens_chunk_size) + 1)
+
+    def window_frames(self) -> int:
+        """The frames each window hands out."""
+        return int(self.tokens_chunk_size) * int(self.temporal_compression_ratio) - int(self.frame_pre_padding)
+
+    def decoded_frames(self, tokens: int) -> int:
+        """The frames `decode_chunks` of `tokens` latents hands out in all."""
+        token_drop, chunk = int(self.config["token_drop"]), int(self.tokens_chunk_size)
+        pad_tokens = (-(tokens + token_drop)) % chunk
+        windows = (tokens + token_drop + pad_tokens) // chunk - int(token_drop > 0)
+        ratio = int(self.temporal_compression_ratio)
+        tail = max(0, min(chunk, int(self.token_overlap)) * ratio - int(self.frame_pre_padding)) if token_drop > 0 else 0
+        return windows * self.window_frames() + tail - self._pad_frames(tokens, pad_tokens)
+
+    def _pad_frames(self, tokens: int, pad_tokens: int) -> int:
+        """The frames `pad_tokens` repeated latents add past `tokens`: cut off again."""
+        ratio, chunk = int(self.temporal_compression_ratio), int(self.tokens_chunk_size)
+        intra_tail = int(self.config["clip_length"]) % ratio
+        return sum(intra_tail if intra_tail and (tokens + k) % chunk == 0 else ratio for k in range(pad_tokens))
+
+    def _decode_pieces(
+        self, z: torch.Tensor, pad_tokens: int, first: int = 0, stop: int | None = None
+    ) -> Iterator[torch.Tensor]:
         tokens_chunk_size = self.tokens_chunk_size
         token_drop = self.config["token_drop"]
         chunk_num_frames = tokens_chunk_size * self.temporal_compression_ratio
         num_tokens = z.shape[2] + token_drop + pad_tokens
-        num_chunks = num_tokens // tokens_chunk_size - int(token_drop > 0)
+        num_chunks = num_tokens // tokens_chunk_size - int(token_drop > 0) if stop is None else stop
         if pad_tokens > 0:
             z = torch.cat([z, z[:, :, -1:].repeat(1, 1, pad_tokens, 1, 1)], dim=2)
         overlap = None
         # Every clip decodes from its own latent window alone; only the cross-fade below
         # reads a neighbour. So a group decodes a round of clips on its ranks at once and
         # the fade runs here, in order, unchanged.
+        decoded = range(max(first - 1, 0), num_chunks)
         windows = (
             (z[:, :, i * tokens_chunk_size : (i + 1) * tokens_chunk_size + self.token_overlap],)
-            for i in range(num_chunks)
+            for i in decoded
         )
-        for clip in spread(self._decode_clip, windows):
+        for index, clip in zip(decoded, spread(self._decode_clip, windows), strict=True):
             for j in range(int(token_drop > 0) + 1):
                 frame_start = j * chunk_num_frames
                 chunk = clip[:, :, frame_start : frame_start + chunk_num_frames]
@@ -104,10 +133,11 @@ class TileBatchedVideoVAE(AutoencoderKLMiniMaxH3):
                 if j == 0:
                     if overlap is not None:
                         chunk = self._blend(overlap, chunk, self.frame_overlap, dim=-3)
-                    yield chunk
+                    if index >= first:
+                        yield chunk
                 else:
                     overlap = chunk
-        if overlap is not None:
+        if overlap is not None and stop is None:
             yield overlap
 
     def _decode(self, z: torch.Tensor) -> torch.Tensor:
