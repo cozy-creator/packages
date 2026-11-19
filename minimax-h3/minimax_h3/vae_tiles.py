@@ -9,8 +9,8 @@ ViT over `(B, S, C)` tokens whose norms reduce over the last dimension only, who
 register/cls tokens are per-batch replicas and whose RoPE comes from the tile geometry.
 (`MiniMaxH3VideoGroupNorm`, the one batch-mixing module, is encoder-side.) So the tiles
 of one chunk go through `post_quant_conv` and the decoder as one `(tiles, C, T, h, w)`
-batch, its rows cut block by block as the device holds them (the Runtime's `split`), and are
-stitched by the unchanged `_stitch_tiles` in the unchanged order.
+batch, its rows cut block by block as the device holds them (the Runtime's `split`); its head
+then runs a row of tiles at a time, each stitched as `_stitch_tiles` stitches it.
 
 The arithmetic per tile is the same; the BYTES are a property of the kernel a larger GEMM
 selects, so they are measured, never assumed. Measured 2026-09-07 at the release tile
@@ -23,10 +23,14 @@ h3a-006 owns the lossy decode variants.
 
 from __future__ import annotations
 
-from collections.abc import Iterator, Sequence
+from collections.abc import Iterator, Mapping, Sequence
+from typing import Any, cast
 
 import torch
-from diffusers.models.autoencoders.autoencoder_kl_minimax_h3 import AutoencoderKLMiniMaxH3
+from diffusers.models.autoencoders.autoencoder_kl_minimax_h3 import (
+    AutoencoderKLMiniMaxH3,
+    MiniMaxH3VideoViTDecoder3d,
+)
 from diffusers.models.autoencoders.vae import DiagonalGaussianDistribution
 from diffusers.models.modeling_utils import get_parameter_dtype
 
@@ -36,9 +40,26 @@ from cozy_runtime.author import Cut, split
 from cozy_runtime.author import device as placed_device
 
 
-#: The encoder's device peak beside its moments, in tiles of them (`split`'s `holds`), before a pass is measured: a
-#: 256 px tile's 128-channel float16 activations, about four held at once (64 MiB), over its 48x16x16 moments (24 KiB).
-ENCODE_HOLDS = 2700
+#: A tile's activations at the encoder's widest level held at once, before a pass is measured: the eager causal conv
+#: holds its input, the SiLU of its norm, the reflected copy, the causally padded one (three frames of one) and its
+#: output, about 7 with cuDNN's workspace; the fused one about 4 (cr-323).
+ENCODE_ACTIVATIONS = 8
+
+
+def encode_holds(config: Mapping[str, Any]) -> int:
+    """`split`'s `holds` for the encoder over a batch of tiles, in windows of its input: `Cut(0)` keeps the tile count,
+    so the Runtime reckons a window's output at the window's own bytes. The widest level is `block_out_channels[0]`
+    channels at the tile's size, in the input's dtype (var-030 13: 2700 windows of moments read as input windows asked
+    13.6 GiB of a 16 MP picture)."""
+    return -(-ENCODE_ACTIVATIONS * int(config["block_out_channels"][0]) // int(config["in_channels"]))
+
+
+def block_holds(dim: int, inner: int, residual: torch.dtype, compute: torch.dtype, rows: torch.dtype) -> int:
+    """`split`'s `holds` for a decoder block over a window of tile rows, in windows of its input (`rows`): the block's
+    peak is its feed-forward's, a token's `residual` beside its normed row, SwiGLU's two-half projection, the gate's
+    activation and their product (`compute`). The default 5 fell short at level 5 (release-gate 44412956639)."""
+    peak = residual.itemsize * dim + compute.itemsize * (dim + 4 * inner)
+    return -(-peak // (rows.itemsize * dim))
 
 
 class TileBatchedVideoVAE(AutoencoderKLMiniMaxH3):
@@ -67,15 +88,18 @@ class TileBatchedVideoVAE(AutoencoderKLMiniMaxH3):
         )
         # Release a piece only while at least `pad_frames` frames stay held, so the trailing
         # padding is never handed out and no length formula has to predict the loop.
+        # A name left bound here would keep its piece on the card through the next clip's decode.
         held: list[torch.Tensor] = []
         held_frames = 0
         for piece in self._decode_pieces(z, pad_tokens):
             held.append(piece)
             held_frames += int(piece.shape[2])
+            del piece
             while held and held_frames - int(held[0].shape[2]) >= pad_frames:
                 first = held.pop(0)
                 held_frames -= int(first.shape[2])
                 yield first
+                del first
         if held and held_frames > pad_frames:
             rest = held[0] if len(held) == 1 else torch.cat(held, dim=2)
             yield rest[:, :, : held_frames - pad_frames]
@@ -96,6 +120,8 @@ class TileBatchedVideoVAE(AutoencoderKLMiniMaxH3):
             (z[:, :, i * tokens_chunk_size : (i + 1) * tokens_chunk_size + self.token_overlap],)
             for i in range(num_chunks)
         )
+        # The fade's frames are copied out, so a clip leaves the card before the next one decodes.
+        chunk: torch.Tensor | None = None
         for clip in spread(self._decode_clip, windows):
             for j in range(int(token_drop > 0) + 1):
                 frame_start = j * chunk_num_frames
@@ -106,7 +132,9 @@ class TileBatchedVideoVAE(AutoencoderKLMiniMaxH3):
                         chunk = self._blend(overlap, chunk, self.frame_overlap, dim=-3)
                     yield chunk
                 else:
-                    overlap = chunk
+                    overlap = chunk.clone(memory_format=torch.contiguous_format)
+            del clip
+            chunk = None
         if overlap is not None:
             yield overlap
 
@@ -183,7 +211,7 @@ class TileBatchedVideoVAE(AutoencoderKLMiniMaxH3):
             for left, w in zip(xs, widths, strict=True)
         ]
         batch = tiles[0] if len(tiles) == 1 else torch.cat(tiles, dim=0)
-        moments = split(self._encode_tiles, batch, Cut(0), holds=ENCODE_HOLDS).split(x.shape[0], dim=0)
+        moments = split(self._encode_tiles, batch, Cut(0), holds=encode_holds(self.config)).split(x.shape[0], dim=0)
         columns = len(xs)
         rows = [moments[row * columns : (row + 1) * columns] for row in range(len(ys))]
         ratio = self.spatial_compression_ratio
@@ -211,23 +239,65 @@ class TileBatchedVideoVAE(AutoencoderKLMiniMaxH3):
             for x, x_len in zip(x_indices, x_lengths, strict=True)
         ]
         batch = tiles[0] if len(tiles) == 1 else torch.cat(tiles, dim=0)
-        decoded = self._decode_tiles(batch).split(z.shape[0], dim=0)
-        columns = len(x_indices)
-        rows = [decoded[row * columns : (row + 1) * columns] for row in range(len(y_indices))]
-        return self._stitch_tiles(rows, y_overlaps, x_overlaps)  # type: ignore[arg-type]  # rows of tile tuples: it indexes them
+        hidden, tail = self._decode_blocks(batch)
+        # The head and the stitch go a row of tiles at a time, each row cut to the room: a row's blend reads only the
+        # row above as decoded, so no step holds every tile's pixels (se-169). Same ops, same order, as
+        # `_stitch_tiles` over every row.
+        across = len(x_indices) * z.shape[0]
+        canvas: torch.Tensor | None = None
+        above: Sequence[torch.Tensor] = ()
+        top = 0
+        for i in range(len(y_indices)):
+            row = split(tail, hidden[i * across : (i + 1) * across], Cut(0)).split(z.shape[0], dim=0)
+            strip = self._stitch_row(row, above, i, len(y_indices), y_overlaps, x_overlaps)
+            if canvas is None:
+                size = (sum(y_lengths) - sum(y_overlaps), sum(x_lengths) - sum(x_overlaps))
+                canvas = strip.new_empty((*strip.shape[:-2], *size))
+            canvas[..., top : top + strip.shape[-2], :] = strip
+            top += strip.shape[-2]
+            above = row
+        assert canvas is not None  # a grid has a row
+        return canvas
+
+    def _stitch_row(
+        self,
+        row: Sequence[torch.Tensor],
+        above: Sequence[torch.Tensor],
+        i: int,
+        rows: int,
+        height_overlaps: Sequence[int],
+        width_overlaps: Sequence[int],
+    ) -> torch.Tensor:
+        """`_stitch_tiles`' row `i` of `rows`: each tile blended into the one `above` and the one before it, as decoded,
+        and its overlaps cut."""
+        strip = []
+        for j, tile in enumerate(row):
+            if i > 0:
+                tile = self._blend(above[j], tile, height_overlaps[i - 1], dim=-2)
+            if j > 0:
+                tile = self._blend(row[j - 1], tile, width_overlaps[j - 1], dim=-1)
+            if i < rows - 1:
+                tile = tile[..., : -height_overlaps[i], :]
+            if j < len(row) - 1:
+                tile = tile[..., :, : -width_overlaps[j]]
+            strip.append(tile)
+        return torch.cat(strip, dim=-1)
 
     def time_grid(self, frames: int, device: torch.device) -> torch.Tensor:
         """The decoder's rotary time of each of a clip's `frames` latent frames, upstream's."""
         return 2.0 * (torch.arange(0.5, frames, dtype=torch.float32, device=device) / frames) - 1.0
 
-    def _decode_tiles(self, batch: torch.Tensor) -> torch.Tensor:
-        """Upstream's ViT decoder over a batch of tiles, block by block: every tile passes a
-        block before any tile enters the next, and `split` cuts each block's rows to the room.
+    def _decode_blocks(self, batch: torch.Tensor) -> tuple[torch.Tensor, _TileTail]:
+        """Upstream's ViT decoder over a batch of tiles up to its head, block by block: every tile
+        passes a block before any tile enters the next, and `split` cuts each block's rows to the room.
         Cutting the whole decoder instead re-read all 36 blocks once per piece: on a 24 GB
         RTX 4090 a chunk ran in 10 pieces at 3.2-3.5 s against 2.4 s with the weights resident
         (runs 11220, 11228); block by block it holds 2.36-2.46 s (11325, 11335). The tiles share
         one geometry, so one rotary table serves them all; every op is upstream's `forward`:
-        uncut, the two orders are bit-identical on the release weights."""
+        uncut, the two orders are bit-identical on the release weights. The first block takes the
+        embedding's dtype to the residual stream's (float32 under the release's float32 layer scales);
+        every later block keeps it, so it writes its rows over its input: the rows are held once
+        (se-169). Returns the last block's rows and the head that turns a window of them into pixels."""
         decoder = self.decoder
         x = self.post_quant_conv(batch)
         tiles, channels, frames, height, width = x.shape
@@ -247,14 +317,16 @@ class TileBatchedVideoVAE(AutoencoderKLMiniMaxH3):
         positions = torch.stack(torch.meshgrid(*grids, indexing="ij"), dim=-1).flatten(0, 2)[None]
         suffix = positions.new_zeros((1, decoder.num_register_tokens + 1, 3))
         rotary = decoder.rope(torch.cat([positions, suffix], dim=1))
-        for block in decoder.transformer_blocks:
-            hidden = split(_BlockRows(block, rotary), hidden, Cut(0))
-        hidden = decoder.norm_out(hidden).to(get_parameter_dtype(decoder.proj_out))
-        hidden = decoder.proj_out(hidden)[:, :patches, :]
-        p, pt = decoder.patch_size, decoder.patch_size_t
-        hidden = hidden.view(tiles, frames, height, width, decoder.out_channels, pt, p, p)
-        hidden = hidden.permute(0, 4, 1, 5, 2, 6, 3, 7).contiguous()
-        return hidden.reshape(tiles, decoder.out_channels, frames * pt, height * p, width * p)
+        first, *rest = decoder.transformer_blocks
+        dim, compute = int(hidden.shape[-1]), hidden.dtype
+        inner = int(self.config["decoder_ffn_mult"]) * dim
+        stream = torch.promote_types(compute, cast(torch.Tensor, first.scale1).dtype)  # `hidden + branch * scale1`
+        first_holds = block_holds(dim, inner, stream, compute, compute)
+        hidden = split(_BlockRows(first, rotary), hidden, Cut(0), holds=first_holds)
+        holds = block_holds(dim, inner, hidden.dtype, compute, hidden.dtype)
+        for block in rest:
+            split(_BlockRows(block, rotary), hidden, Cut(0), out=hidden, holds=holds)
+        return hidden, _TileTail(decoder, patches, (frames, height, width))
 
     def encode_condition(
         self,
@@ -269,7 +341,7 @@ class TileBatchedVideoVAE(AutoencoderKLMiniMaxH3):
 
 
 class _BlockRows:
-    """One decoder block over a window of tile rows, with the tiles' shared rotary table."""
+    """One decoder block over a window of tile rows, with the tiles' shared rotary table; with `out`, written there."""
 
     __slots__ = ("block", "rotary")
 
@@ -277,9 +349,33 @@ class _BlockRows:
         self.block = block
         self.rotary = rotary
 
+    def __call__(self, hidden: torch.Tensor, out: torch.Tensor | None = None) -> torch.Tensor:
+        rows: torch.Tensor = self.block(hidden, self.rotary)
+        return rows if out is None else out.copy_(rows)
+
+
+class _TileTail:
+    """The decoder's head over a window of tile rows: `norm_out`, `proj_out`, and each token's patch back in place,
+    upstream's `forward` after its blocks."""
+
+    __slots__ = ("decoder", "patches", "grid")
+
+    def __init__(self, decoder: MiniMaxH3VideoViTDecoder3d, patches: int, grid: tuple[int, int, int]) -> None:
+        self.decoder = decoder
+        self.patches = patches
+        self.grid = grid
+
     def __call__(self, hidden: torch.Tensor) -> torch.Tensor:
-        out: torch.Tensor = self.block(hidden, self.rotary)
-        return out
+        decoder = self.decoder
+        frames, height, width = self.grid
+        tiles = hidden.shape[0]
+        out = decoder.norm_out(hidden).to(get_parameter_dtype(decoder.proj_out))
+        out = decoder.proj_out(out)[:, : self.patches, :]
+        p, pt = decoder.patch_size, decoder.patch_size_t
+        out = out.view(tiles, frames, height, width, decoder.out_channels, pt, p, p)
+        out = out.permute(0, 4, 1, 5, 2, 6, 3, 7).contiguous()
+        pixels: torch.Tensor = out.reshape(tiles, decoder.out_channels, frames * pt, height * p, width * p)
+        return pixels
 
 
 def encode_condition(

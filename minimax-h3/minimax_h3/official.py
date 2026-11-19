@@ -2178,13 +2178,17 @@ def decode_chunks(
                 chunk = next(chunks, None)
             if chunk is None:
                 return frames if tail is None else tail.finish()
-            video = chunk.float() * pixel_std + pixel_mean
+            # In place, and nothing of this chunk left bound while the next one decodes (se-169).
+            video = chunk.to(torch.float32, copy=True)
+            del chunk
+            video.mul_(pixel_std).add_(pixel_mean)
             frames += int(video.shape[2])
             selected = equalize(video[0].permute(1, 0, 2, 3))
             if tail is not None:
                 selected = tail.push(selected)
             if selected.shape[0]:
                 on_chunk(selected)
+            del video, selected
 
 
 @dataclass(frozen=True)

@@ -10,7 +10,7 @@ tile is Diffusers'.
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import Literal, cast
+from typing import Any, Literal, cast
 
 import torch
 from cozy_runtime import rng
@@ -74,9 +74,18 @@ class ImageDecoder(MiniMaxH3VideoViTDecoder3d):
         super().__init__(patch_size_t=1, **config)  # type: ignore[arg-type]  # the VAE's decoder keywords
 
 
-#: The encoder's device peak beside its moments, in tiles of them (`split`'s `holds`), before a pass is measured: a
-#: 256 px tile's 128-channel float16 activations, about four held at once (64 MiB), over its 48x16x16 moments (24 KiB).
-ENCODE_HOLDS = 2700
+#: A tile's activations at the encoder's widest level held at once, before a pass is measured: the eager causal conv
+#: holds its input, the SiLU of its norm, the reflected copy, the causally padded one (three frames of one) and its
+#: output, about 7 with cuDNN's workspace; the fused one about 4 (cr-323).
+ENCODE_ACTIVATIONS = 8
+
+
+def encode_holds(config: Mapping[str, Any]) -> int:
+    """`split`'s `holds` for the encoder over a batch of tiles, in windows of its input: `Cut(0)` keeps the tile count,
+    so the Runtime reckons a window's output at the window's own bytes. The widest level is `block_out_channels[0]`
+    channels at the tile's size, in the input's dtype (var-030 13: 2700 windows of moments read as input windows asked
+    13.6 GiB of a 16 MP picture)."""
+    return -(-ENCODE_ACTIVATIONS * int(config["block_out_channels"][0]) // int(config["in_channels"]))
 
 
 class ImageVAE(AutoencoderKLMiniMaxH3):
@@ -119,7 +128,7 @@ class ImageVAE(AutoencoderKLMiniMaxH3):
             for left, w in zip(xs, widths, strict=True)
         ]
         batch = tiles[0] if len(tiles) == 1 else torch.cat(tiles, dim=0)
-        moments = split(self._encode_tiles, batch, Cut(0), holds=ENCODE_HOLDS).split(x.shape[0], dim=0)
+        moments = split(self._encode_tiles, batch, Cut(0), holds=encode_holds(self.config)).split(x.shape[0], dim=0)
         columns = len(xs)
         rows = [moments[row * columns : (row + 1) * columns] for row in range(len(ys))]
         ratio = self.spatial_compression_ratio

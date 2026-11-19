@@ -254,6 +254,7 @@ def qkv_chunks(
     for start in range(0, tokens, CHUNK):
         out = _empty(hidden, min(tokens, start + CHUNK) - start, 3 * width)
         yield pack(hidden, start, qkv, out, values).squeeze(0)
+        del out  # not held while the next chunk is allocated
 
 
 def project_values(
