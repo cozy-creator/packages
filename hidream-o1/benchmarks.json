@@ -1,0 +1,74 @@
+[
+  {
+    "function": "generate",
+    "request": {
+      "refs": 0,
+      "megapixels": 3.69,
+      "steps": 50
+    },
+    "gpu": "NVIDIA GeForce RTX 4090",
+    "gpus": 1,
+    "lane": "int8",
+    "warm_ms": 29406,
+    "cold_ms": 35393,
+    "step1_ms": 1015,
+    "steady_step_ms": 635,
+    "vram_bytes": 25757220864,
+    "budget_bytes": null,
+    "peak_device_bytes": 16860184576,
+    "peak_host_bytes": 2704220160,
+    "ran_on": {
+      "cozy": "0.27.0-dev+gf6c0a78a",
+      "runtime": "0.48.0.dev2346+g051d106f"
+    },
+    "note": "pod-session 44407668658 cap-sweep/small-a: cold PRO-26, warm PRO-27; small: 1 MP, the smallest size its box offers, default steps; gemm cozy.int8-convrot256.native-leaf/1"
+  },
+  {
+    "function": "generate_turbo",
+    "request": {
+      "refs": 0,
+      "megapixels": 3.69,
+      "steps": 28
+    },
+    "gpu": "NVIDIA GeForce RTX 4090",
+    "gpus": 1,
+    "lane": "int8",
+    "warm_ms": 9520,
+    "cold_ms": 15335,
+    "step1_ms": 550,
+    "steady_step_ms": 317,
+    "vram_bytes": 25757220864,
+    "budget_bytes": null,
+    "peak_device_bytes": 15807414272,
+    "peak_host_bytes": 2553135104,
+    "ran_on": {
+      "cozy": "0.27.0-dev+gf6c0a78a",
+      "runtime": "0.48.0.dev2346+g051d106f"
+    },
+    "note": "pod-session 44407668658 cap-sweep/small-a: cold PRO-28, warm PRO-29; small: 1 MP, the smallest size its box offers, default steps; gemm cozy.int8-convrot256.native-leaf/1"
+  },
+  {
+    "function": "image",
+    "request": {
+      "refs": 0,
+      "megapixels": 4.19,
+      "steps": 28
+    },
+    "gpu": "NVIDIA GeForce RTX 4090",
+    "gpus": 1,
+    "lane": "int8",
+    "warm_ms": 11372,
+    "cold_ms": 17154,
+    "step1_ms": 600,
+    "steady_step_ms": 382,
+    "vram_bytes": 25757220864,
+    "budget_bytes": null,
+    "peak_device_bytes": 15721431040,
+    "peak_host_bytes": 2557755392,
+    "ran_on": {
+      "cozy": "0.27.0-dev+gf6c0a78a",
+      "runtime": "0.48.0.dev2346+g051d106f"
+    },
+    "note": "pod-session 44407668658 cap-sweep/small-a: cold PRO-30, warm PRO-31; small: its one size, default steps; gemm cozy.int8-convrot256.native-leaf/1"
+  }
+]

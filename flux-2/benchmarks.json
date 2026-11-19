@@ -1,0 +1,98 @@
+[
+  {
+    "function": "generate",
+    "request": {
+      "refs": 0,
+      "megapixels": 1.05,
+      "steps": 50
+    },
+    "gpu": "NVIDIA GeForce RTX 4090",
+    "gpus": 1,
+    "lane": "int8",
+    "warm_ms": 72021,
+    "cold_ms": 87787,
+    "step1_ms": 534,
+    "steady_step_ms": 1220,
+    "vram_bytes": 25757220864,
+    "budget_bytes": null,
+    "peak_device_bytes": 25078923264,
+    "peak_host_bytes": 25852551168,
+    "ran_on": {
+      "cozy": "0.27.0-dev+gf6c0a78a",
+      "runtime": "0.48.0.dev2346+g051d106f"
+    },
+    "note": "pod-session 44407668658 cap-sweep/small-a: cold PRO-89, warm PRO-90; small: 1 MP, the smallest size its box offers, default steps; gemm cozy.int8-convrot256.native-leaf/1"
+  },
+  {
+    "function": "generate_turbo",
+    "request": {
+      "refs": 0,
+      "megapixels": 1.05,
+      "steps": 8
+    },
+    "gpu": "NVIDIA GeForce RTX 4090",
+    "gpus": 1,
+    "lane": "int8",
+    "warm_ms": 21877,
+    "cold_ms": 53734,
+    "step1_ms": 334,
+    "steady_step_ms": 1260,
+    "vram_bytes": 25757220864,
+    "budget_bytes": null,
+    "peak_device_bytes": 25116672000,
+    "peak_host_bytes": 29429878784,
+    "ran_on": {
+      "cozy": "0.27.0-dev+gf6c0a78a",
+      "runtime": "0.48.0.dev2346+g051d106f"
+    },
+    "note": "pod-session 44407668658 cap-sweep/small-a: cold PRO-91, warm PRO-92; small: 1 MP, the smallest size its box offers, default steps; gemm cozy.int8-convrot256.native-leaf/1"
+  },
+  {
+    "function": "image",
+    "request": {
+      "refs": 0,
+      "megapixels": 1.05,
+      "steps": 8
+    },
+    "gpu": "NVIDIA GeForce RTX 4090",
+    "gpus": 1,
+    "lane": "int8",
+    "warm_ms": 17787,
+    "cold_ms": 63903,
+    "step1_ms": 791,
+    "steady_step_ms": 1187,
+    "vram_bytes": 25757220864,
+    "budget_bytes": null,
+    "peak_device_bytes": 25032785920,
+    "peak_host_bytes": 29377343488,
+    "ran_on": {
+      "cozy": "0.27.0-dev+gf6c0a78a",
+      "runtime": "0.48.0.dev2346+g051d106f"
+    },
+    "note": "pod-session 44407668658 cap-sweep/small-a: cold PRO-93, warm PRO-94; small: 1 MP, upsampling on as the box; lanes model int8, turbo_lora bf16, upsampler int8; gemm cozy.int8-convrot256.native-leaf/1"
+  },
+  {
+    "function": "upscale",
+    "request": {
+      "refs": 0,
+      "megapixels": 2.12,
+      "steps": 5
+    },
+    "gpu": "NVIDIA GeForce RTX 4090",
+    "gpus": 1,
+    "lane": "int8",
+    "warm_ms": 36541,
+    "cold_ms": 51790,
+    "step1_ms": 1178,
+    "steady_step_ms": 5895,
+    "vram_bytes": 25757220864,
+    "budget_bytes": null,
+    "peak_device_bytes": 25068437504,
+    "peak_host_bytes": 29824155648,
+    "ran_on": {
+      "cozy": "0.27.0-dev+gf6c0a78a",
+      "runtime": "0.48.0.dev2346+g051d106f"
+    },
+    "note": "pod-session 44407668658 cap-sweep/small-a: cold PRO-95, warm PRO-96; small: a 1 MP picture to 2 MP, its smallest offered size; gemm cozy.int8-convrot256.native-leaf/1"
+  }
+]
