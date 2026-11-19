@@ -184,7 +184,8 @@ class _Site(nn.Module):
 
 class IPGraph:
     def __init__(self, config: Config) -> None:
-        arguments = config.section(PROJECTION).mapping()
+        # The construction config is the one component's that has one, else theirs by name (the Runtime's contract).
+        arguments = (config.section(PROJECTION) if PROJECTION in config.keys() else config).mapping()
         arguments.pop("_class_name", None)
         self.projection = IPAdapterPlusImageProjection(**arguments)
         #: h94's numbering: 1, 3, 5, … over the UNet's cross-attentions in `attn_processors` order (Diffusers'
