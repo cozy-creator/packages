@@ -15,8 +15,16 @@ It takes pictures as Anima's does:
   `reference_strength` (0.4: the words set the scene, the picture gives its subject and style; from 0.5 up the picture's
   own backdrop wins over the words, at 0.3 its subject fades); up to 4 pictures. The mention reads as its description,
   else as nothing.
+- A picture whose subject is a face steers its identity instead, through h94's
+  [IP-Adapter-FaceID-PlusV2](https://huggingface.co/h94/IP-Adapter-FaceID) and its LoRA: insightface's buffalo_l finds
+  the face (SCRFD-10G; one face covering at least 1% of the picture and twice any other's size) and gives its ArcFace
+  identity, and ViT-H reads the face aligned at 224². At the default `reference_strength` it runs at its authors' scale
+  1 (its scale is 2.5 times `reference_strength`). A face A/B (se-175): ArcFace similarity 0.65 against Plus's 0.42, the
+  words still followed. Pictures without such a face keep Plus, beside it in the same request.
+  insightface's models and FaceID are for non-commercial research use only.
 
-Each adapter is a model slot (`controlnet`, `image_encoder`, `ip_adapter`), fetched only when a request uses it.
+Each adapter is a model slot (`controlnet`, `image_encoder`, `ip_adapter`, `faces`, `face_adapter`, `face_lora`),
+fetched only when a request uses it: FaceID's two once a run finds a face.
 
 `upscale` (the Upscale tool on a picture box) makes the box's picture larger, at 2, 4 or 8 MP: img2img over the picture
 Lanczos-upscaled to the canvas, the last `denoise` (0.2) of 30 DPM++ 2M Karras steps, no HiDiffusion. Downscaled back from

@@ -2,19 +2,30 @@
 insightface ships buffalo_l as ONNX graphs and h94 ships FaceID-PlusV2 as a pickle, which it refuses.
 
     uv run --project sdxl --with torch --with onnx --with onnxruntime scripts/faceid_ingest.py buffalo <dir>
-    cozy model upload <dir> deepinsight/buffalo-l --lane f32 --source-format as-is --mirror <page>
     uv run --project sdxl --with torch scripts/faceid_ingest.py faceid <dir>
-    cozy model upload <dir> h94/ip-adapter-faceid-plusv2-sdxl --lane f16 --source-format as-is --mirror <page>
+    uv run --project sdxl --with torch scripts/faceid_ingest.py lora <dir>
+
+Each component is then its own upload, the first a commit and each later one onto it (`--base <commit>:<component>`):
+
+    cozy model upload <dir>/detection/model.safetensors:detection deepinsight/buffalo-l --lane f32 \
+      --source-format as-is --mirror <page>
+    cozy model upload <dir>/recognition/model.safetensors deepinsight/buffalo-l --base <commit>:recognition …
+    cozy model upload <dir>/image_proj/diffusion_pytorch_model.safetensors:image_proj h94/ip-adapter-faceid-plusv2-sdxl \
+      --lane f16 --source-format as-is --mirror <page>
+    cozy model upload <dir>/ip_adapter/diffusion_pytorch_model.safetensors h94/… --base <commit>:ip_adapter …
+    cozy model upload <dir>/ip-adapter-faceid-plusv2_sdxl_lora.safetensors h94/ip-adapter-faceid-plusv2-sdxl-lora \
+      --lane f16 --mirror <page>
 
 - `buffalo`: `det_10g.onnx` and `w600k_r50.onnx` from insightface's v0.7 release, each graph's initializers in its
   convolutions' order onto `sdxl.faces`' port (`SCRFD`, `IResNet`): the folded convolutions as they are, the other batch
   norms as their scale and shift, PReLU slopes flat. The port must give onnxruntime's outputs on random inputs.
 - `faceid`: `ip-adapter-faceid-plusv2_sdxl.bin` through Diffusers' own loader conversion
   (`_convert_ip_adapter_image_proj_to_diffusers`), as TensorFS's `ipadapter.sdxl` lays out Plus: `image_proj` is
-  Diffusers' `IPAdapterFaceIDPlusImageProjection`, its arguments as config; `ip_adapter` each cross-attention's
-  `N.to_k_ip`/`N.to_v_ip`. Its LoRA is h94's own safetensors, which TensorFS's `sdxl.lora` converts
-  (`cozy model upload hf://h94/IP-Adapter-FaceID@<rev>/ip-adapter-faceid-plusv2_sdxl_lora.safetensors`); the .bin's
-  copy of it (`N.to_*_lora`) is checked identical there and left out here.
+  Diffusers' `IPAdapterFaceIDPlusImageProjection`'s state (its arguments are its shapes, as the converter reads them),
+  `ip_adapter` each cross-attention's `N.to_k_ip`/`N.to_v_ip`. The .bin's copy of its LoRA (`N.to_*_lora`) is left out: h94's own LoRA file holds the same
+  factors, byte for byte.
+- `lora`: that file (kohya names), which TensorFS's `sdxl.lora` converts, with each `.alpha` an F32 scalar of its value
+  (128, the rank): TensorFS refuses its I64 ones. Every factor is the file's own bytes.
 
 Each source is pinned by its digest. Both are for non-commercial research use only (insightface's models; h94's card).
 """
@@ -24,7 +35,6 @@ from __future__ import annotations
 import argparse
 import hashlib
 import io
-import json
 import urllib.request
 import zipfile
 from collections.abc import Iterator
@@ -47,6 +57,7 @@ BUFFALO = {
 }
 H94 = "https://huggingface.co/h94/IP-Adapter-FaceID/resolve/43907e6f44d079bf1a9102d9a6e56aef7a219bae/"
 FACEID = ("ip-adapter-faceid-plusv2_sdxl.bin", "c6945d82b543700cc3ccbb98d363b837e9c596281607857c74b713a876daf5fb")
+LORA = ("ip-adapter-faceid-plusv2_sdxl_lora.safetensors", "f24b4bb2dad6638a09c00f151cde84991baf374409385bcbab53c1871a30cb7b")
 LICENSE = ("For non-commercial research use only: insightface's pretrained models are, and h94 releases IP-Adapter-FaceID "
            "'exclusively for research purposes and not intended for commercial use'.")
 
@@ -131,7 +142,8 @@ def _ported(graph: bytes, net: nn.Module) -> dict[str, torch.Tensor]:
     for key, array in out.items():
         if tuple(array.shape) != tuple(state[key].shape):
             raise SystemExit(f"{key}: {array.shape} from the graph, {tuple(state[key].shape)} in the port")
-    return {key: torch.from_numpy(np.ascontiguousarray(array, dtype=np.float32)) for key, array in out.items()}
+    # A copy each: the export shares one initializer between equal biases (`fpn.1`'s is `down.0`'s).
+    return {key: torch.from_numpy(np.array(array, dtype=np.float32)) for key, array in out.items()}
 
 
 def _agrees(graph: bytes, net: nn.Module, tensors: dict[str, torch.Tensor], size: int) -> float:
@@ -187,37 +199,37 @@ def faceid(out: Path, given: Path | None) -> None:
         unet = UNet2DConditionModel()  # its converter reads only the file
     image_proj: dict[str, torch.Tensor] = state["image_proj"]
     projection: nn.Module = unet._convert_ip_adapter_image_proj_to_diffusers(image_proj, low_cpu_mem_usage=False)
-    # The arguments Diffusers' converter builds it with, read off the file as it reads them.
-    resampler = "perceiver_resampler"
-    config = {
-        "_class_name": type(projection).__name__,
-        "embed_dims": image_proj[f"{resampler}.proj_in.weight"].shape[0],
-        "output_dims": image_proj[f"{resampler}.proj_out.weight"].shape[0],
-        "hidden_dims": image_proj[f"{resampler}.proj_in.weight"].shape[1],
-        "heads": image_proj[f"{resampler}.layers.0.0.to_q.weight"].shape[0] // 64,
-        "id_embeddings_dim": image_proj["proj.0.weight"].shape[1],
-    }
     tensors = {k: v.to(torch.float16) for k, v in projection.state_dict().items()}
     metadata = {"source": H94 + name, "sha256": digest}
     written(out / "image_proj", tensors, metadata, "diffusion_pytorch_model")
-    (out / "image_proj" / "config.json").write_text(json.dumps(config, indent=2) + "\n")
     sites = {k: v for k, v in state["ip_adapter"].items() if k.endswith(("to_k_ip.weight", "to_v_ip.weight"))}
     written(out / "ip_adapter", sites, metadata, "diffusion_pytorch_model")
     left = len(state["ip_adapter"]) - len(sites)
-    print(f"image_proj: {config}, {len(tensors)} tensors; ip_adapter: {len(sites)} tensors ({left} LoRA factors left out)")
+    print(f"image_proj: {type(projection).__name__}, {len(tensors)} tensors; ip_adapter: {len(sites)} tensors ({left} LoRA factors left out)")
     (out / "README.md").write_text(
         f"h94's IP-Adapter-FaceID-PlusV2 for SDXL ({H94}{name}, sha256 {digest}), in Diffusers' loader layout; its LoRA "
         f"is h94/ip-adapter-faceid-plusv2-sdxl-lora.\n\n{LICENSE}\n"
     )
 
 
+def lora(out: Path, given: Path | None) -> None:
+    from safetensors.torch import load
+
+    name, digest = LORA
+    tensors = load(fetched(H94 + name, name, digest, given))
+    alphas = {k for k, v in tensors.items() if k.endswith(".alpha")}
+    tensors.update({k: tensors[k].to(torch.float32) for k in alphas})
+    written(out, tensors, {"source": H94 + name, "sha256": digest}, name.removesuffix(".safetensors"))
+    print(f"{name}: {len(tensors) - len(alphas)} factors as they are, {len(alphas)} alphas as F32")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    parser.add_argument("source", choices=("buffalo", "faceid"))
+    parser.add_argument("source", choices=("buffalo", "faceid", "lora"))
     parser.add_argument("out", type=Path)
     parser.add_argument("--from", dest="given", type=Path, help="the source file, already downloaded")
     args = parser.parse_args()
-    (buffalo if args.source == "buffalo" else faceid)(args.out, args.given)
+    {"buffalo": buffalo, "faceid": faceid, "lora": lora}[args.source](args.out, args.given)
 
 
 if __name__ == "__main__":

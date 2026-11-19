@@ -39,6 +39,7 @@ import msgspec
 import torch
 import torch.nn.functional as F
 from cozy_runtime import rng
+from cozy_runtime.accel import lora
 from cozy_runtime.author import (
     AdjustmentRow,
     AdjustmentRows,
@@ -88,7 +89,20 @@ from transformers import (
 from transformers import initialization as transformer_init
 
 from ._numerics import decode_latents, encode_tokens, guided, hold_decode_dtype
-from .adapters import MODES, ControlNet, Controls, ImageEncoder, IPAdapter, References
+from .adapters import (
+    MODES,
+    ControlNet,
+    Controls,
+    FaceIDAdapter,
+    FaceLoRA,
+    ImageEncoder,
+    IPAdapter,
+    References,
+    Steer,
+    attention_linears,
+    steering,
+)
+from .faces import FaceAnalysis, aligned, crop, subject
 
 if TYPE_CHECKING:
     from diffusers.configuration_utils import ConfigMixin
@@ -117,10 +131,13 @@ Kind = Literal["depth", "pose", "lineart", "sketch", "canny", "inpaint"]
 MAX_PICTURES = 4
 #: `GenerateInput.reference_strength`'s default.
 REFERENCE_STRENGTH = 0.4
+#: FaceID-PlusV2's scale at the default `reference_strength`, which scales both adapters alike: its authors' 1
+#: (`IPAdapterFaceIDPlusXL`), the face A/B's winning arm (se-175: ArcFace 0.65 against Plus's 0.42, prompts followed).
+FACE_SCALE = 1.0
 
 
 class GenerateInput(ImageRequest):
-    #: Its words, and the pictures it mentions: each a reference for the IP-Adapter (`_said`).
+    #: Its words, and the pictures it mentions: each a reference for an IP-Adapter (`_said`, `_references`).
     prompt: Prompt[Image] = Prompt()  # type: ignore[assignment]  # a prompt with pictures, in place of the base's text
     #: Image to image: start from this picture, `strength` of the schedule redrawing it.
     image: Annotated[ImageFile, FileBound(max_decoded_bytes=256 << 20)] | None = None
@@ -129,9 +146,9 @@ class GenerateInput(ImageRequest):
     #: Control maps, each through its mode of the union ControlNet; `inpaint`'s is the picture with the area to redraw
     #: transparent.
     control: list[Control[Kind]] = msgspec.field(default_factory=list)
-    #: How strongly the mentioned pictures steer, the IP-Adapter's scale. 0.4: the words set the scene while the picture
-    #: gives its subject and style. At tencent-ailab's 0.5 and above, IP-Adapter Plus redraws the picture, its backdrop
-    #: too, past the words; at 0.3 the subject fades (se-175, SE175-41..56, 61..72).
+    #: How strongly the mentioned pictures steer, Plus's scale (FaceID's `FACE_SCALE` times it over the default). 0.4: the
+    #: words set the scene while the picture gives its subject and style. At tencent-ailab's 0.5 and above, IP-Adapter
+    #: Plus redraws the picture, its backdrop too, past the words; at 0.3 the subject fades (se-175, SE175-41..56, 61..72).
     reference_strength: Annotated[float, msgspec.Meta(ge=0.0, le=2.0), Advanced()] = REFERENCE_STRENGTH
     steps: Steps = None
     guidance: Guidance = None
@@ -340,6 +357,8 @@ class SdxlPipeline:
         unet.name_or_path = ""
         unet._base_num_upsamplers = unet.num_upsamplers
         unet._hidiffusion_active = False
+        #: Where FaceID's LoRA arms while a face steers: every UNet attention's q, k, v and out.
+        self.sites = lora.Sites(unet, attention_linears(unet))
         self.scheduler_config: dict[str, object] = dict(mapping["scheduler"])
         self.vae_scale: float = float(mapping["vae"]["scaling_factor"])
 
@@ -687,12 +706,14 @@ def _start(payload: GenerateInput, width: int, height: int,
 
 
 #: Which requests need each adapter (cl-1103, `_generate`): the ControlNet with a map at a strength above 0, the image
-#: encoder and IP-Adapter with a picture in the prompt at a reference_strength above 0.
+#: encoder, IP-Adapter Plus and the face reader with a picture in the prompt at a reference_strength above 0.
 _MAPPED = "request.control.exists(c, c.strength > 0)"
 _STEERED = 'request.reference_strength > 0 && request.prompt.references.exists(r, r.type == "image")'
 _BOX_STEERED = 'request.reference_strength > 0 && request.instructions.references.exists(r, r.type == "image")'
-_NEEDS = {"controlnet": _MAPPED, "image_encoder": _STEERED, "ip_adapter": _STEERED}
-_BOX_NEEDS = {"controlnet": _MAPPED, "image_encoder": _BOX_STEERED, "ip_adapter": _BOX_STEERED}
+_NEEDS = {"controlnet": _MAPPED, "image_encoder": _STEERED, "ip_adapter": _STEERED, "faces": _STEERED}
+_BOX_NEEDS = {"controlnet": _MAPPED, "image_encoder": _BOX_STEERED, "ip_adapter": _BOX_STEERED, "faces": _BOX_STEERED}
+#: FaceID-PlusV2 and its LoRA: what only the run learns, when a picture's subject is a face (`_references`).
+_ON_DEMAND = ("face_adapter", "face_lora")
 _DEFAULTS = {"model": "stabilityai/sdxl@1.0.0"}
 #: The adapters, each its author's file as uploaded (se-175), fetched only when a request uses it.
 _ADAPTERS = {
@@ -700,11 +721,49 @@ _ADAPTERS = {
     "controlnet": "xinsir/controlnet-union-sdxl-promax@0.1.0",
     "image_encoder": "laion/clip-vit-h-14-laion2b-s32b-b79k@0.1.0",
     "ip_adapter": "h94/ip-adapter-plus-sdxl-vit-h@0.1.0",
+    "faces": "deepinsight/buffalo-l@0.1.0",
+    "face_adapter": "h94/ip-adapter-faceid-plusv2-sdxl@0.1.0",
+    "face_lora": "h94/ip-adapter-faceid-plusv2-sdxl-lora@0.1.0",
 }
 
 
+@dataclasses.dataclass(frozen=True)
+class _Adapters:
+    """The models a denoise's references may use."""
+
+    image_encoder: ImageEncoder
+    ip_adapter: IPAdapter
+    faces: FaceAnalysis
+    face_adapter: FaceIDAdapter
+    face_lora: FaceLoRA
+
+
+def _references(ctx: Context, pictures: list[PILImage.Image], strength: float, guided: bool,
+                adapters: _Adapters) -> tuple[list[Steer], int]:  # fmt: skip
+    """Each picture's part of the denoise, and how many are faces: FaceID-PlusV2 for a picture whose subject is a face
+    (SCRFD's, `faces.subject`), IP-Adapter Plus for every other."""
+    found = [subject(adapters.faces.find(picture), *picture.size) for picture in pictures]
+    portraits = [(picture, face) for picture, face in zip(pictures, found, strict=True) if face is not None]
+    plain = [picture for picture, face in zip(pictures, found, strict=True) if face is None]
+    if portraits:
+        for slot in _ON_DEMAND:
+            ctx.need(slot)
+    parts = []
+    if plain:
+        embeds, empty = adapters.image_encoder.tokens(plain)
+        tokens = adapters.ip_adapter.tokens(embeds, empty, guided)
+        parts.append(Steer(tokens, adapters.ip_adapter.graph.sites, strength))
+    if portraits:
+        identities = adapters.faces.identities([aligned(picture, face, 112) for picture, face in portraits])
+        # The face aligned at 224² is the CLIP picture (h94's PlusV2 example: `norm_crop(…, image_size=224)`).
+        embeds, empty = adapters.image_encoder.tokens([crop(picture, face, 224) for picture, face in portraits])
+        tokens = adapters.face_adapter.tokens(identities, embeds, empty, guided)
+        parts.append(Steer(tokens, adapters.face_adapter.graph.sites, FACE_SCALE * strength / REFERENCE_STRENGTH))
+    return parts, len(portraits)
+
+
 def _generate(ctx: Context, payload: GenerateInput, facts: GenerateFacts, model: SdxlModel, controlnet: ControlNet,
-              image_encoder: ImageEncoder, ip_adapter: IPAdapter, tel: Telemetry, adj: Adjustments) -> ImageResult:
+              adapters: _Adapters, tel: Telemetry, adj: Adjustments) -> ImageResult:
     hold_decode_dtype(model.pipe.components["vae"], tel)
     prompt, pictures = _said(payload.prompt, adj)
     first = payload.image or next((c.image for c in payload.control if c.strength > 0), None)
@@ -736,24 +795,33 @@ def _generate(ctx: Context, payload: GenerateInput, facts: GenerateFacts, model:
     start, strength = _start(payload, width, height, area)
     if area is not None:
         area = _feathered(area)
-    references = None
+    parts: list[Steer] = []
+    faced = 0
     if pictures and payload.reference_strength > 0:
         with tel.stage("encoding references"):
-            embeds, empty = image_encoder.tokens([p.file.read() for p in pictures])
-            references = ip_adapter.tokens(embeds, empty, classifier_free)
+            parts, faced = _references(ctx, [p.file.read() for p in pictures], payload.reference_strength,
+                                       classifier_free, adapters)  # fmt: skip
+        tel.log("references", plus=len(pictures) - faced, faceid=faced)
 
-    def body() -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    def body(references: References | None = None) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         return model.generate(
             (ids, ids_2), negative, width=width, height=height, steps=steps, guidance=guidance,
             hidiffusion=hidiffusion_applied, seed=seed, progress=ctx.progress, start=start, strength=strength,
             mask=area, controls=controls, references=references,
         )
 
-    run: Callable[[], tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]] = body
+    def steered() -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        with steering(model.pipe.components["unet"], parts) as references:
+            return body(references)
+
+    run: Callable[[], tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]] = steered if parts else body
     if controls is not None:
         run = functools.partial(controlnet.armed, run)
-    if references is not None:
-        run = functools.partial(ip_adapter.armed, model.pipe.components["unet"], payload.reference_strength, run)
+    if len(pictures) > faced and parts:
+        run = functools.partial(adapters.ip_adapter.armed, run)
+    if faced:
+        run = functools.partial(adapters.face_adapter.armed, run)
+        run = functools.partial(adapters.face_lora.applied, model.pipe.sites, run)
     with tel.stage("generate"):
         image, encoded, pooled, latents = run()
     if area is not None and start is not None:
@@ -776,11 +844,11 @@ def _generate(ctx: Context, payload: GenerateInput, facts: GenerateFacts, model:
         asset = ImageFile.from_image(ImageFrame(decoded_w, decoded_h, rgb), format="webp")
     tel.log("sampled", sampler="ddim eta=1.0" if hidiffusion_applied else "dpmpp_2m_karras", steps=steps,
             guidance=guidance, classifier_free=classifier_free, hidiffusion=hidiffusion_applied,
-            image_to_image=start is not None, references=len(pictures) if references is not None else 0)
+            image_to_image=start is not None, references=len(pictures) if parts else 0, faces=faced)
     return ImageResult(asset, decoded_w, decoded_h, seed, prompt)
 
 
-@app.entrypoint(defaults=_ADAPTERS, needs=_NEEDS, memoize=True, preflight=resolve_generate)
+@app.entrypoint(defaults=_ADAPTERS, needs=_NEEDS, on_demand=_ON_DEMAND, memoize=True, preflight=resolve_generate)
 def generate(
     ctx: Context,
     payload: GenerateInput,
@@ -789,6 +857,9 @@ def generate(
     controlnet: ControlNet,
     image_encoder: ImageEncoder,
     ip_adapter: IPAdapter,
+    faces: FaceAnalysis,
+    face_adapter: FaceIDAdapter,
+    face_lora: FaceLoRA,
     tel: Telemetry,
     adj: Adjustments,
 ) -> ImageResult:
@@ -796,7 +867,8 @@ def generate(
     start picture.
 
     Tokenize, encode, denoise, decode, encode the WebP."""
-    return _generate(ctx, payload, facts, model, controlnet, image_encoder, ip_adapter, tel, adj)
+    adapters = _Adapters(image_encoder, ip_adapter, faces, face_adapter, face_lora)
+    return _generate(ctx, payload, facts, model, controlnet, adapters, tel, adj)
 
 
 class ImageBox(msgspec.Struct, kw_only=True):
@@ -831,11 +903,14 @@ def resolve_image(payload: ImageBox) -> GenerateFacts:
     return resolve_generate(_request(payload))
 
 
-@app.tool(label="Image", named="image", defaults=_ADAPTERS, needs=_BOX_NEEDS, memoize=True, preflight=resolve_image)
+@app.tool(label="Image", named="image", defaults=_ADAPTERS, needs=_BOX_NEEDS, on_demand=_ON_DEMAND, memoize=True,
+          preflight=resolve_image)
 def image(ctx: Context, payload: ImageBox, facts: Preflight[GenerateFacts], model: SdxlModel, controlnet: ControlNet,
-          image_encoder: ImageEncoder, ip_adapter: IPAdapter, tel: Telemetry, adj: Adjustments) -> ImageResult:
+          image_encoder: ImageEncoder, ip_adapter: IPAdapter, faces: FaceAnalysis, face_adapter: FaceIDAdapter,
+          face_lora: FaceLoRA, tel: Telemetry, adj: Adjustments) -> ImageResult:  # fmt: skip
     """SDXL on a canvas: `generate` from the box. Mentioned pictures steer it, a start picture makes it an edit."""
-    return _generate(ctx, _request(payload), facts, model, controlnet, image_encoder, ip_adapter, tel, adj)
+    adapters = _Adapters(image_encoder, ip_adapter, faces, face_adapter, face_lora)
+    return _generate(ctx, _request(payload), facts, model, controlnet, adapters, tel, adj)
 
 
 #: What SDXL is told of a picture it upscales, and kept from.

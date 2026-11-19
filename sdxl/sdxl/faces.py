@@ -7,8 +7,8 @@ A picture is read as insightface's `FaceAnalysis` reads it (python-package v0.7:
 `face_align.py`): SCRFD over the picture letterboxed into 640² (top left, on black), (x - 127.5) / 128; each anchor's box
 and landmarks decoded from its stride, kept from score 0.5, NMS at 0.4; a face aligned by the similarity (Umeyama) that
 takes its landmarks to ArcFace's five-point template, warped bilinear, and embedded from (x - 127.5) / 127.5,
-L2-normalized. As ComfyUI_IPAdapter_plus's FaceID node does, a picture where 640² finds no face is read again smaller,
-down to 320²: a face too close for SCRFD's largest anchors fits them there.
+L2-normalized. Only at 640²: ComfyUI_IPAdapter_plus's FaceID node reads a faceless picture again smaller, down to 320²,
+but there SCRFD finds faces in animals (se-175's fox), and here a found face picks the adapter.
 """
 
 from __future__ import annotations
@@ -27,8 +27,8 @@ from torch import nn
 #: The pack's two networks, each a component.
 DETECTION = "detection"
 RECOGNITION = "recognition"
-#: SCRFD's input sides: 640², then smaller where it finds none (ComfyUI_IPAdapter_plus `ipadapter_execute`).
-SIDES = (640, 576, 512, 448, 384, 320)
+#: SCRFD's input side (insightface `FaceAnalysis.prepare`'s `det_size`).
+SIDE = 640
 #: SCRFD-10G's strides, anchors per place, score floor and NMS overlap (insightface `SCRFD`).
 STRIDES = (8, 16, 32)
 ANCHORS = 2
@@ -331,18 +331,13 @@ class FaceAnalysis(Model[FaceGraph]):
 
     @uses_components(DETECTION)
     def find(self, picture: PILImage.Image) -> list[Face]:
-        """The picture's faces, highest score first: at 640², else at the first smaller side that finds one."""
+        """The picture's faces, highest score first."""
         net = self.graph.components[DETECTION]
         weight = next(net.parameters())
-        rgb = _rgb(picture)
-        for side in SIDES:
-            canvas, scale = _letterboxed(rgb, side)
-            with torch.no_grad():
-                levels = net(((canvas - 127.5) / 128.0).to(weight.device, weight.dtype))
-            faces = _decoded(levels, side, scale)
-            if faces:
-                return faces
-        return []
+        canvas, scale = _letterboxed(_rgb(picture), SIDE)
+        with torch.no_grad():
+            levels = net(((canvas - 127.5) / 128.0).to(weight.device, weight.dtype))
+        return _decoded(levels, SIDE, scale)
 
     @uses_components(RECOGNITION)
     def identities(self, faces: Sequence[torch.Tensor]) -> torch.Tensor:
