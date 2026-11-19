@@ -14,7 +14,7 @@ from typing import Annotated, NamedTuple
 import msgspec
 import numpy as np
 import numpy.typing as npt
-from cozy_runtime.author import App, Context, InvalidRequest, Outputs, Seed, Telemetry, call
+from cozy_runtime.author import App, Context, InvalidRequest, Outputs, Seed, Telemetry, Weights, call
 from cozy_runtime.fields import FileBound, Image, Prompt
 from cozy_runtime.media import (
     DecodedMediaEvent,
@@ -32,7 +32,8 @@ from ._h3 import Beat, PackageShot, Shot, ShotLoRA, render_shot
 
 app = App()
 
-#: MATLOWAI's ORB360 step 1500 (hf://MATLOWAI/MiniMax-H3-ORB360-CardSpin), trained on H3's Ref2VA DiT, clockwise only.
+#: MATLOWAI's ORB360 step 1500 (hf://MATLOWAI/MiniMax-H3-ORB360-CardSpin), trained on H3's Ref2VA DiT, clockwise only:
+#: the `lora` slot's default, which a request may replace (`models.lora`).
 ORB360 = "matlowai/orb360@0.1.1"
 #: What the video is, for its viewer (its `orbit` metadata): one clockwise turn whose end is its start, so the canvas turns it on drag.
 TURN: dict[str, str | int | bool] = {"degrees": 360, "direction": "cw", "loops": True}
@@ -198,29 +199,29 @@ def said(payload: Orbit) -> str:
     return text if any(ch.isalnum() for ch in MENTION.sub("", text)) else ""
 
 
-def orbit_shot(payload: Orbit, text: str, *, pinned: bool) -> PackageShot:
-    """The ORB360 shot on Ref2VA: every picture the instructions mention, by its mention, and with `pinned` the first
-    as the shot's first and last frame too."""
+def orbit_shot(payload: Orbit, text: str, lora: str, *, pinned: bool) -> PackageShot:
+    """The shot on Ref2VA under `lora` (the slot's ref): every picture the instructions mention, by its mention, and
+    with `pinned` the first as the shot's first and last frame too."""
     picture = first_picture(payload)[1]
     beat = Beat(duration=DURATION, description=Prompt(text=text, references=References(dict(payload.instructions.references))))
     ends = picture if pinned else None
     return PackageShot(shot=Shot(beats=[beat], first_frame=ends, last_frame=ends, seed=payload.seed),
-                       loras=[ShotLoRA(model=ORB360)])  # fmt: skip
+                       loras=[ShotLoRA(model=lora)])  # fmt: skip
 
 
-async def pinned(payload: Orbit, text: str, tel: Telemetry) -> Turned:
+async def pinned(payload: Orbit, text: str, lora: str, tel: Telemetry) -> Turned:
     """Ref2VA under ORB360 with the picture as its first and last frame: its last frame is the turn's end."""
     with tel.scope("Turn"):
-        made = await call(render_shot, orbit_shot(payload, text, pinned=True))
+        made = await call(render_shot, orbit_shot(payload, text, lora, pinned=True))
     thumbs = [grey(frame) for frame in frames_of(made.video)]
     return Turned([(made.video, i) for i in range(len(thumbs) - 1)], psnr(thumbs[-1], thumbs[0]), made.warnings)
 
 
-async def bridged(payload: Orbit, text: str, out: Outputs, tel: Telemetry) -> Turned:
+async def bridged(payload: Orbit, text: str, lora: str, out: Outputs, tel: Telemetry) -> Turned:
     """se-114's B: the Ref2VA turn under ORB360, cut where its tail comes closest to frame 0, its last twelfth redrawn
     by a 5 s FL2VA shot without the LoRA from there to frame 0, fitted into those frames."""
     with tel.scope("Turn"):
-        made = await call(render_shot, orbit_shot(payload, text, pinned=False))
+        made = await call(render_shot, orbit_shot(payload, text, lora, pinned=False))
     out.publish("video", made.video, label="Turn, before its loop is joined")
     thumbs = [grey(frame) for frame in frames_of(made.video)]
     tail = range(max(1, len(thumbs) - 16), len(thumbs))
@@ -275,8 +276,8 @@ def silent(frames: Sequence[tuple[VideoFile, int]]) -> Iterator[DecodedMediaEven
                         break
 
 
-@app.tool(label="Orbit", named="video")
-async def orbit(ctx: Context, payload: Orbit, out: Outputs, tel: Telemetry) -> OrbitResult:
+@app.tool(label="Orbit", named="video", defaults={"lora": ORB360})
+async def orbit(ctx: Context, payload: Orbit, lora: Weights, out: Outputs, tel: Telemetry) -> OrbitResult:
     """The first picture the instructions mention, seen from all the way round: one clockwise camera turn around it,
     frozen in time, that loops. H3 renders it under ORB360 from its trained caption, which names the picture by its
     mention and the angle every third of the turn, its end meeting its start (`ENDS`), with what the instructions say and
@@ -286,9 +287,9 @@ async def orbit(ctx: Context, payload: Orbit, out: Outputs, tel: Telemetry) -> O
     plain = backdrop(picture)
     text = caption(name, said(payload), frames_for(DURATION), plain)
     if ENDS == "pinned":
-        turned = await pinned(payload, text, tel)
+        turned = await pinned(payload, text, lora.ref, tel)
     else:
-        turned = await bridged(payload, text, out, tel)
+        turned = await bridged(payload, text, lora.ref, out, tel)
     with tel.stage("writing the turn"):
         # Every frame a keyframe, so the canvas shows any angle at once.
         saved = out.save_video_stream(silent(turned.frames), keyframe_interval=1)
