@@ -102,7 +102,7 @@ from .adapters import (
     attention_linears,
     steering,
 )
-from .faces import FaceAnalysis, aligned, crop, subject
+from .faces import FaceDetector, FaceRecognizer, aligned, crop, subject
 
 if TYPE_CHECKING:
     from diffusers.configuration_utils import ConfigMixin
@@ -706,14 +706,14 @@ def _start(payload: GenerateInput, width: int, height: int,
 
 
 #: Which requests need each adapter (cl-1103, `_generate`): the ControlNet with a map at a strength above 0, the image
-#: encoder, IP-Adapter Plus and the face reader with a picture in the prompt at a reference_strength above 0.
+#: encoder, IP-Adapter Plus and the face detector with a picture in the prompt at a reference_strength above 0.
 _MAPPED = "request.control.exists(c, c.strength > 0)"
 _STEERED = 'request.reference_strength > 0 && request.prompt.references.exists(r, r.type == "image")'
 _BOX_STEERED = 'request.reference_strength > 0 && request.instructions.references.exists(r, r.type == "image")'
 _NEEDS = {"controlnet": _MAPPED, "image_encoder": _STEERED, "ip_adapter": _STEERED, "faces": _STEERED}
 _BOX_NEEDS = {"controlnet": _MAPPED, "image_encoder": _BOX_STEERED, "ip_adapter": _BOX_STEERED, "faces": _BOX_STEERED}
-#: FaceID-PlusV2 and its LoRA: what only the run learns, when a picture's subject is a face (`_references`).
-_ON_DEMAND = ("face_adapter", "face_lora")
+#: ArcFace, FaceID-PlusV2 and its LoRA: what only the run learns, when a picture's subject is a face (`_references`).
+_ON_DEMAND = ("face_identity", "face_adapter", "face_lora")
 _DEFAULTS = {"model": "stabilityai/sdxl@1.0.0"}
 #: The adapters, each its author's file as uploaded (se-175), fetched only when a request uses it.
 _ADAPTERS = {
@@ -722,6 +722,7 @@ _ADAPTERS = {
     "image_encoder": "laion/clip-vit-h-14-laion2b-s32b-b79k@0.1.0",
     "ip_adapter": "h94/ip-adapter-plus-sdxl-vit-h@0.1.0",
     "faces": "deepinsight/buffalo-l@0.1.0",
+    "face_identity": "deepinsight/buffalo-l@0.1.0",
     "face_adapter": "h94/ip-adapter-faceid-plusv2-sdxl@0.1.0",
     "face_lora": "h94/ip-adapter-faceid-plusv2-sdxl-lora@0.1.0",
 }
@@ -733,7 +734,8 @@ class _Adapters:
 
     image_encoder: ImageEncoder
     ip_adapter: IPAdapter
-    faces: FaceAnalysis
+    faces: FaceDetector
+    face_identity: FaceRecognizer
     face_adapter: FaceIDAdapter
     face_lora: FaceLoRA
 
@@ -754,7 +756,7 @@ def _references(ctx: Context, pictures: list[PILImage.Image], strength: float, g
         tokens = adapters.ip_adapter.tokens(embeds, empty, guided)
         parts.append(Steer(tokens, adapters.ip_adapter.graph.sites, strength))
     if portraits:
-        identities = adapters.faces.identities([aligned(picture, face, 112) for picture, face in portraits])
+        identities = adapters.face_identity.identities([aligned(picture, face, 112) for picture, face in portraits])
         # The face aligned at 224² is the CLIP picture (h94's PlusV2 example: `norm_crop(…, image_size=224)`).
         embeds, empty = adapters.image_encoder.tokens([crop(picture, face, 224) for picture, face in portraits])
         tokens = adapters.face_adapter.tokens(identities, embeds, empty, guided)
@@ -856,7 +858,8 @@ def generate(
     controlnet: ControlNet,
     image_encoder: ImageEncoder,
     ip_adapter: IPAdapter,
-    faces: FaceAnalysis,
+    faces: FaceDetector,
+    face_identity: FaceRecognizer,
     face_adapter: FaceIDAdapter,
     face_lora: FaceLoRA,
     tel: Telemetry,
@@ -866,7 +869,7 @@ def generate(
     start picture.
 
     Tokenize, encode, denoise, decode, encode the WebP."""
-    adapters = _Adapters(image_encoder, ip_adapter, faces, face_adapter, face_lora)
+    adapters = _Adapters(image_encoder, ip_adapter, faces, face_identity, face_adapter, face_lora)
     return _generate(ctx, payload, facts, model, controlnet, adapters, tel, adj)
 
 
@@ -905,10 +908,10 @@ def resolve_image(payload: ImageBox) -> GenerateFacts:
 @app.tool(label="Image", named="image", defaults=_ADAPTERS, needs=_BOX_NEEDS, on_demand=_ON_DEMAND, memoize=True,
           preflight=resolve_image)
 def image(ctx: Context, payload: ImageBox, facts: Preflight[GenerateFacts], model: SdxlModel, controlnet: ControlNet,
-          image_encoder: ImageEncoder, ip_adapter: IPAdapter, faces: FaceAnalysis, face_adapter: FaceIDAdapter,
-          face_lora: FaceLoRA, tel: Telemetry, adj: Adjustments) -> ImageResult:  # fmt: skip
+          image_encoder: ImageEncoder, ip_adapter: IPAdapter, faces: FaceDetector, face_identity: FaceRecognizer,
+          face_adapter: FaceIDAdapter, face_lora: FaceLoRA, tel: Telemetry, adj: Adjustments) -> ImageResult:  # fmt: skip
     """SDXL on a canvas: `generate` from the box. Mentioned pictures steer it, a start picture makes it an edit."""
-    adapters = _Adapters(image_encoder, ip_adapter, faces, face_adapter, face_lora)
+    adapters = _Adapters(image_encoder, ip_adapter, faces, face_identity, face_adapter, face_lora)
     return _generate(ctx, _request(payload), facts, model, controlnet, adapters, tel, adj)
 
 

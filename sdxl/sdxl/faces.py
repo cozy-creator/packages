@@ -24,7 +24,8 @@ from numpy.typing import NDArray
 from PIL import Image as PILImage
 from torch import nn
 
-#: The pack's two networks, each a component.
+#: The pack's two networks, each a component and its own model slot (`FaceDetector`, `FaceRecognizer`), so a picture
+#: without a face never fetches ArcFace.
 DETECTION = "detection"
 RECOGNITION = "recognition"
 #: SCRFD's input side (insightface `FaceAnalysis.prepare`'s `det_size`).
@@ -308,26 +309,33 @@ def crop(picture: PILImage.Image, face: Face, size: int) -> PILImage.Image:
 # ---------------------------------------------------------------- the model
 
 
-class FaceGraph:
+def _stored(config: Config, key: str) -> torch.dtype:
+    """Its stored dtype (an as-is upload is never cast): insightface's graphs are f32."""
+    stored = config.tensor_dtype(key, default="f32")
+    return {"f32": torch.float32, "bf16": torch.bfloat16, "f16": torch.float16}[stored]
+
+
+class DetectionGraph:
     def __init__(self, config: Config) -> None:
-        # Built in its stored dtype (an as-is upload is never cast): insightface's graphs are f32.
-        stored = config.tensor_dtype(f"{RECOGNITION}.fc.weight", default="f32")
-        dtype = {"f32": torch.float32, "bf16": torch.bfloat16, "f16": torch.float16}[stored]
-        self.components: dict[str, nn.Module] = {
-            DETECTION: SCRFD().to(dtype).eval(),
-            RECOGNITION: IResNet().to(dtype).eval(),
-        }
+        dtype = _stored(config, f"{DETECTION}.stem.0.weight")
+        self.components: dict[str, nn.Module] = {DETECTION: SCRFD().to(dtype).eval()}
 
 
-class FaceAnalysis(Model[FaceGraph]):
-    """insightface's buffalo_l: SCRFD-10G finds faces, ArcFace (IResNet-50) says whose."""
+class RecognitionGraph:
+    def __init__(self, config: Config) -> None:
+        dtype = _stored(config, f"{RECOGNITION}.fc.weight")
+        self.components: dict[str, nn.Module] = {RECOGNITION: IResNet().to(dtype).eval()}
+
+
+class FaceDetector(Model[DetectionGraph]):
+    """buffalo_l's SCRFD-10G: a picture's faces."""
 
     serving = Serving(encoded_leaves=False, min_bits=16)
 
-    graph: FaceGraph
+    graph: DetectionGraph
 
     def load(self, loader: Loader) -> None:
-        self.graph = loader.construct(FaceGraph)
+        self.graph = loader.construct(DetectionGraph)
 
     @uses_components(DETECTION)
     def find(self, picture: PILImage.Image) -> list[Face]:
@@ -338,6 +346,17 @@ class FaceAnalysis(Model[FaceGraph]):
         with torch.no_grad():
             levels = net(((canvas - 127.5) / 128.0).to(weight.device, weight.dtype))
         return _decoded(levels, SIDE, scale)
+
+
+class FaceRecognizer(Model[RecognitionGraph]):
+    """buffalo_l's ArcFace (IResNet-50): whose face."""
+
+    serving = Serving(encoded_leaves=False, min_bits=16)
+
+    graph: RecognitionGraph
+
+    def load(self, loader: Loader) -> None:
+        self.graph = loader.construct(RecognitionGraph)
 
     @uses_components(RECOGNITION)
     def identities(self, faces: Sequence[torch.Tensor]) -> torch.Tensor:

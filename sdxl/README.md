@@ -23,8 +23,9 @@ It takes pictures as Anima's does:
   words still followed. Pictures without such a face keep Plus, beside it in the same request.
   insightface's models and FaceID are for non-commercial research use only.
 
-Each adapter is a model slot (`controlnet`, `image_encoder`, `ip_adapter`, `faces`, `face_adapter`, `face_lora`),
-fetched only when a request uses it: FaceID's two once a run finds a face.
+Each adapter is a model slot (`controlnet`, `image_encoder`, `ip_adapter`, `faces`, `face_identity`, `face_adapter`,
+`face_lora`), fetched only when a request uses it: buffalo_l's detector (`faces`) with any picture, its ArcFace
+(`face_identity`) and FaceID's two once a run finds a face.
 
 `upscale` (the Upscale tool on a picture box) makes the box's picture larger, at 2, 4 or 8 MP: img2img over the picture
 Lanczos-upscaled to the canvas, the last `denoise` (0.2) of 30 DPM++ 2M Karras steps, no HiDiffusion. Downscaled back from
