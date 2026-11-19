@@ -5,8 +5,9 @@ constructs and fills the modules and owns their residency; no Diffusers weight l
 placement, or offload hook takes part in serving.
 
 A caller's LoRAs adapt the DiT through Runtime's PEFT layers (`serving.loras`). The
-Turbo overlay (`turbo.FunAccLoRA`) is armed on the DiT's `lora.Sites` (`SITES`); Runtime bakes it
-into the resident weights while it is armed.
+Turbo overlay (`turbo.FunAccLoRA`) is armed on the DiT's `lora.Sites` (`SITES`), and a function's
+own LoRA slot (`adapter.QwenImage21LoRA`) on a second set over the same linears; Runtime bakes
+each into the resident weights while it is armed.
 """
 
 from __future__ import annotations
@@ -267,6 +268,8 @@ class QwenImage21DiTGraph:
         transformer = _transformer(config)
         #: Where the Turbo overlay is armed (`turbo.FunAccLoRA`).
         self.sites = lora.Sites(transformer, SITES)
+        #: Where a function's own LoRA slot is armed beside it (`adapter.QwenImage21LoRA`).
+        self.adapters = lora.Sites(transformer, SITES)
         self.components: DiTComponents = {"transformer": transformer}
         self.scheduler_config: dict[str, object] = _section(
             config, "scheduler", "a transformer goes with its scheduler (`<model>:transformer,scheduler`)"
