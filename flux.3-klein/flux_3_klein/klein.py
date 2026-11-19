@@ -25,6 +25,7 @@ from cozy_runtime.author import (
     Config,
     Loader,
     Model,
+    ModelAssets,
     OutputError,
     Serving,
     Telemetry,
@@ -150,15 +151,48 @@ class Transformer(Flux3Transformer2DModel):
         return velocities
 
 
+def _text_encoder(config: Config) -> Qwen3VLForConditionalGeneration:
+    """Qwen3-VL's conditioning layers (`_conditioning_only`) from a checkpoint's `text_encoder` section, or from the
+    whole config of a checkpoint of the encoder alone (Runtime gives one component's config unsectioned)."""
+    section = config.section("text_encoder") if "text_encoder" in config.keys() else config
+    with transformer_init.no_init_weights():
+        text_encoder: Qwen3VLForConditionalGeneration = AutoModelForImageTextToText.from_config(  # type: ignore[no-untyped-call]  # Transformers' auto classes are unannotated
+            Qwen3VLConfig(**section.mapping()), dtype=torch.bfloat16
+        )
+    _conditioning_only(text_encoder)
+    return text_encoder
+
+
+def _encode(
+    encoder: Qwen3VLForConditionalGeneration, processor: Qwen3VLProcessor, prompt: str, device: torch.device
+) -> torch.Tensor:
+    """Diffusers' Flux3 prompt embeddings of `prompt`, on the CPU."""
+    with torch.inference_mode():
+        embeds: torch.Tensor = Flux3TextEncoderStep._get_qwen3_vl_prompt_embeds(
+            encoder,
+            processor,  # type: ignore[arg-type]  # Diffusers annotates the AutoProcessor factory
+            prompt,
+            device=device,
+            max_sequence_length=MAX_TOKENS,
+            pad_multiple=PAD_MULTIPLE,
+            hidden_states_layers=TEXT_LAYERS,
+        )
+    return embeds.cpu()
+
+
+def _processor(assets: ModelAssets) -> Qwen3VLProcessor:
+    """Qwen3-VL's own processor from the encoder's files: `text_encoder/`, or the root of a checkpoint that keeps them
+    there."""
+    folder = "text_encoder/" if any(name.startswith("text_encoder/") for name in assets.names()) else ""
+    return cast(Qwen3VLProcessor, vlm.processor(assets, folder))
+
+
 class KleinGraph:
     def __init__(self, config: Config) -> None:
         with transformer_init.no_init_weights():
             transformer = construct(Flux3Transformer2DModel, config.section("transformer").mapping())
-            text_encoder: Qwen3VLForConditionalGeneration = AutoModelForImageTextToText.from_config(  # type: ignore[no-untyped-call]  # Transformers' auto classes are unannotated
-                Qwen3VLConfig(**config.section("text_encoder").mapping()), dtype=torch.bfloat16
-            )
             vae = construct(AutoencoderKLFlux2, config.section("vae").mapping())
-        _conditioning_only(text_encoder)
+        text_encoder = _text_encoder(config)
         transformer.__class__ = Transformer
         for block in transformer.modules():
             if type(block) in (Flux3ModeTransformerBlock, Flux3SingleTransformerBlock):
@@ -174,6 +208,17 @@ class Components(TypedDict):
     transformer: Transformer
     text_encoder: Qwen3VLForConditionalGeneration
     vae: AutoencoderKLFlux2
+
+
+class TextEncoderComponents(TypedDict):
+    text_encoder: Qwen3VLForConditionalGeneration
+
+
+class KleinTextEncoderGraph:
+    """The `text_encoder` of a Klein checkpoint, or a checkpoint of the encoder alone."""
+
+    def __init__(self, config: Config) -> None:
+        self.components: TextEncoderComponents = {"text_encoder": _text_encoder(config)}
 
 
 def construct[M: ConfigMixin](cls: type[M], config: dict[str, object]) -> M:
@@ -297,6 +342,23 @@ def _conditions(
     return tokens, torch.cat([tf.single_stream_modulations[mode](act) for mode in modes])
 
 
+class KleinTextEncoder(Model[KleinTextEncoderGraph]):
+    """Klein's Qwen3-VL, the `text_encoder` slot: a Klein checkpoint's encoder, or a checkpoint of the encoder alone.
+    Only the encoder is built."""
+
+    graph: KleinTextEncoderGraph
+    processor: Qwen3VLProcessor
+
+    def load(self, loader: Loader) -> None:
+        self.graph = loader.construct(KleinTextEncoderGraph)
+        self.processor = _processor(loader.assets)
+
+    @memoize
+    @uses_components("text_encoder")
+    def encode(self, prompt: str) -> torch.Tensor:
+        return _encode(self.graph.components["text_encoder"], self.processor, prompt, torch.device(str(self.device)))
+
+
 class Klein(Model[KleinGraph]):
     """One Klein checkpoint: the distilled flow map (no guidance) or the base model (CFG)."""
 
@@ -313,7 +375,7 @@ class Klein(Model[KleinGraph]):
 
     def load(self, loader: Loader) -> None:
         self.graph = loader.construct(KleinGraph)
-        self.processor = cast(Qwen3VLProcessor, vlm.processor(loader.assets, "text_encoder/"))  # Qwen3-VL's own
+        self.processor = _processor(loader.assets)
 
     @property
     def flow_map(self) -> bool:
@@ -322,18 +384,8 @@ class Klein(Model[KleinGraph]):
     @memoize
     @uses_components("text_encoder")
     def encode(self, prompt: str) -> torch.Tensor:
-        encoder = self.graph.components["text_encoder"]
-        with torch.inference_mode():
-            embeds: torch.Tensor = Flux3TextEncoderStep._get_qwen3_vl_prompt_embeds(
-                encoder,
-                self.processor,  # type: ignore[arg-type]  # Diffusers annotates the AutoProcessor factory
-                prompt,
-                device=torch.device(str(self.device)),
-                max_sequence_length=MAX_TOKENS,
-                pad_multiple=PAD_MULTIPLE,
-                hidden_states_layers=TEXT_LAYERS,
-            )
-        return embeds.cpu()
+        """Its own encoder's embeddings, which the calibration reads (`quantize.calibrate`)."""
+        return _encode(self.graph.components["text_encoder"], self.processor, prompt, torch.device(str(self.device)))
 
     def hold_vae(self, tel: Telemetry) -> None:
         """Serve the VAE at `VAE_DTYPE` on a GPU from now on, before any VAE scope opens: the Runtime

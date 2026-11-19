@@ -33,8 +33,9 @@ reasoner is an on-demand model slot (`reasoner`), defaulting to `huihui-ai/huihu
 
 The text encoder (stock Qwen3.5-9B's language model) is its own slot, `text_encoder`; `model` reads the DiT and the VAE.
 By default it is pottokao's Heretic abliteration of Qwen3.5-9B (`pottokao/moss-image-text-encoder-heretic-pan2`: 32 of
-its tensors changed, 2/100 refusals against 100/100, KL 0.050), the weights moss-image encodes with (se-160). PAN2's own
-is any PAN2 checkpoint: `model.text_encoder=ifm/pan2@0.3.0`.
+its tensors changed, 2/100 refusals against 100/100, KL 0.050), the weights moss-image encodes with (se-160). Its 0.2.0
+holds the encoder and its tokenizer alone, pottokao's work only, and the slot (`Pan2TextEncoder`) builds only the encoder,
+so PAN2's own is any PAN2 checkpoint: `model.text_encoder=ifm/pan2@0.3.0`.
 
 `ifm/pan2@0.3.0` has two lanes: `bf16` and `int8` (int8 ConvRot on the DiT blocks and the Qwen encoder's language
 layers, [`quantize.py`](pan2/quantize.py)). A GPU with int8 tensor cores runs `int8`; `--lane bf16` pins 16 bits.

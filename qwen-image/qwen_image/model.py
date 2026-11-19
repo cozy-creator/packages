@@ -164,6 +164,17 @@ class TransformerGraph:
         self.sites = lora.Sites(transformer, lora_paths(len(transformer.transformer_blocks)))
 
 
+def _text_encoder(config: Mapping[str, Any]) -> Qwen2_5_VLForConditionalGeneration:  # type: ignore[explicit-any]  # the checkpoint's JSON, as Config.mapping() gives it
+    """Qwen2.5-VL in bf16. Construction dtype leaves its RoPE buffers in F32, as upstream loads. The pipelines read
+    the last hidden state only: the 1.1 GB head is never built."""
+    with transformer_init.no_init_weights():
+        encoder: Qwen2_5_VLForConditionalGeneration = AutoModelForImageTextToText.from_config(  # type: ignore[no-untyped-call]  # Transformers' Auto classes are untyped
+            Qwen2_5_VLConfig(**config), dtype=torch.bfloat16
+        )
+    encoder.lm_head = nn.Identity()
+    return encoder
+
+
 class QwenImageGraph(TransformerGraph):
     """A whole checkpoint: the DiT, Qwen2.5-VL and the VAE, in the checkpoint's precision."""
 
@@ -173,25 +184,35 @@ class QwenImageGraph(TransformerGraph):
         super().__init__(config)
         self.text_encoder_config = config.section("text_encoder").mapping()
         vae_dtype = _DTYPES[config.tensor_dtype("vae.encoder.conv_in.weight", default="bf16")]
+        self.components["text_encoder"] = _text_encoder(self.text_encoder_config)
         with transformer_init.no_init_weights():
-            # Construction dtype leaves Qwen2.5-VL's RoPE buffers in F32, as upstream loads.
-            self.components["text_encoder"] = AutoModelForImageTextToText.from_config(  # type: ignore[no-untyped-call]  # Transformers' Auto classes are untyped
-                Qwen2_5_VLConfig(**self.text_encoder_config), dtype=torch.bfloat16
-            )
             self.components["vae"] = _to(construct(AutoencoderKLQwenImage, config.section("vae").mapping()), vae_dtype)
-        # The pipelines read the last hidden state only: the 1.1 GB head is never built.
-        self.components["text_encoder"].lm_head = nn.Identity()
+
+
+class TextEncoderComponents(TypedDict):
+    text_encoder: Qwen2_5_VLForConditionalGeneration
+
+
+class TextEncoderGraph:
+    """The `text_encoder` of a Qwen-Image checkpoint, or of a checkpoint of the encoder alone (Runtime gives one
+    component's config unsectioned)."""
+
+    def __init__(self, config: Config) -> None:
+        section = config.section("text_encoder") if "text_encoder" in config.keys() else config
+        self.text_encoder_config = section.mapping()
+        self.components: TextEncoderComponents = {"text_encoder": _text_encoder(self.text_encoder_config)}
 
 
 def build_processor(  # type: ignore[explicit-any]  # text_encoder: the checkpoint's JSON, as Config.mapping() gives it
     assets: ModelAssets, text_encoder: Mapping[str, Any]
 ) -> Qwen2VLProcessor:
-    """Qwen2.5-VL's processor: the checkpoint's `tokenizer/` files parsed in memory, and the image
-    processor its vision tower reads (Transformers' defaults at the tower's patch, merge and frame
-    sizes, which is what Qwen-Image-Edit's `processor/` folder states)."""
+    """Qwen2.5-VL's processor: the checkpoint's `tokenizer/` files (its root's, for one that keeps them there) parsed
+    in memory, and the image processor its vision tower reads (Transformers' defaults at the tower's patch, merge and
+    frame sizes, which is what Qwen-Image-Edit's `processor/` folder states)."""
+    folder = "tokenizer/" if any(name.startswith("tokenizer/") for name in assets.names()) else ""
 
     def read(name: str) -> bytes:
-        return assets.read(f"tokenizer/{name}")
+        return assets.read(folder + name)
 
     config = json.loads(read("tokenizer_config.json"))
     added = config.pop("added_tokens_decoder", {})
@@ -388,8 +409,8 @@ class QwenImageTransformer(Model[TransformerGraph]):
 
 
 class QwenImage(Model[QwenImageGraph]):
-    """A whole Qwen-Image checkpoint (Qwen-Image-2512): it encodes text and references for either
-    DiT, denoises on its own and decodes."""
+    """A whole Qwen-Image checkpoint (Qwen-Image-2512): it encodes references for either DiT, denoises on its own and
+    decodes. A function's `text_encoder` slot is `QwenImageTextEncoder`."""
 
     #: Caller LoRAs on its DiT, as `QwenImageTransformer`'s.
     serving = Serving(loras=("transformer",))
@@ -428,56 +449,8 @@ class QwenImage(Model[QwenImageGraph]):
 
     def _pipeline(self, edit: bool) -> QwenImagePipeline | QwenImageEditPlusPipeline:
         scheduler = construct(FlowMatchEulerDiscreteScheduler, self.graph.scheduler_config)
-        vae, text_encoder = self.graph.components["vae"], self.graph.components["text_encoder"]
-        tokenizer, transformer = self.processor.tokenizer, self.graph.components["transformer"]
-        if edit:
-            return QwenImageEditPlusPipeline(
-                processor=self.processor, scheduler=scheduler, vae=vae, text_encoder=text_encoder,
-                tokenizer=tokenizer, transformer=transformer,
-            )
-        return QwenImagePipeline(
-            scheduler=scheduler, vae=vae, text_encoder=text_encoder, tokenizer=tokenizer, transformer=transformer
-        )
-
-    @memoize
-    @uses_components("text_encoder")
-    def encode(self, prompt: str, images: list[Image.Image]) -> tuple[torch.Tensor, torch.Tensor | None]:
-        """The prompt as upstream reads it, its embeddings and mask (None when every token is
-        valid): with references, the edit template with each at its 384² area; without, the
-        text-to-image template, at most 512 tokens."""
-        device = torch.device(str(self.device))
-        pipeline = self._pipeline(edit=bool(images))
-        with torch.inference_mode(), _last_layer_only(self.graph.components["text_encoder"]):
-            if images:
-                conditions = _conditions(cast(QwenImageEditPlusPipeline, pipeline), images)
-                # With references `_pipeline` is the edit one; Diffusers types its image as one tensor.
-                embeds, mask = pipeline.encode_prompt(prompt, image=conditions, device=device)  # type: ignore[call-arg,arg-type]
-            else:
-                embeds, mask = pipeline.encode_prompt(prompt, device=device, max_sequence_length=TEXT_TOKENS)
-        return embeds.cpu(), None if mask is None else mask.cpu()
-
-    def edit_prompt(self, prompt: str, images: list[Image.Image], rows: int) -> tuple[str, int, int]:
-        """`prompt` as the edit reads it beside `images`, in the DiT's `rows` text rows (`text_rows`): the
-        template and each picture's label and vision tokens first, then as many of the prompt's tokens as fit.
-        Upstream reads any length and fails past its table (se-119). With the tokens kept and given."""
-        pipeline = cast(QwenImageEditPlusPipeline, self._pipeline(edit=True))
-        conditions = _conditions(pipeline, images)
-        labels = "".join(PICTURE.format(n) for n in range(1, len(images) + 1))
-        template, drop = pipeline.prompt_template_encode, pipeline.prompt_template_encode_start_idx
-
-        def length(text: str) -> int:
-            """The text rows Diffusers' `_get_qwen_prompt_embeds` makes of `text`."""
-            said = self.processor(text=[template.format(labels + text)], images=conditions)
-            return len(said["input_ids"][0]) - drop
-
-        tokenizer = self.processor.tokenizer
-        ids: list[int] = tokenizer(prompt)["input_ids"]
-        kept, keep = prompt, len(ids)
-        # A cut can tokenize longer at its edge: measured again until it fits.
-        while keep > 0 and (over := length(kept) - rows) > 0:
-            keep = max(keep - over, 0)
-            kept = tokenizer.decode(ids[:keep])
-        return kept, keep, len(ids)
+        return _upstream(self.processor, self.graph.components["text_encoder"], edit, scheduler=scheduler,
+                         vae=self.graph.components["vae"], transformer=self.graph.components["transformer"])
 
     @memoize
     @uses_components("vae")
@@ -554,6 +527,82 @@ class QwenImage(Model[QwenImageGraph]):
                 )
             pixels = ((image.clamp(-1, 1) * 0.5 + 0.5).clamp(0, 1) * 255).round().to(torch.uint8)
             return Image.fromarray(pixels.permute(1, 2, 0).contiguous().cpu().numpy())
+
+
+def _upstream(
+    processor: Qwen2VLProcessor,
+    text_encoder: Qwen2_5_VLForConditionalGeneration,
+    edit: bool,
+    *,
+    scheduler: FlowMatchEulerDiscreteScheduler | None = None,
+    vae: AutoencoderKLQwenImage | None = None,
+    transformer: QwenImageTransformer2DModel | None = None,
+) -> QwenImagePipeline | QwenImageEditPlusPipeline:
+    """Upstream's text-to-image or edit pipeline over these modules. Encoding reads only the encoder and the
+    processor."""
+    # Diffusers types each module as required; its pipelines take None for one a call does not read.
+    modules: dict[str, Any] = {  # type: ignore[explicit-any]
+        "scheduler": scheduler, "vae": vae, "text_encoder": text_encoder, "tokenizer": processor.tokenizer,
+        "transformer": transformer,
+    }
+    if edit:
+        return QwenImageEditPlusPipeline(processor=processor, **modules)
+    return QwenImagePipeline(**modules)
+
+
+class QwenImageTextEncoder(Model[TextEncoderGraph]):
+    """Qwen-Image's Qwen2.5-VL, the `text_encoder` slot: a Qwen-Image checkpoint's encoder and tokenizer, or a
+    checkpoint of the encoder alone. Only the encoder is built."""
+
+    graph: TextEncoderGraph
+    processor: Qwen2VLProcessor
+
+    def load(self, loader: Loader) -> None:
+        self.graph = loader.construct(TextEncoderGraph)
+        self.processor = build_processor(loader.assets, self.graph.text_encoder_config)
+
+    def _pipeline(self, edit: bool) -> QwenImagePipeline | QwenImageEditPlusPipeline:
+        return _upstream(self.processor, self.graph.components["text_encoder"], edit)
+
+    @memoize
+    @uses_components("text_encoder")
+    def encode(self, prompt: str, images: list[Image.Image]) -> tuple[torch.Tensor, torch.Tensor | None]:
+        """The prompt as upstream reads it, its embeddings and mask (None when every token is
+        valid): with references, the edit template with each at its 384² area; without, the
+        text-to-image template, at most 512 tokens."""
+        device = torch.device(str(self.device))
+        pipeline = self._pipeline(edit=bool(images))
+        with torch.inference_mode(), _last_layer_only(self.graph.components["text_encoder"]):
+            if images:
+                conditions = _conditions(cast(QwenImageEditPlusPipeline, pipeline), images)
+                # With references `_pipeline` is the edit one; Diffusers types its image as one tensor.
+                embeds, mask = pipeline.encode_prompt(prompt, image=conditions, device=device)  # type: ignore[call-arg,arg-type]
+            else:
+                embeds, mask = pipeline.encode_prompt(prompt, device=device, max_sequence_length=TEXT_TOKENS)
+        return embeds.cpu(), None if mask is None else mask.cpu()
+
+    def edit_prompt(self, prompt: str, images: list[Image.Image], rows: int) -> tuple[str, int, int]:
+        """`prompt` as the edit reads it beside `images`, in the DiT's `rows` text rows (`text_rows`): the
+        template and each picture's label and vision tokens first, then as many of the prompt's tokens as fit.
+        Upstream reads any length and fails past its table (se-119). With the tokens kept and given."""
+        pipeline = cast(QwenImageEditPlusPipeline, self._pipeline(edit=True))
+        conditions = _conditions(pipeline, images)
+        labels = "".join(PICTURE.format(n) for n in range(1, len(images) + 1))
+        template, drop = pipeline.prompt_template_encode, pipeline.prompt_template_encode_start_idx
+
+        def length(text: str) -> int:
+            """The text rows Diffusers' `_get_qwen_prompt_embeds` makes of `text`."""
+            said = self.processor(text=[template.format(labels + text)], images=conditions)
+            return len(said["input_ids"][0]) - drop
+
+        tokenizer = self.processor.tokenizer
+        ids: list[int] = tokenizer(prompt)["input_ids"]
+        kept, keep = prompt, len(ids)
+        # A cut can tokenize longer at its edge: measured again until it fits.
+        while keep > 0 and (over := length(kept) - rows) > 0:
+            keep = max(keep - over, 0)
+            kept = tokenizer.decode(ids[:keep])
+        return kept, keep, len(ids)
 
 
 def _decoded(vae: AutoencoderKLQwenImage, z: torch.Tensor) -> torch.Tensor:

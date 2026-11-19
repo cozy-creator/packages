@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import io
 from collections.abc import Callable
+from types import SimpleNamespace
 from typing import TypedDict, cast
 
 import numpy as np
@@ -20,6 +21,7 @@ from cozy_runtime.author import (
     Config,
     Loader,
     Model,
+    ModelAssets,
     OutputError,
     Serving,
     Telemetry,
@@ -97,22 +99,60 @@ class _Staged(BriaFibo2Pipeline):
         raise _Encoded
 
 
+def _text_encoder(config: Config) -> Qwen3VLForConditionalGeneration:
+    """Qwen3-VL from a checkpoint's `text_encoder` section, or from the whole config of a checkpoint of the encoder
+    alone (Runtime gives one component's config unsectioned). The pipeline reads hidden states only: the
+    language-model head is never built."""
+    section = config.section("text_encoder") if "text_encoder" in config.keys() else config
+    with transformer_init.no_init_weights():
+        text_encoder: Qwen3VLForConditionalGeneration = AutoModelForImageTextToText.from_config(  # type: ignore[no-untyped-call]  # Transformers' auto classes are unannotated
+            Qwen3VLConfig(**section.mapping()), dtype=torch.bfloat16
+        )
+    text_encoder.lm_head = torch.nn.Identity()
+    return text_encoder
+
+
+def _processor_config(config: Config) -> dict[str, object]:
+    """The processor folder's config file, which TensorFS keeps as its component's config; none without one."""
+    return config.section("processor").mapping() if "processor" in config.keys() else {}
+
+
+def _processor(assets: ModelAssets, config: dict[str, object]) -> Qwen3VLProcessor:
+    """Qwen3-VL's processor from the checkpoint's `processor/` folder, or its root when it keeps the files there."""
+    folder = "processor/" if any(name.startswith("processor/") for name in assets.names()) else ""
+    return cast(Qwen3VLProcessor, vlm.processor(assets, folder, config))
+
+
 class FiboGraph:
     def __init__(self, config: Config) -> None:
+        text_encoder = _text_encoder(config)
         with transformer_init.no_init_weights():
-            text_encoder: Qwen3VLForConditionalGeneration = AutoModelForImageTextToText.from_config(  # type: ignore[no-untyped-call]  # Transformers' auto classes are unannotated
-                Qwen3VLConfig(**config.section("text_encoder").mapping()), dtype=torch.bfloat16
-            )
             self.components: Components = {
                 "transformer": _to(construct(BriaFibo2Transformer2DModel, config.section("transformer").mapping()), torch.bfloat16),
                 "text_encoder": text_encoder,
                 "vae": _to(construct(AutoencoderKLFlux2, config.section("vae").mapping()), torch.float32),
             }
-        # The pipeline reads hidden states only: the language-model head is never built.
-        text_encoder.lm_head = torch.nn.Identity()
         self.scheduler_config: dict[str, object] = config.section("scheduler").mapping()
-        # The processor folder's config file, which TensorFS keeps as its component's config.
-        self.processor_config: dict[str, object] = config.section("processor").mapping()
+        self.processor_config = _processor_config(config)
+
+
+class TextEncoderComponents(TypedDict):
+    text_encoder: Qwen3VLForConditionalGeneration
+
+
+class Fibo2TextEncoderGraph:
+    """The `text_encoder` of a Fibo 2.0 checkpoint, or a checkpoint of the encoder alone, and its processor's config."""
+
+    def __init__(self, config: Config) -> None:
+        self.components: TextEncoderComponents = {"text_encoder": _text_encoder(config)}
+        self.processor_config = _processor_config(config)
+
+
+class _NoDiT:
+    """The DiT as the text encoder's run reads it: only its `in_channels`, for the latents the run stops at
+    (`_Staged.prepare_latents`)."""
+
+    config = SimpleNamespace(in_channels=0)
 
 
 class Components(TypedDict):
@@ -131,6 +171,46 @@ def _to[M: torch.nn.Module](module: M, dtype: torch.dtype) -> M:
     return module.to(dtype=dtype)
 
 
+class Fibo2TextEncoder(Model[Fibo2TextEncoderGraph]):
+    """Fibo 2.0's Qwen3-VL, the `text_encoder` slot: a Fibo 2.0 checkpoint's encoder and processor, or a checkpoint of
+    the encoder alone. Only the encoder is built."""
+
+    graph: Fibo2TextEncoderGraph
+    processor: Qwen3VLProcessor
+
+    def load(self, loader: Loader) -> None:
+        self.graph = loader.construct(Fibo2TextEncoderGraph)
+        self.processor = _processor(loader.assets, self.graph.processor_config)
+
+    @memoize
+    @uses_components("text_encoder")
+    def encode(
+        self, prompt: str, images: list[Image.Image], *, width: int, height: int, guidance: float, negative: str | None,
+        fonts: tuple[bytes, ...],
+    ) -> dict[str, Encoding]:
+        """Every encoding the pipeline's call makes, by its part in the sampler: `prompt` (with the
+        images to edit and the caption's text images, drawn in `fonts`, the DiT checkpoint's), `base` (a
+        generation's caption without its text images) and `negative` (with CFG). `__call__` encodes them
+        in that order."""
+        pipe = _Staged(transformer=_NoDiT(), scheduler=None, vae=None,  # type: ignore[arg-type]  # the run stops before the DiT, its scheduler and the VAE
+                       text_encoder=self.graph.components["text_encoder"], processor=self.processor)
+        pipe.stage_device = torch.device(str(self.device))
+        pipe.encoded = []
+        try:
+            with torch.inference_mode():
+                pipe(prompt=prompt, image=images or None, width=width, height=height, guidance_scale=guidance,
+                     negative_prompt=negative, fonts=[io.BytesIO(font) for font in fonts], output_type="latent")
+        except _Encoded:
+            first, *rest = pipe.encoded
+            roles = {"prompt": first}
+            if guidance > 1.0:
+                roles["negative"] = rest.pop()
+            if rest:
+                roles["base"] = rest.pop()
+            return roles
+        raise RuntimeError("the pipeline never reached its latents")
+
+
 class Fibo2(Model[FiboGraph]):
     """One Fibo 2.0 checkpoint: Dev (CFG) or Edit Turbo (4 steps, no guidance)."""
 
@@ -143,7 +223,7 @@ class Fibo2(Model[FiboGraph]):
 
     def load(self, loader: Loader) -> None:
         self.graph = loader.construct(FiboGraph)
-        self.processor = cast(Qwen3VLProcessor, vlm.processor(loader.assets, "processor/", self.graph.processor_config))  # Qwen3-VL's folder
+        self.processor = _processor(loader.assets, self.graph.processor_config)
         self.fonts = tuple(loader.assets.read(name) for name in FONTS)
 
     def _pipeline(self, component: str) -> _Staged:
@@ -163,30 +243,6 @@ class Fibo2(Model[FiboGraph]):
         if torch.device(str(self.device)).type == "cuda" and next(vae.parameters()).dtype != VAE_DTYPE:
             hold_dtype(vae, VAE_DTYPE)
             tel.log("vae representation", dtype=str(VAE_DTYPE).removeprefix("torch."))
-
-    @memoize
-    @uses_components("text_encoder")
-    def encode(
-        self, prompt: str, images: list[Image.Image], *, width: int, height: int, guidance: float, negative: str | None
-    ) -> dict[str, Encoding]:
-        """Every encoding the pipeline's call makes, by its part in the sampler: `prompt` (with the
-        images to edit and the caption's text images), `base` (a generation's caption without its
-        text images) and `negative` (with CFG). `__call__` encodes them in that order."""
-        pipe = self._pipeline("text_encoder")
-        try:
-            with torch.inference_mode():
-                pipe(prompt=prompt, image=images or None, width=width, height=height, guidance_scale=guidance,
-                     negative_prompt=negative, fonts=[io.BytesIO(font) for font in self.fonts],
-                     output_type="latent")
-        except _Encoded:
-            first, *rest = pipe.encoded
-            roles = {"prompt": first}
-            if guidance > 1.0:
-                roles["negative"] = rest.pop()
-            if rest:
-                roles["base"] = rest.pop()
-            return roles
-        raise RuntimeError("the pipeline never reached its latents")
 
     @memoize
     @uses_components("vae")

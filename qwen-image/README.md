@@ -46,8 +46,9 @@ Chinese quality negative, and Qwen-Image-Edit-2511's single space. With pictures
 `model` binds the text-to-image DiT and the VAE of a Qwen-Image checkpoint, and `text_encoder` its text encoder:
 Qwen2.5-VL-7B-Instruct, stock in both Qwen checkpoints. Its default is abliterated (Paul, 11-17: "use abliterated
 models wherever possible"): [coder3101's Heretic](https://huggingface.co/coder3101/Qwen2.5-VL-7B-Instruct-heretic)
-(`coder3101/qwen2.5-vl-7b-instruct-heretic`, 5/100 refusals against 100/100, KL 0.016), composed on
-Qwen-Image-2512. Qwen's own is any Qwen-Image checkpoint: `--model text_encoder=qwen/qwen-image-2512@0.1.1`.
+(`coder3101/qwen2.5-vl-7b-instruct-heretic`, 5/100 refusals against 100/100, KL 0.016). Its 0.2.0 holds the encoder
+and its tokenizer alone, coder3101's work only (se-160), and the slot (`QwenImageTextEncoder`) builds only the encoder, so
+Qwen's own is any Qwen-Image checkpoint: `--model text_encoder=qwen/qwen-image-2512@0.1.1`.
 `edit_model` binds only the edit checkpoint's DiT, and the first request with references fetches and
 builds it (and `edit_turbo_lora`). Runtime keeps each DiT's residency: going from one to the other
 pages weights, it does not reload them. `--lane` picks the lane of `model`; the edit DiT takes the
@@ -111,8 +112,12 @@ cozy model publish qwen/qwen-image-2512 <version> sha256:<bf16 commit> sha256:<i
 cozy model upload hf://coder3101/Qwen2.5-VL-7B-Instruct-heretic@7c9234bfdb274f4cc922dc39a5b8484b02b06248/model.safetensors.index.json \
   coder3101/qwen2.5-vl-7b-instruct-heretic --lane bf16 --base qwen/qwen-image-2512@sha256:<bf16 commit>:text_encoder \
   --mirror https://huggingface.co/coder3101/Qwen2.5-VL-7B-Instruct-heretic --on <machine>
-cozy model quantize coder3101/qwen2.5-vl-7b-instruct-heretic@sha256:<bf16 commit> --lane int8 --package qwen-image --on <machine>
+cozy model upload --lane bf16 'coder3101/qwen2.5-vl-7b-instruct-heretic@sha256:<bf16 commit>:text_encoder,tokenizer' \
+  coder3101/qwen2.5-vl-7b-instruct-heretic --mirror https://huggingface.co/coder3101/Qwen2.5-VL-7B-Instruct-heretic --on <machine>
 ```
+
+The last line keeps the encoder and its tokenizer alone: a header-only cut, the same chunks. The int8 recipe leaves the
+encoder bf16, so its one bf16 lane serves an int8 run too.
 
 The edit checkpoint is `hf://Qwen/Qwen-Image-Edit-2511@6f3ccc0b56e431dc6a0c2b2039706d7d26f22cb9`, its
 LoRA `hf://lightx2v/Qwen-Image-Edit-2511-Lightning@107d238d68b8387e32843d0b4a2e24ceb0d3ad86/Qwen-Image-Edit-2511-Lightning-8steps-V1.0-fp32.safetensors`.
