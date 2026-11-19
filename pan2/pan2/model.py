@@ -31,10 +31,10 @@ from transformers import AddedToken, Qwen2Tokenizer, Qwen3_5TextConfig, Qwen3_5T
 FPS = 24
 MAX_FRAMES = 481
 DEFAULT_STEPS = 50
-#: How PAN2's own rewriter runs a local Qwen3.5-9B (ifm-ai/PAN2@0fb907b6 `inference/prompts_rewritter.py`): thinking
-#: off, sampled at temperature 0.2 and top-p 0.9 with Transformers' default top-k 50 (Qwen3.5-9B ships no generation
-#: config), at most 4096 new tokens.
-TEMPERATURE, TOP_P, TOP_K, MAX_NEW_TOKENS = 0.2, 0.9, 50, 4096
+#: How the rewriter decodes: PAN2's agent skill writes its JSON caption with a reasoning agent, and Qwen3.5-9B reasons
+#: in its thinking mode, at its card's settings for it (Best Practices: temperature 1.0, top-p 0.95, top-k 20, presence
+#: penalty 1.5) and its recommended output length, 32,768 tokens, thought and answer together.
+TEMPERATURE, TOP_P, TOP_K, PRESENCE_PENALTY, MAX_NEW_TOKENS = 1.0, 0.95, 20, 1.5, 32768
 #: The caption tokens the encoder reads (Diffusers' `max_sequence_length`, PAN2's `packed_caption_segment_limit`): past
 #: them a caption is cut, as upstream cuts it, with a warning.
 CAPTION_TOKENS = 1536
@@ -185,12 +185,17 @@ class Reasoner(VisionLM):
     """Replicated auxiliary beside the sequence-sharded simulator: PAN2's prompt rewriter."""
 
     @uses_components(COMPONENT)
-    def answer(self, text: str, image: Image.Image | None, *, seed: int, progress: Callable[[int], None]) -> str:
-        """`prompts_rewritter.py`'s `rewrite_prompt`: one user turn and no system turn, `image` before `text` when there
-        is one, thinking off, decoded at its settings (`TEMPERATURE`, ...) from `seed`; the answer stripped."""
-        content: object = [{"type": "image"}, {"type": "text", "text": text}] if image is not None else text
+    def answer(self, system: str, turns: list[str], image: Image.Image | None, *, seed: int,
+               progress: Callable[[int], None]) -> tuple[str, int]:
+        """The assistant's next turn after `turns` (user, assistant, user, ...) under `system`, `image` before the first
+        turn's words: thought first, then the answer, decoded at the card's thinking settings (`TEMPERATURE`, ...) from
+        `seed`. The answer is what follows the thought, empty when the thought takes the whole budget; and the tokens
+        decoded."""
+        content = [*([{"type": "image"}] if image is not None else []), {"type": "text", "text": turns[0]}]
+        messages: list[dict[str, object]] = [{"role": "system", "content": system}, {"role": "user", "content": content}]
+        messages += [{"role": "assistant" if i % 2 else "user", "content": turn} for i, turn in enumerate(turns[1:], 1)]
         chat: str = self.processor.apply_chat_template(  # type: ignore[arg-type, unused-ignore]  # content as parts
-            [{"role": "user", "content": content}], add_generation_prompt=True, tokenize=False, enable_thinking=False,
+            messages, add_generation_prompt=True, tokenize=False, enable_thinking=True,
         )
         model = self.pipe.components[COMPONENT]
         inputs = self.processor(text=[chat], images=[image] if image is not None else None, return_tensors="pt").to(model.device)
@@ -201,8 +206,11 @@ class Reasoner(VisionLM):
         ends = [tokenizer.eos_token_id, *(configured if isinstance(configured, list) else [configured])]
         stop = [token for token in dict.fromkeys(ends) if isinstance(token, int)]
         out = lm.generate(model, inputs, max_new_tokens=MAX_NEW_TOKENS, stop=stop, pad=stop[0], temperature=TEMPERATURE,
-                          top_p=TOP_P, top_k=TOP_K, seed=seed, progress=progress)
-        return str(tokenizer.decode(out[0], skip_special_tokens=True, clean_up_tokenization_spaces=False)).strip()
+                          top_p=TOP_P, top_k=TOP_K, presence_penalty=PRESENCE_PENALTY, seed=seed, progress=progress)
+        ids = [int(token) for token in out[0].tolist()]
+        closed = tokenizer.convert_tokens_to_ids("</think>")
+        answer = ids[len(ids) - ids[::-1].index(closed):] if closed in ids else []
+        return str(tokenizer.decode(answer, skip_special_tokens=True, clean_up_tokenization_spaces=False)).strip(), len(ids)
 
 
 @sequence_parallel(degrees=(2, 4, 8))

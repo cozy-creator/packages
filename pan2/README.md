@@ -17,13 +17,16 @@ cozy run pan2/generate instructions='<opening> A hand lifts the cup.' \
   'references:=[{"name": "opening", "image": "opening.webp"}]'
 ```
 
-The prompt rewriter is PAN2's own for a local model (ifm-ai/PAN2@0fb907b6 `inference/prompts_rewritter.py`): Qwen3.5-9B,
-huihui-ai's abliterated one (`huihui-ai/huihui-qwen3.5-9b-abliterated`, refusals removed) by default, or Qwen's own with
-`--model reasoner=qwen/qwen3.5-9b@0.2.0`. Its instruction and the request go in one user turn (the first frame before them
-with its "Reference image" line when one is mentioned), thinking off, sampled at temperature 0.2 and top-p 0.9 from the
-render's seed, and its dense natural-language caption is used as written. Ours alone: an empty answer renders the
-instructions as written, with a warning. PAN2's agent skill (`inference/pan-prompt-rewriter/`, a structured JSON caption
-for a reasoning agent) is the other upstream path; with a thinking model it is a possible later improvement, unmeasured.
+The prompt rewriter writes PAN2's structured, timed caption as PAN2's agent skill does (ifm-ai/PAN2@0fb907b6
+`inference/pan-prompt-rewriter/`): its `system_prompt.md` unchanged, the request as a `{"original_prompt", "duration_sec"}`
+record (the first frame before it when one is mentioned), the reply checked as its `prompt_tools.py` checks it (one
+`refined_prompt`, the seven-key caption over the whole duration, at most 1480 encoder tokens), and a refused reply sent back
+once with the checks' receipt. The skill is for a reasoning agent, so the model reasons first: Qwen3.5-9B in thinking mode at
+its card's settings (temperature 1.0, top-p 0.95, top-k 20, presence penalty 1.5, 32,768 tokens), huihui-ai's abliterated
+one (`huihui-ai/huihui-qwen3.5-9b-abliterated`) by default, or Qwen's own with `--model reasoner=qwen/qwen3.5-9b@0.2.0`.
+Ours alone: if the correction is refused too, the video renders the instructions as written, with a warning. PAN2's
+`inference/prompts_rewritter.py` (prose captions for a local model) is not used: its prose captions rendered unusable
+video against PAN2's structured training captions (xs-222).
 `prompt_upsampling: false` sends the instructions to the encoder as written, as PAN2's `generate.py` does. The encoder
 reads 1536 caption tokens; past them a caption is cut, with a warning, as upstream cuts it. The returned `prompt` is the actual caption used.
 

@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import json
 import math
 import secrets
+from decimal import Decimal
 from pathlib import Path
 from typing import Annotated
 
@@ -14,6 +16,7 @@ from cozy_runtime.media import VideoFile
 from PIL.Image import Image as Picture
 
 from . import quantize as quantize  # its recipe
+from .caption import POSITIVE_SOFT_LIMIT, authored
 from .model import CAPTION_TOKENS, DEFAULT_STEPS, FPS, Pan2, Reasoner
 
 app = App()
@@ -26,11 +29,11 @@ TEXT_ENCODER = "pottokao/moss-image-text-encoder-heretic-pan2@0.1.0"
 
 from . import lanes as lanes  # noqa: E402  # the `curve` lane function; it registers on `app`
 
-#: PAN2's own rewriter for a local model, its instruction unchanged (ifm-ai/PAN2@0fb907b6
-#: `inference/prompts_rewritter.py` `REWRITE_SYSTEM_PROMPT`, Apache-2.0).
-REWRITE = Path(__file__).with_name("prompts_rewritter.txt").read_text()
-#: Its line before the request when the first frame is attached (`build_messages`).
-FIRST_FRAME = "Reference image: the attached image is the exact first visible frame for this image-to-video rewrite."
+#: PAN2's prompt rewriter policy, its agent skill's `inference/pan-prompt-rewriter/system_prompt.md`
+#: (ifm-ai/PAN2@0fb907b6, Apache-2.0), unchanged: the system turn of every rewrite.
+REWRITE = Path(__file__).with_name("system_prompt.md").read_text()
+#: Replies asked for: the first, and one correction (the policy's "When the caller requests a correction").
+ATTEMPTS = 2
 
 
 class Generate(msgspec.Struct, kw_only=True):
@@ -75,19 +78,42 @@ def names(text: str) -> str:
     return MENTION.sub(lambda found: found[1].replace(".", " "), text).strip()
 
 
-def rewrite(ctx: Context, reasoner: Reasoner, prompt: str, picture: Picture | None, seed: int, adj: Adjustments,
-            tel: Telemetry) -> str:
-    """`prompt` as PAN2's own rewriter writes it for a local model (`prompts_rewritter.py`): its instruction and the
-    request in one user turn, the first frame before them with its line; the caption used as written. Ours alone: an
-    empty answer, which upstream exits on, renders `prompt` as written, with a warning."""
-    instruction = REWRITE.strip()
-    text = f"{instruction}\n\n{FIRST_FRAME}\n\nInput text:\n{prompt}" if picture else f"{instruction}\n\nInput text:\n{prompt}"
-    caption = reasoner.answer(text, picture, seed=seed, progress=lambda _: ctx.raise_if_cancelled())
-    if not caption:
-        adj.warn("prompt_upsampling", "PAN2's prompt rewriter returned nothing, so the video renders the instructions as written")
-        return prompt
-    tel.log("action timeline", caption=caption[:2000])
-    return caption
+def checked(reply: str, seconds: int, encoder: Pan2) -> tuple[str | None, dict[str, object]]:
+    """`reply`'s positive caption, as PAN2's rewriter tool accepts one (`caption.authored` and the soft limit), or None
+    and what its checks say, in its validation receipt's words."""
+    try:
+        positive = authored(reply, Decimal(seconds))
+    except ValueError as exc:
+        return None, {"errors": [str(exc)]}
+    tokens = encoder.caption_tokens(positive)
+    if tokens > POSITIVE_SOFT_LIMIT:
+        return None, {"errors": ["Token budget exceeded; revise only the positive when needed"],
+                      "positive_tokens": tokens, "positive_soft_limit": POSITIVE_SOFT_LIMIT}
+    return positive, {}
+
+
+def rewrite(ctx: Context, reasoner: Reasoner, encoder: Pan2, prompt: str, picture: Picture | None, seconds: int,
+            seed: int, adj: Adjustments, tel: Telemetry) -> str:
+    """`prompt` as PAN2's agent skill writes it (`inference/pan-prompt-rewriter/`): the request as one
+    `{"original_prompt", "duration_sec"}` record, the first frame before it, under its policy (`REWRITE`), by a model
+    that reasons first (`Reasoner.answer`); the reply checked as its `prompt_tools.py` checks it. A refused reply goes
+    back once, as the policy's caller corrects one: the reply as the assistant's turn, then the checks' receipt. Ours
+    alone: if the correction is refused too, the video renders `prompt` as written, with a warning."""
+    turns = [json.dumps({"original_prompt": prompt, "duration_sec": seconds}, ensure_ascii=False)]
+    why: list[str] = []
+    for attempt in range(1, ATTEMPTS + 1):
+        reply, decoded = reasoner.answer(REWRITE, turns, picture, seed=seed, progress=lambda _: ctx.raise_if_cancelled())
+        positive, said = checked(reply, seconds, encoder)
+        if positive is not None:
+            tel.log("action timeline", attempts=attempt, tokens=decoded)
+            return positive
+        errors = said.get("errors")
+        why.append(str(errors[0]) if isinstance(errors, list) and errors else "refused")
+        turns += [reply, json.dumps(said, ensure_ascii=False)]
+    adj.warn("prompt_upsampling", f"PAN2's prompt rewriter wrote no caption its checks accept (reply: {why[0]}; "
+                                  f"correction: {why[-1]}), so the video renders the instructions as written")
+    tel.log("action timeline", parsed=False, why=why, answer=turns[-2][-2000:], attempts=ATTEMPTS)
+    return prompt
 
 
 # The reasoner only for a request that upsamples, which it rewrites into the event timeline (cl-1103). It is
@@ -114,7 +140,7 @@ def generate(ctx: Context, payload: Generate, model: Pan2, text_encoder: Pan2, r
         raise InvalidRequest("PAN2 needs instructions: the scene and its actions", fields=["instructions"])
     if payload.prompt_upsampling:
         with tel.stage("writing action timeline"):
-            prompt = rewrite(ctx, reasoner, prompt, picture, seed, adj, tel)
+            prompt = rewrite(ctx, reasoner, text_encoder, prompt, picture, (frames - 1) // FPS, seed, adj, tel)
     if (tokens := text_encoder.caption_tokens(prompt)) > CAPTION_TOKENS:
         adj.warn("prompt_upsampling" if payload.prompt_upsampling else "instructions",
                  f"PAN2 reads {CAPTION_TOKENS} caption tokens and this caption has {tokens}, so the rest is cut")
