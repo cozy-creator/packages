@@ -64,5 +64,23 @@
       "runtime": "0.48.0.dev2346+g051d106f"
     },
     "note": "pod-session 44407668658 cap-sweep/small-a: cold PRO-74, warm PRO-75; small: a one-line instruction, default max_tokens; gemm cozy.int8-convrot256.native-leaf/1, cozy.w4a8-convrot256.native-leaf/1"
+  },
+  {
+    "function": "write",
+    "gpus": 0,
+    "cpu": "Intel(R) Xeon(R) 6975P-C",
+    "cores": 2,
+    "threads": 4,
+    "request": {},
+    "lane": "bf16",
+    "model": "huihui-ai/huihui-qwen3.5-0.8b-abliterated@0.1.0",
+    "warm_ms": 4449,
+    "cold_ms": 10107,
+    "peak_host_bytes": 4596850688,
+    "ran_on": {
+      "cozy": "0.27.0-dev+gb6b5ad24",
+      "runtime": "0.48.0.dev2347+g24fb6ecc"
+    },
+    "note": "pod-session 44432101984 (cl-1279): GitHub ubuntu-24.04 runner, 4 threads; warm again 4474 ms"
   }
 ]
