@@ -18,9 +18,11 @@ It takes pictures as Anima's does:
 - A picture whose subject is a face steers its identity instead, through h94's
   [IP-Adapter-FaceID-PlusV2](https://huggingface.co/h94/IP-Adapter-FaceID) and its LoRA: insightface's buffalo_l finds
   the face (SCRFD-10G) and gives its ArcFace identity, and ViT-H reads the face aligned at 224². The face is the
-  subject when it is insightface's main face, no other is half its area, and it is at least 1/8 of the picture's height
-  (a standing figure is 8 heads, so framed closer than full length); and it is read only if aligning it to ArcFace's
-  112² template doesn't enlarge it. At the default `reference_strength` it runs at its authors' scale
+  subject when it is insightface's main face, no other is half its area, and it is at least 1/3 of the picture's height
+  (a head-and-shoulders portrait, by photographic convention); and it is read only if aligning it to ArcFace's 112²
+  template doesn't enlarge it. Wider framings keep Plus, where FaceID lost (a full-length figure, se-175). Known limit:
+  close-framed paintings and 3D portraits still go to FaceID and may lose their painted or rendered style (FaceID made
+  se-175's painted woman a cartoon; no reference-only signal tells a painted face from a photographed one). At the default `reference_strength` it runs at its authors' scale
   1 (its scale is 2.5 times `reference_strength`). A face A/B (se-175): ArcFace similarity 0.65 against Plus's 0.42, the
   words still followed. Pictures without such a face keep Plus, beside it in the same request. Plus over the whole face
   picture stacked with FaceID was measured and not taken: it redraws the reference past the words (CLIP text score 13.9

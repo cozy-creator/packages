@@ -39,9 +39,10 @@ TEMPLATE = np.array([[38.2946, 51.6963], [73.5318, 51.5014], [56.0252, 71.7366],
                      [70.7299, 92.2041]], dtype=np.float64)  # fmt: skip
 #: A face is the picture's subject when it is the main face (insightface's `detect` ranking: area less twice its centre's
 #: squared offset from the picture's), no other face is half its area (FaceID takes one identity), and it is at least
-#: this share of the picture's height: the figure-drawing canon's 8 heads to a standing figure, so a figure framed
-#: closer than full length. A full-length figure, a crowd or a background face keeps Plus, its body and scene with it.
-HEADS = 8
+#: this share of the picture's height: a head-and-shoulders portrait, by photographic convention. FaceID lost to Plus
+#: wider (se-175: a full-length figure at 0.13), so a medium shot, a full-length figure, a crowd or a background face
+#: keeps Plus, its body, outfit and scene with it.
+FRAMING = 1 / 3
 
 
 def _conv(inputs: int, outputs: int, kernel: int = 3, stride: int = 1) -> nn.Conv2d:
@@ -201,7 +202,7 @@ class Face:
 
 
 def subject(faces: Sequence[Face], width: int, height: int) -> Face | None:
-    """The face that is the picture's subject (`HEADS`), if one is."""
+    """The face that is the picture's subject (`FRAMING`), if one is."""
 
     def rank(face: Face) -> float:
         x, y = (face.box[0] + face.box[2]) / 2 - width // 2, (face.box[1] + face.box[3]) / 2 - height // 2
@@ -212,7 +213,7 @@ def subject(faces: Sequence[Face], width: int, height: int) -> Face | None:
     main = max(faces, key=rank)
     if any(face is not main and face.area * 2 >= main.area for face in faces):
         return None
-    return main if (main.box[3] - main.box[1]) * HEADS >= height else None
+    return main if main.box[3] - main.box[1] >= FRAMING * height else None
 
 
 def readable(face: Face) -> bool:
