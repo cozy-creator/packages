@@ -164,8 +164,8 @@ wheels = [
 
 [[package]]
 name = "cozy-runtime"
-version = "0.49.0.dev2388+g69d526d2"
-source = { url = "https://github.com/cozy-creator/cozy-runtime/releases/download/rc-0.28.0/cozy_runtime-0.49.0.dev2388+g69d526d2-py3-none-any.whl" }
+version = "0.49.0.dev2390+g7020b11a"
+source = { url = "https://github.com/cozy-creator/cozy-runtime/releases/download/rc-0.28.0/cozy_runtime-0.49.0.dev2390+g7020b11a-py3-none-any.whl" }
 dependencies = [
     { name = "msgspec" },
     { name = "numpy" },
@@ -175,7 +175,7 @@ dependencies = [
     { name = "tensorfs", version = "0.28.0.dev3490+g88b4c22a", source = { url = "https://github.com/cozy-creator/cozy-creator/releases/download/rc-0.28.0/tensorfs-0.28.0.dev3490+g88b4c22a-cp311-abi3-manylinux_2_28_x86_64.whl" }, marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
 ]
 wheels = [
-    { url = "https://github.com/cozy-creator/cozy-runtime/releases/download/rc-0.28.0/cozy_runtime-0.49.0.dev2388+g69d526d2-py3-none-any.whl", hash = "sha256:5deedc3ede596e24779f9867d462df168ee5ea9c8fec50dc5fc4ca65e20ece20" },
+    { url = "https://github.com/cozy-creator/cozy-runtime/releases/download/rc-0.28.0/cozy_runtime-0.49.0.dev2390+g7020b11a-py3-none-any.whl", hash = "sha256:caa89300128d9feb27b39554c59a2488df029d770b4fa6d424b7527a073ae40e" },
 ]
 
 [package.optional-dependencies]
@@ -376,7 +376,7 @@ wheels = [
 
 [[package]]
 name = "minimax-h3-image"
-version = "0.3.0rc2"
+version = "0.3.0rc3"
 source = { editable = "." }
 dependencies = [
     { name = "cozy-runtime", extra = ["adapters", "media"] },
@@ -391,7 +391,7 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
-    { name = "cozy-runtime", extras = ["adapters", "media"], url = "https://github.com/cozy-creator/cozy-runtime/releases/download/rc-0.28.0/cozy_runtime-0.49.0.dev2388+g69d526d2-py3-none-any.whl" },
+    { name = "cozy-runtime", extras = ["adapters", "media"], url = "https://github.com/cozy-creator/cozy-runtime/releases/download/rc-0.28.0/cozy_runtime-0.49.0.dev2390+g7020b11a-py3-none-any.whl" },
     { name = "diffusers", specifier = ">=0.41,<0.42" },
     { name = "msgspec", specifier = ">=0.19" },
     { name = "numpy", specifier = ">=1.26" },
