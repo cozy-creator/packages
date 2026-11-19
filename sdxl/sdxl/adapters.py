@@ -169,7 +169,8 @@ class ImageEncoder(Model[EncoderGraph]):
 #: The IP-Adapter's components, as ingest lays out h94's file (TensorFS's `ipadapter.sdxl`, Diffusers' loader's layout):
 #: `image_proj` is Diffusers' `IPAdapterPlusImageProjection` with its arguments as config, `ip_adapter` each cross-attention's
 #: image key and value.
-PROJECTION, SITES = "image_proj", "ip_adapter"
+PROJECTION = "image_proj"
+SITES = "ip_adapter"
 
 
 class _Site(nn.Module):
