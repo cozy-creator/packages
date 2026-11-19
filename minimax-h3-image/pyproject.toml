@@ -1,6 +1,6 @@
 [project]
 name = "minimax-h3-image"
-version = "0.2.0rc2"
+version = "0.2.0"
 description = "MiniMax-H3-Image, MiniMax's image model: text to image, or an edit of up to 16 pictures, at 16 MP in 6 steps"
 requires-python = ">=3.12,<3.15"
 dependencies = [
