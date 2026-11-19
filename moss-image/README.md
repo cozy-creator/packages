@@ -20,8 +20,9 @@ identity edit.
 **Control.** `control` takes maps of kind `pose` (a DWPose skeleton, colored bones on black), `depth` (near is white),
 `canny`, `lineart` or `sketch` (white lines on black), each `{image, kind, strength}`. The first with a strength above 0
 runs under thedeoxen's control LoRA of its kind (`thedeoxen/moss-image-<kind>-controlnet`, `sketch` their scribble
-one; built in, at the control's strength; `generate` and the Image tool are CPU roots whose GPU call is `text_to_image`,
-or `control` with the LoRA stacked). They are AI-Toolkit edit LoRAs, so the map, resized to the picture, is the one
+one, at the control's strength; `generate` and the Image tool are CPU roots whose GPU call is `text_to_image`, or
+`control` with the LoRA stacked). Each kind's LoRA, and the edit one, is a slot's default (`pose`, `depth`, `canny`,
+`lineart`, `sketch`, `edit_lora`), fetched only for a request that uses it, and a box's `models.<slot>` replaces it. They are AI-Toolkit edit LoRAs, so the map, resized to the picture, is the one
 reference (at t = 0, the image beside it at f = 0, the text before it), and Qwen3.5's vision tower reads it too
 (`Picture 1: ` before the prompt, at most 384² pixels), in both CFG branches. The picture is the map's size unless
 `aspect_ratio` or `megapixels` say otherwise, as in their workflows. 30 Euler steps at CFG 4, as their workflows; the
