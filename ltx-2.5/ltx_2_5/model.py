@@ -198,6 +198,12 @@ class Ltx25(Model[Graph]):
         pipe.set_progress_bar_config(disable=True)  # type: ignore[no-untyped-call]  # Diffusers leaves progress configuration unannotated.
         return pipe
 
+    @memoize
+    @uses_components("text_encoder")
+    def encode(self, prompt: str) -> tuple[torch.Tensor, torch.Tensor]:
+        """The checkpoint's own encoder; `generate` encodes with its `text_encoder` slot (`Ltx25TextEncoder`)."""
+        return encode_prompt(self.graph.components["text_encoder"], self.tokenizer, prompt, torch.device(str(self.device)))
+
     @uses_components("transformer", "connectors", "vae", "audio_vae")
     def denoise(self, embeds: tuple[torch.Tensor, torch.Tensor], image: Image.Image | None, *, width: int, height: int,
                 frames: int, generator: torch.Generator, check: Callable[[], None], progress: Callable[[int], None],
