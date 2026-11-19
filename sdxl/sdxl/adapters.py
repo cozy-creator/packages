@@ -1,13 +1,13 @@
-"""SDXL's picture adapters, each its author's file uploaded as it is (se-175):
+"""SDXL's picture adapters (se-175):
 
 - xinsir's ControlNet Union ProMax (`controlnet-union-sdxl-1.0`, `diffusion_pytorch_model_promax`): one ControlNet for
   every control kind, each map steering through its mode's task embedding. Diffusers' `ControlNetUnionModel`, called
   as its `StableDiffusionXLControlNetUnionPipeline` calls it: the maps in 0..1 at the output's size, on both CFG rows.
 - h94's IP-Adapter Plus (`sdxl_models/ip-adapter-plus_sdxl_vit-h`) over LAION's OpenCLIP ViT-H/14, the encoder h94
-  ships as `models/image_encoder` (the same tensors): each picture's penultimate ViT-H tokens through the adapter's
-  Perceiver resampler into 16 tokens, which every UNet cross-attention reads beside the text through Diffusers'
-  `IPAdapterAttnProcessor2_0`, scaled by the request's strength. The unconditional rows read a black picture's tokens,
-  as Diffusers' pipelines do.
+  ships as `models/image_encoder` (the same tensors), as ingest lays it out (TensorFS's `ipadapter.sdxl`): each picture's
+  penultimate ViT-H tokens through Diffusers' `IPAdapterPlusImageProjection` into 16 tokens, which every UNet
+  cross-attention reads beside the text through Diffusers' `IPAdapterAttnProcessor2_0`, scaled by the request's strength.
+  The unconditional rows read a black picture's tokens, as Diffusers' pipelines do.
 """
 
 from __future__ import annotations
@@ -18,10 +18,10 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, TypeVar, cast
 
 import torch
-import torch.nn.functional as F
 from cozy_runtime.author import Config, Loader, Model, Serving, UnsupportedInput, uses_components
 from diffusers.models.attention_processor import IPAdapterAttnProcessor2_0
 from diffusers.models.controlnets.controlnet_union import ControlNetUnionModel
+from diffusers.models.embeddings import IPAdapterPlusImageProjection
 from torch import nn
 from transformers import CLIPImageProcessor, CLIPVisionConfig, CLIPVisionModel
 from transformers import initialization as transformer_init
@@ -166,60 +166,10 @@ class ImageEncoder(Model[EncoderGraph]):
 # ---------------------------------------------------------------- IP-Adapter Plus
 
 
-class _Perceiver(nn.Module):
-    """One resampler layer's attention, in h94's file layout (`layers.N.0`)."""
-
-    def __init__(self, width: int, inner: int) -> None:
-        super().__init__()
-        self.norm1, self.norm2 = nn.LayerNorm(width), nn.LayerNorm(width)
-        self.to_q = nn.Linear(width, inner, bias=False)
-        self.to_kv = nn.Linear(width, 2 * inner, bias=False)
-        self.to_out = nn.Linear(inner, width, bias=False)
-
-
-class _Projection(nn.Module):
-    """IP-Adapter Plus's Perceiver resampler, as h94's file stores it (`image_proj.`)."""
-
-    def __init__(self, config: Config) -> None:
-        super().__init__()
-        key = f"{COMPONENT}.image_proj"
-        _, queries, width = config.tensor_shape(f"{key}.latents", default=(1, 16, 1280))
-        _, embeds = config.tensor_shape(f"{key}.proj_in.weight", default=(width, 1280))
-        outputs, _ = config.tensor_shape(f"{key}.proj_out.weight", default=(2048, width))
-        inner, _ = config.tensor_shape(f"{key}.layers.0.0.to_q.weight", default=(width, width))
-        hidden, _ = config.tensor_shape(f"{key}.layers.0.1.1.weight", default=(4 * width, width))
-        depth = 1
-        while _stored(config, f"{key}.layers.{depth}.0.to_q.weight"):
-            depth += 1
-        #: 64 per head (tencent-ailab's `Resampler`; Diffusers' conversion reads the heads off `to_q` the same way).
-        self.heads = inner // 64
-        self.latents = nn.Parameter(torch.empty(1, queries, width))
-        self.proj_in = nn.Linear(embeds, width)
-        self.attentions = [_Perceiver(width, inner) for _ in range(depth)]
-        self.feeds = [
-            nn.Sequential(nn.LayerNorm(width), nn.Linear(width, hidden, bias=False), nn.GELU(),
-                          nn.Linear(hidden, width, bias=False))
-            for _ in range(depth)
-        ]  # fmt: skip
-        self.layers = nn.ModuleList(nn.ModuleList(pair) for pair in zip(self.attentions, self.feeds, strict=True))
-        self.proj_out = nn.Linear(width, outputs)
-        self.norm_out = nn.LayerNorm(outputs)
-
-    def forward(self, embeds: torch.Tensor) -> torch.Tensor:
-        """[n, 257, 1280] ViT-H tokens to [n, 16, 2048]: Diffusers' `IPAdapterPlusImageProjection`, whose blocks hold
-        `to_kv` as two linears and so read Diffusers' converted names, not the file's."""
-        latents = self.latents.repeat(embeds.shape[0], 1, 1)
-        x = self.proj_in(embeds)
-        for attention, feed in zip(self.attentions, self.feeds, strict=True):
-            tokens = attention.norm1(x)
-            queries = attention.norm2(latents)
-            key, value = attention.to_kv(torch.cat([tokens, queries], dim=1)).chunk(2, dim=-1)
-            q, k, v = (t.unflatten(-1, (self.heads, -1)).transpose(1, 2) for t in (attention.to_q(queries), key, value))
-            attended = F.scaled_dot_product_attention(q, k, v).transpose(1, 2).flatten(2)
-            latents = attention.to_out(attended) + latents
-            latents = feed(latents) + latents
-        out: torch.Tensor = self.norm_out(self.proj_out(latents))
-        return out
+#: The IP-Adapter's components, as ingest lays out h94's file (TensorFS's `ipadapter.sdxl`, Diffusers' loader's layout):
+#: `image_proj` is Diffusers' `IPAdapterPlusImageProjection` with its arguments as config, `ip_adapter` each cross-attention's
+#: image key and value.
+PROJECTION, SITES = "image_proj", "ip_adapter"
 
 
 class _Site(nn.Module):
@@ -233,18 +183,18 @@ class _Site(nn.Module):
 
 class IPGraph:
     def __init__(self, config: Config) -> None:
-        root = nn.Module()
-        root.image_proj = self.projection = _Projection(config)
+        arguments = config.section(PROJECTION).mapping()
+        arguments.pop("_class_name", None)
+        self.projection = IPAdapterPlusImageProjection(**arguments)
         #: h94's numbering: 1, 3, 5, … over the UNet's cross-attentions in `attn_processors` order (Diffusers'
         #: `_convert_ip_adapter_attn_to_diffusers`).
         ids: list[int] = []
-        while _stored(config, f"{COMPONENT}.ip_adapter.{2 * len(ids) + 1}.to_k_ip.weight"):
+        while _stored(config, f"{SITES}.{2 * len(ids) + 1}.to_k_ip.weight"):
             ids.append(2 * len(ids) + 1)
         sites = {}
         for n in ids:
-            width, inputs = config.tensor_shape(f"{COMPONENT}.ip_adapter.{n}.to_k_ip.weight", default=(1280, 2048))
+            width, inputs = config.tensor_shape(f"{SITES}.{n}.to_k_ip.weight", default=(1280, 2048))
             sites[str(n)] = _Site(inputs, width)
-        root.ip_adapter = nn.ModuleDict(sites)
         queries = self.projection.latents.shape[1]
         #: Diffusers' processor per site, its image key and value this file's linears (outside the component tree,
         #: which spells the file).
@@ -257,7 +207,10 @@ class IPGraph:
                 )
             processor.to_k_ip, processor.to_v_ip = nn.ModuleList([site.to_k_ip]), nn.ModuleList([site.to_v_ip])
             self.processors.append(processor)
-        self.components: dict[str, nn.Module] = {COMPONENT: root.to(torch.float16).eval()}
+        self.components: dict[str, nn.Module] = {
+            PROJECTION: _to(self.projection, torch.float16).eval(),
+            SITES: _to(nn.ModuleDict(sites), torch.float16).eval(),
+        }
 
 
 @dataclass(frozen=True)
@@ -296,7 +249,7 @@ class IPAdapter(Model[IPGraph]):
     def load(self, loader: Loader) -> None:
         self.graph = loader.construct(IPGraph)
 
-    @uses_components(COMPONENT)
+    @uses_components(PROJECTION, SITES)
     def tokens(self, embeds: torch.Tensor, empty: torch.Tensor, guided: bool) -> References:
         """The pictures' tokens side by side, [1, n·16, 2048], under the black picture's when CFG runs."""
         projection = self.graph.projection
@@ -307,7 +260,7 @@ class IPAdapter(Model[IPGraph]):
         uncond = projection(empty.to(weight.device, weight.dtype)).flatten(0, 1).unsqueeze(0)
         return References(torch.cat([uncond, cond]))
 
-    @uses_components(COMPONENT)
+    @uses_components(PROJECTION, SITES)
     def armed(self, unet: UNet2DConditionModel, strength: float, body: Callable[[], T]) -> T:
         """`body` with this adapter's weights held and its processors on `unet`'s cross-attentions at `strength`;
         each site's own processor comes back after."""
