@@ -22,7 +22,9 @@ It takes pictures as Anima's does:
   (a standing figure is 8 heads, so framed closer than full length); and it is read only if aligning it to ArcFace's
   112² template doesn't enlarge it. At the default `reference_strength` it runs at its authors' scale
   1 (its scale is 2.5 times `reference_strength`). A face A/B (se-175): ArcFace similarity 0.65 against Plus's 0.42, the
-  words still followed. Pictures without such a face keep Plus, beside it in the same request.
+  words still followed. Pictures without such a face keep Plus, beside it in the same request. Plus over the whole face
+  picture stacked with FaceID was measured and not taken: it redraws the reference past the words (CLIP text score 13.9
+  against FaceID's 28.5 on four photo cells, se-175).
   insightface's models and FaceID are for non-commercial research use only.
 
 Each adapter is a model slot (`controlnet`, `image_encoder`, `ip_adapter`, `faces`, `face_identity`, `face_adapter`,
