@@ -108,31 +108,42 @@ class NaSwinAttention(MMWindowAttention):
         first = 0
         for group in _groups(lengths, GROUP):
             last = first + sum(lengths[w] for w in group)
-            at = rows[first:last]
-            qkv = rearrange(self.proj_qkv.vid(vid.index_select(0, at)), "l (o h d) -> l o h d", o=3, d=self.head_dim)
-            q, k, v = qkv.unbind(1)
-            q, k = self.norm_q.vid(q), self.norm_k.vid(k)
-            if freqs is not None:
-                q, k = (_rotary(freqs[first:last], x) for x in (q, k))
-            o_vid, start = [], 0
-            for count, length in _runs(lengths[w] for w in group):
-                rows_ = slice(start, start + count * length)
-                batch = [
-                    torch.cat([x[rows_].view(count, length, *x.shape[1:]), t.expand(count, *t.shape)], dim=1)
-                    for x, t in ((q, txt_q), (k, txt_k), (v, txt_v))
-                ]
-                o = self.attn(*batch).type_as(q)
-                o_vid.append(o[:, :length].flatten(0, 1))
-                o_txt = o[:, length:].float().sum(0)
-                txt_sum = o_txt if txt_sum is None else txt_sum + o_txt
-                start += count * length
-            o_vid = self.proj_out.vid(rearrange(torch.cat(o_vid) if len(o_vid) > 1 else o_vid[0], "l h d -> l (h d)"))
-            out = o_vid.new_empty((vid.shape[0], o_vid.shape[1])) if out is None else out
-            out.index_copy_(0, at, o_vid)
+            group_freqs = None if freqs is None else freqs[first:last]
+            out, txt_sum = self._group(vid, rows[first:last], [lengths[w] for w in group], group_freqs,
+                                       (txt_q, txt_k, txt_v), out, txt_sum)
             first = last
         assert out is not None and txt_sum is not None
         txt_out = (txt_sum / windows).type_as(txt_q)
         return out, self.proj_out.txt(rearrange(txt_out, "l h d -> l (h d)"))
+
+    def _group(self, vid, at, lengths, freqs, txt, out, txt_sum):
+        """One window group of `forward`: its rows' output written into `out` (made by the first group) and its
+        text output added to `txt_sum`. Its tensors die when it returns, before the next group allocates."""
+        qkv = rearrange(self.proj_qkv.vid(vid.index_select(0, at)), "l (o h d) -> l o h d", o=3, d=self.head_dim)
+        q, k, v = qkv.unbind(1)
+        q, k = self.norm_q.vid(q), self.norm_k.vid(k)
+        if freqs is not None:
+            q, k = (_rotary(freqs, x) for x in (q, k))
+        o_vid, start = [], 0
+        for count, length in _runs(lengths):
+            piece, o_txt = self._run((q, k, v), txt, slice(start, start + count * length), count, length)
+            o_vid.append(piece)
+            txt_sum = o_txt if txt_sum is None else txt_sum + o_txt
+            start += count * length
+        o_vid = self.proj_out.vid(rearrange(torch.cat(o_vid) if len(o_vid) > 1 else o_vid[0], "l h d -> l (h d)"))
+        out = o_vid.new_empty((vid.shape[0], o_vid.shape[1])) if out is None else out
+        out.index_copy_(0, at, o_vid)
+        return out, txt_sum
+
+    def _run(self, qkv, txt, rows, count, length):
+        """`count` windows of `length` rows each with the text, as one batch: the windows' output rows and the
+        text's output summed over them. Its batch dies when it returns, before the next run's is built."""
+        batch = [
+            torch.cat([x[rows].view(count, length, *x.shape[1:]), t.expand(count, *t.shape)], dim=1)
+            for x, t in zip(qkv, txt)
+        ]
+        o = self.attn(*batch).type_as(qkv[0])
+        return o[:, :length].flatten(0, 1), o[:, length:].float().sum(0)
 
 
 #: Video tokens a window group holds at most (whole windows; a longer window is a group alone).
