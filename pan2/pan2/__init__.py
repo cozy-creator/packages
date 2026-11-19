@@ -92,6 +92,20 @@ def checked(reply: str, seconds: int, encoder: Pan2) -> tuple[str | None, dict[s
     return positive, {}
 
 
+def _where(reply: str) -> str:
+    """Proof only (xs-222 row E): where the reply, else its nested caption, stops parsing, and the text around it."""
+    text, layer = reply, "reply"
+    try:
+        inner = json.loads(text)
+        text, layer = (inner.get("refined_prompt") if isinstance(inner, dict) else None), "caption"
+        if not isinstance(text, str):
+            return ""
+        json.loads(text)
+    except json.JSONDecodeError as exc:
+        return f"; {layer} ({len(text)} chars) breaks at {exc.pos}: {text[max(0, exc.pos - 150):exc.pos + 150]!r}"
+    return ""
+
+
 def rewrite(ctx: Context, reasoner: Reasoner, encoder: Pan2, prompt: str, picture: Picture | None, seconds: int,
             seed: int, adj: Adjustments, tel: Telemetry) -> str:
     """`prompt` as PAN2's agent skill writes it (`inference/pan-prompt-rewriter/`): the request as one
@@ -101,19 +115,21 @@ def rewrite(ctx: Context, reasoner: Reasoner, encoder: Pan2, prompt: str, pictur
     alone: if the correction is refused too, the video renders `prompt` as written, with a warning."""
     turns = [json.dumps({"original_prompt": prompt, "duration_sec": seconds}, ensure_ascii=False)]
     why: list[str] = []
+    seen: list[str] = []  # Proof only (xs-222 row E): each turn's length, tokens, tail, and the text at a parse error.
     for attempt in range(1, ATTEMPTS + 1):
         reply, decoded = reasoner.answer(REWRITE, turns, picture, seed=seed, progress=lambda _: ctx.raise_if_cancelled())
+        seen.append(f"[turn {attempt}: {len(reply)} chars, {decoded} tokens{_where(reply)}; ends {reply[-300:]!r}]")
         positive, said = checked(reply, seconds, encoder)
         if positive is not None:
             tel.log("action timeline", attempts=attempt, tokens=decoded)
-            # Proof only (xs-222 row E): whether the first reply passed, and why not.
-            adj.warn("prompt_upsampling", f"rewrite accepted on attempt {attempt}" + (f" (reply: {why[0]})" if why else ""))
+            adj.warn("prompt_upsampling", f"rewrite accepted on attempt {attempt}" + (f" (reply: {why[0]})" if why else "")
+                     + " " + " ".join(seen))
             return positive
         errors = said.get("errors")
         why.append(str(errors[0]) if isinstance(errors, list) and errors else "refused")
         turns += [reply, json.dumps(said, ensure_ascii=False)]
     adj.warn("prompt_upsampling", f"PAN2's prompt rewriter wrote no caption its checks accept (reply: {why[0]}; "
-                                  f"correction: {why[-1]}), so the video renders the instructions as written")
+                                  f"correction: {why[-1]}), so the video renders the instructions as written " + " ".join(seen))
     tel.log("action timeline", parsed=False, why=why, answer=turns[-2][-2000:], attempts=ATTEMPTS)
     return prompt
 
