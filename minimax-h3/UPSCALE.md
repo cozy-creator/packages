@@ -24,9 +24,9 @@ strength: 0.7          # under Advanced: 0.7 (default), 0.8 or 0.909 (NVIDIA's)
   change (0.7 keeps them); small text becomes other letters at every strength (large text stays legible). A prompt
   that says something else is followed more as strength rises.
 - **Strength** is the refine's start noise: lower keeps more of the take and is faster.
-- **Size.** Where a size's rows do not fit the card (2160p 15 s below 80 GB, or a long take), the refine runs in
-  overlapping temporal windows. It holds the take's frames in host memory: about 3 GB per 40 s of 768p source, plus the
-  output (11 GB for 40 s at 1440p). A video already that big comes back as it is.
+- **Size.** A take longer than one 1440p 5 s clip's rows refines in overlapping temporal windows, laid out from the
+  request alone, so it renders the same video on every card. It holds the take's frames in host memory: about 3 GB per
+  40 s of 768p source, plus the output (11 GB for 40 s at 1440p). A video already that big comes back as it is.
 
 Upscaling can restore or synthesize texture; it cannot correct wrong motion or character identity. Review moving
 faces, hands and clothing at normal speed.

@@ -3,8 +3,9 @@ in latent space (`latent_upscaler`), re-noised to its start sigma and refined at
 through the FL2VA DiT under the Regenerate overlay; `open_h3/pipeline.py` `upscale` and `refine`.
 
 The refine is text-only T2VA: `[text | clean silent audio | video]`, CFG 1, Euler on video alone.
-A clip whose rows do not fit one forward refines in overlapping temporal windows that share each
-step's state and blend their velocities (`plan_windows`).
+A clip with more rows than a window holds (`WINDOW_ROWS`) refines in overlapping temporal windows
+that share each step's state and blend their velocities (`plan_windows`): the layout is the
+request's, the same on every card.
 """
 
 from __future__ import annotations
@@ -64,16 +65,15 @@ VIDEO_TAG, TEXT_TAG, AUDIO_TAG = 0, 1, 2
 AUDIO_CHANNELS = 2
 #: Latent frames neighbouring windows share (about one second).
 OVERLAP = 7
-#: The most video rows one forward has refined at a normal step time (1440p 15 s whole, run 20382;
-#: 2160p 15 s in three windows, run 20470): 465k rows (2160p 15 s in two windows on 48 GB, sized
-#: from total memory, run 20476) made no progress in an hour.
-_MOST_ROWS = 107 * 3600
-#: The refine's windows: None, as few as the card's room holds (`_ROW_BYTES` a row); a row count,
-#: windows of at most that many rows from the shape alone, the same on every card (`_MOST_ROWS`).
-WINDOW_ROWS: int | None = None
+#: The most video rows a refine window holds: one 1440p 5 s clip (37 latent frames of 45x80).
+#: The layout changes the picture, so it comes from the request alone, the same on every card
+#: (se-170, Paul 11-18). Sized so a window fits a 6 GiB budget (var-030 section 5.3); against one
+#: window it renders no visibly different video and refines 1.45-2.5x faster on an RTX 4090
+#: (pod-session 44416003091).
+WINDOW_ROWS = 37 * 3600
 #: What a refine holds per packed row at a block's peak: 5.5 bf16 rows of hidden 5376 (its input,
 #: residual, norm and attention output are whole; the Runtime cuts the attention and FFN working
-#: sets). 2160p 15 s whole needs more than 48 GB (run 20468) and runs in three windows on 24 GB.
+#: sets).
 _ROW_BYTES = 11 * 5376
 
 
