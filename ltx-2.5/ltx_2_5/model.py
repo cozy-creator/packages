@@ -12,7 +12,6 @@ import torch
 from cozy_runtime.accel import sequence_parallel
 from cozy_runtime.author import Config, Loader, Model, ModelAssets, Serving, device, memoize, uses_components
 from diffusers.models.autoencoders.autoencoder_kl_ltx2_audio import AutoencoderKLLTX2Audio
-from diffusers.models.autoencoders.autoencoder_kl_ltx2 import AutoencoderKLLTX2Video
 from diffusers.models.transformers.transformer_ltx2 import LTX2VideoTransformer3DModel
 from diffusers.models.condition_embedders.condition_embedder_ltx2 import LTX2TextConnectors
 from diffusers.schedulers.scheduling_flow_match_euler_discrete import FlowMatchEulerDiscreteScheduler
@@ -29,14 +28,13 @@ from transformers import AddedToken, Gemma4UnifiedConfig, Gemma4UnifiedForCondit
 
 from .frames import install as install_frames
 from .frames import per_frame
-from .vae import VideoVAE
+from .vae import VideoPixels, VideoVAE
 from .parallel import install
 
 FPS = 24
 SIGMAS = (1.0, 0.99375, 0.9875, 0.98125, 0.975, 0.909375, 0.725, 0.421875)
 REFINE_SIGMAS = SIGMAS[-3:]
 COMPONENTS = ("transformer", "text_encoder", "connectors", "vae", "audio_vae", "vocoder", "latent_upsampler")
-VideoPixels = np.ndarray[tuple[int, int, int, int], np.dtype[np.uint8]]
 
 
 def stored[T: nn.Module](module: T, component: str, config: Config) -> T:
@@ -76,7 +74,7 @@ class Components(TypedDict):
     transformer: LTX2VideoTransformer3DModel
     text_encoder: Gemma4UnifiedForConditionalGeneration
     connectors: LTX2TextConnectors
-    vae: AutoencoderKLLTX2Video
+    vae: VideoVAE
     audio_vae: AutoencoderKLLTX2Audio
     vocoder: LTX2VocoderWithBWE
     latent_upsampler: LTX2LatentUpsamplerModel
@@ -230,15 +228,7 @@ class Ltx25(Model[Graph]):
     def decode_video(self, latents: torch.Tensor) -> VideoPixels:
         vae = self.graph.components["vae"]
         with torch.inference_mode():
-            pixels = vae.decode(latents.to(vae.dtype), None, return_dict=False)[0]
-        pixels = pixels[0].permute(1, 2, 3, 0)
-        result = np.empty(tuple(pixels.shape), dtype=np.uint8)
-        # A full 20-second 1080p F32 copy is 12 GB. Pointwise conversion needs only a
-        # small frame batch; keeping it bounded preserves the exact rounded RGB8 bytes.
-        for start in range(0, len(pixels), 16):
-            chunk = pixels[start:start + 16].to(dtype=torch.float32, copy=True).add_(1).mul_(127.5).round_().clamp_(0, 255)
-            result[start:start + 16] = chunk.to(torch.uint8).cpu().numpy()
-        return cast(VideoPixels, result)
+            return vae.frames(latents.to(vae.dtype))
 
     @uses_components("audio_vae", "vocoder")
     def decode_audio(self, latents: torch.Tensor) -> tuple[torch.Tensor, int]:
