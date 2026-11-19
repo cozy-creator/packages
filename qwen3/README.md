@@ -5,12 +5,15 @@ Qwen3.6 and Qwen3.8, dense or mixture-of-experts, natively multimodal (Apache-2.
 abliterated (refusals removed); a request picks another by `model`. Decoding is greedy unless `temperature` is set; a
 sampled answer replays from its `seed`, so the same request always gives the same answer, and it is memoized.
 
-`caption` says what a picture or a video shows, in its own question, for a project's Caption: `cozy run qwen3/caption --file images=./character.png`.
-
-`write` is its canvas tool (Write, boxes named `text_1`, …): one answer to a box's `instructions`, which may mention
-pictures and videos (`<dog>`), each shown to the model right after its first mention. It samples at Qwen's instruct
-settings (temperature 0.7, top_p 0.8, presence_penalty 1.5), from a new seed each render unless `seed` is set:
-`cozy run qwen3/write "instructions=Continue: The sea at night"`.
+Its canvas tools, under LLM:
+- **Write** (`write`, boxes named `text_1`, …): one answer to a box's `instructions`, which may mention pictures and
+  videos (`<dog>`), each shown to the model right after its first mention. It samples at Qwen's instruct settings
+  (temperature 0.7, top_p 0.8, presence_penalty 1.5), from a new seed each render unless `seed` is set:
+  `cozy run qwen3/write "instructions=Continue: The sea at night"`.
+- **Caption** (`caption`, boxes named `caption_1`, …): a detailed, literal description, in one paragraph of at most 120
+  words, of the pictures and videos its `instructions` mention, the box's own words after the package's question. Let go
+  on a picture or a video, it makes a box of words beside it reading `<that box>`. Its box and sampling are Write's. Another
+  tool reads it by mention: `<caption_1>` in Upscale's `prompt` is its words.
 
 Write the request in a file, `request.yaml`:
 

@@ -1,6 +1,6 @@
 [project]
 name = "qwen3"
-version = "0.2.1rc1"
+version = "0.3.0rc1"
 description = "Qwen3: single-turn questions about text, images and videos, on any Qwen3.5, 3.6 or 3.8 checkpoint"
 requires-python = ">=3.12"
 dependencies = [

@@ -5,7 +5,8 @@ from __future__ import annotations
 
 import msgspec
 from cozy_runtime import vlm
-from cozy_runtime.author import App, Context, EncodingRule, QuantizationPlan, Recipe, Telemetry
+from cozy_runtime.author import App, Context, EncodingRule, InvalidRequest, QuantizationPlan, Recipe, Telemetry
+from cozy_runtime.fields import Prompt
 from cozy_runtime.vlm import AskRequest, AskResult, TextBox, TextResult, VisionLM
 
 app = App()
@@ -71,14 +72,29 @@ def ask(ctx: Context, payload: AskRequest, model: VisionLM, tel: Telemetry) -> A
     return vlm.ask(ctx, payload, model, tel)
 
 
-#: What a description asks: what it is, for whatever mentions it to read, and nothing of how it looks as a picture.
-_CAPTION = "Say what this shows, in one or two plain sentences, for someone who can't see it: who or what it is and how it looks. Say only what you can see."
+#: Caption's question, before the box's own words: a detailed, literal description of what is visible, for any use. This
+#: wording is unmeasured as an upscale's prompt. What se-151 measured was upscale-specific ("Describe this picture in detail
+#: so a painter could recreate it at high resolution: …", through `ask` with 400 tokens), and a two-sentence caption gained
+#: nothing there.
+_CAPTION = (
+    "Describe what this shows in detail, in one paragraph of at most 120 words: the subjects and every visible element, "
+    "any visible text exactly as written, the materials, colours and lighting, the medium and style (for example photo, "
+    "3D render, flat cel-shaded art, watercolour, woodblock print), the layout and the background; for a video, also "
+    "what happens and how the camera moves. Describe only what you can see and invent nothing. Do not mention blur, "
+    "noise, compression, resolution or image quality."
+)
 
 
-@app.entrypoint(defaults={"model": MODEL}, memoize=True)
-def caption(ctx: Context, payload: AskRequest, model: VisionLM, tel: Telemetry) -> AskResult:
-    """What a picture or a video shows, in this package's own question: `images` or `videos`, and nothing to ask."""
-    return vlm.ask(ctx, msgspec.structs.replace(payload, prompt=_CAPTION), model, tel)
+@app.tool(label="Caption", named="caption", defaults={"model": MODEL}, memoize=True)
+def caption(ctx: Context, payload: TextBox, model: VisionLM, tel: Telemetry) -> TextResult:
+    """A detailed, literal description of the pictures and videos the box mentions: this package's question, then the
+    box's own words. Its box and sampling are Write's."""
+    said = payload.instructions
+    if not said.references:
+        raise InvalidRequest("Caption has nothing to describe: its words mention no picture or video",
+                             code="caption_nothing")  # fmt: skip
+    asked = Prompt(text=f"{_CAPTION}\n\n{said.text}", references=said.references)
+    return vlm.write(ctx, msgspec.structs.replace(payload, instructions=asked), model, tel)
 
 
 @app.tool(label="Write", named="text", defaults={"model": MODEL}, memoize=True)
