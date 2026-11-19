@@ -95,6 +95,8 @@ module = [
     "tfsbench", "cozy_eval", "cozy_eval.*",
     # BFL's reference code, fetched by its model proof at run time.
     "flux3", "flux3.*",
+    # The graphs scripts/faceid_ingest.py converts, and their reference runner.
+    "onnx", "onnx.*", "onnxruntime",
 ]
 ignore_missing_imports = true
 
