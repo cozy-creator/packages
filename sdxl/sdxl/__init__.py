@@ -699,7 +699,7 @@ _ADAPTERS = {
     "model": "stabilityai/sdxl@1.0.0",
     "controlnet": "xinsir/controlnet-union-sdxl-promax@0.1.0",
     "image_encoder": "laion/clip-vit-h-14-laion2b-s32b-b79k@0.1.0",
-    "ip_adapter": "h94/ip-adapter-plus-sdxl-vit-h@0.1.0",
+    "ip_adapter": "h94/ip-adapter-plus-sdxl-vit-h@0.2.0",
 }
 
 
