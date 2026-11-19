@@ -22,7 +22,7 @@ from fractions import Fraction
 from functools import partial
 from itertools import accumulate
 from types import ModuleType
-from typing import TYPE_CHECKING, Annotated, Literal, NamedTuple, cast
+from typing import TYPE_CHECKING, Annotated, Literal, cast
 
 import msgspec
 import numpy as np
@@ -44,6 +44,7 @@ from cozy_runtime.author import (
     Telemetry,
     ThreadPoolExecutor,
     UnsupportedInput,
+    Weights,
 )
 from cozy_runtime.fields import (
     Advanced,
@@ -1954,24 +1955,22 @@ async def render_shot(ctx: Context, payload: PackageShot, out: Outputs, tel: Tel
     return PackageShotResult(made.video, made.warnings)
 
 
-class EditLoRA(NamedTuple):
-    model: str
-    trigger: str
-    strength: float = 1.0
-
-
 #: Alissonerdx's guide-edit LoRAs on Ref2VA, each taking the plate through `MiniMaxH3AddGuide` at frame 0
 #: (hf://Alissonerdx/Minimax-H3-ComfyUI README.md: its LoRA table gives each trigger, and line 97 the guide), at the
-#: Hub's mirror releases, whose cards carry the same triggers. Each one's guide starts at strength 1.0
-#: (docs/character-swap.md:14, head-swap.md:28, style-transfer.md:13, vfx-edit.md:6, motion-transfer.md:55). Live
-#: Wallpaper animates pictures without a plate, so it isn't an edit.
-EDITS: dict[str, EditLoRA] = {
-    "character_swap": EditLoRA("alissonerdx/minimax-h3-character-swap@0.1.0", "body_swap:"),
-    "head_swap": EditLoRA("alissonerdx/minimax-h3-head-swap@0.1.0", "head_swap:"),
-    "style_transfer": EditLoRA("alissonerdx/minimax-h3-style-transfer@0.1.0", "style_transfer:"),
-    "vfx_edit": EditLoRA("alissonerdx/minimax-h3-vfx-edit@0.1.0", "vfx_edit:"),
-    "motion_transfer": EditLoRA("alissonerdx/minimax-h3-motion-transfer@0.1.0", "motion_transfer:"),
+#: Hub's mirror releases: each edit's slot default, fetched only for its edit (`_EDIT_NEEDS`), which a box's
+#: `models.<edit>` replaces. Its trigger and strength are its release's (`triggers`, `strength`): the box's prompt
+#: carries the trigger, as for any LoRA. Live Wallpaper animates pictures without a plate, so it isn't an edit.
+EDITS: dict[str, str] = {
+    "character_swap": "alissonerdx/minimax-h3-character-swap@0.1.0",
+    "head_swap": "alissonerdx/minimax-h3-head-swap@0.1.0",
+    "style_transfer": "alissonerdx/minimax-h3-style-transfer@0.1.0",
+    "vfx_edit": "alissonerdx/minimax-h3-vfx-edit@0.1.0",
+    "motion_transfer": "alissonerdx/minimax-h3-motion-transfer@0.1.0",
 }
+#: An edit runs Ref2VA alone, under its own slot's LoRA.
+_EDIT_NEEDS = {"ref2va_segment": "true", "fl2va_segment": "false", "character_swap": 'request.edit == "character_swap"',
+               "head_swap": 'request.edit == "head_swap"', "style_transfer": 'request.edit == "style_transfer"',
+               "vfx_edit": 'request.edit == "vfx_edit"', "motion_transfer": 'request.edit == "motion_transfer"'}
 ShotFootage = Annotated[VideoFile, FileBound(max_decoded_bytes=VIDEO_READ_BYTES)]
 
 
@@ -2000,15 +1999,15 @@ class Edit(msgspec.Struct, kw_only=True):
 
 
 # A plate is a reference of every segment: an edit runs Ref2VA alone.
-@app.tool(label="MiniMax H3 Edit", named="edit", reserved=_RESERVED, needs={"ref2va_segment": "true", "fl2va_segment": "false"})
-async def edit(ctx: Context, payload: Edit, out: Outputs, tel: Telemetry) -> ShotResult:
-    """A plate edited by its summary and beats, on Ref2VA under the chosen edit LoRA, its trigger opening each beat. With
-    no picture in a beat, the plate's own first frame is the picture."""
-    lora = EDITS[payload.edit]
-    beats = [replace(beat, description=replace(beat.description, text=f"{lora.trigger} {beat.description.text}".rstrip()))
-             for beat in payload.beats]  # fmt: skip
-    shot = Shot(summary=payload.summary, beats=beats, turbo=payload.turbo, quality=payload.quality, seed=payload.seed)
-    choice = ModelChoice(lora=(Lora(lora.model, lora.strength),))
+@app.tool(label="MiniMax H3 Edit", named="edit", reserved=_RESERVED, defaults=EDITS, needs=_EDIT_NEEDS)
+async def edit(ctx: Context, payload: Edit, character_swap: Weights, head_swap: Weights, style_transfer: Weights,
+               vfx_edit: Weights, motion_transfer: Weights, out: Outputs, tel: Telemetry) -> ShotResult:  # fmt: skip
+    """A plate edited by its summary and beats, on Ref2VA under the chosen edit's LoRA slot. With no picture in a beat,
+    the plate's own first frame is the picture."""
+    slots = {"character_swap": character_swap, "head_swap": head_swap, "style_transfer": style_transfer,
+             "vfx_edit": vfx_edit, "motion_transfer": motion_transfer}  # fmt: skip
+    shot = Shot(summary=payload.summary, beats=payload.beats, turbo=payload.turbo, quality=payload.quality, seed=payload.seed)
+    choice = ModelChoice(lora=(Lora(slots[payload.edit].ref),))
     return await _render(ctx, shot, out, tel, plate=payload.plate, lora=choice)
 
 

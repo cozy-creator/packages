@@ -370,7 +370,7 @@ wheels = [
 
 [[package]]
 name = "moss-image"
-version = "0.13.2rc1"
+version = "0.13.2rc2"
 source = { editable = "." }
 dependencies = [
     { name = "cozy-runtime", extra = ["adapters", "media"] },
