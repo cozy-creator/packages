@@ -82,5 +82,23 @@
       "runtime": "0.48.0.dev2347+g24fb6ecc"
     },
     "note": "pod-session 44432101984 (cl-1279): GitHub ubuntu-24.04 runner, 4 threads; warm again 4474 ms"
+  },
+  {
+    "function": "caption",
+    "gpus": 0,
+    "cpu": "Intel(R) Xeon(R) 6975P-C",
+    "cores": 2,
+    "threads": 4,
+    "request": {},
+    "lane": "bf16",
+    "model": "huihui-ai/huihui-qwen3.5-0.8b-abliterated@0.1.0",
+    "warm_ms": 40787,
+    "cold_ms": 45575,
+    "peak_host_bytes": 4861784064,
+    "ran_on": {
+      "cozy": "0.28.0-dev+g88b4c22a",
+      "runtime": "0.49.0.dev2378+gd366fcd3"
+    },
+    "note": "pod-session 44593550889: GitHub ubuntu-24.04 runner, 4 threads; warm again 35090 ms; qwen3 from packages 40209e2524 (pr1022)"
   }
 ]
