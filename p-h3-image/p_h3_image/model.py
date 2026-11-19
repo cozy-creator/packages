@@ -35,7 +35,8 @@ from PIL import Image
 from torch import nn
 from transformers import ProcessorMixin, Qwen3VLConfig, Qwen3VLForConditionalGeneration
 
-from . import fused
+from minimax_h3 import glue
+
 from .transformer import MODALITIES, PH3ImageTransformer, build_transformer, compute_dtypes, parse_tables
 from .vae import VAE_ENCODER, ImageVAE, encode_picture
 
@@ -229,8 +230,11 @@ class PH3Image(Model[ImageGraph]):
         return None
 
     def execution_plan(self, plan: Plan) -> str:
-        """The DiT blocks' fused glue (`fused`) and the VAE's fused encoder (`VAE_ENCODER`)."""
-        plans = (fused.install(self, self.graph, plan), fusion.install_encoder(plan, VAE_ENCODER, self.graph.components["vae"]))
+        """The DiT blocks' fused glue, the H3 family's (`minimax_h3.glue`), and the VAE's fused encoder (`VAE_ENCODER`)."""
+        plans = (
+            glue.install(self, self.graph, plan, forwards=(PH3ImageTransformer.forward,)),
+            fusion.install_encoder(plan, VAE_ENCODER, self.graph.components["vae"]),
+        )
         return "+".join(identity for identity in plans if identity)
 
     @memoize

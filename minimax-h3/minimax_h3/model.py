@@ -35,6 +35,7 @@ from cozy_runtime.author import (
 from cozy_runtime.accel.kernels import Plan
 
 from . import glue, producer, regenerate, shot_latents
+from .adaln_pruned import H3Transformer
 from .conditioner import build_text_conditioner
 from .latent_upscaler import H3LatentUpscaler as H3LatentUpscaler
 from .official import (
@@ -260,7 +261,7 @@ class H3Model(Model[OfficialH3Pipeline]):
         components = self.pipe.components
         dits = [components[name] for name in ("transformer", "transformer_ref") if name in components]
         plans = (
-            glue.install(self, self.pipe, plan),
+            glue.install(self, self.pipe, plan, forwards=(H3Transformer.forward,)),
             fusion.install(plan, VAE_BLOCK, self.pipe.components["vae"]),
             fusion.install_encoder(plan, VAE_ENCODER, self.pipe.components["vae"]),
             *(stepcache.install(plan, STACK, dit) for dit in dits),

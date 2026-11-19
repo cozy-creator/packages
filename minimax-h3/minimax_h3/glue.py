@@ -1,27 +1,25 @@
-"""H3's fused glue (h3a-015): the elementwise chains a DiT block runs between its GEMMs.
+"""The MiniMax-H3 family's fused DiT glue (h3a-015), shared by minimax-h3, minimax-h3-image and
+p-h3-image: every block of Diffusers' `MiniMaxH3Transformer3DModel` runs the Runtime's row kernels
+(`cozy_runtime.accel.glue`, `GLUE`) between its GEMMs. `install` substitutes the fused forwards on
+the filled transformers as the model's execution plan. Shapes are the ones the eager composition
+already produces, so nothing moves a parameter, a buffer or a state-dict key (re-censused after
+the swap).
 
-Each kernel is one pass over rows of a `[rows, width]` bf16 activation; `install` substitutes
-the fused forwards on the filled H3 transformers as this model's execution plan. Shapes are
-the ones the eager composition already produces, so nothing moves a parameter, a buffer or a
-state-dict key (re-censused after the swap).
+What stays here is H3's: its widths and rounding (`GLUE`), its block topology, the attention cut
+by query heads and the block's tail by tokens (the Runtime sizes both to the memory the DiT's
+weights leave), and the post-RoPE key mean the sparse producer's first step reads (`KEY_MEAN`).
 
-Numerics are the EAGER composition's: every intermediate eager rounds to bf16 is rounded here too
-(`_rb`, in the integer domain so the compiler cannot fold the round-trip away), and the fp8 epilogue
-is the rowwise leaf's own quantizer on the same registers. Measured on sm89 against torch 2.13 eager:
-the modulate, gate-add, SwiGLU and RoPE chains are bit-identical; the RMSNorm differs from torch's
-fused kernel by one bf16 ulp on ~4e-6 of elements (fp32 reduction order of the row variance).
-
-The `@triton.jit` functions are the kernel SOURCES (`GLUE`): the Runtime compiles them on the machine
-that runs them when the executor starts and `plan.load` waits for that build; no request compiles.
-An fp8 epilogue is chosen per site from what the fill installed: a site whose every consumer is an
-`fp8.rowwise` encoded leaf hands it a `PreQuantized` operand; any other consumer gets bf16.
+Numerics are the EAGER composition's: every intermediate eager rounds to bf16 is rounded too, and
+the fp8 epilogue is the rowwise leaf's own quantizer on the same registers. Measured on sm89
+against torch 2.13 eager: the modulate, gate-add, SwiGLU and RoPE chains are bit-identical; the
+RMSNorm differs from torch's fused kernel by one bf16 ulp on ~4e-6 of elements (fp32 reduction
+order of the row variance). An fp8 epilogue is chosen per site from what the fill installed: a
+site whose every consumer is an `fp8.rowwise` encoded leaf hands it a `PreQuantized` operand; any
+other consumer gets bf16.
 
 Not installable (eager serves, the code is reported): no CUDA sm80+, no Triton, kernels absent or
-failed, an unmatched Diffusers topology. A build that does not load, or a failure after substitution
-began, refuses the construction: there is no eager left.
-
-Adapted from NVlabs/Sana `sol-engine` `models/minimax_h3/{GB200,GB10}/fusions.py` (Apache-2.0): the
-per-row program, table-row gather, partner-channel RoPE and integer-domain bf16 rounding are theirs.
+failed, an unmatched Diffusers topology. A build that does not load, or a failure after
+substitution began, refuses the construction: there is no eager left.
 """
 
 from __future__ import annotations
@@ -33,7 +31,7 @@ import time
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from contextvars import ContextVar
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Literal, Protocol, cast, overload
+from typing import TYPE_CHECKING, Protocol, cast
 
 import torch
 from diffusers.models.activations import SwiGLU
@@ -46,7 +44,7 @@ from diffusers.models.transformers.transformer_minimax_h3 import (
     _apply_rotary_emb,
 )
 
-from cozy_runtime import rng
+from cozy_runtime.accel import glue as fused
 from cozy_runtime.accel import plain_forward
 from cozy_runtime.author import Cut, split
 from cozy_runtime.accel.kernels import (
@@ -62,12 +60,9 @@ from cozy_runtime.accel.kernels import (
 )
 from cozy_runtime.accel.rows import Rows, rows
 
-from .adaln_pruned import H3Transformer
-
 try:
     import triton
     import triton.language as tl
-    from triton.language.extra import libdevice
 except ImportError as _absent:  # pragma: no cover - a CPU-only or non-Linux environment
     if TYPE_CHECKING:
         raise
@@ -108,6 +103,12 @@ def take(value: Hidden | Owned[Hidden]) -> Hidden:
     return taken  # type: ignore[return-value]  # an Owned is taken once: its one callee empties it
 #: The widths compiled: a transformer with others is not installable.
 HIDDEN, FFN, HEAD_DIM, ROTARY = 5376, 14336, 128, 96
+#: The DiT's row kernels: `torch.nn.RMSNorm`s modulated by `1 + scale` and `shift`, and RoPE on 96
+#: of 128 channels with the tables cast to bf16 first, as eager computes them.
+GLUE = fused.Glue(
+    "minimax-h3-glue", width=HIDDEN, ffn=FFN, head_dim=HEAD_DIM, rotary=ROTARY, shift=True,
+    rms_rounding="once", rope_rounding="product",
+)  # fmt: skip
 #: A tail window's peak, in its rows of hidden (`_Tail`): its normed rows, the FFN's [value | gate]
 #: projection and SwiGLU product, its quantized operands and its down projection. Whole, 13.3 GB
 #: at 15 s against 1.17 GB of hidden (run 25405).
@@ -115,13 +116,8 @@ _TAIL_HOLDS = 12
 #: A head window's peak, in windows beside the whole output: Q, K and V, the attention's own K/V
 #: copies and its output. 6.2 measured on a capped 4090 (run 29255).
 HEAD_HOLDS = 7
-_ROW_WARPS = 16
-_ROPE_HEADS = 8
-_ROPE_WARPS = 4
 _KEY_TOKENS = 64
 _KEY_WARPS = 4
-_SWIGLU_BLOCK = 1024
-_SWIGLU_WARPS = 8
 #: The codes eager serves past; any other is breakage and refuses.
 NOT_INSTALLABLE = frozenset(
     {
@@ -143,185 +139,8 @@ class GlueRefusal(RuntimeError):
         self.code = code
 
 
-# ------- kernel sources (Triton hashes each one's line: a moved one rebuilds its set everywhere)
+# ------- kernel source (Triton hashes its line: a moved one rebuilds its set everywhere)
 if not TRITON_ABSENT:
-
-    @triton.jit
-    def _rb(x):  # type: ignore[no-untyped-def]
-        # fp32 -> bf16 -> fp32 round-to-nearest-even in the integer domain: the compiler
-        # folds `x.to(bf16).to(f32)` to identity and would keep fp32 precision eager lacks.
-        bits = x.to(tl.int32, bitcast=True)
-        bits = bits + 0x7FFF + ((bits >> 16) & 1)
-        return (bits & -65536).to(tl.float32, bitcast=True)
-
-
-    @triton.jit
-    def _e4m3(value, scale):  # type: ignore[no-untyped-def]
-        # Exactly `leaves._triton_rowwise_kernel`'s cast: IEEE divide, clamp, RTNE.
-        return tl.clamp(tl.div_rn(value, scale), -448.0, 448.0).to(
-            tl.float8e4nv, fp_downcast_rounding="rtne"
-        )
-
-
-    @triton.jit  # type: ignore[untyped-decorator]
-    def _norm_mod_kernel(  # type: ignore[no-untyped-def]
-        x_ptr,
-        branch_ptr,
-        gate_ptr,
-        hidden_ptr,
-        out_ptr,
-        scale_out_ptr,
-        weight_ptr,
-        scale_ptr,
-        shift_ptr,
-        index_ptr,
-        n_cols,
-        n_index,
-        stride_x,
-        stride_table,
-        eps,
-        RESIDUAL: tl.constexpr,
-        FP8: tl.constexpr,
-        BLOCK: tl.constexpr,
-    ):
-        row = tl.program_id(0).to(tl.int64)
-        cols = tl.arange(0, BLOCK)
-        mask = cols < n_cols
-        offset = row * stride_x + cols
-        # One table row per SEQUENCE row; a batch axis wraps (eager broadcasts the index).
-        table = tl.load(index_ptr + row % n_index).to(tl.int64) * stride_table + cols
-        x = tl.load(x_ptr + offset, mask=mask, other=0.0).to(tl.float32)
-        if RESIDUAL:
-            branch = tl.load(branch_ptr + offset, mask=mask, other=0.0).to(tl.float32)
-            gate = tl.load(gate_ptr + table, mask=mask, other=0.0).to(tl.float32)
-            x = _rb(x + _rb(gate * branch))
-            tl.store(hidden_ptr + offset, x.to(tl.bfloat16), mask=mask)
-        variance = tl.sum(x * x, axis=0) / n_cols
-        weight = tl.load(weight_ptr + cols, mask=mask, other=0.0).to(tl.float32)
-        normed = _rb(x * tl.math.rsqrt(variance + eps) * weight)
-        scale = tl.load(scale_ptr + table, mask=mask, other=0.0).to(tl.float32)
-        shift = tl.load(shift_ptr + table, mask=mask, other=0.0).to(tl.float32)
-        out = _rb(_rb(normed * _rb(1.0 + scale)) + shift)
-        if FP8:
-            amax = tl.max(tl.abs(out), axis=0)
-            row_scale = tl.maximum(amax / 448.0, 1e-12)
-            tl.store(scale_out_ptr + row, row_scale)
-            tl.store(out_ptr + offset, _e4m3(out, row_scale), mask=mask)
-        else:
-            tl.store(out_ptr + offset, out.to(tl.bfloat16), mask=mask)
-
-
-    @triton.jit  # type: ignore[untyped-decorator]
-    def _gate_add_kernel(  # type: ignore[no-untyped-def]
-        x_ptr,
-        branch_ptr,
-        gate_ptr,
-        out_ptr,
-        index_ptr,
-        n_cols,
-        n_index,
-        stride_x,
-        stride_table,
-        BLOCK: tl.constexpr,
-    ):
-        row = tl.program_id(0).to(tl.int64)
-        cols = tl.arange(0, BLOCK)
-        mask = cols < n_cols
-        offset = row * stride_x + cols
-        table = tl.load(index_ptr + row % n_index).to(tl.int64) * stride_table + cols
-        x = tl.load(x_ptr + offset, mask=mask, other=0.0).to(tl.float32)
-        branch = tl.load(branch_ptr + offset, mask=mask, other=0.0).to(tl.float32)
-        gate = tl.load(gate_ptr + table, mask=mask, other=0.0).to(tl.float32)
-        tl.store(out_ptr + offset, _rb(x + _rb(gate * branch)).to(tl.bfloat16), mask=mask)
-
-
-    @triton.jit
-    def _silu_product(x_ptr, base, cols, mask, half):  # type: ignore[no-untyped-def]
-        value = tl.load(x_ptr + base + cols, mask=mask, other=0.0).to(tl.float32)
-        gate = tl.load(x_ptr + base + half + cols, mask=mask, other=0.0).to(tl.float32)
-        # torch's silu: `x / (1 + exp(-x))` in fp32 with IEEE divide and an exact exp.
-        activated = _rb(tl.div_rn(gate, 1.0 + libdevice.exp(-gate)))
-        return _rb(value * activated)
-
-
-    @triton.jit  # type: ignore[untyped-decorator]
-    def _swiglu_kernel(  # type: ignore[no-untyped-def]
-        x_ptr,
-        out_ptr,
-        scale_out_ptr,
-        half,
-        stride_x,
-        stride_out,
-        FP8: tl.constexpr,
-        BLOCK: tl.constexpr,
-    ):
-        # One row per program, chunked: a 14336-wide product held twice would spill. The
-        # fp8 epilogue needs the row amax first, so it recomputes the chunk on a second
-        # sweep from a row that is by then L2-resident.
-        row = tl.program_id(0).to(tl.int64)
-        base = row * stride_x
-        offsets = tl.arange(0, BLOCK)
-        if FP8:
-            amax = tl.zeros((BLOCK,), dtype=tl.float32)
-            for start in range(0, half, BLOCK):
-                cols = start + offsets
-                amax = tl.maximum(amax, tl.abs(_silu_product(x_ptr, base, cols, cols < half, half)))
-            row_scale = tl.maximum(tl.max(amax, axis=0) / 448.0, 1e-12)
-            tl.store(scale_out_ptr + row, row_scale)
-            for start in range(0, half, BLOCK):
-                cols = start + offsets
-                product = _silu_product(x_ptr, base, cols, cols < half, half)
-                tl.store(out_ptr + row * stride_out + cols, _e4m3(product, row_scale), mask=cols < half)
-        else:
-            for start in range(0, half, BLOCK):
-                cols = start + offsets
-                product = _silu_product(x_ptr, base, cols, cols < half, half)
-                tl.store(out_ptr + row * stride_out + cols, product.to(tl.bfloat16), mask=cols < half)
-
-
-    @triton.jit  # type: ignore[untyped-decorator]
-    def _rope_norm_kernel(  # type: ignore[no-untyped-def]
-        x_ptr,
-        out_ptr,
-        weight_ptr,
-        cos_ptr,
-        sin_ptr,
-        seq,
-        heads,
-        eps,
-        HEAD_DIM: tl.constexpr,
-        ROTARY: tl.constexpr,
-        HEADS: tl.constexpr,
-    ):
-        # One program per (row, HEADS heads): the RMS is per head, the rotation pairs
-        # channel j with j +/- ROTARY/2 inside the rotary span, and cos/sin are per
-        # sequence position (a batch axis wraps).
-        row = tl.program_id(0).to(tl.int64)
-        head0 = tl.program_id(1) * HEADS
-        token = row % seq
-        head = head0 + tl.arange(0, HEADS)[:, None]
-        chan = tl.arange(0, HEAD_DIM)[None, :]
-        mask = head < heads
-        base = (row * heads + head) * HEAD_DIM
-        x = tl.load(x_ptr + base + chan, mask=mask, other=0.0).to(tl.float32)
-        inv = tl.math.rsqrt(tl.sum(x * x, axis=1)[:, None] / HEAD_DIM + eps)
-        weight = tl.load(weight_ptr + chan).to(tl.float32)
-        normed = _rb(x * inv * weight)
-        half = ROTARY // 2
-        rotating = chan < ROTARY
-        low = chan < half
-        partner = tl.where(low, chan + half, chan - half)
-        paired = tl.load(x_ptr + base + partner, mask=mask & rotating, other=0.0).to(tl.float32)
-        paired_weight = tl.load(weight_ptr + partner, mask=rotating, other=0.0).to(tl.float32)
-        rotated = _rb(paired * inv * paired_weight)
-        rotated = tl.where(low, -rotated, rotated)
-        # Eager casts the fp32 tables to bf16 BEFORE multiplying.
-        cos = _rb(tl.load(cos_ptr + token * ROTARY + chan, mask=rotating, other=1.0))
-        sin = _rb(tl.load(sin_ptr + token * ROTARY + chan, mask=rotating, other=0.0))
-        turned = _rb(_rb(normed * cos) + _rb(rotated * sin))
-        out = tl.where(rotating, turned, normed)
-        tl.store(out_ptr + base + chan, out.to(tl.bfloat16), mask=mask)
-
 
     @triton.jit  # type: ignore[untyped-decorator]
     def _key_sum_kernel(  # type: ignore[no-untyped-def]
@@ -367,406 +186,34 @@ def _blocks(transformer: MiniMaxH3Transformer3DModel) -> Iterable[MiniMaxH3Trans
     return cast("Iterable[MiniMaxH3TransformerBlock]", transformer.transformer_blocks)
 
 
-def _next_pow2(n: int) -> int:
-    return 1 << (n - 1).bit_length()
-
-
-def _entries(fp8s: tuple[int, ...]) -> Iterator[TritonEntry]:
-    """Every entry the H3 widths need, with the epilogues `fp8s` names (0: bf16, 1: fp8). Row
-    counts never enter one: they size grids."""
-    block = _next_pow2(HIDDEN)
-    for residual in (0, 1):
-        for fp8 in fp8s:
-            yield TritonEntry(
-                _norm_mod_kernel,
-                {
-                    "x_ptr": "*bf16",
-                    "branch_ptr": "*bf16",
-                    "gate_ptr": "*bf16",
-                    "hidden_ptr": "*bf16",
-                    "out_ptr": "*fp8e4nv" if fp8 else "*bf16",
-                    "scale_out_ptr": "*fp32" if fp8 else "*bf16",
-                    "weight_ptr": "*bf16",
-                    "scale_ptr": "*bf16",
-                    "shift_ptr": "*bf16",
-                    "index_ptr": "*i64",
-                    "n_cols": "i32",
-                    "n_index": "i32",
-                    "stride_x": "i32",
-                    "stride_table": "i32",
-                    "eps": "fp32",
-                    "RESIDUAL": "constexpr",
-                    "FP8": "constexpr",
-                    "BLOCK": "constexpr",
-                },
-                {"RESIDUAL": residual, "FP8": fp8, "BLOCK": block},
-                (
-                    "x_ptr",
-                    "branch_ptr",
-                    "gate_ptr",
-                    "hidden_ptr",
-                    "out_ptr",
-                    "scale_out_ptr",
-                    "weight_ptr",
-                    "scale_ptr",
-                    "shift_ptr",
-                    "index_ptr",
-                    "n_cols",
-                    "stride_x",
-                    "stride_table",
-                ),
-                _ROW_WARPS,
-            )
-    yield TritonEntry(
-        _gate_add_kernel,
-        {
-            "x_ptr": "*bf16",
-            "branch_ptr": "*bf16",
-            "gate_ptr": "*bf16",
-            "out_ptr": "*bf16",
-            "index_ptr": "*i64",
-            "n_cols": "i32",
-            "n_index": "i32",
-            "stride_x": "i32",
-            "stride_table": "i32",
-            "BLOCK": "constexpr",
-        },
-        {"BLOCK": block},
-        (
-            "x_ptr",
-            "branch_ptr",
-            "gate_ptr",
-            "out_ptr",
-            "index_ptr",
-            "n_cols",
-            "stride_x",
-            "stride_table",
-        ),
-        _ROW_WARPS,
-    )
-    for fp8 in fp8s:
-        yield TritonEntry(
-            _swiglu_kernel,
+def _key_entries() -> tuple[TritonEntry, ...]:
+    return (
+        TritonEntry(
+            _key_sum_kernel,
             {
-                "x_ptr": "*bf16",
-                "out_ptr": "*fp8e4nv" if fp8 else "*bf16",
-                "scale_out_ptr": "*fp32" if fp8 else "*bf16",
-                "half": "i32",
-                "stride_x": "i32",
-                "stride_out": "i32",
-                "FP8": "constexpr",
-                "BLOCK": "constexpr",
+                "key_ptr": "*bf16",
+                "out_ptr": "*fp32",
+                "tokens": "i32",
+                "stride_t": "i32",
+                "HEAD_DIM": "constexpr",
+                "BLOCK_T": "constexpr",
             },
-            {"FP8": fp8, "BLOCK": _SWIGLU_BLOCK},
-            ("x_ptr", "out_ptr", "scale_out_ptr", "half", "stride_x", "stride_out"),
-            _SWIGLU_WARPS,
-        )
-    yield TritonEntry(
-        _rope_norm_kernel,
-        {
-            "x_ptr": "*bf16",
-            "out_ptr": "*bf16",
-            "weight_ptr": "*bf16",
-            "cos_ptr": "*fp32",
-            "sin_ptr": "*fp32",
-            "seq": "i32",
-            "heads": "i32",
-            "eps": "fp32",
-            "HEAD_DIM": "constexpr",
-            "ROTARY": "constexpr",
-            "HEADS": "constexpr",
-        },
-        {"HEAD_DIM": HEAD_DIM, "ROTARY": ROTARY, "HEADS": _ROPE_HEADS},
-        ("x_ptr", "out_ptr", "weight_ptr", "cos_ptr", "sin_ptr"),
-        _ROPE_WARPS,
-    )
-    yield TritonEntry(
-        _key_sum_kernel,
-        {
-            "key_ptr": "*bf16",
-            "out_ptr": "*fp32",
-            "tokens": "i32",
-            "stride_t": "i32",
-            "HEAD_DIM": "constexpr",
-            "BLOCK_T": "constexpr",
-        },
-        {"HEAD_DIM": HEAD_DIM, "BLOCK_T": _KEY_TOKENS},
-        ("key_ptr", "out_ptr", "stride_t"),
-        _KEY_WARPS,
+            {"HEAD_DIM": HEAD_DIM, "BLOCK_T": _KEY_TOKENS},
+            ("key_ptr", "out_ptr", "stride_t"),
+            _KEY_WARPS,
+        ),
     )
 
 
-#: Every sm80+ card's set: the bf16 epilogues.
-GLUE = TritonKernels("minimax-h3-glue", () if TRITON_ABSENT else _entries((0,)))
-#: With the fp8 epilogues, for cards that have fp8 (sm89+). Triton has no e4m3 below: on an
-#: sm86 the fp8 entries do not build, and one failed entry refuses its whole set, so an RTX 3070
-#: served the eager blocks, which do not fit 15 s in 8 GB.
-GLUE_FP8 = TritonKernels("minimax-h3-glue-fp8", () if TRITON_ABSENT else _entries((0, 1)))
-CONTRACT = "h3-glue-call-and-topology/2"
-
-
-def kernels(device: torch.device) -> TritonKernels:
-    """The set `device` builds."""
-    return GLUE_FP8 if torch.cuda.get_device_capability(device) >= (8, 9) else GLUE
-
-
-# ---------------------------------------------------------------------- wrappers
-
-
-def _rows(x: torch.Tensor, width: int) -> torch.Tensor:
-    flat = x.reshape(-1, width)
-    return flat if flat.stride(-1) == 1 else flat.contiguous()
-
-
-def _table(t: torch.Tensor) -> torch.Tensor:
-    # `chunk(6, dim=-1)` views have a 6*hidden row stride and a unit column stride; that is
-    # addressable as `row * stride(0) + col`, so no copy — anything else is made contiguous.
-    return t if t.stride(-1) == 1 else t.contiguous()
-
-
-def _require(x: torch.Tensor) -> None:
-    if x.dtype is not torch.bfloat16 or not x.is_cuda:
-        raise GlueRefusal(
-            "fusion_block_shape",
-            f"fused glue serves bfloat16 CUDA activations, got {x.dtype} on {x.device}",
-        )
-
-
-def _launch_norm_mod(
-    launch: Launch,
-    x: torch.Tensor,
-    branch: torch.Tensor | None,
-    gate: torch.Tensor | None,
-    weight: torch.Tensor,
-    scale: torch.Tensor,
-    shift: torch.Tensor,
-    index: torch.Tensor,
-    eps: float,
-    fp8: bool,
-    hidden_out: torch.Tensor | None = None,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    _require(x)
-    width = int(x.shape[-1])
-    rows = _rows(x, width)
-    n = int(rows.shape[0])
-    if branch is None:
-        hidden = rows
-    else:  # a row is read whole before it is written: `hidden_out` may be `branch`'s own rows
-        hidden = torch.empty_like(rows) if hidden_out is None else _rows(hidden_out, width)
-    branch_rows = _rows(branch, width) if branch is not None else rows
-    gate = _table(gate) if gate is not None else scale
-    scale, shift = _table(scale), _table(shift)
-    if fp8:
-        out = torch.empty(n, width, dtype=torch.float8_e4m3fn, device=x.device)
-        row_scale = torch.empty(n, 1, dtype=torch.float32, device=x.device)
-    else:
-        out = torch.empty_like(rows)
-        row_scale = out
-    launch(
-        _norm_mod_kernel,
-        (n, 1, 1),
-        rows,
-        branch_rows,
-        gate,
-        hidden,
-        out,
-        row_scale,
-        weight,
-        scale,
-        shift,
-        index,
-        width,
-        index.numel(),
-        rows.stride(0),
-        scale.stride(0),
-        float(eps),
-        int(branch is not None),
-        int(fp8),
-        _next_pow2(width),
-    )
-    return hidden, out, row_scale
-
-
-@overload
-def rmsnorm_modulate(
-    launch: Launch, x: torch.Tensor, weight: torch.Tensor, scale: torch.Tensor, shift: torch.Tensor, index: torch.Tensor, eps: float,
-    *, fp8: Literal[False] = False,
-) -> torch.Tensor: ...
-@overload
-def rmsnorm_modulate(
-    launch: Launch, x: torch.Tensor, weight: torch.Tensor, scale: torch.Tensor, shift: torch.Tensor, index: torch.Tensor, eps: float,
-    *, fp8: Literal[True],
-) -> PreQuantized: ...
-@overload
-def rmsnorm_modulate(
-    launch: Launch, x: torch.Tensor, weight: torch.Tensor, scale: torch.Tensor, shift: torch.Tensor, index: torch.Tensor, eps: float,
-    *, fp8: bool,
-) -> torch.Tensor | PreQuantized: ...
-def rmsnorm_modulate(
-    launch: Launch,
-    x: torch.Tensor,
-    weight: torch.Tensor,
-    scale: torch.Tensor,
-    shift: torch.Tensor,
-    index: torch.Tensor,
-    eps: float,
-    *,
-    fp8: bool = False,
-) -> torch.Tensor | PreQuantized:
-    """`rmsnorm(x) * (1 + scale[index]) + shift[index]`, one read and one write.
-
-    With `fp8`, the write is the rowwise leaf's operand (E4M3 payload + per-row scale)
-    instead of the bf16 tensor the leaf would have read back to quantize.
-    """
-    _, out, row_scale = _launch_norm_mod(
-        launch, x, None, None, weight, scale, shift, index, eps, fp8
-    )
-    if fp8:
-        return PreQuantized(out, row_scale, tuple(x.shape))
-    return out.view_as(x)
-
-
-@overload
-def gate_add_rmsnorm_modulate(
-    launch: Launch, residual: torch.Tensor, gate: torch.Tensor, branch: torch.Tensor, index: torch.Tensor, weight: torch.Tensor, scale: torch.Tensor,
-    shift: torch.Tensor, eps: float, *, fp8: Literal[False] = False, hidden_out: torch.Tensor | None = None,
-) -> tuple[torch.Tensor, torch.Tensor]: ...
-@overload
-def gate_add_rmsnorm_modulate(
-    launch: Launch, residual: torch.Tensor, gate: torch.Tensor, branch: torch.Tensor, index: torch.Tensor, weight: torch.Tensor, scale: torch.Tensor,
-    shift: torch.Tensor, eps: float, *, fp8: Literal[True], hidden_out: torch.Tensor | None = None,
-) -> tuple[torch.Tensor, PreQuantized]: ...
-@overload
-def gate_add_rmsnorm_modulate(
-    launch: Launch, residual: torch.Tensor, gate: torch.Tensor, branch: torch.Tensor, index: torch.Tensor, weight: torch.Tensor, scale: torch.Tensor,
-    shift: torch.Tensor, eps: float, *, fp8: bool, hidden_out: torch.Tensor | None = None,
-) -> tuple[torch.Tensor, torch.Tensor | PreQuantized]: ...
-def gate_add_rmsnorm_modulate(
-    launch: Launch,
-    residual: torch.Tensor,
-    gate: torch.Tensor,
-    branch: torch.Tensor,
-    index: torch.Tensor,
-    weight: torch.Tensor,
-    scale: torch.Tensor,
-    shift: torch.Tensor,
-    eps: float,
-    *,
-    fp8: bool = False,
-    hidden_out: torch.Tensor | None = None,
-) -> tuple[torch.Tensor, torch.Tensor | PreQuantized]:
-    """`hidden = residual + gate[index] * branch`, then `rmsnorm_modulate(hidden)`.
-
-    Returns `(hidden, normed)`: the new residual stream and the next GEMM's input, from
-    one pass over the registers that already hold the row. `hidden` is written into
-    `hidden_out` where given (`branch` itself may be it).
-    """
-    hidden, out, row_scale = _launch_norm_mod(
-        launch, residual, branch, gate, weight, scale, shift, index, eps, fp8, hidden_out
-    )
-    normed = PreQuantized(out, row_scale, tuple(residual.shape)) if fp8 else out.view_as(residual)
-    return hidden.view_as(residual), normed
-
-
-def gate_add(
-    launch: Launch, residual: torch.Tensor, gate: torch.Tensor, branch: torch.Tensor, index: torch.Tensor, out: torch.Tensor | None = None
-) -> torch.Tensor:
-    """`residual + gate[index] * branch`, one pass (eager: a gather, a mul and an add), into
-    `out` where given (`residual` itself may be it: a row is read whole before it is written)."""
-    _require(residual)
-    width = int(residual.shape[-1])
-    rows, branch_rows = _rows(residual, width), _rows(branch, width)
-    gate = _table(gate)
-    out = torch.empty_like(rows) if out is None else _rows(out, width)
-    block = _next_pow2(width)
-    launch(
-        _gate_add_kernel,
-        (int(rows.shape[0]), 1, 1),
-        rows,
-        branch_rows,
-        gate,
-        out,
-        index,
-        width,
-        index.numel(),
-        rows.stride(0),
-        gate.stride(0),
-        block,
-    )
-    return out.view_as(residual)
-
-
-@overload
-def swiglu(launch: Launch, x: torch.Tensor, *, fp8: Literal[False] = False) -> torch.Tensor: ...
-@overload
-def swiglu(launch: Launch, x: torch.Tensor, *, fp8: Literal[True]) -> PreQuantized: ...
-@overload
-def swiglu(launch: Launch, x: torch.Tensor, *, fp8: bool) -> torch.Tensor | PreQuantized: ...
-def swiglu(launch: Launch, x: torch.Tensor, *, fp8: bool = False) -> torch.Tensor | PreQuantized:
-    """`value * silu(gate)` over a `[..., 2F]` projection: one read of 2F, one write of F."""
-    _require(x)
-    width = int(x.shape[-1])
-    half = width // 2
-    rows = _rows(x, width)
-    n = int(rows.shape[0])
-    if fp8:
-        out = torch.empty(n, half, dtype=torch.float8_e4m3fn, device=x.device)
-        row_scale = torch.empty(n, 1, dtype=torch.float32, device=x.device)
-    else:
-        out = torch.empty(n, half, dtype=x.dtype, device=x.device)
-        row_scale = out
-    launch(
-        _swiglu_kernel,
-        (n, 1, 1),
-        rows,
-        out,
-        row_scale,
-        half,
-        rows.stride(0),
-        half,
-        int(fp8),
-        _SWIGLU_BLOCK,
-    )
-    if fp8:
-        return PreQuantized(out, row_scale, (*x.shape[:-1], half))
-    return out.view(*x.shape[:-1], half)
-
-
-def rmsnorm_rope(
-    launch: Launch, x: torch.Tensor, weight: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor, eps: float
-) -> torch.Tensor:
-    """Per-head RMSNorm then partial rotary on `(batch, seq, heads, head_dim)`, in place: each
-    program reads its heads' rows whole before it writes them, so `x` (a projection's own
-    output) never exists twice (2.3 GB of Q and K at 15 s).
-
-    `cos`/`sin` are `(seq, rotary_dim)`; channels past `rotary_dim` pass through.
-    """
-    _require(x)
-    batch, seq, heads, head_dim = (int(d) for d in x.shape)
-    rotary = int(cos.shape[-1])
-    flat = x.reshape(batch * seq, heads * head_dim)
-    flat = flat if flat.stride(-1) == 1 else flat.contiguous()
-    launch(
-        _rope_norm_kernel,
-        (batch * seq, -(-heads // _ROPE_HEADS), 1),
-        flat,
-        flat,
-        weight,
-        cos.contiguous(),
-        sin.contiguous(),
-        seq,
-        heads,
-        float(eps),
-        head_dim,
-        rotary,
-        _ROPE_HEADS,
-    )
-    return flat.view(batch, seq, heads, head_dim)
+#: The key sums (`key_sums`), on every sm80+ card.
+KEYS = TritonKernels("minimax-h3-key-sums", () if TRITON_ABSENT else _key_entries())
+CONTRACT = "h3-glue-call-and-topology/3"
 
 
 def key_sums(launch: Launch, key: torch.Tensor) -> torch.Tensor:
     """F32 [heads, head_dim] sums over tokens of `key`'s [1, tokens, heads, head_dim]."""
-    _require(key)
+    if key.dtype is not torch.bfloat16 or not key.is_cuda:
+        raise GlueRefusal("fusion_block_shape", f"key sums take bf16 CUDA keys, not {key.dtype}")
     _, tokens, heads, head_dim = (int(d) for d in key.shape)
     flat = key[0].reshape(tokens, heads * head_dim)
     flat = flat if flat.stride(-1) == 1 else flat.contiguous()
@@ -775,98 +222,10 @@ def key_sums(launch: Launch, key: torch.Tensor) -> torch.Tensor:
     return out
 
 
-def warm(launch: Launch, device: torch.device, *, heads: int, fp8: bool) -> float:
-    """Launch every entry the served widths need, on two rows; nothing compiles. Returns the
-    milliseconds the first launches took to enqueue."""
-    started = time.perf_counter()
-    rows, table = 2, 3
-    x = torch.ones(1, rows, HIDDEN, device=device, dtype=torch.bfloat16)
-    weight = torch.ones(HIDDEN, device=device, dtype=torch.bfloat16)
-    tables = torch.ones(table, 6 * HIDDEN, device=device, dtype=torch.bfloat16).chunk(6, dim=-1)
-    index = torch.arange(rows, device=device) % table
-    for quant in {False, fp8}:
-        rmsnorm_modulate(launch, x, weight, tables[1], tables[0], index, 1e-5, fp8=quant)
-        gate_add_rmsnorm_modulate(
-            launch, x, tables[2], x, index, weight, tables[4], tables[3], 1e-5, fp8=quant
-        )
-        ffn = torch.ones(1, rows, 2 * FFN, device=device, dtype=torch.bfloat16)
-        swiglu(launch, ffn, fp8=quant)
-    gate_add(launch, x, tables[5], x, index)
-    q = torch.ones(1, rows, heads, HEAD_DIM, device=device, dtype=torch.bfloat16)
-    angles = torch.zeros(rows, ROTARY, device=device)
-    head_weight = torch.ones(HEAD_DIM, device=device, dtype=torch.bfloat16)
-    rmsnorm_rope(launch, q, head_weight, angles, angles, 1e-5)
-    key_sums(launch, q)
-    return (time.perf_counter() - started) * 1000
-
-
-def _off(got: torch.Tensor, want: torch.Tensor) -> float:
-    """`got`'s relative L2 error against the exact `want`, inf where it is not finite."""
-    got = got.double()
-    if not bool(torch.isfinite(got).all()):
-        return float("inf")
-    return float((got - want).norm() / want.norm().clamp(min=1e-30))
-
-
-def checked(launch: Launch, device: torch.device, *, heads: int, fp8: bool) -> str:
-    """Each entry against its arithmetic in float64 on this card: what disagrees, or "". Rounding to
-    bf16 loses 1e-3 and an e4m3 row 5e-2; a misaddressed tile or a wrong dtype loses O(1)."""
-    generator = rng.generator(20261104)
-
-    def random(*shape: int, by: float = 1.0) -> torch.Tensor:
-        return (rng.noise(shape, generator, device=device) * by).to(torch.bfloat16)
-
-    rows, table, eps = 3, 5, 1e-5
-    x, branch = random(1, rows, HIDDEN), random(1, rows, HIDDEN)
-    weight = random(HIDDEN, by=0.1)
-    gate, scale, shift = (random(table, HIDDEN, by=0.5) for _ in range(3))
-    index = torch.arange(rows, device=device) % table
-    wide = {"gate": gate[index].double(), "scale": scale[index].double(), "shift": shift[index].double()}
-    added = x.double() + wide["gate"] * branch.double()
-
-    def norm(value: torch.Tensor) -> torch.Tensor:
-        rms = value * torch.rsqrt(value.pow(2).mean(-1, keepdim=True) + eps) * weight.double()
-        return rms * (1 + wide["scale"]) + wide["shift"]
-
-    ffn = random(1, rows, 2 * FFN)
-    product = ffn[..., :FFN].double() * torch.nn.functional.silu(ffn[..., FFN:].double())
-    errors: dict[str, tuple[float, float]] = {}
-    with torch.no_grad():
-        errors["norm"] = _off(rmsnorm_modulate(launch, x, weight, scale, shift, index, eps), norm(x.double())), 1e-2
-        hidden, out = gate_add_rmsnorm_modulate(launch, x, gate, branch, index, weight, scale, shift, eps)
-        errors["gate add"] = _off(hidden, added), 1e-2
-        errors["gate add norm"] = _off(out, norm(added)), 1e-2
-        errors["residual"] = _off(gate_add(launch, x, gate, branch, index), added), 1e-2
-        errors["swiglu"] = _off(swiglu(launch, ffn), product), 1e-2
-        for quantized, want, name in (
-            (rmsnorm_modulate(launch, x, weight, scale, shift, index, eps, fp8=True), norm(x.double()), "fp8 norm"),
-            (swiglu(launch, ffn, fp8=True), product, "fp8 swiglu"),
-            (
-                gate_add_rmsnorm_modulate(
-                    launch, x, gate, branch, index, weight, scale, shift, eps, fp8=True
-                )[1],
-                norm(added),
-                "fp8 gate add norm",
-            ),
-        ) if fp8 else ():
-            decoded = quantized.payload.double() * quantized.scale.double()
-            errors[name] = _off(decoded.view_as(want), want), 0.1
-        q = random(1, rows, heads, HEAD_DIM)
-        angles = torch.rand(rows, ROTARY, generator=generator, dtype=torch.float32).to(device) * 6.0
-        cos, sin = torch.cos(angles), torch.sin(angles)
-        head_weight = random(HEAD_DIM, by=0.1)
-        rms = q.double() * torch.rsqrt(q.double().pow(2).mean(-1, keepdim=True) + eps) * head_weight.double()
-        half = ROTARY // 2
-        low, high = rms[..., :half], rms[..., half:ROTARY]
-        c, s = cos.double()[None, :, None], sin.double()[None, :, None]
-        turned = torch.cat(
-            [low * c[..., :half] - high * s[..., :half], high * c[..., half:] + low * s[..., half:], rms[..., ROTARY:]],
-            dim=-1,
-        )
-        errors["rope"] = _off(rmsnorm_rope(launch, q.clone(), head_weight, cos, sin, eps), turned), 1e-2
-        errors["key sums"] = _off(key_sums(launch, q), q[0].double().sum(0)), 1e-2
-    wrong = {name: f"{got:.2e}" for name, (got, bar) in errors.items() if not got <= bar}
-    return f"{wrong} of {len(errors)} entries off their arithmetic" if wrong else ""
+def _swiglu(launch: Launch, both: torch.Tensor, *, fp8: bool = False) -> torch.Tensor | PreQuantized:
+    """`value * silu(gate)` over Diffusers' `SwiGLU` projection, its [value | gate] halves."""
+    half = int(both.shape[-1]) // 2
+    return fused.swiglu(launch, GLUE, both[..., half:], both[..., :half], fp8=fp8)
 
 
 # ------------------------------------------------------------------ fused modules
@@ -878,7 +237,7 @@ class FusedSwiGLU(SwiGLU):
 
     # An fp8 down projection takes the quantized operand in place of the bf16 rows.
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor | PreQuantized:  # type: ignore[override]
-        return swiglu(self._glue, self.proj(hidden_states), fp8=self._fusion_fp8)
+        return _swiglu(self._glue, self.proj(hidden_states), fp8=self._fusion_fp8)
 
 
 class H3AttnProcessor(MiniMaxH3AttnProcessor):
@@ -920,7 +279,7 @@ class H3AttnProcessor(MiniMaxH3AttnProcessor):
         attention_mask: torch.Tensor | None,
     ) -> torch.Tensor:
         query, key, value = self.qkv(attn, hidden_states, rotary_emb)
-        seed_key_mean(getattr(self, "_glue", None), key, slice(None))
+        seed_key_mean(getattr(self, "_keys", None), key, slice(None))
         return self.attend(query, key, value, attention_mask)
 
     def attend(
@@ -963,6 +322,7 @@ class H3AttnProcessor(MiniMaxH3AttnProcessor):
 
 class FusedMiniMaxH3AttnProcessor(H3AttnProcessor):
     _glue: Launch
+    _keys: Launch
 
     def qkv(
         self, attn: MiniMaxH3Attention, hidden_states: Hidden, rotary_emb: tuple[torch.Tensor, torch.Tensor] | None
@@ -978,8 +338,10 @@ class FusedMiniMaxH3AttnProcessor(H3AttnProcessor):
         if rotary_emb is None:
             return attn.norm_q(query), attn.norm_k(key)
         cos, sin = rotary_emb
-        query = rmsnorm_rope(self._glue, query, attn.norm_q.weight, cos, sin, _eps(attn.norm_q))
-        key = rmsnorm_rope(self._glue, key, attn.norm_k.weight, cos, sin, _eps(attn.norm_k))
+        query = fused.head_norm_rope(
+            self._glue, GLUE, query, attn.norm_q.weight, _eps(attn.norm_q), cos, sin
+        )
+        key = fused.head_norm_rope(self._glue, GLUE, key, attn.norm_k.weight, _eps(attn.norm_k), cos, sin)
         return query, key
 
 
@@ -1076,7 +438,7 @@ class _Heads:
                 for project in self.projections
             )
         query, key = self.processor.rope(self.attn, query, key, self.rotary)
-        seed_key_mean(getattr(self.processor, "_glue", None), key, window)
+        seed_key_mean(getattr(self.processor, "_keys", None), key, window)
         return self.processor.attend(query, key, value)
 
 
@@ -1099,8 +461,9 @@ class FusedMiniMaxH3TransformerBlock(MiniMaxH3TransformerBlock):
         # block's input throughout.
         attn_output: torch.Tensor = self.attn(
             Owned(
-                rmsnorm_modulate(
+                fused.norm_modulate(
                     self._glue,
+                    GLUE,
                     hidden_states,
                     self.norm1.weight,
                     scale_msa,
@@ -1150,8 +513,9 @@ class _Tail:
         assert isinstance(rows, slice)
         block, (gate_msa, scale, shift, gate) = self.block, self.gates
         residual, index = self.residual[:, rows], self.index[rows]
-        hidden, normed = gate_add_rmsnorm_modulate(
+        hidden, normed = fused.gate_add_norm_modulate(
             block._glue,
+            GLUE,
             residual,
             gate_msa,
             out,
@@ -1161,11 +525,11 @@ class _Tail:
             shift,
             _eps(block.norm2),
             fp8=block._fusion_ff_fp8,
-            hidden_out=out,
+            into=out,
         )
         ffn = _FFN(block.ff)(normed)
         del normed
-        gate_add(block._glue, hidden, gate, ffn, index, out=out)
+        fused.gate_add(block._glue, GLUE, hidden, gate, ffn, index, into=out)
 
 
 class _FFN:
@@ -1185,7 +549,7 @@ class _FFN:
         # [value | gate] halves itself (the same law as `swiglu`): the product is never written.
         both: torch.Tensor = act.proj(normed)
         rows = int8_rows(both, (down,), activation="swiglu")
-        product: torch.Tensor = down(swiglu(act._glue, both) if rows is None else rows)
+        product: torch.Tensor = down(_swiglu(act._glue, both) if rows is None else rows)
         return product
 
 
@@ -1227,7 +591,7 @@ def _type_name(value: object) -> str:
 
 def identity() -> str:
     """The plan's identity: its kernels' sources and its call/topology contract."""
-    document = {"kernels": [GLUE.identity, GLUE_FP8.identity], "plan": CONTRACT}
+    document = {"kernels": [GLUE.bf16.identity, GLUE.fp8.identity, KEYS.identity], "plan": CONTRACT}
     return (
         "sha256:"
         + hashlib.sha256(
@@ -1269,7 +633,7 @@ def _require_calls() -> None:
 
 
 def record(model: object, plan: Plan, name: str, document: Mapping[str, object]) -> None:
-    """One part of the execution plan's outcome, named by its kernel set (`GLUE.name`): on the
+    """One part of the execution plan's outcome, named by its kernel set (`GLUE.bf16.name`): on the
     model (`_cozy_fusion_report[name]`) and in the construction's
     receipts (`measurements.execution.plan_reports`), so `run show` names a refusal. An install
     deferred to a request boundary reports again, through the same plan, when it lands; one whose
@@ -1280,7 +644,7 @@ def record(model: object, plan: Plan, name: str, document: Mapping[str, object])
 
 
 def _record(model: object, plan: Plan, result: Applied) -> Applied:
-    record(model, plan, GLUE.name, result.document())
+    record(model, plan, GLUE.bf16.name, result.document())
     return result
 
 
@@ -1329,10 +693,12 @@ def _widths(transformer: MiniMaxH3Transformer3DModel, root: str) -> None:
     )
 
 
-def _validate_transformer(transformer: MiniMaxH3Transformer3DModel, root: str) -> None:
-    forwards = (MiniMaxH3Transformer3DModel.forward, H3Transformer.forward)
+def _validate_transformer(
+    transformer: MiniMaxH3Transformer3DModel, root: str, forwards: tuple[object, ...]
+) -> None:
     _shape(
-        type(transformer).forward in forwards and plain_forward(transformer),
+        type(transformer).forward in (MiniMaxH3Transformer3DModel.forward, *forwards)
+        and plain_forward(transformer),
         f"{root}: {_type_name(transformer)} overrides the Diffusers MiniMax-H3 forward",
     )
     for index, block in enumerate(_blocks(transformer)):
@@ -1381,7 +747,7 @@ def _validate_transformer(transformer: MiniMaxH3Transformer3DModel, root: str) -
 
 
 def _install_transformer(
-    transformer: MiniMaxH3Transformer3DModel, root: str, glue: Launch
+    transformer: MiniMaxH3Transformer3DModel, root: str, glue: Launch, keys: Launch
 ) -> tuple[list[tuple[str, str, str]], int]:
     substitutions: list[tuple[str, str, str]] = []
     fp8_sites = 0
@@ -1398,6 +764,7 @@ def _install_transformer(
         processor._attention_backend = current._attention_backend
         processor._parallel_config = current._parallel_config
         processor._glue = glue
+        processor._keys = keys
         substitutions.append(
             (f"{path}.attn.processor", _type_name(attn.processor), _type_name(processor))
         )
@@ -1441,15 +808,23 @@ def _transformers(pipe: Pipeline) -> Iterator[tuple[str, MiniMaxH3Transformer3DM
             yield str(name), member
 
 
+def _warm_keys(keys: Launch, device: torch.device, heads: int) -> float:
+    """Launch the key sums once, on two rows; nothing compiles. The milliseconds it took to enqueue."""
+    started = time.perf_counter()
+    key_sums(keys, torch.ones(1, 2, heads, HEAD_DIM, device=device, dtype=torch.bfloat16))
+    return (time.perf_counter() - started) * 1000
+
+
 def _eager(model: object, plan: Plan, code: str, reason: str) -> str:
     _record(model, plan, Applied(False, reason, (), 0, 0.0, code))
     return ""
 
 
-def install(model: object, pipe: Pipeline, plan: Plan) -> str:
+def install(model: object, pipe: Pipeline, plan: Plan, *, forwards: tuple[object, ...] = ()) -> str:
     """Install the fused glue on every H3 transformer `pipe` holds; the plan's identity, or ""
     when eager serves (a `NOT_INSTALLABLE` code, reported). Waits for the kernels' build.
-    Fused or eager, every block's attention runs `H3AttnProcessor`."""
+    `forwards`: the package's own transformer forwards the blocks may run under, beside
+    Diffusers'. Fused or eager, every block's attention runs `H3AttnProcessor`."""
     for _, transformer in _transformers(pipe):
         for block in _blocks(transformer):
             _release_qkv(block.attn)
@@ -1466,19 +841,20 @@ def install(model: object, pipe: Pipeline, plan: Plan) -> str:
             "fusion_device_incapable",
             f"fused glue needs bf16 tensor cores (sm80+); this device is sm{major}x",
         )
-    if TRITON_ABSENT:
-        return _eager(model, plan, "fusion_kernels_absent", TRITON_ABSENT)
+    if TRITON_ABSENT or GLUE.absent:
+        return _eager(model, plan, "fusion_kernels_absent", TRITON_ABSENT or GLUE.absent)
     try:
         _require_calls()
         transformers = tuple(_transformers(pipe))
         for name, transformer in transformers:
             _widths(transformer, name)
-            _validate_transformer(transformer, name)
+            _validate_transformer(transformer, name, forwards)
         if not transformers:
             return _eager(model, plan, "fusion_no_transformer", "no MiniMax-H3 transformer to fuse")
-        glue = plan.load(kernels(device))
+        glue = plan.load(GLUE.kernels(device))
+        keys = plan.load(KEYS)
         heads = int(transformers[0][1].config["num_attention_heads"])
-        wrong = checked(glue, device, heads=heads, fp8=kernels(device) is GLUE_FP8)
+        wrong = fused.checked(glue, GLUE, device, heads=heads, fp8=GLUE.kernels(device) is GLUE.fp8)
         if wrong:  # no fused block has served yet: the eager model does, and the run says why
             return _eager(model, plan, "fusion_numeric", wrong)
     except KernelsUnavailable as exc:
@@ -1493,7 +869,7 @@ def install(model: object, pipe: Pipeline, plan: Plan) -> str:
     warm_ms = 0.0
     for name, transformer in transformers:
         before = _tensor_census(transformer)
-        installed, sites = _install_transformer(transformer, name, glue)
+        installed, sites = _install_transformer(transformer, name, glue, keys)
         if _tensor_census(transformer) != before:
             raise GlueRefusal(
                 "fusion_tensor_schema_changed",
@@ -1503,6 +879,7 @@ def install(model: object, pipe: Pipeline, plan: Plan) -> str:
         fp8_sites += sites
         # PAST THE POINT OF NO RETURN: the forwards are substituted, so a failure refuses.
         heads = int(transformer.config["num_attention_heads"])
-        warm_ms += warm(glue, device, heads=heads, fp8=sites > 0)
+        warm_ms += fused.warm(glue, GLUE, device, heads=heads, fp8=sites > 0)
+        warm_ms += _warm_keys(keys, device, heads)
     _record(model, plan, Applied(True, "", tuple(substitutions), fp8_sites, warm_ms))
     return identity()

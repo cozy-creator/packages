@@ -27,7 +27,8 @@ from PIL import Image, ImageOps
 from torch import nn
 from transformers import ProcessorMixin, Qwen3VLConfig, Qwen3VLForConditionalGeneration
 
-from . import fused
+from minimax_h3 import glue
+
 from .transformer import ImageTransformer, TabledTransformer, build_transformer, compute_dtypes, parse_tables
 from .vae import PIXEL_MEAN, PIXEL_STD, VAE_ENCODER, ImageDecoder, ImageEncoder
 
@@ -169,8 +170,8 @@ class H3Image(Model[ImageGraph]):
         return None
 
     def execution_plan(self, plan: Plan) -> str:
-        """The DiT blocks' fused glue (`fused`), P-H3-Image's: the same H3 blocks and widths."""
-        return fused.install(self, self.graph, plan)
+        """The DiT blocks' fused glue, the H3 family's (`minimax_h3.glue`)."""
+        return glue.install(self, self.graph, plan, forwards=(ImageTransformer.forward,))
 
     @uses_components("transformer")
     def denoise(
