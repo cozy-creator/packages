@@ -201,7 +201,9 @@ class Ltx25(Model[Graph]):
     @memoize
     @uses_components("text_encoder")
     def encode(self, prompt: str) -> tuple[torch.Tensor, torch.Tensor]:
-        """The checkpoint's own encoder; `generate` encodes with its `text_encoder` slot (`Ltx25TextEncoder`)."""
+        """The checkpoint's own encoder; `generate` encodes with its `text_encoder` slot (`Ltx25TextEncoder`). The graph
+        keeps the encoder because the int8 recipe quantizes it through this class and `_first_frame` reads its config for
+        the CRF (18, not 33); this method declares it (`undeclared_construction`)."""
         return encode_prompt(self.graph.components["text_encoder"], self.tokenizer, prompt, torch.device(str(self.device)))
 
     @uses_components("transformer", "connectors", "vae", "audio_vae")
