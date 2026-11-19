@@ -111,7 +111,10 @@ frames where each segment after the first starts, a pickup's kept ones included,
   at tau 0.5, with EasyCache; standard 10 dense at tau 1.0; draft that with FirstBlockCache.
 - **Length.** A segment renders whole seconds on H3's 17n+5 frame grid, so the video can run up to a second past its
   beats.
-- **Models.** `minimaxai/minimax-h3@1.0.0-rc.8` and `alibaba-pai/minimax-h3-turbo-lora@1.0.1`.
+- **Models.** `minimaxai/minimax-h3@1.0.0-rc.8` and `alibaba-pai/minimax-h3-turbo-lora@1.0.1`. The text encoder (stock
+  Qwen3-VL-32B-Instruct, its first 50 layers) is its own slot, `text_encoder`: llmfan46's Heretic abliteration of it by
+  default (`llmfan46/qwen3-vl-32b-instruct-ultra-uncensored-heretic`, 4/100 refusals, KL 0.042), the one
+  minimax-h3-image encodes with; MiniMax's own is `model.text_encoder=minimaxai/minimax-h3@1.0.0-rc.8` (se-160).
   `model.base_model=<checkpoint>` and `--lora <org/lora>[,strength]` serve every segment; a
   LoRA trained on the other transformer than a segment runs is applied to it, and the machine warns when its
   record says which it was trained on (`--trained-on`, or its trainer's metadata). Edit's LoRAs are

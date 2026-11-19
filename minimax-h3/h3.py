@@ -103,6 +103,7 @@ from minimax_h3.model import (
     H3LatentUpscaler as H3LatentUpscaler,
     H3Model as H3Model,
     H3RegenerateLoRA as H3RegenerateLoRA,
+    H3TextEncoder as H3TextEncoder,
     H3TurboBase as H3TurboBase,
     H3TurboLoRA as H3TurboLoRA,
     H3VideoVAE as H3VideoVAE,
@@ -804,14 +805,19 @@ def _nonfinite_fraction(torch: ModuleType, value: Tensor) -> float:
 
 #: The releases every H3 callable defaults to; the machine picks each lane from the GPU.
 _MODEL = "minimaxai/minimax-h3@1.0.0-rc.8"
+#: H3's text encoder is stock Qwen3-VL-32B-Instruct (its first 50 layers), its own slot: llmfan46's Heretic abliteration
+#: by default (Paul, 11-17: "use abliterated models wherever possible"), the one minimax-h3-image encodes with too. Stock
+#: is any H3 checkpoint: `model.text_encoder=minimaxai/minimax-h3@1.0.0-rc.8`.
+_TEXT_ENCODER = "llmfan46/qwen3-vl-32b-instruct-ultra-uncensored-heretic@0.1.0"
 _TURBO_LORA = "alibaba-pai/minimax-h3-turbo-lora@1.0.1"
 _REGENERATE_LORA = "efficient-large-model/open-h3-regenerate-2k@0.1.0"
 _LATENT_UPSCALER = "lbh-123-ai/h3-latent-upscaler@0.1.2"
 
 #: The components each task runs. A machine downloads these first and the rest behind the
 #: run, so a pod's first request pays for one DiT, not two.
-_FL2VA = ("text_encoder", "transformer", "vae", "audio_vae")
-_REF2VA = ("text_encoder", "transformer_ref", "vae", "audio_vae")
+_FL2VA = ("transformer", "vae", "audio_vae")
+_REF2VA = ("transformer_ref", "vae", "audio_vae")
+_TEXT = ("text_encoder",)
 
 
 #: The output canvas the Regenerate route computes (`regenerate.TARGETS`): the demand axis beside
@@ -959,6 +965,7 @@ def _render_keyframes(
     ctx: Context,
     task: Task,
     model: H3Model,
+    encoder: H3TextEncoder,
     out: Outputs,
     tel: Telemetry,
     *,
@@ -998,7 +1005,7 @@ def _render_keyframes(
             canvas=(canvas[1], canvas[0]),
         )
     with tel.stage("condition_text"):
-        model.condition_text(task, state)
+        encoder.condition(model.pipe, task, state)
     if first is not None or last is not None:
         with tel.stage("condition_media"):
             model.condition_fl2va_media(task, state)
@@ -1028,6 +1035,7 @@ def _references_to_video(
     payload: Ref2VAInput,
     assets: ReferenceFiles,
     model: H3Model,
+    encoder: H3TextEncoder,
     out: Outputs,
     tel: Telemetry,
     *,
@@ -1105,7 +1113,7 @@ def _references_to_video(
                 )
     # Text and references at once where the text encoder lives on another GPU.
     with tel.stage("condition"):
-        condition_references(model, task, state, tel=tel)
+        condition_references(model, encoder, task, state, tel=tel)
     if turbo_lora is None:
         sample = partial(model.sample_ref2va, recipe=FULL_RECIPES[payload.quality])
     else:
@@ -1282,8 +1290,8 @@ def _sampling(payload: FL2VAInput | Ref2VAInput, turbo_lora: H3TurboLoRA) -> H3T
 
 @app.entrypoint(
     private=True,
-    defaults={"base_model": _MODEL, "turbo_lora": _TURBO_LORA},
-    components={"base_model": _REF2VA, "turbo_lora": ("ref2va_turbo",)},
+    defaults={"base_model": _MODEL, "text_encoder": _TEXT_ENCODER, "turbo_lora": _TURBO_LORA},
+    components={"base_model": _REF2VA, "text_encoder": _TEXT, "turbo_lora": ("ref2va_turbo",)},
     memoize=True,
 )
 async def ref2va_segment(
@@ -1292,6 +1300,7 @@ async def ref2va_segment(
     payload: Ref2VAInput,
     assets: ReferenceFiles,
     base_model: H3TurboBase,
+    text_encoder: H3TextEncoder,
     turbo_lora: H3TurboLoRA,
     out: Outputs,
     tel: Telemetry,
@@ -1319,7 +1328,7 @@ async def ref2va_segment(
         earlier = _Earlier.read(payload.earlier_latents, payload.earlier_videos, head)
     ended: list[ImageFile] = []
     segment = _references_to_video(
-        ctx, "ref2va" if lora is None else "ref2va_turbo", payload, assets, base_model, out, tel,
+        ctx, "ref2va" if lora is None else "ref2va_turbo", payload, assets, base_model, text_encoder, out, tel,
         turbo_lora=lora, context=context, delivery=plan,
         expected_context_provenance=context_provenance(payload.previous_provenance or observed),
         completed=handed if handed.wanted else None,
@@ -1370,8 +1379,8 @@ def _frame(asset: ImageFile | None, shape: tuple[int, ...]) -> PILImage.Image | 
 
 @app.entrypoint(
     private=True,
-    defaults={"base_model": _MODEL, "turbo_lora": _TURBO_LORA},
-    components={"base_model": _FL2VA, "turbo_lora": ("fl2va_turbo",)},
+    defaults={"base_model": _MODEL, "text_encoder": _TEXT_ENCODER, "turbo_lora": _TURBO_LORA},
+    components={"base_model": _FL2VA, "text_encoder": _TEXT, "turbo_lora": ("fl2va_turbo",)},
     memoize=True,
 )
 async def fl2va_segment(
@@ -1379,6 +1388,7 @@ async def fl2va_segment(
     *,
     payload: FL2VAInput,
     base_model: H3TurboBase,
+    text_encoder: H3TextEncoder,
     turbo_lora: H3TurboLoRA,
     out: Outputs,
     tel: Telemetry,
@@ -1393,7 +1403,7 @@ async def fl2va_segment(
     handed = _Segments(out, base_model, plan, observed, payload.latents)
     ended: list[ImageFile] = []
     shot = _render_keyframes(
-        ctx, "fl2va" if lora is None else "fl2va_turbo", base_model, out, tel,
+        ctx, "fl2va" if lora is None else "fl2va_turbo", base_model, text_encoder, out, tel,
         prompt=encoder_prompt("fl2va", payload.prompt), seed=payload.seed,
         duration_s=payload.duration_s, steps=payload.steps,
         first=_frame(payload.first_frame, payload.canvas), last=_frame(payload.last_frame, payload.canvas),
@@ -1406,8 +1416,10 @@ async def fl2va_segment(
 
 @app.entrypoint(
     private=True,
-    defaults={"base_model": _MODEL, "regenerate_lora": _REGENERATE_LORA, "latent_upscaler": _LATENT_UPSCALER},
-    components={"base_model": _FL2VA, "regenerate_lora": ("fl2va_regenerate",), "latent_upscaler": ("upscaler",)},
+    defaults={"base_model": _MODEL, "text_encoder": _TEXT_ENCODER, "regenerate_lora": _REGENERATE_LORA,
+              "latent_upscaler": _LATENT_UPSCALER},
+    components={"base_model": _FL2VA, "text_encoder": _TEXT, "regenerate_lora": ("fl2va_regenerate",),
+                "latent_upscaler": ("upscaler",)},
     memoize=True,
 )
 async def regenerate_shot(
@@ -1415,6 +1427,7 @@ async def regenerate_shot(
     *,
     payload: RegenerateInput,
     base_model: H3TurboBase,
+    text_encoder: H3TextEncoder,
     regenerate_lora: H3RegenerateLoRA,
     latent_upscaler: H3LatentUpscaler,
     out: Outputs,
@@ -1450,7 +1463,7 @@ async def regenerate_shot(
             latents = latent_upscaler.upscale(latents, height=height, width=width)
     cancel()
     with tel.stage("condition_text"):
-        text = base_model.encode_prompt(encoder_prompt("fl2va", payload.prompt), frames_for(MIN_DURATION_S))
+        text = base_model.encode_prompt(text_encoder, encoder_prompt("fl2va", payload.prompt), frames_for(MIN_DURATION_S))
     layout = refine_math.plan_windows(tuple(int(value) for value in latents.shape))
     (first, stop), *_ = layout.spans
     schedule = regenerate_lora.pipe.plan.refined(payload.strength)
