@@ -15,7 +15,7 @@
 from typing import Tuple, Union
 import torch
 from cozy_runtime.attention import Attention
-from cozy_runtime.author import Cut, split
+from cozy_runtime.author import Cut, split, windows
 from einops import rearrange
 
 # from ..cache import Cache
@@ -74,11 +74,12 @@ class NaSwinAttention(MMWindowAttention):
         torch.FloatTensor,
         torch.FloatTensor,
     ]:
-        """[Override] Upstream's window attention a group of whole windows at a time (at most
-        `GROUP` video tokens, from the shape alone): each window attends to its own tokens and the
-        text, so a group's projections, norms, rotary and attention are the whole call's for those
-        rows, and the text output is the same mean over every window. No tensor spans all video
-        tokens but the input and the output.
+        """[Override] Upstream's window attention a group of whole windows at a time, as many tokens
+        a group as the room left holds (`author.windows`: one group when it all fits): each window
+        attends to its own tokens and the text, so a group's projections, norms, rotary and attention
+        are the whole call's for those rows. The text output is the mean over every window, summed
+        one window at a time in window order, so the grouping moves none of its bytes. No tensor
+        spans all video tokens but the input and the output.
 
         The layout orders the windows by length (cached for the forward), so a group is runs of
         equal windows: a run is one batch of `[window rows | text rows]`, built by one concat each
@@ -101,19 +102,21 @@ class NaSwinAttention(MMWindowAttention):
             spans = rows[:, 0].split(lengths)
             return torch.cat([spans[w] for w in order]), shapes[order], [lengths[w] for w in order], int(count.sum())
 
-        rows, window_shape, lengths, windows = cache_win("win_rows_by_length", layout)
+        rows, window_shape, lengths, count = cache_win("win_rows_by_length", layout)
         freqs = cache_win("rope_freqs_3d_by_length", lambda: self.rope.get_freqs(window_shape)) if self.rope else None
+        layout_ = windows("seedvr2 window groups", (len(rows),), Cut(0), per_element_bytes=self._token_bytes(vid))
         out = None
         txt_sum = None
         first = 0
-        for group in _groups(lengths, GROUP):
+        for group in _groups(lengths, max(b - a for a, b in layout_.spans)):
             last = first + sum(lengths[w] for w in group)
             group_freqs = None if freqs is None else freqs[first:last]
-            out, txt_sum = self._group(vid, rows[first:last], [lengths[w] for w in group], group_freqs,
-                                       (txt_q, txt_k, txt_v), out, txt_sum)
+            with layout_.piece():
+                out, txt_sum = self._group(vid, rows[first:last], [lengths[w] for w in group], group_freqs,
+                                           (txt_q, txt_k, txt_v), out, txt_sum)
             first = last
         assert out is not None and txt_sum is not None
-        txt_out = (txt_sum / windows).type_as(txt_q)
+        txt_out = (txt_sum / count).type_as(txt_q)
         return out, self.proj_out.txt(rearrange(txt_out, "l h d -> l (h d)"))
 
     def _group(self, vid, at, lengths, freqs, txt, out, txt_sum):
@@ -128,7 +131,8 @@ class NaSwinAttention(MMWindowAttention):
         for count, length in _runs(lengths):
             piece, o_txt = self._run((q, k, v), txt, slice(start, start + count * length), count, length)
             o_vid.append(piece)
-            txt_sum = o_txt if txt_sum is None else txt_sum + o_txt
+            for window in o_txt:  # in window order, one add each
+                txt_sum = window.float() if txt_sum is None else txt_sum.add_(window)
             start += count * length
         o_vid = self.proj_out.vid(rearrange(torch.cat(o_vid) if len(o_vid) > 1 else o_vid[0], "l h d -> l (h d)"))
         out = o_vid.new_empty((vid.shape[0], o_vid.shape[1])) if out is None else out
@@ -136,22 +140,28 @@ class NaSwinAttention(MMWindowAttention):
         return out, txt_sum
 
     def _run(self, qkv, txt, rows, count, length):
-        """`count` windows of `length` rows each with the text, as one batch: the windows' output rows and the
-        text's output summed over them. Its batch dies when it returns, before the next run's is built."""
+        """`count` windows of `length` rows each with the text, as one batch: the windows' output rows and each
+        window's text output. Its batch dies when it returns, before the next run's is built."""
         batch = [
             torch.cat([x[rows].view(count, length, *x.shape[1:]), t.expand(count, *t.shape)], dim=1)
             for x, t in zip(qkv, txt)
         ]
         o = self.attn(*batch).type_as(qkv[0])
-        return o[:, :length].flatten(0, 1), o[:, length:].float().sum(0)
+        return o[:, :length].flatten(0, 1), o[:, length:]
 
-
-#: Video tokens a window group holds at most (whole windows; a longer window is a group alone).
-GROUP = 16384
+    @staticmethod
+    def _token_bytes(vid):
+        """What a window group holds for each of its video tokens at its peak: the gathered row (the input's
+        dtype); the q, k, v projection, the normed q and k, their text-joined batches, the attention output, its
+        concatenation and the output projection (eleven of the compute dtype); and the rotary's F32 copies of q
+        and k, in and out (four)."""
+        kind = vid.device.type
+        compute = torch.get_autocast_dtype(kind) if torch.is_autocast_enabled(kind) else vid.dtype
+        return vid.shape[-1] * (vid.element_size() + 11 * compute.itemsize + 4 * torch.float32.itemsize)
 
 
 def _groups(lengths, most):
-    """Consecutive windows, as few groups as hold at most `most` tokens each."""
+    """Consecutive windows, as few groups as hold at most `most` tokens each (a longer window is a group alone)."""
     group, size = [], 0
     for w, n in enumerate(lengths):
         if group and size + n > most:
@@ -267,8 +277,8 @@ class NaMMSRTransformerBlock(MMWindowTransformerBlock):
 
         vid_mlp, txt_mlp = self.mlp_norm(vid_attn, txt_attn)
         vid_mlp, txt_mlp = self.ada(vid_mlp, txt_mlp, layer="mlp", mode="in", **ada_kwargs)
-        # [Override] The video MLP in pieces of `GROUP` tokens: exact, token-local.
-        vid_mlp = split(self.mlp.vid, vid_mlp, Cut(0), most=GROUP * vid_mlp.shape[-1], holds=self.mlp_holds)
+        # [Override] The video MLP in as few pieces of tokens as the room holds: exact, token-local.
+        vid_mlp = split(self.mlp.vid, vid_mlp, Cut(0), holds=self.mlp_holds)
         txt_mlp = self.mlp.txt(txt_mlp)
         vid_mlp, txt_mlp = self.ada(vid_mlp, txt_mlp, layer="mlp", mode="out", **ada_kwargs)
         vid_mlp, txt_mlp = (vid_mlp + vid_attn), (txt_mlp + txt_attn)
