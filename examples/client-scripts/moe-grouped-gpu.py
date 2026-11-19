@@ -1,6 +1,6 @@
 # /// script
 # requires-python = ">=3.12"
-# dependencies = ["cozy-runtime>=0.48.0.dev0,<0.49", "msgspec>=0.19", "torch==2.14.0"]
+# dependencies = ["cozy-runtime>=0.48.0.dev0,<0.50", "msgspec>=0.19", "torch==2.14.0"]
 # ///
 """cozy_runtime.moe's grouped expert GEMV on a GPU, against each expert's own Linears (se-085).
 

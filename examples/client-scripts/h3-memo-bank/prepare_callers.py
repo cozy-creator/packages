@@ -113,7 +113,7 @@ for name, caller in callers.items():
 name = "h3-bank-{name.replace('_', '-')}"
 version = "0.0.1"
 requires-python = ">=3.12,<3.13"
-dependencies = ["cozy-runtime>=0.48.0.dev0,<0.49", "minimax-h3=={project['version']}", "msgspec>=0.19"]
+dependencies = ["cozy-runtime>=0.48.0.dev0,<0.50", "minimax-h3=={project['version']}", "msgspec>=0.19"]
 
 [project.entry-points."cozy.application"]
 default = "bank_caller:app"
