@@ -9,7 +9,8 @@ Video with sound from MiniMax H3, as four tools. Each is a box on a canvas and t
   as `generate` renders a shot, under one of Alissonerdx's guide-edit LoRAs: character swap, head swap, style transfer,
   VFX edit or motion transfer.
 - **`retake`** (Retake) makes `start_s` to `end_s` of a take again from a `prompt`, its picture and sound, and keeps the
-  rest: the fields of LTX-2.5 Retake, plus `turbo`, `quality` and `seed`.
+  rest: LTX-2.5 Retake's `video`, `start_s`, `end_s`, `prompt` and `seed`, plus `turbo` and `quality`. It has no
+  `redo`: H3 makes the picture and sound together.
 - **`upscale`** (MiniMax H3 Upscale) re-renders a take at 1080p, 1440p or 2160p with NVIDIA's Regenerate-2K, guided by
   the take's own text or a `prompt` that replaces it ([UPSCALE.md](UPSCALE.md)).
 

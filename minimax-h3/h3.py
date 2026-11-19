@@ -102,7 +102,7 @@ from minimax_h3.continuation import (
     provenance,
     video_tokens,
 )
-from minimax_h3.retake import PREFIX_FRAMES, SNAP, SUFFIX_FRAMES, shot_changes, window
+from minimax_h3.retake import FLASH, PREFIX_FRAMES, SNAP, SUFFIX_FRAMES, shot_changes, window
 from minimax_h3.shot_latents import SAMPLES_PER_TICK
 from minimax_h3.guide_rows import GuideClip
 from minimax_h3.model import (
@@ -2294,21 +2294,23 @@ _RETAKE_NEEDS = {"ref2va_segment": "true"}
 
 
 def _shot_change(video: VideoFile, near: int, length: int) -> int | None:
-    """The frame on the 24-fps clock that opens a new shot within `SNAP` of `near`, the nearest; None when none does."""
+    """The frame on the 24-fps clock that opens a new shot within `SNAP` of `near`, the nearest; None when none does. The
+    read runs `FLASH` frames further each way, so a change at either end is seen to hold."""
     first, last = max(1, near - SNAP), min(length, near + SNAP + 1)
+    begin = max(0, first - 1 - FLASH)
     slots: list[int] = []
 
     def pictures() -> Iterator[npt.NDArray[np.uint8]]:
         origin = None
-        with video.stream(start=Fraction(first - 1, FPS), end=Fraction(last, FPS), audio=False) as events:
+        with video.stream(start=Fraction(begin, FPS), end=Fraction(min(length, last + FLASH), FPS), audio=False) as events:
             for event in events:
                 if isinstance(event, DecodedVideoFrame):
                     origin = event.start_time if origin is None else origin
-                    slots.append(first - 1 + round((event.start_time - origin) * FPS))
+                    slots.append(begin + round((event.start_time - origin) * FPS))
                     yield np.frombuffer(event.rgb, dtype=np.uint8).reshape(event.height, event.width, 3)
 
     found = [slots[index] for index in shot_changes(pictures())]
-    return min((slot for slot in found if 0 < slot < length), key=lambda slot: abs(slot - near), default=None)
+    return min((slot for slot in found if first <= slot < last), key=lambda slot: abs(slot - near), default=None)
 
 
 @app.tool(label="Retake", named="retake", reserved=_RESERVED, needs=_RETAKE_NEEDS)

@@ -63,7 +63,7 @@ head's sound. The kept sound is resampled to the new part's. The result has no l
 `retake` cuts a take at a window and makes only the middle (`minimax_h3/retake.py`). The window goes on from the 22
 frames before it, from the take's latents when they're on its `17k + 5` grid (`shot_latents.cut`), else encoded. At its
 end, a shot change within one chunk of the asked end (picture and colour change both outliers among the frames around
-it) ends it: the last segment samples a few frames past it, cut. Otherwise the take's next 39 frames and their second of
+it, one pair alone, still changed 4 frames on: not a pan or a flash) ends it: the last segment samples a few frames past it, cut. Otherwise the take's next 39 frames and their second of
 sound are a suffix, held over the sample's last 12 latents as the carry is over its head
 (`ContinuationPlan.suffix`, `align_context_rows`, `unprotect_carried`); the sample is exactly `22 + L + 39`, so the
 window is `L ≡ 12 (mod 17)` frames, and with latents it ends on a chunk, where the take's own latents follow in phase.

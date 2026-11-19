@@ -66,7 +66,8 @@ def _seconds(frames: int) -> str:
 def window(start: int, end: int, length: int, *, phased: bool, cut: int | None) -> Window:
     """The window for a range `[start, end)` of a take of `length` frames. `phased`: the take's latents carry it, so the
     window starts on their `17k + 5` grid and its suffix on a chunk. `cut`: a shot change, the first frame of the next
-    shot, within `SNAP` of `end`. Each edge moves outward, never in, and says by how much."""
+    shot, within `SNAP` of `end`. Each edge moves outward, never in, but to that shot change or to 22 frames in, and
+    says by how much."""
     said: list[str] = []
     if start < PREFIX_FRAMES:
         said.append(f"a redo goes on from {PREFIX_FRAMES} frames before it, so it starts at {_seconds(PREFIX_FRAMES)}, "
@@ -111,12 +112,15 @@ def _split(total: int, least: int, most: int) -> tuple[int, ...]:
 
 #: A frame pair is a shot change when its pictures differ by this much (mean absolute difference, 0-1, of the frames
 #: shrunk to `_SIDE`) and its colours by this much (total variation of 16-bin channel histograms, 0-1), each at least
-#: `_OUTLIER` times the median pair's around it: a cut replaces the picture and its colours at once; motion, even fast,
-#: moves the picture for many frames running and its colours little. A missed cut only holds the next frames instead.
+#: `_OUTLIER` times the median pair's around it: a cut replaces the picture and its colours at once. Motion, even a whip
+#: pan, moves the picture for frames running, so a pair beside another that moved is not one; and a flash comes back,
+#: so the change must still hold `FLASH` frames on either side. A missed cut only holds the next frames instead.
 _PICTURE = 0.08
 _COLOUR = 0.1
 _OUTLIER = 4.0
 _SIDE = 64
+#: The longest flash (a strobe, lightning, a muzzle flash) a shot change outlasts, in frames.
+FLASH = 4
 
 
 def _measures(frame: npt.NDArray[np.uint8]) -> tuple[npt.NDArray[np.float64], npt.NDArray[np.float64]]:
@@ -134,10 +138,24 @@ def shot_changes(frames: Iterable[npt.NDArray[np.uint8]]) -> list[int]:
     measured = [_measures(frame) for frame in frames]
     if len(measured) < 3:
         return []
-    picture = np.array([np.abs(b[0] - a[0]).mean() for a, b in zip(measured, measured[1:])])
-    colour = np.array([0.5 * np.abs(b[1] - a[1]).sum() for a, b in zip(measured, measured[1:])])
+
+    def picture(a: int, b: int) -> float:
+        return float(np.abs(measured[b][0] - measured[a][0]).mean())
+
+    def colour(a: int, b: int) -> float:
+        return float(0.5 * np.abs(measured[b][1] - measured[a][1]).sum())
+
+    last = len(measured) - 1
+    moved = [picture(index, index + 1) for index in range(last)]
+    least = max(_PICTURE, _OUTLIER * float(np.median(moved)))
+    least_colour = max(_COLOUR, _OUTLIER * float(np.median([colour(index, index + 1) for index in range(last)])))
+
+    def changed(a: int, b: int) -> bool:
+        return picture(a, b) >= least and colour(a, b) >= least_colour
+
     return [
-        index + 1 for index in range(len(picture))
-        if picture[index] >= max(_PICTURE, _OUTLIER * float(np.median(picture)))
-        and colour[index] >= max(_COLOUR, _OUTLIER * float(np.median(colour)))
+        index + 1 for index in range(last)
+        if changed(index, index + 1)
+        and all(moved[beside] < least for beside in (index - 1, index + 1) if 0 <= beside < last)
+        and changed(max(0, index - FLASH), index + 1) and changed(index, min(last, index + 1 + FLASH))
     ]  # fmt: skip
