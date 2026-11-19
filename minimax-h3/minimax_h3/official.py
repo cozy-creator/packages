@@ -71,7 +71,6 @@ from cozy_runtime.media import DecodedAudio, DecodedAudioChunk, DecodedMediaEven
 from minimax_h3.preparation.table_layout import TableLayout
 
 from .adaln_pruned import H3Transformer, build_transformer
-from .cell_texture import CellEqualizer
 from .conditioner import FinalHiddenState, PresentationLength, build_text_conditioner
 from .continuation import (
     AUDIO_TICKS,
@@ -2170,7 +2169,6 @@ def decode_chunks(
     pixel_std = torch.tensor(pixel[1], device=device).view(1, -1, 1, 1, 1)
     frames = 0
     tail = DeliveredFrames(delivery) if delivery is not None else None
-    equalize = CellEqualizer(VAE_SPATIAL_RATIO)
     with torch.no_grad():
         chunks = vae.decode_chunks(latents * latents_std + latents_mean)
         while True:
@@ -2180,7 +2178,7 @@ def decode_chunks(
                 return frames if tail is None else tail.finish()
             video = chunk.float() * pixel_std + pixel_mean
             frames += int(video.shape[2])
-            selected = equalize(video[0].permute(1, 0, 2, 3))
+            selected = video[0].permute(1, 0, 2, 3)
             if tail is not None:
                 selected = tail.push(selected)
             if selected.shape[0]:
