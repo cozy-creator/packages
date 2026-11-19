@@ -9,7 +9,7 @@ import math
 from typing import Annotated, Literal
 
 import msgspec
-from cozy_runtime.author import Adjustments, App, Context, Lora, ModelChoice, Seed, Telemetry, call
+from cozy_runtime.author import Adjustments, App, Context, Lora, ModelChoice, Seed, Telemetry, Weights, call
 from cozy_runtime.fields import Advanced, AspectRatio, FileBound, Image, Prompt, Ratios
 from cozy_runtime.media import ImageFile
 from PIL import Image as PILImage
@@ -37,7 +37,7 @@ SIZES = Sizes((0.25, 4.0), (256, 4096), 16, "MOSS-Image's 0.25-4 MP")
 STEPS, MOST_STEPS = 50, 200
 GUIDANCE = 3.0
 #: Moss-Image-Edit (chinoll/Moss-Image-Edit, rank 64 on every block linear), the LoRA a prompt mentioning pictures
-#: runs under: its caller stacks it on `model` (`edit`).
+#: runs under: the `edit_lora` slot's default, which its caller stacks on `model` (`edit`).
 EDIT_LORA = "chinoll/moss-image-edit@0.1.0"
 #: Moss-Image-Edit's workflows: 30 Euler steps at CFG 4 against an empty negative.
 EDIT_STEPS, EDIT_GUIDANCE = 30, 4.0
@@ -48,7 +48,7 @@ MAX_PICTURES = 4
 #: The control maps MOSS-Image reads (`control`).
 type Kinds = Literal["pose", "depth", "canny", "lineart", "sketch"]
 #: thedeoxen's control LoRAs for MOSS-Image SFT, one a kind, stacked on `model` at the control's strength: AI-Toolkit
-#: edit LoRAs, each trained alone with its map as the one reference.
+#: edit LoRAs, each trained alone with its map as the one reference. Each is the default of its kind's slot.
 CONTROL_LORAS: dict[str, str] = {
     "pose": "thedeoxen/moss-image-pose-controlnet@0.1.0",  # a DWPose skeleton: colored bones on black
     "depth": "thedeoxen/moss-image-depth-controlnet@0.1.0",  # near is white
@@ -159,23 +159,36 @@ def reference(picture: PILImage.Image) -> PILImage.Image:
 _STEERS = 'request.control.exists(c, c.strength > 0 && c.kind in ["pose", "depth", "canny", "lineart", "sketch"])'
 _PICTURE = '.references.exists(r, r.type == "image")'
 _NO_PICTURE = '.references.all(r, r.type != "image")'
+#: Each LoRA slot, by the same rules: a kind's control LoRA with a steering map of that kind (over-fetched when an
+#: earlier map is the one read), the edit LoRA for an edit. A request may replace any of them (`models.<slot>`).
+_LORAS = {"edit_lora": EDIT_LORA, **CONTROL_LORAS}
+_KIND = 'request.control.exists(c, c.strength > 0 && c.kind == "{}")'
 _NEEDS = {"control": _STEERS, "edit": f"!({_STEERS}) && request.prompt{_PICTURE}",
-          "text_to_image": f"!({_STEERS}) && request.prompt{_NO_PICTURE}"}
+          "text_to_image": f"!({_STEERS}) && request.prompt{_NO_PICTURE}",
+          "edit_lora": f"!({_STEERS}) && request.prompt{_PICTURE}", **{kind: _KIND.format(kind) for kind in CONTROL_LORAS}}
 _BOX_NEEDS = {"control": _STEERS, "edit": f"!({_STEERS}) && request.instructions{_PICTURE}",
-              "text_to_image": f"!({_STEERS}) && request.instructions{_NO_PICTURE}"}
+              "text_to_image": f"!({_STEERS}) && request.instructions{_NO_PICTURE}",
+              "edit_lora": f"!({_STEERS}) && request.instructions{_PICTURE}",
+              **{kind: _KIND.format(kind) for kind in CONTROL_LORAS}}
 
 
-@app.entrypoint(needs=_NEEDS)
-async def generate(ctx: Context, payload: GenerateInput) -> ImageResult:
-    """MOSS-Image from the text (`text_to_image`); with a control map, `control` under its kind's adapter
-    (`CONTROL_LORAS`, at its strength); else with pictures mentioned, `edit` under Moss-Image-Edit (`EDIT_LORA`).
-    Each adapter is stacked on the model after any caller LoRA, and each is this request's GPU call, so the request's
-    model and LoRAs reach it."""
+@app.entrypoint(defaults=_LORAS, needs=_NEEDS)
+async def generate(ctx: Context, payload: GenerateInput, edit_lora: Weights, pose: Weights, depth: Weights,
+                   canny: Weights, lineart: Weights, sketch: Weights) -> ImageResult:  # fmt: skip
+    """MOSS-Image from the text (`text_to_image`); with a control map, `control` under its kind's LoRA slot (at the
+    map's strength); else with pictures mentioned, `edit` under the `edit_lora` slot (Moss-Image-Edit)."""
+    controls = {"pose": pose, "depth": depth, "canny": canny, "lineart": lineart, "sketch": sketch}
+    return await steered(payload, edit_lora, controls)
+
+
+async def steered(payload: GenerateInput, edit_lora: Weights, controls: dict[str, Weights]) -> ImageResult:
+    """`generate`'s call: each LoRA slot handed on by its ref, stacked on the model after any caller LoRA. Each call is
+    this request's GPU call, so the request's model and LoRAs reach it."""
     if maps := steering(payload):
-        lora = Lora(CONTROL_LORAS[maps[0].kind], maps[0].strength)
+        lora = Lora(controls[maps[0].kind].ref, maps[0].strength)
         return await call(control, payload, models={"model": ModelChoice(lora=(lora,))})
     if payload.prompt.references:
-        return await call(edit, payload, models={"model": ModelChoice(lora=(Lora(EDIT_LORA),))})
+        return await call(edit, payload, models={"model": ModelChoice(lora=(Lora(edit_lora.ref),))})
     return await call(text_to_image, payload)
 
 
@@ -303,13 +316,15 @@ class ImageBox(msgspec.Struct, kw_only=True):
     control: list[Control[Literal["pose", "depth", "canny", "lineart", "sketch"]]] = msgspec.field(default_factory=list)
 
 
-@app.tool(label="Image", named="image", needs=_BOX_NEEDS)
-async def image(ctx: Context, payload: ImageBox) -> ImageResult:
+@app.tool(label="Image", named="image", defaults=_LORAS, needs=_BOX_NEEDS)
+async def image(ctx: Context, payload: ImageBox, edit_lora: Weights, pose: Weights, depth: Weights, canny: Weights,
+                lineart: Weights, sketch: Weights) -> ImageResult:  # fmt: skip
     """MOSS-Image on a canvas: `generate` from the box, steered by its first control map when it has one, else an
     edit of its pictures when it mentions any."""
     request = GenerateInput(prompt=payload.instructions, aspect_ratio=payload.aspect_ratio, megapixels=payload.megapixels,
                             seed=payload.seed, negative_prompt=payload.negative_prompt, control=payload.control)  # fmt: skip
-    return await generate(ctx, request)
+    controls = {"pose": pose, "depth": depth, "canny": canny, "lineart": lineart, "sketch": sketch}
+    return await steered(request, edit_lora, controls)
 
 
 #: What MOSS-Image is told of a picture it upscales.
