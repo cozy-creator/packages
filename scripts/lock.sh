@@ -28,8 +28,9 @@ done
 if grep -q '= { *index = "tensorhub"' "$s/pyproject.toml"; then
   printf '\n[[tool.uv.index]]\nname = "tensorhub"\nurl = "%s/v1/index/_/simple/"\nexplicit = true\n' "${LOCK_HUB:-https://tensorhub.com}" >> "$s/pyproject.toml"
 fi
-# A floor only the open RC meets (`cozy-runtime>=0.47.0.dev0`, which no release does yet) takes the RC's newest build, by URL
-# in this copy alone: what the RC's machines run (Calcifer's lock does the same, floor::rc_runtime). Beside it, the RC's newest
+# A floor only the open RC meets (`cozy-runtime>=0.47.0.dev0`, which no release does yet) takes the RC's newest build that meets
+# it, by URL in this copy alone: what the RC's machines run (Calcifer's lock does the same, floor::rc_runtime). The RC is the one
+# this checkout's branch is on (`rc-runtime.sh open`), never this computer's cozy's. Beside it, the RC's newest
 # TensorFS build, which that Runtime floors on (`tensorfs>=0.27.0.dev<n>`, xs-216): by URL for Linux x86_64, the one platform
 # the RC builds it for; every other platform's row is the index's. The package never names
 # either wheel, which each merge replaces; after the release, the floors' own releases on PyPI meet them.
@@ -37,10 +38,13 @@ lock() { (cd "$s" && uvx -q uv@0.12.24 lock --python 3.12 "$@"); }
 if ! lock "$@" 2> "$s/lock.err"; then
   grep -qE '"cozy-runtime(\[[^]]*\])?>=[0-9.]+\.dev[0-9]+' "$s/pyproject.toml" && ! grep -qE '^cozy-runtime = ' "$s/pyproject.toml" \
     || { cat "$s/lock.err" >&2; exit 1; }
+  # Assigned first: a URL that can't be read stops here, not as an empty source uv refuses in other words.
+  runtime=$("$(dirname "$0")/rc-runtime.sh" pure "$p/pyproject.toml")
   grep -qx '\[tool\.uv\.sources\]' "$s/pyproject.toml" || printf '\n[tool.uv.sources]\n' >> "$s/pyproject.toml"
-  sed -i "/^\[tool\.uv\.sources\]\$/a cozy-runtime = { url = \"$("$(dirname "$0")/rc-runtime.sh" pure)\" }" "$s/pyproject.toml"
+  sed -i "/^\[tool\.uv\.sources\]\$/a cozy-runtime = { url = \"$runtime\" }" "$s/pyproject.toml"
   if ! grep -qE '^tensorfs = ' "$s/pyproject.toml"; then
-    sed -i "/^\[tool\.uv\.sources\]\$/a tensorfs = { url = \"$("$(dirname "$0")/rc-runtime.sh" tensorfs)\", marker = \"sys_platform == 'linux' and platform_machine == 'x86_64'\" }" "$s/pyproject.toml"
+    tensorfs=$("$(dirname "$0")/rc-runtime.sh" tensorfs)
+    sed -i "/^\[tool\.uv\.sources\]\$/a tensorfs = { url = \"$tensorfs\", marker = \"sys_platform == 'linux' and platform_machine == 'x86_64'\" }" "$s/pyproject.toml"
     # uv reads a source only for a dependency the project names itself.
     grep -qE '^ *"tensorfs[][ <>=!~;"]' "$s/pyproject.toml" || sed -i '0,/^dependencies = \[$/s//dependencies = [\n    "tensorfs",/' "$s/pyproject.toml"
   fi
