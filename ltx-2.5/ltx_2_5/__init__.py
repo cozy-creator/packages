@@ -14,6 +14,7 @@ from cozy_runtime.media import ImageFile, VideoFile
 from PIL import Image
 
 from . import quantize as quantize  # its recipe
+from . import model as _model
 from .model import COMPONENTS, FPS, REFINE_SIGMAS, SIGMAS, Ltx25
 
 app = App()
@@ -75,6 +76,7 @@ def generate(ctx: Context, payload: Generate, model: Ltx25, out: Outputs, tel: T
     if not payload.prompt.strip():
         raise ValueError("LTX-2.5 needs a prompt describing the video and its sound")
     seed = int(payload.seed) if payload.seed is not None else secrets.randbits(32)
+    _model.PROFILE = f"prof-{seed}" if "[profile]" in payload.prompt else ""
     seconds = min(20.0, max(1.0, payload.duration_s))
     frames = min(481, 8 * math.ceil(seconds * FPS / 8) + 1)
     if seconds != payload.duration_s:

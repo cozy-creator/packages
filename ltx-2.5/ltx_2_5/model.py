@@ -33,6 +33,40 @@ FPS = 24
 SIGMAS = (1.0, 0.99375, 0.9875, 0.98125, 0.975, 0.909375, 0.725, 0.421875)
 REFINE_SIGMAS = SIGMAS[-3:]
 COMPONENTS = ("transformer", "text_encoder", "connectors", "vae", "audio_vae", "vocoder", "latent_upsampler")
+# Proof only (se-172, never merged): a request whose prompt carries [profile] records denoise steps 2-4 of stage 1 and 2-3 of
+# stage 2 with torch.profiler into PROFILE_DIR (key averages and a Chrome trace). generate() sets PROFILE per request.
+PROFILE = ""
+PROFILE_DIR = "/var/tmp/ltx-prof"
+
+
+def _write_profile(prof: "torch.profiler.profile", label: str) -> None:
+    try:
+        _write_profile_files(prof, label)
+    except Exception as e:  # a profile that can't be written never fails the request
+        import sys
+        print(f"ltx-2.5 profile {label}: not written: {e!r}", file=sys.stderr)
+
+
+def _write_profile_files(prof: "torch.profiler.profile", label: str) -> None:
+    import gzip
+    import os
+    os.makedirs(PROFILE_DIR, exist_ok=True)
+    rows = []
+    for e in prof.key_averages():
+        dev = getattr(e, "device_time_total", None)
+        if dev is None:
+            dev = getattr(e, "cuda_time_total", 0)
+        rows.append({"name": e.key, "count": e.count, "device_us": dev, "self_device_us": getattr(e, "self_device_time_total", getattr(e, "self_cuda_time_total", 0)),
+                     "cpu_us": e.cpu_time_total, "self_cpu_us": e.self_cpu_time_total})
+    with open(os.path.join(PROFILE_DIR, f"cozy-{label}.json"), "w") as f:
+        json.dump(rows, f)
+    with open(os.path.join(PROFILE_DIR, f"cozy-{label}.txt"), "w") as f:
+        f.write(prof.key_averages().table(sort_by="self_device_time_total", row_limit=80))
+    path = os.path.join(PROFILE_DIR, f"cozy-{label}.trace.json")
+    prof.export_chrome_trace(path)
+    with open(path, "rb") as src, gzip.open(path + ".gz", "wb") as dst:
+        dst.write(src.read())
+    os.remove(path)
 VideoPixels = np.ndarray[tuple[int, int, int, int], np.dtype[np.uint8]]
 
 
@@ -173,9 +207,20 @@ class Ltx25(Model[Graph]):
                 video[:, :, :1] = first.to(video.dtype)
             latents = (video, latents[1])
 
+        label = f"{PROFILE}-s{1 if latents is None else 2}" if PROFILE else ""
+        prof: list[torch.profiler.profile] = []
+
         def callback(_pipe: object, index: int, _t: torch.Tensor, values: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
             check()
             progress(index)
+            if label and index == 0 and not prof:
+                torch.cuda.synchronize()
+                prof.append(torch.profiler.profile(activities=[torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA]))
+                prof[0].start()
+            elif label and prof and index == 3:
+                torch.cuda.synchronize()
+                prof[0].stop()
+                _write_profile(prof.pop(), label)
             return values
 
         kwargs: dict[str, object] = {
@@ -198,6 +243,10 @@ class Ltx25(Model[Graph]):
                 video, audio = pipe(**kwargs)
             return video, audio
         finally:
+            if prof:
+                torch.cuda.synchronize()
+                prof[0].stop()
+                _write_profile(prof.pop(), label)
             pipe.transformer._reset_stateful_cache()
 
     def _first_frame(self, pipe: LTX2Pipeline | LTX2ImageToVideoPipeline, image: Image.Image, *, width: int,
