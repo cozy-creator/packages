@@ -307,18 +307,23 @@ _BOX_NEEDS = {"expander_i2i": f"request.prompt_upsampling && request.instruction
               "turbo_lora": "request.turbo"}  # fmt: skip
 
 
-#: What a box's picture costs (cl-1286): its megapixels and its steps, Turbo's 4 else 40, by `generate`'s row of its card nearest
-#: it (`benchmarks.json`: 40 steps, no rewrite), from that row's megapixels: 0.966 of it denoising, by megapixels^1.19 and in
-#: proportion to steps, and 0.034 fixed (an RTX 4090's warm 40-step runs: generating image 7.2 s at 1 MP, 37.5 s at 4 MP,
-#: 38.8 s in all); and the enhancer's rewrite, on by default (`prompt_upsampling`). No function runs the enhancer alone, so no row measures it yet: its term reads
-#: `prompt_upsampling`'s row once one exists, until then 0.29 of the card's `generate` row (an RTX 4090's "upsampling prompt"
-#: stage, warm: 9.4 to 14.1 s, 12.3 s at the median).
-_GENERATE = 'measured(machine, "generate").warm_ms'
-_GENERATE_MP = 'measured(machine, "generate").request.megapixels'
+#: What a box's picture costs (cl-1286): its megapixels, its steps (Turbo's 4 else 40) and its rewrite (`prompt_upsampling`, 1 on,
+#: 0 off: on by default). Its picture is `generate`'s row of its card nearest it (`benchmarks.json`: 40 steps, no rewrite), from that
+#: row's megapixels: 0.966 of it denoising, by megapixels^1.19 and in proportion to steps, and 0.034 fixed (an RTX 4090's warm
+#: 40-step runs: generating image 7.2 s at 1 MP, 37.5 s at 4 MP, 38.8 s in all). Its rewrite is what a row of `image` with it on
+#: measured beyond its picture; with none yet, 0.29 of the card's `generate` row (an RTX 4090's "upsampling prompt" stage, warm:
+#: 9.4 to 14.1 s, 12.3 s at the median).
+_GENERATE = 'measured(machine, "generate")'
+_BOX = 'measured(machine, "image", {"request": {}})'
+_ASKED = (f"{_GENERATE}.warm_ms * (0.966 * pow(size.megapixels / {_GENERATE}.request.megapixels, 1.19)"
+          " * size.steps / 40.0 + 0.034)")
+_BOX_PICTURE = (f"{_GENERATE}.warm_ms * (0.966 * pow({_BOX}.request.megapixels / {_GENERATE}.request.megapixels, 1.19)"
+                f" * {_BOX}.request.steps / 40.0 + 0.034)")
+_REWRITTEN = f"has({_BOX}.request.prompt_upsampling) && {_BOX}.request.prompt_upsampling == 1.0"
 _BOX_ESTIMATE = {
-    "size": {"megapixels": "double(request.megapixels)", "steps": "request.turbo ? 4.0 : 40.0"},
-    "ms": f"{_GENERATE} * (0.966 * pow(size.megapixels / {_GENERATE_MP}, 1.19) * size.steps / 40.0 + 0.034)"
-          f' + (request.prompt_upsampling ? measured(machine, "prompt_upsampling", {{"warm_ms": 0.29 * {_GENERATE}}}).warm_ms : 0.0)',
+    "size": {"megapixels": "double(request.megapixels)", "steps": "request.turbo ? 4.0 : 40.0",
+             "prompt_upsampling": "request.prompt_upsampling ? 1.0 : 0.0"},
+    "ms": f"{_ASKED} + size.prompt_upsampling * (({_REWRITTEN}) ? {_BOX}.warm_ms - {_BOX_PICTURE} : 0.29 * {_GENERATE}.warm_ms)",
 }  # fmt: skip
 
 
