@@ -16,7 +16,7 @@ import msgspec
 import numpy as np
 import numpy.typing as npt
 import torch
-from cozy_runtime.author import InvalidRequest, OutputError, Outputs, SavedVideo, Seed, Telemetry
+from cozy_runtime.author import InvalidRequest, OutputError, Outputs, Seed, Telemetry
 from cozy_runtime.fields import (
     Advanced,
     AspectRatio,
@@ -782,7 +782,8 @@ def join_kept(out: Outputs, take: VideoFile, frames: int, new: VideoFile, *, aft
               overlap: Overlap = Overlap(), cut: bool = False) -> tuple[VideoFile, list[str]]:  # fmt: skip
     """A take's first `frames`, then `new`, then the take again from frame `after` (a redo; frames on the 24-fps clock), as
     one video, where no latents carry the take through it. At each join the kept frames and sound beside it cross-fade into
-    the new part's own copies (`overlap`), except the picture at a shot change (`cut`), where the next shot starts fresh.
+    the new part's own copies (`overlap`). A redo ending on a shot change (`cut`) leaves the next shot as it is: the new
+    part's last 40 ms of sound cross-fade into the take's own there instead, and nothing from the cut on changes.
 
     The take is spliced (`Outputs.splice_video`): every packet outside the window is its own, byte for byte, and the window,
     the cross-faded kept frames and the new part, is encoded at its size and on its clock. A take that can't be cut by packet
@@ -791,7 +792,7 @@ def join_kept(out: Outputs, take: VideoFile, frames: int, new: VideoFile, *, aft
         said = "the take has no sound track for the new part's sound, so its kept frames are encoded again"
     else:
         try:
-            return _spliced(out, take, frames, new, after=after, overlap=overlap, cut=cut), []
+            return _spliced(out, take, frames, new, after=after, overlap=overlap, cut=cut)
         except OutputError as refused:
             if refused.code != "video_copy_incompatible":
                 raise
@@ -801,10 +802,11 @@ def join_kept(out: Outputs, take: VideoFile, frames: int, new: VideoFile, *, aft
 
 
 def _spliced(out: Outputs, take: VideoFile, frames: int, new: VideoFile, *, after: int | None, overlap: Overlap,
-             cut: bool) -> VideoFile:  # fmt: skip
+             cut: bool) -> tuple[VideoFile, list[str]]:  # fmt: skip
     """`join_kept` as a splice of the take, on its own clock and at its size: its frames from `CROSSFADE_FRAMES` before the
-    join to as many after `after` (or its end) replaced by the window, whose sound is one, already mixed, from its first
-    frame. A take not at 24 fps shows the new part's frames on its own clock."""
+    join to as many after `after` (to the cut itself at a shot change; to its end for a pickup) replaced by the window, whose
+    sound is one, already mixed, from its first frame. The splice holds one frame clock, so a take not at 24 fps shows the
+    new part's frames on its own, some twice."""
     probe = take.probe()
     rate = probe.frame_rate or Fraction(FPS)
     size = (probe.width, probe.height)
@@ -817,7 +819,7 @@ def _spliced(out: Outputs, take: VideoFile, frames: int, new: VideoFile, *, afte
         return round(Fraction(slots) / rate * H3_RATE)
 
     faded, join, resume = slot(CROSSFADE_FRAMES), slot(frames), None if after is None else slot(after)
-    start, end = max(0, join - faded), None if resume is None else resume + faded
+    start, end = max(0, join - faded), None if resume is None else resume + (0 if cut else faded)
     count = slot(probe_frames(new)) if resume is None else resume - join
     fade = round(CROSSFADE_S * H3_RATE)
     # The window's sound at H3's rate: the kept sound handing over to the head's copy, the new part's, then the kept sound
@@ -826,8 +828,13 @@ def _spliced(out: Outputs, take: VideoFile, frames: int, new: VideoFile, *, afte
     if overlap.head_sound is not None:
         before = crossfade(overlap.head_sound[:, -fade:], before, kept_first=False)
     made = take_sound(new, Fraction(0), None)
-    parts = [before, _fitted_sound(made, samples(count))]
-    if resume is not None and end is not None:
+    made = _fitted_sound(made, samples(count))
+    if cut and resume is not None:
+        # The next shot keeps its own sound: the new part's hands over to it before the cut.
+        kept = _fitted_sound(take_sound(take, Fraction(resume) / rate - CROSSFADE_S, Fraction(resume) / rate), fade)
+        made = crossfade(kept, made, kept_first=False)
+    parts = [before, made]
+    if resume is not None and end is not None and end > resume:
         tail = _fitted_sound(take_sound(take, Fraction(resume) / rate, Fraction(end) / rate), samples(end - resume))
         parts.append(tail if overlap.tail_sound is None else crossfade(overlap.tail_sound[:, :fade], tail, kept_first=True))
     wave = torch.cat(parts, dim=1)
@@ -844,9 +851,8 @@ def _spliced(out: Outputs, take: VideoFile, frames: int, new: VideoFile, *, afte
             while current < wanted and (following := next(made_frames, None)) is not None:
                 latest, current = following, current + 1
             yield latest
-        if resume is not None and end is not None:
-            copies = [] if cut else _copies(overlap.tail_frames, size)
-            yield from _kept_slots(take, resume, end, rate, size, copies, toward_copy=False)
+        if resume is not None and end is not None and end > resume:
+            yield from _kept_slots(take, resume, end, rate, size, _copies(overlap.tail_frames, size), toward_copy=False)
 
     def window() -> Iterator[DecodedMediaEvent]:
         yield DecodedMediaHeader(
@@ -862,9 +868,10 @@ def _spliced(out: Outputs, take: VideoFile, frames: int, new: VideoFile, *, afte
                                                                      for c in wave),
                                 pts=0, time_base=track.time_base)  # fmt: skip
 
-    # Runtime 0.49.0.dev2387 (cozy-runtime #2347); the type check's pinned Runtime (scripts/typecheck-requirements.in) predates it.
-    spliced: SavedVideo = out.splice_video(take, start, end, window())  # type: ignore[attr-defined]
-    return spliced.video
+    spliced = out.splice_video(take, start, end, window())
+    held = [] if rate == FPS else [f"the take runs at {float(rate):g} fps, so the new part's 24 fps frames show on its clock, "
+                                  "some twice"]  # fmt: skip
+    return spliced.video, held
 
 
 def _sized(rgb: bytes, width: int, height: int, size: tuple[int, int]) -> bytes:
@@ -931,6 +938,10 @@ def _joined(out: Outputs, take: VideoFile, frames: int, new: VideoFile, *, after
     parts = sound_chunks(new.stream(pictures=False))
     made = torch.from_numpy(np.concatenate(parts, axis=1)) if parts else torch.zeros((sound.channels, 0))
     made = _fitted_sound(made, clock[1] - clock[0])
+    if cut and after is not None:
+        # The next shot keeps its own sound: the new part's hands over to it before the cut.
+        ahead = _at(take_sound(take, Fraction(after, FPS) - CROSSFADE_S, Fraction(after, FPS)), rate, sound.channels)
+        made = crossfade(_fitted_sound(ahead, fade), made, kept_first=False)
     layout, names = AUDIO_LAYOUTS[sound.channels]
     track = DecodedAudioFormat(channels=sound.channels, sample_rate=rate, channel_layout=layout,
                                channel_names=names, time_base=Fraction(1, rate))  # fmt: skip
@@ -949,7 +960,7 @@ def _joined(out: Outputs, take: VideoFile, frames: int, new: VideoFile, *, after
     join.append(new, lambda _: chunk(made, clock[0]), last=after is None or ends[2] == ends[1])
     if after is not None and ends[2] > ends[1]:
         rest = _fitted_sound(_at(take_sound(take, Fraction(after, FPS), None), rate, sound.channels), clock[2] - clock[1])
-        if overlap.tail_sound is not None:
+        if overlap.tail_sound is not None and not cut:
             rest = crossfade(_at(overlap.tail_sound, H3_RATE, sound.channels)[:, :fade], rest, kept_first=True)
         frames_after = _kept_frames(take, ends[2] - ends[1], size, start=after)
         kept = out.save_video_stream(frames_after if cut else _faded(frames_after, overlap.tail_frames, at_end=False,

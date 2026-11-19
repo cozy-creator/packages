@@ -70,7 +70,7 @@ window is `L ≡ 12 (mod 17)` frames, and with latents it ends on a chunk, where
 The sound starts on the nearest tick to the suffix's first frame, encoded from 5 s before to 1 s after its second. A
 window longer than one sample chains segments of whole chunks, the suffix only on the last. The part decodes from the
 carried window to the suffix's in place of its regenerated head and tail, and joins by pixels at both ends as above
-(no picture cross-fade at a shot change).
+(at a shot change the window stops at the cut, and the new sound's last 40 ms cross-fade into the take's there).
 
 Outside the window every packet is the take's, byte for byte; the window and the frames up to the take's next IDR are encoded
 again at its size and clock. A take that can't be cut by packet copy is encoded again whole (`shot._joined`).
