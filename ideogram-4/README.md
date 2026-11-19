@@ -6,7 +6,7 @@ conditional one reads the caption beside the image tokens, a separate unconditio
 tokens alone, and both run every step ("asymmetric CFG"). The text encoder is a frozen
 Qwen3-VL-8B-Instruct (13 of its layers' hidden states, concatenated); the VAE is FLUX.2's.
 
-`image` is the canvas tool, its prompt `instructions`: `aspect_ratio`, `megapixels`, `turbo` (on by default: Ideogram's 12-step V4_TURBO_12, else 48 steps) and `seed`. A plain prompt is always upsampled into the caption.
+`image` is the canvas tool, its prompt `instructions`: `aspect_ratio`, `megapixels`, `turbo` (on by default: Ideogram's 12-step V4_TURBO_12, else 48 steps), `image`, `strength` and `seed`. A plain prompt is always upsampled into the caption.
 
 | function | checkpoints | default steps | guidance |
 | --- | --- | --- | --- |
@@ -35,9 +35,9 @@ cozy run ideogram-4/generate prompt='A bakery storefront at dawn' \
 ```
 
 Inputs: `prompt`, `aspect_ratio` (any `W:H`), `megapixels`, `steps`,
-`guidance`, `seed` (random when omitted, returned) and `prompt_upsampling` (default on). Text to image
+`guidance`, `seed` (random when omitted, returned), `prompt_upsampling` (default on), `image` and `strength`. Text to image
 defaults to 1:1 at 1 MP (1024×1024, the reference CLI's); sizes are held to 256–2048 px sides, at most
-6:1 and 4 MP, on the 16 px grid, and anything outside is a `clamp` adjustment. Ideogram 4 is text to image only: its prompt is words, so a picture mentioned in it goes as its name ([references](../docs/references.md)). It has no
+6:1 and 4 MP, on the 16 px grid, and anything outside is a `clamp` adjustment. Ideogram 4's release takes no reference pictures (no edit, reference or control input; se-175), so a picture mentioned in its prompt goes as its name ([references](../docs/references.md)). `image` starts from a picture, as Diffusers' flow img2img pipelines do: its VAE latents noised to the last `strength` (0.8) of the steps, which run; the size is the picture's unless `aspect_ratio` or `megapixels` says otherwise. It has no
 `negative_prompt`: its unconditional DiT reads no text. Outputs: `image` (PNG), `width`, `height`, `seed`
 and `prompt`, the caption the image was made from.
 
