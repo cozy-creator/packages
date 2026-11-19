@@ -8,6 +8,10 @@ in the denoise window and as a reference, never one copy (tag
 archive/h3-single-copy-context-20261010). The sound is the predecessor's last 40 audio ticks,
 placed on this clip's timeline exactly where they ended on the predecessor's.
 
+A video H3 didn't make carries its last frames encoded: the encoder runs each 17-frame chunk on
+its own, so a 22/39/56-frame window ending on the cut is the same kind of tokens, in phase. A redo
+also holds a suffix: the kept frames after its window, in the double form over the sample's tail.
+
 Reference: NikoDemon80/ComfyUI-H3-Motion-Context and AIMixer/ComfyUI_MiniMaxH3_Director
 (latent tails, cycle-aligned windows, a 24-frame sound window ending at the join).
 """
@@ -42,6 +46,8 @@ CONTEXT_FRAMES = (22, 39, 56)
 AUDIO_FRAMES = 24
 AUDIO_TICKS = 40
 AUDIO_TICKS_PER_S = 40
+#: 5 s and 15 s on the grid: the samples H3 serves.
+MIN_FRAMES = 124
 MAX_FRAMES = 362
 MAX_CONTEXT_BYTES = 16 << 20
 #: A canvas's area, with room for its sides rounding up to the 32 px grid past H3's 1344x768 (a 1280x2784 picture).
@@ -94,25 +100,35 @@ class Carry:
 
 @dataclass(frozen=True)
 class ContinuationPlan:
-    """One segment's clocks. It samples its carry's head plus `seconds` on the `17n + 5` grid
-    (snapped up, as `frames_for` does) and cuts the regenerated head. Its
-    picture ends at the last sampled frame, where a successor's picture window must end;
-    a successor carrying sound alone needs the sound to reach the join, so the picture
-    then ends on the last frame the sound covers (one frame earlier when the grid rounds
-    the sound down)."""
+    """One segment's clocks. It samples its carry's head plus `frames` new frames (a shot's
+    segment asks whole seconds) on the `17n + 5` grid, snapped up as `frames_for` does, and
+    cuts the regenerated head. Its picture ends at the last sampled frame, where a successor's
+    picture window must end; a successor carrying sound alone needs the sound to reach the
+    join, so the picture then ends on the last frame the sound covers (one frame earlier when
+    the grid rounds the sound down).
 
-    seconds: int
+    A redo's last segment delivers exactly `frames` and samples a `tail` after them, regenerated
+    and cut: its `suffix`, the kept frames held there as condition rows (so the sample is exactly
+    head, frames and suffix), or frames past the shot change it ends on."""
+
+    frames: int
     carried: Carry = Carry()
     successor: Carry = Carry()
+    suffix: Carry = Carry()
+    tail: int = 0
 
     def __post_init__(self) -> None:
-        if type(self.seconds) is not int or not 5 <= self.seconds <= 15:
-            _refuse("a segment delivers 5-15 new seconds")
-        if self.sample_frames > MAX_FRAMES:
+        if type(self.frames) is not int or self.frames < 1 or type(self.tail) is not int or self.tail < 0:
+            _refuse("a segment delivers at least one new frame")
+        if self.cut_tail and self.successor:
+            _refuse("a segment that cuts its tail is its part's last: nothing carries on from it")
+        if self.suffix and (not self.suffix.frames or self.tail > self.suffix.frames
+                            or self.sample_frames != self.prefix_frames + self.frames + self.suffix.frames):  # fmt: skip
+            _refuse("a suffix is held over the sample's last frames, whole VAE cycles")
+        if not MIN_FRAMES <= self.sample_frames <= MAX_FRAMES:
             _refuse(
-                f"{self.seconds} s plus {self.prefix_frames} carried frames samples "
-                f"{self.sample_frames} frames, above the {MAX_FRAMES}-frame envelope; "
-                "shorten the segment"
+                f"{self.frames} new frames plus {self.prefix_frames} carried and {self.cut_tail} held after "
+                f"samples {self.sample_frames} frames, outside the {MIN_FRAMES}-{MAX_FRAMES}-frame envelope"
             )
 
     @property
@@ -120,12 +136,19 @@ class ContinuationPlan:
         return self.carried.head_frames
 
     @property
+    def cut_tail(self) -> int:
+        """The frames sampled after the delivered ones and cut."""
+        return max(self.tail, self.suffix.frames)
+
+    @property
     def sample_frames(self) -> int:
-        frames = self.prefix_frames + FPS * self.seconds
+        frames = self.prefix_frames + self.frames + self.cut_tail
         return frames + (5 - frames) % 17
 
     @property
     def delivery_end(self) -> int:
+        if self.cut_tail:
+            return self.prefix_frames + self.frames
         if self.successor.audio and not self.successor.frames:
             return min(self.sample_frames, 3 * audio_ticks(self.sample_frames) // 5)
         return self.sample_frames
@@ -164,7 +187,9 @@ class ContinuationPlan:
 class AVContext:
     """A successor's carry in the model's normalized space: the last picture window
     `(1, 24, tokens, h, w)` and/or the last second of sound as packed channel-major audio
-    rows `(80, 32)`, ending `audio_offset` ticks past the picture join."""
+    rows `(80, 32)`, ending `audio_offset` ticks past the picture join. A redo's suffix is the
+    same: its first picture window and second of sound, starting `audio_offset` ticks past its
+    first frame."""
 
     video: torch.Tensor | None
     audio: torch.Tensor | None
@@ -315,36 +340,61 @@ def decode_context(data: bytes) -> AVContext:
         ) from exc
 
 
-def align_context_rows(state: PipelineState, context: AVContext, patch_size: Sequence[int]) -> None:
-    """Put the carried rows, the last condition rows, on this clip's timeline.
+def picture_rows(window: torch.Tensor | None, patch_size: Sequence[int]) -> int:
+    """The packed rows of a held picture window `(1, 24, tokens, h, w)`."""
+    if window is None:
+        return 0
+    _, patch_h, patch_w = patch_size
+    _, _, frames, height, width = (int(n) for n in window.shape)
+    return frames * (height // patch_h) * (width // patch_w)
 
-    The picture tokens sit on the target head they condition, in phase. The sound ends at
-    the picture join plus its offset, on fractional rotary positions where the grids
-    disagree, so it continues exactly where it stopped. The native scheduler keeps both
-    fixed on every step.
+
+def align_context_rows(
+    state: PipelineState, context: AVContext, patch_size: Sequence[int], suffix: AVContext | None = None,
+    sample_frames: int = 0,
+) -> None:  # fmt: skip
+    """Put the carried rows, then a redo's `suffix` rows, the last condition rows, on this clip's timeline.
+
+    The carried picture tokens sit on the target head they condition, in phase; the suffix's on
+    the last whole cycles of the `sample_frames` sample. The carried sound ends at the picture
+    join plus its offset, and the suffix's starts at its first frame plus its own, on fractional
+    rotary positions where the grids disagree, so each continues exactly where it stopped. The
+    native scheduler keeps them fixed on every step.
     """
-    origin = state.position_ids[state.video_indices[state.num_condition_video_rows], 0].clone()
+    targets = state.num_condition_video_rows
+    origin = state.position_ids[state.video_indices[targets], 0].clone()
+    held = picture_rows(suffix.video if suffix is not None else None, patch_size)
     if context.video is not None:
-        _, patch_h, patch_w = patch_size
-        _, _, frames, height, width = (int(n) for n in context.video.shape)
-        count = frames * (height // patch_h) * (width // patch_w)
-        if count > state.num_condition_video_rows:
+        count = picture_rows(context.video, patch_size)
+        if count + held > targets:
             _refuse("context packed picture geometry is inconsistent")
-        rows = state.video_indices[
-            state.num_condition_video_rows - count : state.num_condition_video_rows
-        ]
+        rows = state.video_indices[targets - held - count : targets - held]
         state.position_ids[rows, 0] += origin - state.position_ids[rows[0], 0].clone()
+    if suffix is not None and suffix.video is not None:
+        per_frame = held // int(suffix.video.shape[2])
+        first = video_tokens(sample_frames) - int(suffix.video.shape[2])
+        if held > targets:
+            _refuse("suffix packed picture geometry is inconsistent")
+        rows = state.video_indices[targets - held : targets]
+        at = state.position_ids[state.video_indices[targets + first * per_frame], 0].clone()
+        state.position_ids[rows, 0] += at - state.position_ids[rows[0], 0].clone()
+    sounds = state.num_condition_audio_rows
+    later = int(suffix.audio.shape[0]) if suffix is not None and suffix.audio is not None else 0
     if context.audio is not None:
         count = int(context.audio.shape[0])
-        if count > state.num_condition_audio_rows:
+        if count + later > sounds:
             _refuse("context packed sound geometry is inconsistent")
-        rows = state.audio_indices[
-            state.num_condition_audio_rows - count : state.num_condition_audio_rows
-        ]
+        rows = state.audio_indices[sounds - later - count : sounds - later]
         ticks = TICKS_PER_FRAME * context.carry.head_frames + context.audio_offset - AUDIO_TICKS
         state.position_ids[rows, 0] += (
             origin + float(ticks) - state.position_ids[rows[0], 0].clone()
         )
+    if suffix is not None and later:
+        if later > sounds:
+            _refuse("suffix packed sound geometry is inconsistent")
+        rows = state.audio_indices[sounds - later : sounds]
+        ticks = TICKS_PER_FRAME * (sample_frames - suffix.carry.frames) + suffix.audio_offset
+        state.position_ids[rows, 0] += origin + float(ticks) - state.position_ids[rows[0], 0].clone()
 
 
 class DeliveredFrames:

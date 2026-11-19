@@ -1,6 +1,6 @@
 # MiniMax H3
 
-Video with sound from MiniMax H3, as three tools. Each is a box on a canvas and the same call for `cozy run`:
+Video with sound from MiniMax H3, as four tools. Each is a box on a canvas and the same call for `cozy run`:
 
 - **`generate`** (MiniMax H3) renders one continuous shot of any length from an optional `summary` and at least one
   beat, with an optional first and last frame. `turbo: true` (the default) runs the turbo LoRA's 8 steps; `turbo: false`
@@ -8,6 +8,9 @@ Video with sound from MiniMax H3, as three tools. Each is a box on a canvas and 
 - **`edit`** (MiniMax H3 Edit) edits a plate, a video it follows frame by frame, by an optional `summary` and its beats,
   as `generate` renders a shot, under one of Alissonerdx's guide-edit LoRAs: character swap, head swap, style transfer,
   VFX edit or motion transfer.
+- **`retake`** (Retake) makes `start_s` to `end_s` of a take again from a `prompt`, its picture and sound, and keeps the
+  rest: LTX-2.5 Retake's `video`, `start_s`, `end_s`, `prompt` and `seed`, plus `turbo` and `quality`. It has no
+  `redo`: H3 makes the picture and sound together.
 - **`upscale`** (MiniMax H3 Upscale) re-renders a take at 1080p, 1440p or 2160p with NVIDIA's Regenerate-2K, guided by
   the take's own text or a `prompt` that replaces it ([UPSCALE.md](UPSCALE.md)).
 
@@ -54,8 +57,25 @@ first frame's shape, moved toward 16:9 when the shot has several segments and th
 before seams were kept cuts on H3's `17k + 5` join grid). The take's first `out_frame` frames are kept unchanged and the
 beats from `beats_from` seconds render after them; unset, `beats_from` is the
 cut's time on the box's own take and 0 on another's. With the take's latents it goes on from them and the video
-decodes as one; without them a new video opens on the cut frame and is joined after the kept start. A `last_frame`
-ends the final segment; a `first_frame` is ignored. `kept_s` in the result says where the new part starts.
+decodes as one. Any other video (a phone clip, another model's) goes on from its last `carried_frames` and its last
+second of sound, encoded. The new part is spliced into the clip (`Outputs.splice_video`): the clip's own packets stay
+byte for byte, its last 4 frames and 40 ms of sound cross-fade into the new part's copy of them, and the result keeps the
+clip's size, frame rate and codec, with no latents. A clip not at 24 fps shows the new part's frames on its own clock, some
+twice, with a warning: a splice holds one frame clock. A clip that can't be cut by packet copy (not one H.264 track in an
+MP4), or has no sound track, is encoded again at H3's size instead, with a warning. A `last_frame` ends the final segment; a `first_frame` is
+ignored. `kept_s` in the result says where the new part starts.
+
+**Retake** cuts the take at `start_s` and `end_s` and makes only the middle again (Paul, 11-19). With the take's
+latents the cuts move outward onto H3's grid (up to 0.7 s each, with a warning); for any other video only the end moves.
+The window goes on from the take's 22 frames before it and their sound. At its end, a shot change within 0.7 s of
+`end_s` ends it there and the next shot starts fresh; else the take's next 39 frames and their sound are held over the
+window's last frames (the double form, as a carry is held), with the first of them as a world state and the last as its
+last keyframe. A window needs 22 frames before it and, with a suffix, 2.6 s at least; one ending within 1.6 s of the
+take's end runs on to it. A window longer than 12.5 s chains segments, the suffix only on the last. The window is
+spliced into the take as a pickup's new part is, with the same cross-fades at both joins: outside it, every packet is the
+take's. A window ending on a shot change stops at the cut and its last 40 ms of sound cross-fade into the take's own, so
+the next shot's frames stay the take's packets. A take with latents keeps them, joined in phase, unless the window ends
+on a shot change.
 
 **Edit.** The plate's length is the edit's: the last beat is cut at its end or runs on to it. With no picture in the
 first segment, the plate's own first frame is the picture. The summary and beats are a shot's (**Beats**, **Segments**).

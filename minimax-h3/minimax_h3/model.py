@@ -327,6 +327,10 @@ class H3Model(Model[OfficialH3Pipeline]):
     def carried_sound(self, waveform: torch.Tensor) -> torch.Tensor:
         return self.pipe.carried_sound(waveform).cpu()
 
+    @uses_components("audio_vae")
+    def held_sound(self, waveform: torch.Tensor, first: int) -> torch.Tensor:
+        return self.pipe.held_sound(waveform, first).cpu()
+
     @uses_components("transformer")
     def sample_fl2va(
         self, state: PipelineState, *, on_step: Callable[[int], None], cancel: Callable[[], None], recipe: FullRecipe = FULL_BALANCED
