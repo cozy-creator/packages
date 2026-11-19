@@ -290,6 +290,7 @@ def _treat(
 
 
 def _log_treatment(tel: Telemetry, slot: str, selection: Selection, stats: TreatmentStats) -> None:
+    # Two rows, so every field fits the eight an observation keeps.
     tel.log(
         "weight fidelity",
         level="info",
@@ -299,9 +300,15 @@ def _log_treatment(tel: Telemetry, slot: str, selection: Selection, stats: Treat
         encoded_keys=stats.encoded_keys,
         reused_keys=stats.reused_keys,
         saturated_elements=stats.saturated_elements,
+        new_bytes=stats.new_bytes_written,
+    )
+    tel.log(
+        "weight fidelity",
+        level="info",
+        output_slot=slot,
+        component=selection.component,
         worst_relative_frobenius=stats.worst_relative_frobenius,
         cast_worst_relative_frobenius=stats.cast_worst_relative_frobenius,
-        new_bytes=stats.new_bytes_written,
     )
 
 
