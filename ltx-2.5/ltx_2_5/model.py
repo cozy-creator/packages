@@ -34,7 +34,6 @@ from .parallel import install
 FPS = 24
 SIGMAS = (1.0, 0.99375, 0.9875, 0.98125, 0.975, 0.909375, 0.725, 0.421875)
 REFINE_SIGMAS = SIGMAS[-3:]
-COMPONENTS = ("transformer", "text_encoder", "connectors", "vae", "audio_vae", "vocoder", "latent_upsampler")
 
 
 def stored[T: nn.Module](module: T, component: str, config: Config) -> T:
@@ -80,26 +79,33 @@ class Components(TypedDict):
     latent_upsampler: LTX2LatentUpsamplerModel
 
 
+def text_encoder(config: Config) -> Gemma4UnifiedForConditionalGeneration:
+    """Gemma 4 12B from an LTX-2.5 checkpoint's `text_encoder` section, or from the whole config of a checkpoint of the
+    encoder alone (Runtime gives one component's config unsectioned)."""
+    section = config.section("text_encoder") if "text_encoder" in config.keys() else config  # noqa: SIM118  # Config has no __contains__
+    text_settings = section.mapping()
+    language_settings = section.section("text_config").mapping()
+    softcap = language_settings.get("final_logit_softcapping")
+    # Canonical JSON writes 30.0 as 30. Gemma's strict float-only field rejects
+    # that equivalent integer spelling; restore its Python type at this boundary.
+    if type(softcap) is int:
+        language_settings["final_logit_softcapping"] = float(softcap)
+    text_settings["text_config"] = language_settings
+    text = Gemma4UnifiedForConditionalGeneration(Gemma4UnifiedConfig(**text_settings))
+    # Prompt encoding uses hidden states, never vocabulary logits; this tied projection
+    # is not a separate stored tensor and would otherwise allocate [tokens,vocabulary].
+    text.lm_head = nn.Identity()
+    return stored(text, "text_encoder", config)
+
+
 class Graph:
     components: Components
     def __init__(self, config: Config) -> None:
-        text_settings = config.section("text_encoder").mapping()
-        language_settings = config.section("text_encoder").section("text_config").mapping()
-        softcap = language_settings.get("final_logit_softcapping")
-        # Canonical JSON writes 30.0 as 30. Gemma's strict float-only field rejects
-        # that equivalent integer spelling; restore its Python type at this boundary.
-        if type(softcap) is int:
-            language_settings["final_logit_softcapping"] = float(softcap)
-        text_settings["text_config"] = language_settings
-        text = Gemma4UnifiedForConditionalGeneration(Gemma4UnifiedConfig(**text_settings))
-        # Prompt encoding uses hidden states, never vocabulary logits; this tied projection
-        # is not a separate stored tensor and would otherwise allocate [tokens,vocabulary].
-        text.lm_head = nn.Identity()
         vae = VideoVAE.from_config(config.section("vae").mapping())
         vae.enable_tiling()
         self.components = {
             "transformer": stored(LTX2VideoTransformer3DModel.from_config(config.section("transformer").mapping()), "transformer", config),
-            "text_encoder": stored(text, "text_encoder", config),
+            "text_encoder": text_encoder(config),
             "connectors": stored(LTX2TextConnectors.from_config(config.section("connectors").mapping()), "connectors", config),
             "vae": stored(vae, "vae", config),
             "audio_vae": stored(AutoencoderKLLTX2Audio.from_config(config.section("audio_vae").mapping()), "audio_vae", config),
@@ -127,6 +133,50 @@ class ImagePipeline(LTX2ImageToVideoPipeline):
         return torch.device(str(device()))
 
 
+class TextEncoderComponents(TypedDict):
+    text_encoder: Gemma4UnifiedForConditionalGeneration
+
+
+class TextEncoderGraph:
+    """The `text_encoder` of an LTX-2.5 checkpoint, or of a checkpoint of the encoder alone."""
+
+    components: TextEncoderComponents
+
+    def __init__(self, config: Config) -> None:
+        self.components = {"text_encoder": text_encoder(config)}
+
+
+def encode_prompt(encoder: Gemma4UnifiedForConditionalGeneration, tokens: GemmaTokenizer, prompt: str,
+                  at: torch.device) -> tuple[torch.Tensor, torch.Tensor]:
+    """Diffusers' LTX-2 prompt encoding: Gemma's hidden states packed, and their mask; the connectors run in `denoise`."""
+    # Diffusers registers an absent module as None; prompt encoding reads only the encoder and the tokenizer.
+    absent: dict[str, None] = dict.fromkeys(("scheduler", "vae", "audio_vae", "connectors", "transformer", "vocoder"))
+    pipe = TextPipeline(text_encoder=encoder, tokenizer=tokens, **absent)  # type: ignore[arg-type]
+    pipe.set_progress_bar_config(disable=True)  # type: ignore[no-untyped-call]  # Diffusers leaves progress configuration unannotated.
+    with torch.inference_mode():
+        embeds, mask, _, _ = pipe.encode_prompt(prompt, do_classifier_free_guidance=False, max_sequence_length=1024,
+                                                 device=at)
+    return embeds, mask
+
+
+@sequence_parallel(degrees=(2, 4, 8))
+class Ltx25TextEncoder(Model[TextEncoderGraph]):
+    """LTX-2.5's Gemma 4 12B, the `text_encoder` slot: an LTX-2.5 checkpoint's encoder and tokenizer, or a checkpoint
+    of the encoder alone. Only the encoder is built. Its degrees are `Ltx25`'s, so a group serves both slots."""
+
+    graph: TextEncoderGraph
+    tokenizer: GemmaTokenizer
+
+    def load(self, loader: Loader) -> None:
+        self.graph = loader.construct(TextEncoderGraph)
+        self.tokenizer = tokenizer(loader.assets)
+
+    @memoize
+    @uses_components("text_encoder")
+    def encode(self, prompt: str) -> tuple[torch.Tensor, torch.Tensor]:
+        return encode_prompt(self.graph.components["text_encoder"], self.tokenizer, prompt, torch.device(str(self.device)))
+
+
 @sequence_parallel(degrees=(2, 4, 8))
 class Ltx25(Model[Graph]):
     serving = Serving(attention_bits={"transformer.transformer_blocks.": 8})
@@ -147,15 +197,6 @@ class Ltx25(Model[Graph]):
         )
         pipe.set_progress_bar_config(disable=True)  # type: ignore[no-untyped-call]  # Diffusers leaves progress configuration unannotated.
         return pipe
-
-    @memoize
-    @uses_components("text_encoder")
-    def encode(self, prompt: str) -> tuple[torch.Tensor, torch.Tensor]:
-        pipe = self._pipeline()
-        with torch.inference_mode():
-            embeds, mask, _, _ = pipe.encode_prompt(prompt, do_classifier_free_guidance=False, max_sequence_length=1024,
-                                                     device=torch.device(str(self.device)))
-        return embeds, mask
 
     @uses_components("transformer", "connectors", "vae", "audio_vae")
     def denoise(self, embeds: tuple[torch.Tensor, torch.Tensor], image: Image.Image | None, *, width: int, height: int,
