@@ -49,7 +49,6 @@ from cozy_runtime.media import (
 )
 from PIL import Image as PILImage
 from safetensors.torch import load as load_tensors
-from safetensors.torch import save as save_tensors
 
 from minimax_h3 import shot_latents
 from minimax_h3.continuation import AUDIO_TICKS_PER_S, Carry, ContinuationPlan, audio_ticks, carries, decode_context
@@ -707,12 +706,15 @@ class Overlap(NamedTuple):
     tail_frames: torch.Tensor | None = None
     tail_sound: torch.Tensor | None = None
 
-    def to_bytes(self) -> bytes:
-        return save_tensors({name: value.contiguous() for name, value in self._asdict().items() if value is not None})
+    def tensors(self) -> dict[str, torch.Tensor]:
+        """The copies there are, by name: what a segment's latents file holds beside its latents."""
+        return {name: value.contiguous() for name, value in self._asdict().items() if value is not None}
 
     @classmethod
     def read(cls, data: bytes) -> Overlap:
-        return cls(**load_tensors(data)) if data else cls()
+        """The copies a segment's latents file holds; none in an empty one or one without them."""
+        found = load_tensors(data) if data else {}
+        return cls(**{name: found[name] for name in cls._fields if name in found})
 
     def joined(self, last: Overlap) -> Overlap:
         """A part made of segments: this, its first's, with its `last`'s, which decodes the whole part."""
