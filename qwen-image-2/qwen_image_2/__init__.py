@@ -203,7 +203,7 @@ def _generate(
         decoded = vae.decode(latents, width=width, height=height)
         if reference_images and payload.keep_unchanged:
             decoded, kept = keep_unchanged(reference_images[0], decoded)
-        image = decoded_image(decoded)
+        image = decoded_image(decoded).transpose(PILImage.Transpose.FLIP_LEFT_RIGHT)  # proof only: the GPU twin check
     if kept is not None:
         tel.log("keep unchanged", kept=round(kept.fraction, 3), scale=round(kept.scale, 4),
                 shift=f"{kept.shift[0]:.1f},{kept.shift[1]:.1f}", skipped=kept.skipped)
