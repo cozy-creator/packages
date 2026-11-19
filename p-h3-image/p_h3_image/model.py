@@ -185,12 +185,6 @@ def _hidden_states_of(encoder: Qwen3VLForConditionalGeneration, layers: Sequence
             handle.remove()
 
 
-def _forget_rope_deltas(module: nn.Module, _args: tuple[object, ...], _output: object) -> None:
-    """Qwen3-VL stores `rope_deltas` on its first picture input though nothing reads it with `use_cache=False`;
-    one int64 kept past the forward trips the Runtime's strict memory ledger."""
-    module.rope_deltas = None  # type: ignore[assignment]  # Qwen3VLModel's cache attribute, not a tensor slot
-
-
 def _dit(section: Mapping[str, object]) -> PH3ImageTransformer:
     """As uploaded (`bf16-full`), or over the AdaLN tables its `adaln_tables` labels (`bf16` and its lanes)."""
     config = dict(section)
@@ -208,7 +202,6 @@ class ImageGraph:
     def __init__(self, config: Config) -> None:
         text = Qwen3VLForConditionalGeneration(Qwen3VLConfig(**config.section("text_encoder").mapping()))  # type: ignore[no-untyped-call]  # Transformers' __init__ is untyped
         text.lm_head = nn.Identity()  # tied to the embeddings, not stored, never run
-        text.model.register_forward_hook(_forget_rope_deltas, always_call=True)
         connector = TextConnector(**config.section("text_connector").mapping())
         vae = ImageVAE.build(config.section("vae").mapping())
         self.components: dict[str, nn.Module] = {

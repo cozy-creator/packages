@@ -304,12 +304,6 @@ class H3ImageEncoder(Model[EncoderGraph]):
         return out
 
 
-def _forget_rope_deltas(module: nn.Module, _args: tuple[object, ...], _output: object) -> None:
-    """Qwen3-VL stores `rope_deltas` on its first picture input though nothing reads it with `use_cache=False`; one
-    int64 kept past the forward trips the Runtime's strict memory ledger."""
-    module.rope_deltas = None  # type: ignore[assignment]  # Qwen3VLModel's cache attribute, not a tensor slot
-
-
 #: A MiniMax-H3 checkpoint's text encoder declares this truncation (`cozy_h3`): 50 of 64 layers, no final norm or head.
 _CONDITIONER = {"source_architecture": "Qwen3VLForConditionalGeneration", "retained_decoder_layers": TEXT_LAYER,
                 "conditioning_hidden_state": TEXT_LAYER, "output": "pre_norm", "language_model_head": False}  # fmt: skip
@@ -328,7 +322,6 @@ def conditioner(config: Mapping[str, object]) -> Qwen3VLForConditionalGeneration
     model.lm_head = nn.Identity()  # the head, never built
     for parameter in model.parameters():
         parameter.data = parameter.data.to(dtype=torch.bfloat16)
-    model.model.register_forward_hook(_forget_rope_deltas, always_call=True)
     return cast(Qwen3VLForConditionalGeneration, model.eval())  # type: ignore[no-untyped-call]  # Transformers' eval is untyped
 
 
