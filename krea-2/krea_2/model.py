@@ -25,6 +25,7 @@ from cozy_runtime import rng, tiles
 from cozy_runtime.accel import fusion, hold_dtype, lora
 from cozy_runtime.author import (
     Config,
+    Cut,
     Loader,
     Model,
     ModelAssets,
@@ -33,6 +34,7 @@ from cozy_runtime.author import (
     Serving,
     memoize,
     preview,
+    split,
     uses_components,
 )
 from cozy_runtime.accel.kernels import Plan
@@ -295,13 +297,63 @@ class RowBias:
     rows: tuple[tuple[int, int, torch.Tensor | None], ...]
 
 
+class _Heads:
+    """A `RowBias` attention as `split` cuts it by query heads: its shape is the output's
+    [batch, tokens, heads, head_dim], a window a range of whole K/V groups, and calling it on a window
+    attends those query heads, each range of rows with its own bias, against their K/V heads repeated to
+    them (as Diffusers' processor repeats them, for every kernel takes repeated heads beside a bias).
+    Called on itself (`split` running whole), every head in one call a range: the fast path. Each head's
+    softmax is its own, so any window gives the whole's bytes."""
+
+    PURE_WINDOWS = True
+    __slots__ = ("bias", "group", "key", "processor", "query", "shape", "value")
+
+    def __init__(self, processor: Attention, query: torch.Tensor, key: torch.Tensor, value: torch.Tensor,
+                 bias: RowBias, group: int) -> None:
+        self.processor, self.query, self.key, self.value, self.bias = processor, query, key, value, bias
+        self.group, self.shape = group, tuple(query.shape)
+
+    @property
+    def dtype(self) -> torch.dtype:
+        return self.query.dtype
+
+    def dim(self) -> int:
+        return len(self.shape)
+
+    def element_size(self) -> int:
+        return int(self.query.element_size())
+
+    def __getitem__(self, index: tuple[slice[int | None], ...]) -> slice[int, int, None]:
+        return cast("slice[int, int, None]", index[2])  # `Cut(2, align=group)` hands whole K/V groups
+
+    def __call__(self, heads: _Heads | slice[int, int, None]) -> torch.Tensor:
+        window = slice(0, self.shape[2]) if heads is self else heads
+        assert isinstance(window, slice) and window.start is not None and window.stop is not None
+        kv = slice(window.start // self.group, window.stop // self.group)
+        key, value = self.key[:, :, kv], self.value[:, :, kv]
+        if self.group > 1:
+            key = key.repeat_interleave(self.group, dim=2)
+            value = value.repeat_interleave(self.group, dim=2)
+        query = self.query[:, :, window]
+        out = query.new_empty(query.shape)
+        for start, stop, bias in self.bias.rows:
+            out[:, start:stop] = transformer_krea2.dispatch_attention_fn(
+                query[:, start:stop], key, value, attn_mask=bias, backend=self.processor._attention_backend,
+                parallel_config=self.processor._parallel_config)
+        return out
+
+
+#: A head window's peak beside the whole output, in windows of it: its repeated K and V (each a window,
+#: keys being the rows) and its own output, with a range's kernel output beside them.
+_HEAD_HOLDS = 4
+
+
 class Attention(Krea2AttnProcessor):
     """Diffusers' processor, with a `RowBias` attended one range of query rows at a time against every key,
-    each with its own bias: the same softmax a row takes under the dense mask. It goes a K/V head at a time,
-    that head's query heads beside it alone (a view, never a copy per query head): the kernels that take a
-    bias beside grouped heads materialize the whole score matrix. Each piece's output lands in the result as
-    it is made, and the gate is made after. Its RoPE and attention are the module's own names at each call,
-    as Diffusers' processor reads them (the Runtime cuts and selects there)."""
+    each with its own bias: the same softmax a row takes under the dense mask. Its heads go in the fewest
+    windows the card's room takes (`split`): all of them in one call a range where they fit, as fast as
+    Diffusers' path, whole K/V groups a window where they don't. Its RoPE and attention are the module's own
+    names at each call, as Diffusers' processor reads them (the Runtime cuts and selects there)."""
 
     def __call__(self, attn: Krea2Attention, hidden_states: torch.Tensor,
                  attention_mask: torch.Tensor | RowBias | None = None,
@@ -316,17 +368,9 @@ class Attention(Krea2AttnProcessor):
             query = transformer_krea2.apply_rotary_emb(query, image_rotary_emb, sequence_dim=1)
             key = transformer_krea2.apply_rotary_emb(key, image_rotary_emb, sequence_dim=1)
         group = attn.num_heads // attn.num_kv_heads
-        out = torch.empty_like(query)
-
-        for head in range(attn.num_kv_heads):
-            heads = slice(head * group, (head + 1) * group)
-            k = key[:, :, head:head + 1].expand(-1, -1, group, -1)
-            v = value[:, :, head:head + 1].expand(-1, -1, group, -1)
-            for start, stop, bias in attention_mask.rows:
-                out[:, start:stop, heads] = transformer_krea2.dispatch_attention_fn(
-                    query[:, start:stop, heads], k, v, attn_mask=bias, backend=self._attention_backend,
-                    parallel_config=self._parallel_config)
-        del query, key, value
+        heads = _Heads(self, query, key, value, attention_mask, group)
+        out = split(heads, heads, Cut(2, align=group), holds=_HEAD_HOLDS)
+        del heads, query, key, value
         gate = attn.to_gate(hidden_states)
         return cast(torch.Tensor, attn.to_out[0](out.flatten(2, 3) * torch.sigmoid(gate)))
 
