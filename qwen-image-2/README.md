@@ -16,12 +16,17 @@ returned. Seeds range from 0 through 9007199254740991 (the interoperable 53-bit
 integer range); omitting one chooses a random seed in that range. Inputs: `prompt` (its text and the pictures it mentions), `aspect_ratio` (any W:H), `megapixels` (any size, 1024² pixels each), `seed` and `prompt_upsampling`. The full model runs 40 steps, Turbo 4 on Fun Acc's
 grid, with its own output head each step and an F32 state (`qwenimage21_pdd.py`). Qwen runs no CFG, so it has no `guidance` or `negative_prompt`. Unknown fields are ignored with a warning. The result is `image`, `width`, `height`, `seed` and `prompt`, the prompt the image was made from.
 
-`upscale` (the Upscale tool on a picture box) restores the box's picture at 2 or 4 MP: the base model, 20 steps, edits it from
-noise with a restoration request, the picture its reference at the canvas's size, as Diffusers sizes a reference to its
-output (`output_resolution`), so the edit keeps to it. On 225 px JPEGs of clean pictures (cozy-creator
-`release-gate/sessions/fixtures/upscale-bench`, se-147) its DISTS to the clean original is 0.13 against the Lanczos
-blow-up's 0.34; a start from the blow-up keeps its blur and JPEG blocks at any strength, and Fun Acc's 4 steps zoom and
-redraw it. 29 s on an RTX 4090 at 4 MP. `megapixels`, `seed` and an optional `prompt`.
+`upscale` (the Upscale tool on a picture box) restores the box's picture at 2 or 4 MP: Turbo (Fun Acc's 4 steps) with
+ausboss's Qwen-Image-2.1 Restore LoRA armed on the DiT edits it from noise with a restoration request, the picture its
+reference at the canvas's size, as Diffusers sizes a reference to its output (`output_resolution`), so the edit keeps to
+it. On 225 px JPEGs of clean pictures (cozy-creator `release-gate/sessions/fixtures/upscale-bench`, se-147, se-151) its
+DISTS to the clean original is 0.126 against the base model's 20 steps' 0.124 and the Lanczos blow-up's 0.34, in 9.7 s
+against 30.8 s on an RTX 4090 at 4 MP. Fun Acc alone zooms and redraws it; the LoRA holds the framing. A start from the
+blow-up keeps its blur and JPEG blocks at any strength. `megapixels`, `seed` and an optional `prompt`. Both are slots a
+request may set: `model.turbo_lora=` (`alibaba-pai/qwen-image-2.1-fun-acc@0.1.1`) and `model.restore_lora=`
+(`ausboss/restore@0.1.0`, [ausboss](https://huggingface.co/ausboss/Qwen-Image-2.1-Restore-LoRA), Qwen Research
+License), which takes any Qwen Image 2.1 LoRA of one rank; it runs at strength 1, the author's. A module Turbo's linears
+don't include (the output projection, which Turbo's per-step heads replace) isn't armed, and the run warns of it.
 
 `prompt` steers it ("the sign says OPEN", "her eyes are green"): its words follow the restoration request, which they
 never replace, and empty it runs exactly as without. Each picture it mentions (a face, the correct text) follows the

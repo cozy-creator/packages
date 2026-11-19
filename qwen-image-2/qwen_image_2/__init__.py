@@ -15,6 +15,7 @@ from cozy_runtime.media import ImageFile
 from PIL import Image as PILImage
 
 from . import quantize as quantize  # its recipes
+from .adapter import QwenImage21LoRA
 from .keep import keep_unchanged, transparent
 from .model import QwenImage21DiT, QwenImage21TextEncoder, QwenImage21VAE, reference_grids
 from .rewriter import Enhancer, rewrite
@@ -339,8 +340,6 @@ def image(
 #: `{}` is the picture: `the picture`, or `<image1>` when a prompt's pictures follow it.
 UPSCALE_PROMPT = ("Restore {} at a higher resolution: remove the blur, noise and JPEG compression artifacts and "
                   "recover sharp, clean detail and edges, keeping the same composition, subject, line work and colours.")
-#: The base model's steps for an upscale: 20, 28 and 40 score alike against the clean pictures (se-147 round 2).
-UPSCALE_STEPS = 20
 
 
 class UpscaleInput(msgspec.Struct, kw_only=True):
@@ -354,18 +353,23 @@ class UpscaleInput(msgspec.Struct, kw_only=True):
     seed: Seed | None = None
 
 
-_UPSCALE = {"model": "qwen/qwen-image-2.1@0.1.0", "text_encoder": "atomicchat/qwen-image-2.1-text-encoder-abliterated@0.1.0",
-            "vae": TEXTURE_FIX}
+#: An upscale runs Turbo (`turbo_lora`) with ausboss's Qwen-Image-2.1 Restore LoRA (`restore_lora`) armed beside it, each a
+#: slot a request may set to another: 4 steps that score as the base model's 20 against the clean pictures (DISTS 0.126 against
+#: 0.124) in a third of the time (9.7 s against 30.8 s on a 4090), the framing kept (se-151). Fun Acc alone drifts and zooms (se-147).
+_UPSCALE = {"model": "qwen/qwen-image-2.1@0.1.0", "restore_lora": "ausboss/restore@0.1.0",
+            "text_encoder": "atomicchat/qwen-image-2.1-text-encoder-abliterated@0.1.0",
+            "turbo_lora": "alibaba-pai/qwen-image-2.1-fun-acc@0.1.1", "vae": TEXTURE_FIX}
 
 
 @app.tool(label="Upscale", named="image", defaults=_UPSCALE,
           components={"model": ("transformer",), "text_encoder": ("text_encoder",), "vae": ("vae",)}, memoize=True)  # fmt: skip
-def upscale(ctx: Context, payload: UpscaleInput, model: QwenImage21DiT, text_encoder: QwenImage21TextEncoder,
-            vae: QwenImage21VAE, tel: Telemetry, adj: Adjustments) -> ImageResult:
-    """Qwen Image 2.1 restores the picture at the size asked: the base model edits it from noise, the picture its reference
-    at the canvas's size, as Diffusers sizes a reference to its output, so the edit keeps to it pixel for pixel. A start from
-    the picture blown up keeps its blur and blocks at any strength (se-147). `prompt` follows the restoration request,
-    and the pictures it mentions follow the picture as references, each at its 1 MP as `generate` takes them."""
+def upscale(ctx: Context, payload: UpscaleInput, model: QwenImage21DiT, restore_lora: QwenImage21LoRA,
+            text_encoder: QwenImage21TextEncoder, turbo_lora: FunAccLoRA, vae: QwenImage21VAE, tel: Telemetry,
+            adj: Adjustments) -> ImageResult:
+    """Qwen Image 2.1 restores the picture at the size asked: Turbo with the Restore LoRA edits it from noise, the picture its
+    reference at the canvas's size, as Diffusers sizes a reference to its output, so the edit keeps to it pixel for pixel. A
+    start from the picture blown up keeps its blur and blocks at any strength (se-147). `prompt` follows the restoration
+    request, and the pictures it mentions follow the picture as references, each at its 1 MP as `generate` takes them."""
     with tel.stage("reading picture"):
         picture = payload.image.read(mode="RGBA")
         _, said, pictures = _said(payload.prompt, adj, before=1)
@@ -374,25 +378,27 @@ def upscale(ctx: Context, payload: UpscaleInput, model: QwenImage21DiT, text_enc
     seed = payload.seed if payload.seed is not None else ImageRequest(prompt="").drawn_seed()
     vae.hold(tel)
     with tel.stage("encoding reference images"):
-        conditioning, latents = vae.encode_reference_images([picture], (width, height))
+        conditioning, references = vae.encode_reference_images([picture], (width, height))
         if mentioned:
             more, more_latents = vae.encode_reference_images(mentioned)
-            conditioning, latents = [*conditioning, *more], torch.cat([latents, more_latents], dim=1)
+            conditioning, references = [*conditioning, *more], torch.cat([references, more_latents], dim=1)
     request = UPSCALE_PROMPT.format("<image1>" if mentioned else "the picture")
     with tel.stage("encoding prompt"):
         prompt, keep, given = text_encoder.fit_prompt("\n\n".join(filter(None, (request, said))), reference_grids(conditioning))
         if keep < given:
             adj.warn("prompt", f"Qwen Image 2.1 reads {keep} of the upscale's {given} tokens, so it goes without the rest")
         embeds, mask, image_pad_mask = text_encoder.encode_image_prompt(prompt, conditioning)
+    if restore_lora.unfit:
+        adj.warn("restore_lora", f"the LoRA's {', '.join(restore_lora.unfit)} isn't armed: only the linears Turbo adapts are")
     ctx.raise_if_cancelled()
     with tel.stage("generating image"):
-        latents = model.denoise(embeds, mask, width=width, height=height, steps=UPSCALE_STEPS, seed=seed,
-                                progress=ctx.progress, reference_images=conditioning, reference_latents=latents,
-                                image_pad_mask=image_pad_mask)  # fmt: skip
+        latents = restore_lora.over(model, lambda: turbo_lora.denoise(
+            model, embeds, mask, width=width, height=height, steps=turbo_lora.steps, seed=seed, progress=ctx.progress,
+            reference_images=conditioning, reference_latents=references, image_pad_mask=image_pad_mask))  # fmt: skip
     with tel.stage("decoding image"):
         image = decoded_image(vae.decode(latents, width=width, height=height))
     with tel.stage("saving image"):
         asset = ImageFile.from_image(image, format="png")
-    tel.log("upscale", source=f"{picture.width}x{picture.height}", width=width, height=height, steps=UPSCALE_STEPS,
+    tel.log("upscale", source=f"{picture.width}x{picture.height}", width=width, height=height, steps=turbo_lora.steps,
             references=len(mentioned))  # fmt: skip
     return ImageResult(asset, width, height, seed, prompt)
