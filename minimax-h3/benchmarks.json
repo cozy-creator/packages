@@ -24,6 +24,28 @@
   },
   {
     "function": "generate",
+    "gpu": "NVIDIA GeForce RTX 4090",
+    "gpus": 1,
+    "lane": "int8",
+    "request": {
+      "refs": 0,
+      "steps": 8,
+      "seconds": 24.0,
+      "segments": 2
+    },
+    "warm_ms": 479041,
+    "step1_ms": 7543,
+    "steady_step_ms": 9463,
+    "vram_bytes": 25757220864,
+    "peak_device_bytes": 25114821263,
+    "ran_on": {
+      "cozy": "0.27.0-dev+g6c55c655",
+      "runtime": "0.48.0.dev0+dev.g8bf4503e"
+    },
+    "note": "gate 44389597659 (11-18) jp-claps/speech/tone-today: 24 s Turbo, two segments, warm, n 3: 472.8, 479.0, 479.4 s; Runtime 0.48.0.dev0+dev.g8bf4503e"
+  },
+  {
+    "function": "generate",
     "request": {
       "refs": 0,
       "steps": 8,
