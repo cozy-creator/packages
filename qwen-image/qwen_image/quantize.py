@@ -1,5 +1,5 @@
 """Qwen-Image's quantized lanes, for either checkpoint: which weights each encoding takes is
-this package's recipe; the encodings and their kernels are Runtime's. Both are made from the bf16
+this package's recipe; the encodings and their kernels are Runtime's. Each is made from the bf16
 lane."""
 
 from __future__ import annotations

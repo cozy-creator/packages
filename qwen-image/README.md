@@ -96,10 +96,11 @@ two-reference composes.
 ## Lanes
 
 The `int8` recipe writes the default lane: every linear of the 60 DiT blocks, their modulation heads
-included, as `int8.convrot` (W8A8). The text encoder stays bf16, as in v1's 8-bit lane: with it int8
-too, a two-reference compose lost the first reference's identity. `nvfp4` (`--lane nvfp4`, Blackwell) uses
-NVFP4 for the blocks' attention and MLP linears and int8 for the modulation heads. Both are made from
-the bf16 upload of either checkpoint, and one release names all three lanes.
+included, and the text encoder's language-layer projections, as `int8.convrot` (W8A8). On a two-reference
+compose the int8 encoder holds both references within 0.004 CLIP of bf16. `fp8` (`fp8.rowwise`, for B300,
+which has no int8 tensor cores) takes the same weights. `nvfp4` (`--lane nvfp4`, Blackwell) uses NVFP4 for
+the blocks' attention and MLP linears and int8 for the rest. Each is made from the bf16 upload of either
+checkpoint, and one release names all four lanes.
 
 ```sh
 cozy model upload hf://Qwen/Qwen-Image-2512@25468b98e3276ca6700de15c6628e51b7de54a26 \
@@ -107,8 +108,9 @@ cozy model upload hf://Qwen/Qwen-Image-2512@25468b98e3276ca6700de15c6628e51b7de5
 cozy model upload hf://lightx2v/Qwen-Image-2512-Lightning@4609161e308ce82018a42c2a0c9b107e865bb751/Qwen-Image-2512-Lightning-8steps-V1.0-fp32.safetensors \
   qwen-image-2512-lightning-lora --lane f32 --on <machine>
 cozy model quantize qwen/qwen-image-2512@sha256:<bf16 commit> --lane int8 --package qwen-image --on <machine>
+cozy model quantize qwen/qwen-image-2512@sha256:<bf16 commit> --lane fp8 --package qwen-image --on <machine>
 cozy model quantize qwen/qwen-image-2512@sha256:<bf16 commit> --lane nvfp4 --package qwen-image --on <machine>
-cozy model publish qwen/qwen-image-2512 <version> sha256:<bf16 commit> sha256:<int8 commit> sha256:<nvfp4 commit>
+cozy model publish qwen/qwen-image-2512 <version> sha256:<bf16 commit> sha256:<int8 commit> sha256:<fp8 commit> sha256:<nvfp4 commit>
 cozy model upload hf://coder3101/Qwen2.5-VL-7B-Instruct-heretic@7c9234bfdb274f4cc922dc39a5b8484b02b06248/model.safetensors.index.json \
   coder3101/qwen2.5-vl-7b-instruct-heretic --lane bf16 --base qwen/qwen-image-2512@sha256:<bf16 commit>:text_encoder \
   --mirror https://huggingface.co/coder3101/Qwen2.5-VL-7B-Instruct-heretic --on <machine>
@@ -116,8 +118,8 @@ cozy model upload --lane bf16 'coder3101/qwen2.5-vl-7b-instruct-heretic@sha256:<
   coder3101/qwen2.5-vl-7b-instruct-heretic --mirror https://huggingface.co/coder3101/Qwen2.5-VL-7B-Instruct-heretic --on <machine>
 ```
 
-The last line keeps the encoder and its tokenizer alone: a header-only cut, the same chunks. The int8 recipe leaves the
-encoder bf16, so its one bf16 lane serves an int8 run too.
+The last line keeps the encoder and its tokenizer alone: a header-only cut, the same chunks. Its int8 and fp8 lanes are
+the same cut of a whole checkpoint's int8 and fp8 lanes holding this encoder: no recipe reads the encoder alone.
 
 The edit checkpoint is `hf://Qwen/Qwen-Image-Edit-2511@6f3ccc0b56e431dc6a0c2b2039706d7d26f22cb9`, its
 LoRA `hf://lightx2v/Qwen-Image-Edit-2511-Lightning@107d238d68b8387e32843d0b4a2e24ceb0d3ad86/Qwen-Image-Edit-2511-Lightning-8steps-V1.0-fp32.safetensors`.
