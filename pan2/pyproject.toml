@@ -1,6 +1,6 @@
 [project]
 name = "pan2"
-version = "0.4.1rc2"
+version = "0.4.1rc3"
 description = "PAN2 action-driven text-to-video and first-frame animation"
 requires-python = ">=3.12,<3.15"
 dependencies = [
