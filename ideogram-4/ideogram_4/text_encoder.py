@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import json
 import math
-from collections.abc import Callable, Sequence
+from collections.abc import Callable
 from typing import Protocol, cast
 
 import torch
@@ -126,51 +126,14 @@ class UpsamplerGraph:
         self.components: dict[str, nn.Module] = {COMPONENT: language_model(config)}
 
 
-class Index(Protocol):
-    """outlines-core's `Index` (it ships no types): a schema compiled over a vocabulary, as states
-    and the token transitions between them. `None` is a token or state outside the schema."""
-
-    def get_initial_state(self) -> int: ...
-
-    def get_next_state(self, state: int, token_id: int) -> int | None: ...
-
-    def get_allowed_tokens(self, state: int) -> list[int] | None: ...
-
-
 class _Processor(Protocol):
-    """outlines' logits processor for a schema; its `index` is what `Schema` steps through."""
+    """outlines' logits processor for a schema; its `index` is what `lm.Grammar` steps through."""
 
-    index: Index
+    index: lm.Index
 
 
 #: Diffusers' `build_caption_logits_processor`, which is unannotated.
 _caption_processor: Callable[[nn.Module, PreTrainedTokenizerFast], _Processor] = build_caption_logits_processor
-
-
-class Schema:
-    """The caption's JSON schema as `lm.generate`'s constraint: the tokens its JSON may take after
-    `tokens`, from outlines-core's index of the schema over the tokenizer's vocabulary. It keeps the
-    state of the last prefix it was asked about, so a decode's next token costs one transition."""
-
-    def __init__(self, index: Index) -> None:
-        self.index = index
-        self.last: tuple[tuple[int, ...], int] = ((), index.get_initial_state())
-
-    def allowed(self, tokens: Sequence[int]) -> Sequence[int]:
-        tokens = tuple(tokens)
-        done, state = self.last
-        if tokens[: len(done)] != done:
-            done, state = (), self.index.get_initial_state()
-        for token in tokens[len(done) :]:
-            following = self.index.get_next_state(state, token)
-            if following is None:
-                raise ValueError(f"token {token} is outside the caption's JSON schema")
-            state = following
-        self.last = (tokens, state)
-        allowed = self.index.get_allowed_tokens(state)
-        if allowed is None:
-            raise ValueError(f"state {state} is outside the caption's JSON schema")
-        return allowed
 
 
 class QwenUpsampler(Model[UpsamplerGraph]):
@@ -180,7 +143,7 @@ class QwenUpsampler(Model[UpsamplerGraph]):
 
     graph: UpsamplerGraph
     tokenizer: PreTrainedTokenizerFast
-    index: Index
+    index: lm.Index
 
     def load(self, loader: Loader) -> None:
         self.graph = loader.construct(UpsamplerGraph)
@@ -209,7 +172,7 @@ class QwenUpsampler(Model[UpsamplerGraph]):
         stop = self.tokenizer.eos_token_id
         # Transformers' default top-k (50), which Diffusers' `generate_captions` sampled under.
         out = lm.generate(model, inputs, max_new_tokens=MAX_TOKENS, stop=[stop], pad=stop,  # type: ignore[arg-type]  # Qwen3-VL's PreTrainedModel
-                          temperature=PROMPT_UPSAMPLE_TEMPERATURE, top_k=50, seed=seed, allowed=Schema(self.index))
+                          temperature=PROMPT_UPSAMPLE_TEMPERATURE, top_k=50, seed=seed, allowed=lm.Grammar(self.index))
         text = str(self.tokenizer.decode(out[0], skip_special_tokens=True)).strip()
         try:
             caption = json.loads(text)
