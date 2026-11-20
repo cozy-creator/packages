@@ -6,7 +6,7 @@ from __future__ import annotations
 
 from cozy_runtime.author import EncodingRule, QuantizationPlan, Recipe
 
-from .model import QwenImage
+from .model import QwenImage, QwenImageTextEncoder
 
 _BLOCKS = "transformer.transformer_blocks.*"
 
@@ -47,6 +47,32 @@ NVFP4 = Recipe(
             EncodingRule(f"{_BLOCKS}.attn.*", "nvfp4"),
             EncodingRule(f"{_BLOCKS}_mlp.*", "nvfp4"),
         ),
+        output_precision="preserve",
+    ),
+)
+
+#: The encoder's own 8-bit lanes on a checkpoint of the encoder alone (the `text_encoder` slot's), Paul 11-19: "make
+#: sure they're at int8-convrot and fp8 at minimum". Its 28 language layers' projections; the vision tower, embedding
+#: and head keep their bytes. The whole-checkpoint lanes above still keep the encoder bf16 (run 14702).
+TEXT_ENCODER_INT8 = Recipe(
+    lane="int8",
+    model=QwenImageTextEncoder,
+    plan=QuantizationPlan(
+        encoding="int8.convrot",
+        components=("text_encoder",),
+        include=("text_encoder.model.layers.*_proj.weight",),
+        output_precision="preserve",
+    ),
+)
+
+#: The same projections in `fp8.rowwise`, for cards with no int8 tensor cores (B300).
+TEXT_ENCODER_FP8 = Recipe(
+    lane="fp8",
+    model=QwenImageTextEncoder,
+    plan=QuantizationPlan(
+        encoding="fp8.rowwise",
+        components=("text_encoder",),
+        include=("text_encoder.model.layers.*_proj.weight",),
         output_precision="preserve",
     ),
 )
