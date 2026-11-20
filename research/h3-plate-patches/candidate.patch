@@ -1,0 +1,77 @@
+--- a/minimax_h3/guide_rows.py
++++ b/minimax_h3/guide_rows.py
+@@ -32,7 +32,7 @@
+ GUIDE = "exact_guide"
+ GUIDE_LATENTS = "exact_guide_latents"
+ GUIDE_SAMPLING_FACTS = "exact_guide_sampling_facts"
+-GuideSampling = Literal["full", "uniform", "motion"]
++GuideSampling = Literal["full", "uniform", "motion", "patch"]
+
+
+ @dataclass(frozen=True, slots=True)
+@@ -45,9 +45,8 @@
+     sampling: GuideSampling = "full"
+
+
+-def guide_frame_selection(latents: torch.Tensor, sampling: GuideSampling, prefix_frames: int) -> tuple[int, ...]:
+-    """Drop about one fifth of the clean VAE frames while preserving coverage and the join."""
+-    frames = int(latents.shape[2])
++def guide_first_prunable(frames: int, prefix_frames: int) -> int:
++    """First latent frame outside the protected head and continuation join."""
+     # Each frame covers 1 or 4 input frames. Keep the complete carried head, including the
+     # first latent wholly beyond it. Keep the last frame, even when the guide is short.
+     first, at = 0, 0
+@@ -57,6 +56,13 @@
+         if at >= prefix_frames:
+             break
+         at += span
++    return first
++
++
++def guide_frame_selection(latents: torch.Tensor, sampling: GuideSampling, prefix_frames: int) -> tuple[int, ...]:
++    """Drop about one fifth of the clean VAE frames while preserving coverage and the join."""
++    frames = int(latents.shape[2])
++    first = guide_first_prunable(frames, prefix_frames)
+     available = max(0, frames - first - 1)
+     dropped = min(frames // 5, available // 2) if sampling != "full" else 0
+     if dropped == 0:
+--- a/minimax_h3/official.py
++++ b/minimax_h3/official.py
+@@ -82,9 +82,10 @@
+     align_context_rows,
+     export_context,
+ )
++from .guide_patch_selector import plate_patch_offsets
+ from .guide_rows import (
+     ANCHOR_LATENTS, ANCHORS, GUIDE, GUIDE_LATENTS, GUIDE_SAMPLING_FACTS, GuideClip, anchor_rows,
+-    guide_frame_selection, guide_rows, select_guide_video,
++    guide_first_prunable, guide_frame_selection, guide_rows, select_guide_video,
+ )
+ from .reference_rows import ClipRows, LoopState, motion_size, public_video, unprotect_carried, unprotect_guide
+ from .steps import denoise_official
+@@ -1721,10 +1722,21 @@
+             if scoped.patch_size[0] != 1:
+                 raise InvalidRequest("guide sampling needs one latent frame per temporal patch", fields=["guide_sampling"])
+             delivery = cast("ContinuationPlan | None", state.get("continuation_delivery"))
+-            kept = guide_frame_selection(latents, guide.sampling, 0 if delivery is None else delivery.prefix_frames)
+-            kept_frames = len(kept)
+-            if kept_frames != frames:
+-                video, offsets = select_guide_video(video, frames, kept)
++            prefix = 0 if delivery is None else delivery.prefix_frames
++            if guide.sampling == "patch":
++                kept = guide_frame_selection(latents, "uniform", prefix)
++                patch = tuple(scoped.patch_size)
++                clean = patchify_video_latents(latents, patch)
++                grid = (frames, int(latents.shape[3]) // patch[1], int(latents.shape[4]) // patch[2])
++                offsets = plate_patch_offsets(
++                    clean, grid, first_prunable=guide_first_prunable(frames, prefix), omit_frames=frames - len(kept),
++                ).to(video.device)
++                video = video.index_select(0, offsets)
++            else:
++                kept = guide_frame_selection(latents, guide.sampling, prefix)
++                kept_frames = len(kept)
++                if kept_frames != frames:
++                    video, offsets = select_guide_video(video, frames, kept)
+         if audio is not None:
+             audio = audio[:, : state.num_audio_latents]
+         guide_rows(state, video, audio, offsets=offsets)
