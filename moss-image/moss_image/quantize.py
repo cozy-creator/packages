@@ -5,7 +5,7 @@ from __future__ import annotations
 
 from cozy_runtime.author import QuantizationPlan, Recipe
 
-from .model import MossImage
+from .model import MossImage, MossTextEncoder
 
 _TEXT = "text_encoder.language_model.layers.*"
 
@@ -28,6 +28,19 @@ INT8 = Recipe(
             f"{_TEXT}.linear_attn.out_proj.weight",
             f"{_TEXT}.mlp.*_proj.weight",
         ),
+        output_precision="preserve",
+    ),
+)
+
+#: The encoder's fp8 lane (`fp8.rowwise`), for cards with no int8 tensor cores (B300): the int8 lane's
+#: projections, on a checkpoint of the encoder alone (the `text_encoder` slot's).
+TEXT_ENCODER_FP8 = Recipe(
+    lane="fp8",
+    model=MossTextEncoder,
+    plan=QuantizationPlan(
+        encoding="fp8.rowwise",
+        components=("text_encoder",),
+        include=(f"{_TEXT}.self_attn.[qkvo]_proj.weight", f"{_TEXT}.linear_attn.in_proj_qkv.weight", f"{_TEXT}.linear_attn.in_proj_z.weight", f"{_TEXT}.linear_attn.out_proj.weight", f"{_TEXT}.mlp.*_proj.weight"),
         output_precision="preserve",
     ),
 )
