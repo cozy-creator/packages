@@ -1,0 +1,3 @@
+se-160m measurement inputs (not for merge), from Wikimedia Commons, downscaled to 1600 px wide (JPEG q3):
+cat.jpg        File:Cat_November_2010-1a.jpg (Alvesgaspar, CC BY-SA 3.0)
+astronaut.jpg  File:Bruce_McCandless_II_during_EVA_in_1984.jpg (NASA, public domain)
