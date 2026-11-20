@@ -82,7 +82,10 @@ from .continuation import (
     align_context_rows,
     export_context,
 )
-from .guide_rows import ANCHOR_LATENTS, ANCHORS, GUIDE, GUIDE_LATENTS, GuideClip, anchor_rows, guide_rows
+from .guide_rows import (
+    ANCHOR_LATENTS, ANCHORS, GUIDE, GUIDE_LATENTS, GUIDE_SAMPLING_FACTS, GuideClip, anchor_rows,
+    guide_frame_selection, guide_rows, select_guide_video,
+)
 from .reference_rows import ClipRows, LoopState, motion_size, public_video, unprotect_carried, unprotect_guide
 from .steps import denoise_official
 from .overlay import ATTENTION_KWARG, OVERLAY_KWARG, REGENERATE_BANK, TURBO_BANK, Overlay, TurboSchedule
@@ -1684,15 +1687,30 @@ class OfficialH3Pipeline:
         other draw of the request's generator; its video row count."""
         rows = cast("tuple[torch.Tensor, torch.Tensor | None]", state.get(GUIDE_LATENTS))
         latents, audio = rows
+        guide = cast(GuideClip, state.get(GUIDE))
+        frames = int(latents.shape[2])
         device = state.latents.device
+        # Draw the baseline shape even when dropping rows, so later anchors see the same RNG.
         noise = randn_tensor(
             latents.shape, generator=state.generator, device=device, dtype=torch.float32
         )
         noised = scoped.scheduler.scale_noise(latents.to(device), scoped.keyframe_noise_aug, noise)  # type: ignore[arg-type]  # Diffusers annotates the legacy FloatTensor
         video = patchify_video_latents(noised, tuple(scoped.patch_size))  # type: ignore[arg-type]  # the DiT's (t, h, w) patch
+        full_rows = int(video.shape[0])
+        offsets = None
+        kept_frames = frames
+        if guide.sampling != "full":
+            if scoped.patch_size[0] != 1:
+                raise InvalidRequest("guide sampling needs one latent frame per temporal patch", fields=["guide_sampling"])
+            delivery = cast("ContinuationPlan | None", state.get("continuation_delivery"))
+            kept = guide_frame_selection(latents, guide.sampling, 0 if delivery is None else delivery.prefix_frames)
+            kept_frames = len(kept)
+            if kept_frames != frames:
+                video, offsets = select_guide_video(video, frames, kept)
         if audio is not None:
             audio = audio[:, : state.num_audio_latents]
-        guide_rows(state, video, audio)
+        guide_rows(state, video, audio, offsets=offsets)
+        state.set(GUIDE_SAMPLING_FACTS, (frames, kept_frames, full_rows, int(video.shape[0])))
         return int(video.shape[0])
 
     @staticmethod
