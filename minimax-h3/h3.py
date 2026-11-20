@@ -2190,19 +2190,26 @@ _PACKAGE_NEEDS = {
 
 #: What a shot costs (cl-1286): its beats, its segments (15 s each: a 30 s shot of two 15 s beats runs two), its seconds, every
 #: beat's summed, and its steps, Turbo's 8 else the full model's (40 unless asked). Its time is its card's nearest row
-#: (`benchmarks.json`) times `_SEGMENTS` of the request over `_ROW_SEGMENTS`, the same of the row's seconds: the first segment by its seconds^1.18,
-#: 0.585 for each later one (an RTX 4090's warm uncapped 5, 15 and 24 s runs: 88 s, 321 s, 509 s); in proportion to its steps.
+#: (`benchmarks.json`, each Turbo's 8 steps) times `_ASKED_SHAPE` over `_ROW_SHAPE`, the same of the row, in shares of a 15 s Turbo run:
+#: a fixed 0.06 no step scales (start, construction, text, decode: an RTX 4090's 5 s run spent 20.8 s outside denoise, of 335 s at
+#: 15 s), then its steps' share, the first segment by (seconds/15)^1.6 but never under 0.17, 0.585 for each later one (an RTX
+#: 4090's warm 5, 15 and 24 s runs). Short shots take what 5 s ones do: on a card the transformer outgrows, weights stream to it
+#: every step, and an RTX 4090's steps (8.2-8.4 s, then 5.4 s) and decode (6.5 s), and an RTX 3090's (12-14.5 s; 11-14 s), take
+#: as long at 1 s as at 5 s; 1 s and 5 s runs came to 0.19-0.24 of a 15 s one on both cards. 1.6 is the least growth that keeps
+#: 5 s on that floor; nothing between 5 and 15 s was measured.
 #: Its canvas is H3's own at every shape, so pixels don't vary.
 _SHOT_SECONDS = "sum(request.beats.map(b, double(b.duration)))"
 _ROW_SECONDS = "measured(machine).request.seconds"
-_SEGMENTS = "(pow(min(size.seconds, 15.0) / 15.0, 1.18) + 0.585 * (double(int((size.seconds + 14.999) / 15.0)) - 1.0))"
-_ROW_SEGMENTS = (f"(pow(min({_ROW_SECONDS}, 15.0) / 15.0, 1.18)"
-                 f" + 0.585 * (double(int(({_ROW_SECONDS} + 14.999) / 15.0)) - 1.0))")
+#: `_SHOT_ESTIMATE`'s shape of the request, and of its row (Turbo's 8 steps), in shares of a 15 s Turbo run.
+_ASKED_SHAPE = ("(0.06 + 0.94 * (max(0.17, pow(min(size.seconds, 15.0) / 15.0, 1.6))"
+                " + 0.585 * (double(int((size.seconds + 14.999) / 15.0)) - 1.0)) * size.steps / 8.0)")
+_ROW_SHAPE = (f"(0.06 + 0.94 * (max(0.17, pow(min({_ROW_SECONDS}, 15.0) / 15.0, 1.6))"
+              f" + 0.585 * (double(int(({_ROW_SECONDS} + 14.999) / 15.0)) - 1.0)))")
 _SHOT_ESTIMATE = {
     "size": {"beats": "double(size(request.beats))", "seconds": _SHOT_SECONDS,
              "segments": f"double(int(({_SHOT_SECONDS} + 14.999) / 15.0))",
              "steps": "request.turbo ? 8.0 : (request.steps != null ? double(request.steps) : 40.0)"},
-    "ms": f"measured(machine).warm_ms * {_SEGMENTS} / {_ROW_SEGMENTS} * size.steps / 8.0",
+    "ms": f"measured(machine).warm_ms * {_ASKED_SHAPE} / {_ROW_SHAPE}",
 }  # fmt: skip
 
 
