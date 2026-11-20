@@ -4,6 +4,7 @@ Projection, normalization, rotary and gating arithmetic follow Diffusers' Apache
 LTX2AudioVideoAttnProcessor (Copyright 2025 Lightricks and HuggingFace).
 """
 
+import inspect
 from typing import cast
 
 import torch
@@ -12,6 +13,25 @@ from diffusers.models.attention_dispatch import AttentionBackendName, dispatch_a
 from diffusers.models.transformers.transformer_ltx2 import (
     LTX2Attention, LTX2VideoTransformer3DModel, LTX2VideoTransformerBlock, apply_interleaved_rotary_emb, apply_split_rotary_emb,
 )
+
+
+#: The transformer's inputs after `self`, in order: the split hook reads one the call leaves out by its position.
+_INPUTS = tuple(inspect.signature(LTX2VideoTransformer3DModel.forward).parameters.values())[1:]
+
+
+class Sharded(LTX2VideoTransformer3DModel):
+    """Diffusers' LTX2 transformer, whose split hook shards only what a call passes. The hook looks up every input the
+    plan names and, for one the call leaves out, reads a positional argument that isn't there ("Expected 5 arguments
+    but got 0"): Diffusers' text-to-video passes no `audio_timestep` and neither of its pipelines a
+    `video_keyframes_mask`, which only a canvas does. Each such input goes as its own default, None, which the hook
+    skips and `forward` reads as left out."""
+
+    def __call__(self, *args: object, **kwargs: object) -> object:
+        root = self._cp_plan.get("") if isinstance(self._cp_plan, dict) else None
+        planned = set(root) if isinstance(root, dict) else set()
+        absent = {parameter.name: None for parameter in _INPUTS[len(args):]
+                  if parameter.name in planned and parameter.name not in kwargs and parameter.default is None}
+        return super().__call__(*args, **absent, **kwargs)
 
 
 def plan(rope_type: str) -> ContextParallelModelPlan:
