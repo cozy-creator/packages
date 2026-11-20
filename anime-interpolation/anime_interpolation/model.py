@@ -55,4 +55,4 @@ def interpolate(
 
     output = cast(Tensor, net(padded(left), padded(right), position))[0, :, :height, :width]
     pixels = output.mul(255).round().clamp(0, 255).to(torch.uint8)
-    return cast(bytes, pixels.permute(1, 2, 0).contiguous().cpu().numpy().tobytes())
+    return pixels.permute(1, 2, 0).contiguous().cpu().numpy().tobytes()
