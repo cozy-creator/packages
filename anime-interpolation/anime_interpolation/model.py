@@ -15,7 +15,7 @@ from .net import IFNet
 
 class Graph:
     def __init__(self, config: Config) -> None:
-        if config.section("rife").as_str("architecture") != "Practical-RIFE 4.26":
+        if config.as_str("architecture") != "Practical-RIFE 4.26":
             raise ValueError(
                 "Anime Frame Interpolation requires the Practical-RIFE 4.26 checkpoint"
             )
