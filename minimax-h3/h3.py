@@ -300,6 +300,8 @@ DurationSeconds = Annotated[
     ),
     Shape(frames={s: frames_for(s) for s in range(MIN_DURATION_S, MAX_DURATION_S + 1)}),
 ]
+#: A segment's new seconds. Its memory is sized by its `frames`, not by these alone.
+SegmentSeconds = Annotated[int, msgspec.Meta(ge=MIN_DURATION_S, le=MAX_DURATION_S)]
 
 
 class Resolution(Enum):
@@ -1098,7 +1100,7 @@ def _references_to_video(
         notes.append("this continues a video made with another model release, lane or turbo setting; the join may show")
     if payload.frames != held_frames(delivery, payload.videos):
         raise InvalidRequest(
-            f"a segment of {payload.new_frames} new frames with these references holds "
+            f"a segment of {segment_frames(payload)} new frames with these references holds "
             f"{held_frames(delivery, payload.videos)} frames, not {payload.frames}",
             fields=["payload.frames"],
         )
@@ -1168,7 +1170,7 @@ def _references_to_video(
         piece.lead = None if earlier is not None or context is None else context.video
         piece.trail = None if suffix is None else suffix.video
     result = _finish(
-        model, task, state, schedule, duration_s=math.ceil(payload.new_frames / FPS), out=out, tel=tel,
+        model, task, state, schedule, duration_s=math.ceil(segment_frames(payload) / FPS), out=out, tel=tel,
         progress=ctx.progress, cancel=ctx.raise_if_cancelled, completed=completed, ended=ended,
         delivered_frames=delivery.delivered_frames, sampled_frames=delivery.sample_frames, earlier=earlier, piece=piece,
     )  # fmt: skip
@@ -1211,6 +1213,14 @@ def held_frames(plan: ContinuationPlan, videos: Sequence[VideoUse] = ()) -> int:
     return plan.sample_frames * (1 + anchored) + plan.carried.frames + plan.suffix.frames
 
 
+def segment_frames(payload: Ref2VAInput) -> int:
+    """A Ref2VA segment's new frames past its carry: a shot's whole seconds, or a redo's frames."""
+    if (payload.duration_s is None) == (payload.new_frames is None):
+        raise InvalidRequest("a segment asks its new seconds (duration_s) or, for a redo's window, its new frames "
+                             "(new_frames): one of them", fields=["payload.duration_s", "payload.new_frames"])  # fmt: skip
+    return payload.new_frames if payload.new_frames is not None else FPS * cast(int, payload.duration_s)
+
+
 #: A take a segment reads frames and sound of.
 TakeVideo = Annotated[VideoFile, FileBound(max_bytes=ANY_SIZE, max_decoded_bytes=VIDEO_READ_BYTES)]
 
@@ -1228,8 +1238,8 @@ class HeldFrames(msgspec.Struct, frozen=True, kw_only=True):
 class Ref2VAInput(msgspec.Struct):
     prompt: str
     seed: int
-    #: New frames past the carry: a shot's segment asks whole seconds (`FPS * seconds`), a redo's the window's.
-    new_frames: Annotated[int, msgspec.Meta(ge=1, le=MAX_FRAMES)]
+    #: A shot's segment: its new seconds past the carry, snapped up to the grid. None for a redo's, which asks `new_frames`.
+    duration_s: SegmentSeconds | None
     steps: int | None
     turbo: bool
     #: `held_frames` of this segment: the shape Runtime banks its memory by. A continuation
@@ -1249,6 +1259,8 @@ class Ref2VAInput(msgspec.Struct):
     context: ContextFile | None = None
     #: The carry, when no `context` holds it: a video's frames before the cut, encoded.
     held: HeldFrames | None = None
+    #: A redo's segment: its new frames past the carry, exactly, in place of `duration_s`.
+    new_frames: Annotated[int, msgspec.Meta(ge=1, le=MAX_FRAMES)] | None = None
     #: A redo's last segment: the kept frames after its window, held over its tail (`ContinuationPlan.suffix`), or
     #: `tail` frames sampled past a shot change it ends on; either way it delivers exactly `new_frames`.
     suffix: HeldFrames | None = None
@@ -1256,7 +1268,7 @@ class Ref2VAInput(msgspec.Struct):
     suffix_audio: bool = False
     tail: Annotated[int, msgspec.Meta(ge=0)] = 0
     #: The first segment of a part joined to kept frames by pixels (`join_kept`): its carried window leads its
-    #: latents, so the part decodes in phase from it, and it hands on its head's sound (`SegmentOutput.overlap`).
+    #: latents, so the part decodes in phase from it, and it hands on its head's sound (`shot.Overlap`, in its latents).
     lead: bool = False
     #: That part's last segment: it decodes the whole part, from the first's carried window to its own suffix's, and
     #: hands on its copies of the kept frames on both sides and its tail's sound.
@@ -1288,11 +1300,9 @@ class SegmentOutput(msgspec.Struct):
     #: so it may feed the next segment (a picture the parent saved itself may not, run 20651).
     last_frame: ImageFile
     #: Its delivered video latents when the call asks (`latents`), else empty: a shot's last
-    #: segment decodes them with its own as one.
+    #: segment decodes them with its own as one. In a part joined to kept frames by pixels they also hold its copies of
+    #: the kept frames and sound just before and after it (`shot.Overlap`), which the joins cross-fade into.
     latents: LatentFile
-    #: A part joined to kept frames by pixels: its copies of the kept frames and sound just before and after it
-    #: (`shot.Overlap`), which the joins cross-fade into; else empty.
-    overlap: LatentFile
 
 
 @dataclass(frozen=True)
@@ -1430,9 +1440,12 @@ class _Segments:
     and, when asked, its delivered latents."""
 
     def __init__(self, out: Outputs, model: H3Model, plan: ContinuationPlan, observed: RenderProvenance,
-                 latents: bool, lead: bool = False) -> None:  # fmt: skip
+                 latents: bool, lead: bool = False, overlap: bool = False) -> None:  # fmt: skip
         self.out, self.model, self.plan, self.observed, self.latents = out, model, plan, observed, latents
         self.lead = lead
+        #: A part joined by pixels: its latents wait for its decode, which finds the overlap they carry (`close`).
+        self.overlap = overlap
+        self.pending: tuple[Tensor, dict[str, str]] | None = None
         self.saved: dict[str, File] = {}
         self.warnings: list[str] = []
 
@@ -1456,7 +1469,17 @@ class _Segments:
             if self.lead and context is not None and context.video is not None:
                 # A part joined by pixels decodes in phase from its carried window, which leads it here.
                 delivered, meta["lead"] = torch.cat([context.video, delivered], dim=2), str(self.plan.carried.frames)
-            self.saved["latents"] = self.out.save_bytes(save_tensors({"latents": delivered.contiguous()}, meta),
+            self.pending = (delivered.contiguous(), meta)
+            if not self.overlap:
+                self.close()
+
+    def close(self, overlap: Overlap | None = None) -> None:
+        """Save the latents the denoise left, with a part's `overlap` beside them."""
+        if self.pending is not None:
+            delivered, meta = self.pending
+            self.pending = None
+            beside = overlap.tensors() if overlap is not None else {}
+            self.saved["latents"] = self.out.save_bytes(save_tensors({"latents": delivered, **beside}, meta),
                                                        media_type="application/octet-stream")  # fmt: skip
 
     @property
@@ -1496,7 +1519,7 @@ async def ref2va_segment(
     lora = _sampling(payload, turbo_lora)
     observed = provenance(base_model.checkpoint_ref, "" if lora is None else lora.checkpoint_ref)
     plan = ContinuationPlan(
-        payload.new_frames,
+        segment_frames(payload),
         Carry(int(payload.context_frames), payload.context_audio),
         Carry(int(payload.next_context_frames), payload.next_context_audio),
         Carry(int(payload.suffix_frames), payload.suffix_audio),
@@ -1519,7 +1542,8 @@ async def ref2va_segment(
                 raise InvalidRequest("a held suffix needs the take it holds", fields=["payload.suffix"])
             suffix = _held(base_model, payload.suffix, plan.suffix, payload.canvas, made, before=False)
     _reference_policy(assets)
-    handed = _Segments(out, base_model, plan, observed, payload.latents, lead=payload.lead)
+    handed = _Segments(out, base_model, plan, observed, payload.latents, lead=payload.lead,
+                       overlap=payload.lead or payload.closes)  # fmt: skip
     earlier = None
     if payload.earlier_latents:
         head = video_tokens(plan.carried.frames) if plan.carried.frames else 0
@@ -1535,10 +1559,9 @@ async def ref2va_segment(
         ended=partial(_keep_frames, ended),
         earlier=earlier, sound=sound, suffix=suffix, piece=piece,
     )  # fmt: skip
-    if piece is not None:
-        handed.saved["overlap"] = out.save_bytes(piece.overlap.to_bytes(), media_type="application/octet-stream")
+    handed.close(piece.overlap if piece is not None else None)
     return SegmentOutput(segment.video, [*segment.warnings, *handed.warnings], observed, handed.file("context"), ended[0],
-                         handed.file("latents"), handed.file("overlap"))  # fmt: skip
+                         handed.file("latents"))  # fmt: skip
 
 
 def log_prompt(tel: Telemetry, event: str, prompt: str, **fields: str | int) -> None:
@@ -1614,8 +1637,9 @@ async def fl2va_segment(
         completed=handed if handed.wanted else None,
         ended=partial(_keep_frames, ended),
     )  # fmt: skip
+    handed.close()
     return SegmentOutput(shot.video, [*shot.warnings, *handed.warnings], observed, handed.file("context"), ended[0],
-                         handed.file("latents"), handed.file("overlap"))  # fmt: skip
+                         handed.file("latents"))  # fmt: skip
 
 
 @app.entrypoint(
@@ -1904,8 +1928,8 @@ def take_canvas(video: VideoFile, warnings: list[str]) -> tuple[int, int]:
 
 
 def _overlap(parts: Sequence[SegmentOutput]) -> Overlap:
-    """A part's overlap (`SegmentOutput.overlap`): its first segment's head, with its last's copies and tail."""
-    return Overlap.read(parts[0].overlap.read_bytes()).joined(Overlap.read(parts[-1].overlap.read_bytes()))
+    """A part's overlap (`shot.Overlap`, in its segments' latents): its first segment's head, with its last's copies and tail."""
+    return Overlap.read(parts[0].latents.read_bytes()).joined(Overlap.read(parts[-1].latents.read_bytes()))
 
 
 async def _render(ctx: Context, shot: Shot, out: Outputs, tel: Telemetry, *, plate: VideoFile | None = None,
@@ -2086,7 +2110,7 @@ async def _render(ctx: Context, shot: Shot, out: Outputs, tel: Telemetry, *, pla
                     result = await call(
                         ref2va_segment,
                         Ref2VAInput(
-                            prompt=segment.prompt, seed=seeds[index], new_frames=plan.frames, steps=steps,
+                            prompt=segment.prompt, seed=seeds[index], duration_s=segments[index], steps=steps,
                             turbo=turbo, quality=shot.quality, frames=held_frames(plan, uses), videos=uses,
                             previous_provenance=expected, context=context if plan.carried else None,
                             held=opening_frames if index == 0 else None,
@@ -2405,7 +2429,8 @@ async def _retake(ctx: Context, payload: Retake, out: Outputs, tel: Telemetry) -
                 result = await call(
                     ref2va_segment,
                     Ref2VAInput(
-                        prompt=segment.prompt, seed=seeds[index], new_frames=each.frames, steps=None, turbo=payload.turbo,
+                        prompt=segment.prompt, seed=seeds[index], duration_s=None, new_frames=each.frames, steps=None,
+                        turbo=payload.turbo,
                         quality=payload.quality, frames=held_frames(each, uses), videos=uses, previous_provenance=expected,
                         context=context, held=held if index == 0 else None,
                         context_frames=cast(ContextFrames, each.carried.frames), context_audio=each.carried.audio,
