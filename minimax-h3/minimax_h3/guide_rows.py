@@ -15,7 +15,7 @@ context) keeps its order.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 import numpy as np
 import numpy.typing as npt
@@ -31,6 +31,8 @@ if TYPE_CHECKING:
 #: The `PipelineState` keys of a call's guide: its clip, then its encoded rows.
 GUIDE = "exact_guide"
 GUIDE_LATENTS = "exact_guide_latents"
+GUIDE_SAMPLING_FACTS = "exact_guide_sampling_facts"
+GuideSampling = Literal["full", "uniform", "motion"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -40,13 +42,58 @@ class GuideClip:
 
     frames: npt.NDArray[np.uint8]
     audio: torch.Tensor | None = None
+    sampling: GuideSampling = "full"
 
 
-def guide_rows(state: PipelineState, video: torch.Tensor, audio: torch.Tensor | None) -> None:
+def guide_frame_selection(latents: torch.Tensor, sampling: GuideSampling, prefix_frames: int) -> tuple[int, ...]:
+    """Drop about one fifth of the clean VAE frames while preserving coverage and the join."""
+    frames = int(latents.shape[2])
+    # Each frame covers 1 or 4 input frames. Keep the complete carried head, including the
+    # first latent wholly beyond it. Keep the last frame, even when the guide is short.
+    first, at = 0, 0
+    while first < frames:
+        span = _ROPE_FRAMES_PER_LATENT[first % len(_ROPE_FRAMES_PER_LATENT)]
+        first += 1
+        if at >= prefix_frames:
+            break
+        at += span
+    available = max(0, frames - first - 1)
+    dropped = min(frames // 5, available // 2) if sampling != "full" else 0
+    if dropped == 0:
+        return tuple(range(frames))
+    scores = []
+    if sampling == "motion":
+        changes = latents.float().diff(dim=2).abs().mean(dim=(0, 1)).flatten(1)
+        # Local changes matter even on a mostly still frame. Protect both sides of a cut.
+        transitions = changes.topk(max(1, changes.shape[1] // 20), dim=1).values.mean(dim=1)
+        scores = torch.maximum(transitions[:-1], transitions[1:]).tolist()
+    omit = set()
+    for bin_index in range(dropped):
+        start = first + bin_index * available // dropped
+        stop = first + (bin_index + 1) * available // dropped - 1
+        # Keep the last frame in each bin so two omitted frames can never be adjacent.
+        middle = (start + stop - 1) // 2
+        omission = min(range(start, stop), key=lambda frame: (scores[frame - 1], abs(frame - middle))) if scores else middle
+        omit.add(omission)
+    return tuple(frame for frame in range(frames) if frame not in omit)
+
+
+def select_guide_video(video: torch.Tensor, total_frames: int, kept: tuple[int, ...]) -> tuple[torch.Tensor, torch.Tensor]:
+    """Select whole frames from a frame-major packed guide, carrying their original row offsets."""
+    per_frame = int(video.shape[0]) // total_frames
+    frames = torch.tensor(kept, device=video.device)[:, None]
+    offsets = (frames * per_frame + torch.arange(per_frame, device=video.device)).flatten()
+    return video[offsets], offsets
+
+
+def guide_rows(
+    state: PipelineState, video: torch.Tensor, audio: torch.Tensor | None, *, offsets: torch.Tensor | None = None
+) -> None:
     """Pack the guide's rows in front of every other condition row of `state`'s layout.
 
-    `video` is the noised, patchified guide (rows of whole target latent frames), `audio` its
-    channel-major soundtrack rows (`(channels, latents, width)`), each at most the target's.
+    `video` is the noised, patchified guide (rows of whole target latent frames), optionally
+    selected at `offsets` in the original guide. `audio` is its channel-major soundtrack rows
+    (`(channels, latents, width)`), each at most the target's.
     """
     positions, tags = state.position_ids, state.token_tags
     video_rows, audio_rows = state.video_indices, state.audio_indices
@@ -56,8 +103,9 @@ def guide_rows(state: PipelineState, video: torch.Tensor, audio: torch.Tensor | 
     count_video = int(video.shape[0])
     if count_video > target_video.numel():
         raise ValueError("a guide video has more frames than the render")
-    guide_positions = [positions[target_video[:count_video]]]
-    guide_tags = [tags[target_video[:count_video]]]
+    source = target_video[:count_video] if offsets is None else target_video[offsets]
+    guide_positions = [positions[source]]
+    guide_tags = [tags[source]]
     count_audio = 0
     if audio is not None:
         channels, latents, width = (int(n) for n in audio.shape)

@@ -96,7 +96,7 @@ from minimax_h3.continuation import (
     provenance,
     video_tokens,
 )
-from minimax_h3.guide_rows import GuideClip
+from minimax_h3.guide_rows import GUIDE_SAMPLING_FACTS, GuideClip, GuideSampling
 from minimax_h3.model import (
     FULL_BALANCED,
     FullRecipe,
@@ -1087,7 +1087,7 @@ def _references_to_video(
             reference_image_short_edges=sizing.edges,
             task=task,
             plan=plan,
-            guide=guide,
+            guide=None if guide is None else replace(guide, sampling=payload.guide_sampling),
             anchors=anchors,
             canvas=(payload.canvas[1], payload.canvas[0]),
         )
@@ -1117,6 +1117,10 @@ def _references_to_video(
             on_step=lambda step: ctx.progress(step, steps),
             cancel=ctx.raise_if_cancelled,
         )
+    if guide is not None:
+        original_frames, kept_frames, original_rows, kept_rows = cast("tuple[int, int, int, int]", state.get(GUIDE_SAMPLING_FACTS))
+        tel.log("h3 guide sampling", mode=payload.guide_sampling, original_frames=original_frames,
+                kept_frames=kept_frames, original_rows=original_rows, kept_rows=kept_rows)  # fmt: skip
     result = _finish(
         model, task, state, schedule, duration_s=payload.duration_s, out=out, tel=tel, progress=ctx.progress,
         cancel=ctx.raise_if_cancelled, completed=completed, ended=ended,
@@ -1195,6 +1199,7 @@ class Ref2VAInput(msgspec.Struct):
     earlier_latents: tuple[LatentFile, ...] = ()
     earlier_videos: tuple[SegmentVideo, ...] = ()
     quality: Quality = "standard"
+    guide_sampling: GuideSampling = "full"
 
 
 class SegmentOutput(msgspec.Struct):
@@ -1673,7 +1678,7 @@ def _anchor(name: str, people: bool) -> StoryReference:
 
 
 async def _render(ctx: Context, shot: Shot, out: Outputs, tel: Telemetry, *, plate: VideoFile | None = None,
-                  lora: ModelChoice | None = None, keep_latents: bool = True) -> ShotResult:  # fmt: skip
+                  lora: ModelChoice | None = None, keep_latents: bool = True, guide_sampling: GuideSampling = "full") -> ShotResult:  # fmt: skip
     """A shot's segments, rendered in order, each going on from the last from its carried latents, decoded as one video
     and published as it grows. A pickup goes on from its take at its frame: from the take's latents, else as a new video
     opening on that frame, joined after the take's kept start. A `plate` is followed frame by frame, and its length is
@@ -1843,6 +1848,7 @@ async def _render(ctx: Context, shot: Shot, out: Outputs, tel: Telemetry, *, pla
                         Ref2VAInput(
                             prompt=segment.prompt, seed=seeds[index], duration_s=segments[index], steps=steps,
                             turbo=turbo, quality=shot.quality, frames=held_frames(plan, uses), videos=uses,
+                            guide_sampling=guide_sampling,
                             previous_provenance=expected, context=context if plan.carried else None,
                             context_frames=cast(ContextFrames, plan.carried.frames),
                             context_audio=plan.carried.audio,
@@ -1997,6 +2003,8 @@ class Edit(msgspec.Struct, kw_only=True):
     turbo: bool = True
     quality: Quality = "standard"
     seed: Seed | None = None
+    #: Experimental for paired comparisons. The default keeps the complete aligned guide.
+    guide_sampling: GuideSampling = "full"
 
 
 # A plate is a reference of every segment: an edit runs Ref2VA alone.
@@ -2009,7 +2017,7 @@ async def edit(ctx: Context, payload: Edit, out: Outputs, tel: Telemetry) -> Sho
              for beat in payload.beats]  # fmt: skip
     shot = Shot(summary=payload.summary, beats=beats, turbo=payload.turbo, quality=payload.quality, seed=payload.seed)
     choice = ModelChoice(lora=(Lora(lora.model, lora.strength),))
-    return await _render(ctx, shot, out, tel, plate=payload.plate, lora=choice)
+    return await _render(ctx, shot, out, tel, plate=payload.plate, lora=choice, guide_sampling=payload.guide_sampling)
 
 
 class Upscale(msgspec.Struct, kw_only=True):
