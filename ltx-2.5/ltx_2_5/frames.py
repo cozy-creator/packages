@@ -27,6 +27,8 @@ import torch
 from diffusers.models.transformers.transformer_ltx2 import LTX2AdaLayerNormSingle, LTX2VideoTransformer3DModel
 from torch import Tensor
 
+from .parallel import Sharded
+
 type Op = Callable[[Tensor | float, Tensor | float], Tensor]
 type Run = tuple[int, int, int, int]
 
@@ -207,8 +209,9 @@ class FrameEmbedding(LTX2AdaLayerNormSingle):
         return Frames(grid, rows[0]), Frames(grid, rows[1])
 
 
-class Transformer(LTX2VideoTransformer3DModel):
-    """Diffusers' LTX2 transformer; inside `per_frame`, its video timestep embeds per frame (`FrameEmbedding`)."""
+class Transformer(Sharded):
+    """Diffusers' LTX2 transformer, sharding only what a call passes (`Sharded`); inside `per_frame`, its video
+    timestep embeds per frame (`FrameEmbedding`)."""
 
     def forward(self, *args: object, **kwargs: object) -> object:
         token = _CALL.set(_grid(self, kwargs) if _PER_FRAME.get() else None)
