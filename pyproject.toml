@@ -6,6 +6,7 @@
 [tool.basedpyright]
 # The editor's language server only; the required check is mypy (scripts/typecheck.sh).
 include = [
+    "anime-interpolation",
     "anima",
     "birefnet",
     "fibo-2",
@@ -31,6 +32,7 @@ include = [
 ]
 exclude = ["**/.venv", "birefnet/birefnet/upstream", "seedvr2/seedvr2/upstream", "hunyuan-image-3/hunyuan_image_3/tencent"]
 extraPaths = [
+    "anime-interpolation",
     "anima",
     "birefnet",
     "fibo-2",
@@ -65,12 +67,12 @@ reportPrivateImportUsage = false
 [tool.mypy]
 python_version = "3.12"
 files = [
-    "anima", "birefnet", "qwen3", "seedvr2", "minimax-h3", "sdxl", "qwen-image-2", "qwen-image", "flux-2",
+    "anime-interpolation", "anima", "birefnet", "qwen3", "seedvr2", "minimax-h3", "sdxl", "qwen-image-2", "qwen-image", "flux-2",
     "flux.3-klein", "fibo-2", "hidream-o1", "hunyuan-image-3", "ideogram-4", "moss-image", "krea-2",
     "relayvsr", "orbit", "p-h3-image", "pan2", "ltx-2.5", "upscale-models", "scripts", "examples",
 ]
 mypy_path = [
-    "typings", "anima", "birefnet", "fibo-2", "flux-2", "flux.3-klein", "hidream-o1", "hunyuan-image-3", "ideogram-4",
+    "typings", "anime-interpolation", "anima", "birefnet", "fibo-2", "flux-2", "flux.3-klein", "hidream-o1", "hunyuan-image-3", "ideogram-4",
     "krea-2", "minimax-h3", "moss-image", "qwen3", "qwen-image", "qwen-image-2",
     "relayvsr", "orbit", "p-h3-image", "pan2", "ltx-2.5", "sdxl", "seedvr2", "upscale-models",
 ]

@@ -1,0 +1,38 @@
+[project]
+name = "anime-interpolation"
+version = "0.1.0rc1"
+description = "Anime Frame Interpolation"
+requires-python = ">=3.12"
+dependencies = [
+    "cozy-runtime[media]>=0.43.1,<0.50",
+    "msgspec>=0.19",
+    "numpy>=2",
+    "torch>=2.10",
+]
+
+[project.entry-points."cozy.application"]
+default = "anime_interpolation:app"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["anime_interpolation"]
+
+[tool.uv]
+environments = [
+    "sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "sys_platform == 'linux' and platform_machine == 'aarch64'",
+    "sys_platform == 'darwin' and platform_machine == 'arm64'",
+    "sys_platform == 'win32' and platform_machine == 'AMD64'",
+]
+
+# Windows PyPI builds are CPU-only. Use the same CUDA layer as the other video tools.
+[[tool.uv.index]]
+name = "pytorch-cu130"
+url = "https://download.pytorch.org/whl/cu130"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu130", marker = "sys_platform == 'win32'" }

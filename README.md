@@ -24,6 +24,7 @@ dependencies or qualifying a worker image.
 | `moss-image/` | OpenMOSS MOSS-Image text-to-image with layout boxes for objects and text (Apache-2.0) |
 | `krea-2/` | Krea 2 text-to-image: Raw (`generate`) and its 8-step Turbo (`generate_turbo`), with caller LoRAs (Krea 2 Community License) |
 | `p-h3-image/` | P-H3-Image, Pruna AI's image model: text to image and edits of up to 8 pictures at 8 MP in 8 steps (MiniMax H3 Community License) |
+| `anime-interpolation/` | Hold-aware Practical-RIFE video interpolation at the source rate or twice the rate (MIT model and inference network) |
 | `relayvsr/` | RelayVSR streaming 4x video upscaling, a fast alternative to SeedVR2 (Apache-2.0) |
 | `orbit/` | Orbit: a picture's subject seen from all the way round, one clockwise turn by `minimax-h3` under ORB360 |
 | `qwen3/` | Qwen3.5, 3.6 and 3.8 (abliterated checkpoints): questions about text, images and videos, on Runtime's shared Qwen-VL code (Apache-2.0) |
