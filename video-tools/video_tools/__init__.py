@@ -44,7 +44,10 @@ def stabilize(ctx: Context, payload: StabilizeInput, out: Outputs, tel: Telemetr
         )
 
     with tel.stage("stabilize video"), payload.video.stream() as source:
-        saved = out.save_video_stream(stabilized(iter(source), corrections, ctx.raise_if_cancelled))
+        frames = stabilized(iter(source), corrections, ctx.raise_if_cancelled)
+        # Keep source presentation timing when the MP4 writer emits a constant-rate file.
+        clock = remap((), float(probe.duration))
+        saved = out.save_video_stream(retimed(frames, clock, ctx.raise_if_cancelled))
     return VideoOutput(saved.video)
 
 
