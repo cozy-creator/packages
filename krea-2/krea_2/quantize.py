@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from cozy_runtime.author import QuantizationPlan, Recipe
 
-from .model import Krea2
+from .model import Krea2, Krea2TextEncoder
 
 _BLOCKS = "transformer.transformer_blocks.*"
 
@@ -27,6 +27,19 @@ INT8 = Recipe(
             f"{_BLOCKS}.ff.*.weight",
             "text_encoder.language_model.layers.*_proj.weight",
         ),
+        output_precision="preserve",
+    ),
+)
+
+#: The encoder's fp8 lane (`fp8.rowwise`), for cards with no int8 tensor cores (B300): the int8 lane's
+#: projections, on a checkpoint of the encoder alone (the `text_encoder` slot's).
+TEXT_ENCODER_FP8 = Recipe(
+    lane="fp8",
+    model=Krea2TextEncoder,
+    plan=QuantizationPlan(
+        encoding="fp8.rowwise",
+        components=("text_encoder",),
+        include=("text_encoder.language_model.layers.*_proj.weight",),
         output_precision="preserve",
     ),
 )

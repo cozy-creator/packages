@@ -45,3 +45,16 @@ TEXT_ENCODER_INT8 = Recipe(
         output_precision="preserve",
     ),
 )
+
+#: The encoder's fp8 lane (`fp8.rowwise`), for cards with no int8 tensor cores (B300): the int8 lane's
+#: projections, on a checkpoint of the encoder alone (both its slots').
+TEXT_ENCODER_FP8 = Recipe(
+    lane="fp8",
+    model=QwenEncoder,
+    plan=QuantizationPlan(
+        encoding="fp8.rowwise",
+        components=("model",),
+        include=(f"{_LM}.self_attn.[qkvo]_proj.weight", f"{_LM}.mlp.*_proj.weight"),
+        output_precision="preserve",
+    ),
+)

@@ -6,7 +6,7 @@ from __future__ import annotations
 from cozy_runtime.author import QuantizationPlan, Recipe
 from cozy_runtime.vlm import VisionLM
 
-from .model import Ltx25
+from .model import Ltx25, Ltx25TextEncoder
 
 _BLOCKS = "transformer.transformer_blocks.*"
 _LM = "text_encoder.model.language_model.layers.*"
@@ -50,6 +50,19 @@ ENHANCER_INT8 = Recipe(
         encoding="int8.convrot",
         components=("model",),
         include=(f"{_ENHANCER}.self_attn.[qkvo]_proj.weight", f"{_ENHANCER}.mlp.*_proj.weight"),
+        output_precision="preserve",
+    ),
+)
+
+#: The encoder's fp8 lane (`fp8.rowwise`), for cards with no int8 tensor cores (B300): the int8 lane's
+#: projections, on a checkpoint of the encoder alone (the `text_encoder` slot's).
+TEXT_ENCODER_FP8 = Recipe(
+    lane="fp8",
+    model=Ltx25TextEncoder,
+    plan=QuantizationPlan(
+        encoding="fp8.rowwise",
+        components=("text_encoder",),
+        include=(f"{_LM}.self_attn.[qkvo]_proj.weight", f"{_LM}.mlp.*_proj.weight"),
         output_precision="preserve",
     ),
 )

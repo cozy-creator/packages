@@ -11,7 +11,7 @@ from torch import nn
 
 from cozy_runtime.author import Context, EncodingRule, QuantizationPlan, Recipe, SelectionPlan, Telemetry
 
-from .klein import Klein, prepare_reference
+from .klein import Klein, KleinTextEncoder, prepare_reference
 from .upsampler import Drafter, Upsampler
 
 #: Every linear of the 43 DiT blocks, the six modulation heads, the context embedder and the output
@@ -184,3 +184,16 @@ UPSAMPLER_NVFP4 = Recipe(
 #: The drafter's lane from any Qwen3.5-9B lane: its multi-token-prediction head alone (`mtp.*`,
 #: bf16 in each), 0.5 GB of the 18 GB model, the source's own objects, with the model's config.
 DRAFTER_HEAD = Recipe(lane="bf16", model=Drafter, plan=SelectionPlan(include=("model.mtp.*",)))
+
+#: The encoder's fp8 lane (`fp8.rowwise`), for cards with no int8 tensor cores (B300): the int8 lane's
+#: projections, on a checkpoint of the encoder alone (the `text_encoder` slot's).
+TEXT_ENCODER_FP8 = Recipe(
+    lane="fp8",
+    model=KleinTextEncoder,
+    plan=QuantizationPlan(
+        encoding="fp8.rowwise",
+        components=("text_encoder",),
+        include=("text_encoder.model.language_model.layers.[0-9].*_proj.weight", "text_encoder.model.language_model.layers.[12][0-9].*_proj.weight", "text_encoder.model.language_model.layers.3[01].*_proj.weight"),
+        output_precision="preserve",
+    ),
+)
