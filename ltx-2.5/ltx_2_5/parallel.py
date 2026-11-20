@@ -8,9 +8,7 @@ from typing import cast
 
 import torch
 from diffusers.models._modeling_parallel import ContextParallelInput, ContextParallelModelPlan, ContextParallelOutput, ParallelConfig
-from diffusers.models.attention_dispatch import (
-    AttentionBackendName, all_to_all_single_any_o_async, all_to_all_single_any_qkv_async, dispatch_attention_fn,
-)
+from diffusers.models.attention_dispatch import AttentionBackendName, dispatch_attention_fn
 from diffusers.models.transformers.transformer_ltx2 import (
     LTX2Attention, LTX2VideoTransformer3DModel, LTX2VideoTransformerBlock, apply_interleaved_rotary_emb, apply_split_rotary_emb,
 )
@@ -63,20 +61,10 @@ class CrossAttention:
             query = rotary(query, query_rotary_emb)
             key = rotary(key, query_rotary_emb if key_rotary_emb is None else key_rotary_emb)
         query, key, value = (x.unflatten(2, (attn.heads, -1)) for x in (query, key, value))
-        group = None
-        heads, rows = query.shape[2], query.shape[1]
-        if not self.prompt and self._parallel_config is not None:
-            cp = self._parallel_config.context_parallel_config
-            assert cp is not None and cp._ulysses_mesh is not None and cp.ring_degree == 1
-            group = cp._ulysses_mesh.get_group()
-            q_wait = all_to_all_single_any_qkv_async(query, group)
-            k_wait = all_to_all_single_any_qkv_async(key, group)
-            v_wait = all_to_all_single_any_qkv_async(value, group)
-            query, key, value = q_wait(), k_wait(), v_wait()
-        result = dispatch_attention_fn(query, key, value, attn_mask=attention_mask,
-                                       dropout_p=0.0, is_causal=False, backend=self._attention_backend)
-        if group is not None:
-            result = all_to_all_single_any_o_async(result, group, NUM_QO_HEAD=heads, Q_S_LOCAL=rows)()
+        # The backend's Ulysses crosses the split video and audio streams, Q's rows unlike K's and V's.
+        parallel = None if self.prompt else self._parallel_config
+        result = dispatch_attention_fn(query, key, value, attn_mask=attention_mask, dropout_p=0.0, is_causal=False,
+                                       backend=self._attention_backend, parallel_config=parallel)
         result = result.flatten(2, 3).to(query.dtype)
         if gate is not None:
             result = (result.unflatten(2, (attn.heads, -1)) * (2.0 * torch.sigmoid(gate)).unsqueeze(-1)).flatten(2, 3)

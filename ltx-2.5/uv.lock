@@ -147,18 +147,18 @@ wheels = [
 
 [[package]]
 name = "cozy-runtime"
-version = "0.49.0.dev2388+g69d526d2"
-source = { url = "https://github.com/cozy-creator/cozy-runtime/releases/download/rc-0.28.0/cozy_runtime-0.49.0.dev2388+g69d526d2-py3-none-any.whl" }
+version = "0.49.0.dev2403+gf10a6d17"
+source = { url = "https://github.com/cozy-creator/cozy-runtime/releases/download/rc-0.28.0/cozy_runtime-0.49.0.dev2403+gf10a6d17-py3-none-any.whl" }
 dependencies = [
     { name = "msgspec" },
     { name = "numpy" },
     { name = "packaging" },
     { name = "pillow" },
     { name = "tensorfs", version = "0.27.0", source = { registry = "https://pypi.org/simple" }, marker = "platform_machine != 'x86_64' or sys_platform != 'linux'" },
-    { name = "tensorfs", version = "0.28.0.dev3490+g88b4c22a", source = { url = "https://github.com/cozy-creator/cozy-creator/releases/download/rc-0.28.0/tensorfs-0.28.0.dev3490+g88b4c22a-cp311-abi3-manylinux_2_28_x86_64.whl" }, marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
+    { name = "tensorfs", version = "0.28.0.dev3526+g0a23cc51", source = { url = "https://github.com/cozy-creator/cozy-creator/releases/download/rc-0.28.0/tensorfs-0.28.0.dev3526+g0a23cc51-cp311-abi3-manylinux_2_28_x86_64.whl" }, marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
 ]
 wheels = [
-    { url = "https://github.com/cozy-creator/cozy-runtime/releases/download/rc-0.28.0/cozy_runtime-0.49.0.dev2388+g69d526d2-py3-none-any.whl", hash = "sha256:5deedc3ede596e24779f9867d462df168ee5ea9c8fec50dc5fc4ca65e20ece20" },
+    { url = "https://github.com/cozy-creator/cozy-runtime/releases/download/rc-0.28.0/cozy_runtime-0.49.0.dev2403+gf10a6d17-py3-none-any.whl", hash = "sha256:fb73d8d0a44eff6ea1ae9516a3e87bbdce49cee953a66036f030198e74277dd0" },
 ]
 
 [package.optional-dependencies]
@@ -175,10 +175,10 @@ requires-dist = [
     { name = "packaging", specifier = ">=24" },
     { name = "peft", marker = "extra == 'adapters'", specifier = ">=0.20,<0.21" },
     { name = "pillow", specifier = ">=12" },
-    { name = "tensorfs", marker = "platform_machine != 'x86_64' or sys_platform != 'linux'", specifier = ">=0.26.0,<0.29" },
-    { name = "tensorfs", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'", specifier = ">=0.28.0.dev3490,<0.29" },
-    { name = "tensorfs", marker = "platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'model-execution'", specifier = ">=0.28.0.dev3490,<0.29" },
-    { name = "tensorfs", marker = "(platform_machine != 'x86_64' and extra == 'model-execution') or (sys_platform != 'linux' and extra == 'model-execution')", specifier = ">=0.26.0,<0.29" },
+    { name = "tensorfs", marker = "platform_machine != 'x86_64' or sys_platform != 'linux'", specifier = ">=0.27.0,<0.29" },
+    { name = "tensorfs", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'", specifier = ">=0.28.0.dev3526,<0.29" },
+    { name = "tensorfs", marker = "platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'model-execution'", specifier = ">=0.28.0.dev3526,<0.29" },
+    { name = "tensorfs", marker = "(platform_machine != 'x86_64' and extra == 'model-execution') or (sys_platform != 'linux' and extra == 'model-execution')", specifier = ">=0.27.0,<0.29" },
     { name = "tokenizers", marker = "extra == 'adapters'", specifier = ">=0.23.1" },
     { name = "torch", marker = "extra == 'adapters'", specifier = ">=2.15" },
     { name = "torch", marker = "extra == 'derive'", specifier = ">=2.15" },
@@ -333,7 +333,7 @@ wheels = [
 
 [[package]]
 name = "ltx-2-5"
-version = "0.4.0rc2"
+version = "0.4.0rc3"
 source = { editable = "." }
 dependencies = [
     { name = "cozy-runtime", extra = ["media"] },
@@ -343,21 +343,21 @@ dependencies = [
     { name = "pillow" },
     { name = "sentencepiece" },
     { name = "tensorfs", version = "0.27.0", source = { registry = "https://pypi.org/simple" }, marker = "platform_machine != 'x86_64' or sys_platform != 'linux'" },
-    { name = "tensorfs", version = "0.28.0.dev3490+g88b4c22a", source = { url = "https://github.com/cozy-creator/cozy-creator/releases/download/rc-0.28.0/tensorfs-0.28.0.dev3490+g88b4c22a-cp311-abi3-manylinux_2_28_x86_64.whl" }, marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
+    { name = "tensorfs", version = "0.28.0.dev3526+g0a23cc51", source = { url = "https://github.com/cozy-creator/cozy-creator/releases/download/rc-0.28.0/tensorfs-0.28.0.dev3526+g0a23cc51-cp311-abi3-manylinux_2_28_x86_64.whl" }, marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
     { name = "tokenizers" },
     { name = "transformers" },
 ]
 
 [package.metadata]
 requires-dist = [
-    { name = "cozy-runtime", extras = ["media"], url = "https://github.com/cozy-creator/cozy-runtime/releases/download/rc-0.28.0/cozy_runtime-0.49.0.dev2388+g69d526d2-py3-none-any.whl" },
+    { name = "cozy-runtime", extras = ["media"], url = "https://github.com/cozy-creator/cozy-runtime/releases/download/rc-0.28.0/cozy_runtime-0.49.0.dev2403+gf10a6d17-py3-none-any.whl" },
     { name = "diffusers", specifier = ">=0.43,<0.44" },
     { name = "msgspec", specifier = ">=0.19" },
     { name = "numpy", specifier = ">=1.26" },
     { name = "pillow", specifier = ">=12" },
     { name = "sentencepiece", specifier = ">=0.2" },
     { name = "tensorfs", marker = "platform_machine != 'x86_64' or sys_platform != 'linux'", specifier = ">=0.25.0" },
-    { name = "tensorfs", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'", url = "https://github.com/cozy-creator/cozy-creator/releases/download/rc-0.28.0/tensorfs-0.28.0.dev3490+g88b4c22a-cp311-abi3-manylinux_2_28_x86_64.whl" },
+    { name = "tensorfs", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'", url = "https://github.com/cozy-creator/cozy-creator/releases/download/rc-0.28.0/tensorfs-0.28.0.dev3526+g0a23cc51-cp311-abi3-manylinux_2_28_x86_64.whl" },
     { name = "tokenizers", specifier = ">=0.22.0" },
     { name = "torch", specifier = ">=2.14" },
     { name = "transformers", specifier = ">=5.14.1,<5.15" },
@@ -731,13 +731,13 @@ wheels = [
 
 [[package]]
 name = "tensorfs"
-version = "0.28.0.dev3490+g88b4c22a"
-source = { url = "https://github.com/cozy-creator/cozy-creator/releases/download/rc-0.28.0/tensorfs-0.28.0.dev3490+g88b4c22a-cp311-abi3-manylinux_2_28_x86_64.whl" }
+version = "0.28.0.dev3526+g0a23cc51"
+source = { url = "https://github.com/cozy-creator/cozy-creator/releases/download/rc-0.28.0/tensorfs-0.28.0.dev3526+g0a23cc51-cp311-abi3-manylinux_2_28_x86_64.whl" }
 resolution-markers = [
     "platform_machine == 'x86_64' and sys_platform == 'linux'",
 ]
 wheels = [
-    { url = "https://github.com/cozy-creator/cozy-creator/releases/download/rc-0.28.0/tensorfs-0.28.0.dev3490+g88b4c22a-cp311-abi3-manylinux_2_28_x86_64.whl", hash = "sha256:455d6c0137218fa8d76d83e176d603c40a37fd353b8ba52e5b5a8027ebbc9f45" },
+    { url = "https://github.com/cozy-creator/cozy-creator/releases/download/rc-0.28.0/tensorfs-0.28.0.dev3526+g0a23cc51-cp311-abi3-manylinux_2_28_x86_64.whl", hash = "sha256:7681e07339d82bd8095235b4de48fc9ec51a4541da8a9a38e7523db020333978" },
 ]
 
 [[package]]
